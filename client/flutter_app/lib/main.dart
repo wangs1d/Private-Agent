@@ -48,6 +48,7 @@ import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/travel_plan_launcher.dart";
 import "features/chat/travel_plan_panel.dart";
+import "features/chat/travel_web_panel_host.dart";
 import "features/chat/right_side_panel.dart";
 import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
@@ -455,6 +456,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     ImagePreviewLauncher.setHandler(_openImagePreview);
     // 右侧双栏「行程规划」面板：行程卡点击 → 打开右栏双面板规划界面
     TravelPlanLauncher.setHandler(_openTravelPlanPanel);
+    // 行程面板共享 WebView 进程级预加载：地图常驻，打开卡片/进出全屏零重载
+    TravelWebPanelHost.preload();
     // 今日安排面板数据刷新：设置（创建/删除）提醒日程后，通过信号刷新右侧面板
     _scheduleReloadSignal.addListener(_onScheduleReloadSignal);
     _bootstrap();

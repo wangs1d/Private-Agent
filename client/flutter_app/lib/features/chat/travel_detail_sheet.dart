@@ -5,9 +5,8 @@ import "../../core/services/image_preview_launcher.dart";
 import "media_thumbnail.dart";
 import "travel_favorites.dart";
 import "travel_plan_models.dart";
+import "travel_theme.dart";
 
-const Color _kAccentBlue = Color(0xFF18D6F3);
-const Color _kAccentOrange = Color(0xFFD7B85A);
 
 /// 条目详情弹窗 —— 移植自 3D-Travel 的详情面板：
 /// 图片画廊（点击大图）、价格卡、地址/描述/贴士、全部评论、视频入口、收藏、导航。
@@ -106,7 +105,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                           Text(widget.dayLabel,
                               style: TextStyle(
                                   fontSize: 11, color: cs.onSurfaceVariant)),
-                        const SizedBox(height: 2),
+                        SizedBox(height: 2),
                         Text(entry.title,
                             style: const TextStyle(
                                 fontSize: 17, fontWeight: FontWeight.w800)),
@@ -169,22 +168,22 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: _kAccentOrange.withValues(alpha: 0.08),
+                    color: TravelPalette.of(context).orange.withValues(alpha: 0.08),
                     borderRadius: BorderRadius.circular(10),
                     border:
-                        Border.all(color: _kAccentOrange.withValues(alpha: 0.3)),
+                        Border.all(color: TravelPalette.of(context).orange.withValues(alpha: 0.3)),
                   ),
                   child: Row(
                     children: <Widget>[
-                      const Icon(Icons.sell_outlined,
-                          size: 16, color: _kAccentOrange),
-                      const SizedBox(width: 8),
+                      Icon(Icons.sell_outlined,
+                          size: 16, color: TravelPalette.of(context).orange),
+                      SizedBox(width: 8),
                       Expanded(
                         child: Text(entry.priceInfo,
-                            style: const TextStyle(
+                            style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.w600,
-                                color: _kAccentOrange)),
+                                color: TravelPalette.of(context).orange)),
                       ),
                     ],
                   ),
@@ -192,7 +191,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
               ],
               // 地址 / 描述 / 贴士
               if (entry.address.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 12),
+                SizedBox(height: 12),
                 _infoRow(cs, Icons.place_outlined, entry.address),
               ],
               if (entry.description.isNotEmpty) ...<Widget>[
@@ -212,8 +211,8 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                     children: <Widget>[
                       Row(
                         children: <Widget>[
-                          const Icon(Icons.tips_and_updates_outlined,
-                              size: 14, color: _kAccentOrange),
+                          Icon(Icons.tips_and_updates_outlined,
+                              size: 14, color: TravelPalette.of(context).orange),
                           const SizedBox(width: 6),
                           Text("实用贴士",
                               style: TextStyle(
@@ -300,17 +299,17 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 10, vertical: 6),
                             decoration: BoxDecoration(
-                              color: _kAccentBlue.withValues(alpha: 0.08),
+                              color: TravelPalette.of(context).accent.withValues(alpha: 0.08),
                               borderRadius: BorderRadius.circular(999),
                               border: Border.all(
-                                  color: _kAccentBlue.withValues(alpha: 0.3)),
+                                  color: TravelPalette.of(context).accent.withValues(alpha: 0.3)),
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
-                                const Icon(Icons.play_circle_outline,
-                                    size: 14, color: _kAccentBlue),
-                                const SizedBox(width: 5),
+                                Icon(Icons.play_circle_outline,
+                                    size: 14, color: TravelPalette.of(context).accent),
+                                SizedBox(width: 5),
                                 ConstrainedBox(
                                   constraints:
                                       const BoxConstraints(maxWidth: 220),
@@ -322,8 +321,8 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                                         : "${video.platform.isEmpty ? "" : "${video.platform} · "}${video.title}",
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        fontSize: 11, color: _kAccentBlue),
+                                    style: TextStyle(
+                                        fontSize: 11, color: TravelPalette.of(context).accent),
                                   ),
                                 ),
                               ],
@@ -335,11 +334,11 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
               ],
               // 导航按钮
               if (entry.latitude != null && entry.longitude != null) ...<Widget>[
-                const SizedBox(height: 16),
+                SizedBox(height: 16),
                 FilledButton.icon(
                   style: FilledButton.styleFrom(
-                    backgroundColor: _kAccentBlue.withValues(alpha: 0.15),
-                    foregroundColor: _kAccentBlue,
+                    backgroundColor: TravelPalette.of(context).accent.withValues(alpha: 0.15),
+                    foregroundColor: TravelPalette.of(context).accent,
                   ),
                   icon: const Icon(Icons.navigation_outlined, size: 16),
                   label: const Text("在高德地图中导航",

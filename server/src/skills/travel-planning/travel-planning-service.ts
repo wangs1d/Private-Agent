@@ -143,6 +143,10 @@ export interface TravelInfo {
   emergency: { police?: string; ambulance?: string; touristHotline?: string; chinaEmbassy?: string };
   customs: string[];
   tips: string[];
+  /** 目的地一句话简介（行程卡海报区展示；知识库未命中时缺省，前端隐藏该行） */
+  intro?: string;
+  /** 出行随身物品叮嘱（行程卡「记得带」胶囊；知识库命中取条目，否则按通用模板） */
+  packing?: string[];
 }
 
 export interface PlannedDay {
@@ -1234,6 +1238,7 @@ export class PlanningService {
       emergency: { police: '110', ambulance: '120', touristHotline: '请查询当地旅游热线', chinaEmbassy: '请查询中国驻当地使馆电话' },
       customs: ['尊重当地风俗', '遵守公共场所秩序'],
       tips: ['建议出发前购买旅游保险', '保留好护照/签证/票据复印件'],
+      packing: ['证件/身份证', '充电器与转换插头', '常用药品', '防晒/雨具按季节'],
     };
   }
 
@@ -1243,6 +1248,8 @@ export class PlanningService {
       // 印度尼西亚 / 巴厘岛
       {
         destination: '印度尼西亚',
+        intro: '千岛之国，火山与海洋交织，海滩、火山日出与多元岛屿文化并存',
+        packing: ['防晒霜 SPF50+', '泳衣/速干衣', '防蚊液', '欧标转换插头', '常用药品'],
         visa: { required: true, type: '落地签', notes: '中国公民可免签入境印尼（30天内），但建议行前确认最新政策' },
         currency: { name: '印尼盾', code: 'IDR', symbol: 'Rp', rateToCNY: 2200 },
         timezone: { name: '印尼中部/西部/东部时间', offset: 'UTC+7 / +8 / +9' },
@@ -1256,6 +1263,8 @@ export class PlanningService {
       },
       {
         destination: '巴厘岛',
+        intro: '印尼唯一以印度教为主的岛屿，海滩/梯田/寺庙与SPA度假胜地',
+        packing: ['防晒霜 SPF50+', '泳衣/速干衣', '防蚊液', '欧标转换插头', '常用药品'],
         visa: { required: true, type: '落地签', notes: '中国公民可免签入境印尼30天' },
         currency: { name: '印尼盾', code: 'IDR', symbol: 'Rp', rateToCNY: 2200 },
         timezone: { name: '印尼中部时间', offset: 'UTC+8' },
@@ -1270,6 +1279,8 @@ export class PlanningService {
       // 日本
       {
         destination: '日本',
+        intro: '传统与现代交织：古都寺庙、樱花红叶、温泉街町与美食盛宴',
+        packing: ['日元现金', '西瓜卡/SUICA 交通卡', '日标转换插头（双扁脚）', '常用药', '舒适的运动鞋'],
         visa: { required: true, type: '需签证', notes: '需提前办日本签证，多地可办' },
         currency: { name: '日元', code: 'JPY', symbol: '¥', rateToCNY: 21 },
         timezone: { name: '日本标准时间', offset: 'UTC+9' },
@@ -1284,6 +1295,8 @@ export class PlanningService {
       // 泰国
       {
         destination: '泰国',
+        intro: '佛庙金辉与海岛碧波并存，街头美食与夜市文化之都',
+        packing: ['防晒霜', '泳装', '防蚊液', '泰铢现金', '薄外套（商场/车内冷气足）'],
         visa: { required: true, type: '免签', notes: '中国公民互免签证（2024起），停留不超过30日' },
         currency: { name: '泰铢', code: 'THB', symbol: '฿', rateToCNY: 5 },
         timezone: { name: '印度支那时间', offset: 'UTC+7' },
@@ -1298,6 +1311,8 @@ export class PlanningService {
       // 三亚
       {
         destination: '三亚',
+        intro: '热带海滨度假城市，亚龙湾/海棠湾海滩、离岛潜水与免税购物',
+        packing: ['防晒霜 SPF50+', '泳装', '遮阳帽/墨镜', '驱蚊液', '身份证'],
         visa: { required: false, type: '免签', notes: '国内旅行无需签证' },
         currency: { name: '人民币', code: 'CNY', symbol: '¥' },
         timezone: { name: '北京时间', offset: 'UTC+8' },
@@ -1312,6 +1327,8 @@ export class PlanningService {
       // 马尔代夫
       {
         destination: '马尔代夫',
+        intro: '印度洋上的珊瑚岛国，一岛一酒店，以水上屋、浮潜与纯净泻湖闻名',
+        packing: ['护照（有效期6个月+）与酒店订单', '防晒霜 SPF50+', '泳装与浮潜装备', '英标转换插头', '美元小额现金（小费）'],
         visa: { required: true, type: '免签', notes: '中国公民可免签30天，需带有效期6个月以上护照与酒店订单' },
         currency: { name: '美元', code: 'USD', symbol: '$', rateToCNY: 7.2 },
         timezone: { name: '马尔代夫时间', offset: 'UTC+5' },

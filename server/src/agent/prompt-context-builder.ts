@@ -3,7 +3,6 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { getMemoryComponents } from "../agentic-memory/index.js";
 import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.js";
-import { formatAgentStylePrompt, loadAgentStyleProfile } from "./agent-style-profile.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
   buildCurrentTimePrompt,
@@ -402,6 +401,9 @@ function pickPromptContextLayers(memory: AgentPromptMemoryContext): PromptContex
       key === "skillIndex"
     ) {
       context[key] = value;
+    } else if (key === "replyStyleMode") {
+      // 联合类型字段（"chat" | "task"），不能走下方 string 兜底
+      volatile.replyStyleMode = value as AgentPromptMemoryContext["replyStyleMode"];
     } else {
       volatile[key] = value;
     }
@@ -645,23 +647,10 @@ export class PromptContextBuilder {
       dedupeJournalVsStm(input.journalRecall, shortTermTaskContext),
       700,
     );
-    // 风格指纹（StyleProfile）并入语气指南：主聊天与主动消息共用同一风格决策源，
-    // 让回复句长/语气词/用词偏好跟随同一份 profile 演化（此前只有主动消息用它）。
-    let styleProfileBlock: string | undefined;
-    if (this.deps.agentMemorySyncService) {
-      try {
-        const styleText = formatAgentStylePrompt(
-          loadAgentStyleProfile(this.deps.agentMemorySyncService),
-        );
-        if (styleText.trim()) styleProfileBlock = styleText;
-      } catch (err) {
-        console.log(`[PromptContextBuilder] 风格指纹注入失败（忽略）: ${err}`);
-      }
-    }
-    const toneGuidance = compactPromptBlock(
-      [input.personalization?.toneGuidance, styleProfileBlock].filter(Boolean).join("\n"),
-      480,
-    );
+    // 2026-09-06：聊天路径不再并入全局 Agent 风格指纹（agent-style-profile，
+    // 固定平均句长/语气词）——全局固定指纹与"语感跟着用户走"直接打架。
+    // 主动消息路径（create-app-services PROACTIVE_SYSTEM_PROMPT）继续使用它。
+    const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 480);
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
     // 仿人记忆连续性：提升阈值让更多召回记忆能被 LLM 看到，避免关键上下文被截断
     const narrativeRecall = compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), 800);

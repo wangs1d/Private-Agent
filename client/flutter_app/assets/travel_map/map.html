@@ -172,11 +172,10 @@
     </button>
   </div>
 
-  <!-- 图层下拉：样式（街道/卫星/暗色）+ 3D 开关 -->
+  <!-- 图层下拉：样式（暗色/卫星）+ 3D 开关（浅色街道已移除） -->
   <div id="layer-popover">
-    <button type="button" class="lp-item style-btn active" data-style="0"><span class="lp-check">✓</span><span>街道</span></button>
+    <button type="button" class="lp-item style-btn active" data-style="0"><span class="lp-check">✓</span><span>暗色</span></button>
     <button type="button" class="lp-item style-btn" data-style="1"><span class="lp-check"></span><span>卫星</span></button>
-    <button type="button" class="lp-item style-btn" data-style="2"><span class="lp-check"></span><span>暗色</span></button>
     <div class="lp-divider"></div>
     <button type="button" class="lp-item" id="btn-3d"><span class="lp-check" id="lp-3d-check">✓</span><span id="lp-3d-label">3D 视角</span></button>
   </div>
@@ -235,7 +234,8 @@
       restaurant: { color: '#71717A', icon: '🍴', label: '餐厅' },
       transport:  { color: '#A1A1AA', icon: '🚌', label: '交通' }
     };
-    var DEFAULT_CENTER = [100.1595, 25.6904]; // 与 3D-Travel 默认中心一致（大理古城）
+    var DEFAULT_CENTER = [100.1595, 25.6904]; // 与 3D-Travel 默认中心一致（大理古城）；
+    // 宿主经 setDefaultCenter 下发真实目的地中心后即被覆盖
     var DEFAULT_ZOOM = 13;
     var MAP_PITCH = 55;
     var MAP_BEARING = -15;
@@ -249,11 +249,12 @@
     var state = {
       httpBase: '',
       maptilerKey: '',
+      defaultCenter: null,   // 真实目的地中心 [lng, lat]（宿主 setDefaultCenter 下发）
       map: null,
       popup: null,
       markers: [],        // { poi, marker }
       waypointBadges: [],
-      styleIndex: 0,      // 0 街道 1 卫星 2 暗色
+      styleIndex: 0,      // 0 暗色（默认黑底） 1 卫星
       is3D: true,
       currentSourceIndex: 0,
       fallbackMode: false,
@@ -294,27 +295,14 @@
       return base + (s.charAt(0) === '/' ? s : '/' + s);
     }
 
-    // ══════════════ 地图源定义（降级链，移植自 config.ts DEFAULT_MAP_SOURCES）══════════════
-    function osmRasterStyle() {
-      return {
-        version: 8,
-        sources: {
-          'osm-tiles': {
-            type: 'raster',
-            tiles: [
-              'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
-              'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
-              'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
-            ],
-            tileSize: 256,
-            attribution: '© OpenStreetMap',
-            maxzoom: 19
-          }
-        },
-        layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm-tiles' }],
-        glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'
-      };
+    // 当前生效的默认中心：优先宿主下发的真实目的地中心，否则退回内置兜底
+    function activeDefaultCenter() {
+      return (state.defaultCenter && validCoord(state.defaultCenter)) ? state.defaultCenter : DEFAULT_CENTER;
     }
+
+    // ══════════════ 地图源定义（降级链：全部暗色系，浅色街道已移除）══════════════
+    // 浅色源失败降级时套反色滤镜，保持黑底观感（滤镜只作用于地图画布）
+    var DARK_INVERT_FILTER = 'invert(1) hue-rotate(180deg) brightness(0.92) saturate(0.85)';
 
     // 卫星 hybrid：ESRI World Imagery 影像 + ESRI 注记叠加（免费无密钥）
     function satelliteStyle() {
@@ -340,17 +328,19 @@
     }
 
     function buildSources() {
+      // 降级链：Carto 真黑底 → OpenFreeMap 浅色源套反色滤镜 → ESRI 卫星
       var sources = [
-        { name: 'OSM Raster', style: osmRasterStyle, terrainUrl: null, has3DBuildings: false },
-        { name: 'OpenFreeMap', style: 'https://tiles.openfreemap.org/styles/liberty', terrainUrl: null, has3DBuildings: true }
+        { name: 'Carto Dark', style: DARK_STYLE_URL, terrainUrl: null, cssDarkInvert: false },
+        { name: 'OpenFreeMap 暗化', style: 'https://tiles.openfreemap.org/styles/liberty', terrainUrl: null, cssDarkInvert: true },
+        { name: 'Esri Satellite', style: satelliteStyle, terrainUrl: null, cssDarkInvert: false }
       ];
-      // 宿主提供 maptilerKey 时追加 MapTiler 源（含 3D 地形 + 3D 建筑）
+      // 宿主提供 maptilerKey 时追加 MapTiler 暗色源（含 3D 地形 + 3D 建筑）
       if (state.maptilerKey) {
         sources.push({
           name: 'MapTiler (3D 地形)',
-          style: 'https://api.maptiler.com/streets-v2/style.json?key=' + state.maptilerKey,
+          style: 'https://api.maptiler.com/darkmatter/style.json?key=' + state.maptilerKey,
           terrainUrl: 'https://api.maptiler.com/tiles/terrain-tiles.json?key=' + state.maptilerKey,
-          has3DBuildings: true
+          cssDarkInvert: false
         });
       }
       return sources;
@@ -401,13 +391,15 @@
           var container = document.getElementById('map');
           container.innerHTML = '';
           var styleUrl = typeof source.style === 'function' ? source.style() : source.style;
+          var initCenter = activeDefaultCenter();
           var map = new maplibregl.Map({
             container: container,
             style: styleUrl,
-            center: DEFAULT_CENTER,
+            center: initCenter,
             zoom: DEFAULT_ZOOM,
             pitch: state.is3D ? MAP_PITCH : 0,
             bearing: state.is3D ? MAP_BEARING : 0,
+            scrollZoom: false, // 滚轮由下方自定义 handler 接管（锚定真实光标）
             attributionControl: false
           });
           state.map = map;
@@ -419,6 +411,9 @@
               // 自定义浅色 chrome（左上图层/定位、左下图例、右下缩放），
               // 不再叠加 MapLibre 默认的缩放/比例尺控件
             } catch (e) { /* 控件失败非致命 */ }
+            // 暗化滤镜只作用于地图画布（标记/弹层/控件不受影响）
+            var darkCanvas = container.querySelector('.maplibregl-canvas');
+            if (darkCanvas) darkCanvas.style.filter = source.cssDarkInvert ? DARK_INVERT_FILTER : '';
             state.popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '300px' });
             // 3D 地形 + 3D 建筑 + 路线图层
             tryAdd3DTerrain(source);
@@ -808,7 +803,8 @@
 
     function resetView() {
       if (state.fallbackMode) {
-        state.fallbackCenter = { lng: DEFAULT_CENTER[0], lat: DEFAULT_CENTER[1] };
+        var fbCenter = activeDefaultCenter();
+        state.fallbackCenter = { lng: fbCenter[0], lat: fbCenter[1] };
         state.fallbackZoom = DEFAULT_ZOOM;
         loadFallbackTiles();
         positionFallbackPois();
@@ -817,8 +813,34 @@
       if (!state.map) return;
       var all = state.pois.filter(function (p) { return visibleInDay(p, state.dayFilter); });
       if (all.length) { fitBoundsOfPois(all); return; }
+      var center = activeDefaultCenter();
       state.map.flyTo({
-        center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM,
+        center: center, zoom: DEFAULT_ZOOM,
+        pitch: state.is3D ? MAP_PITCH : 0,
+        bearing: state.is3D ? MAP_BEARING : 0, duration: 1500
+      });
+    }
+
+    // 宿主下发真实目的地中心：更新默认中心与离线兜底中心；
+    // 当前无带坐标的可见 POI 时立即飞过去（有 POI 时 fitBounds 已覆盖，不打扰）
+    function setDefaultCenter(lat, lng) {
+      var c = [lng, lat];
+      if (!validCoord(c)) return;
+      state.defaultCenter = c;
+      state.fallbackCenter = { lng: lng, lat: lat };
+      var visible = state.pois.filter(function (p) { return visibleInDay(p, state.dayFilter); });
+      var hasCoord = visible.some(function (p) {
+        return validCoord([Number(p.longitude), Number(p.latitude)]);
+      });
+      if (hasCoord) return;
+      if (state.fallbackMode) {
+        loadFallbackTiles();
+        positionFallbackPois();
+        return;
+      }
+      if (!state.map) return;
+      state.map.flyTo({
+        center: c, zoom: DEFAULT_ZOOM,
         pitch: state.is3D ? MAP_PITCH : 0,
         bearing: state.is3D ? MAP_BEARING : 0, duration: 1500
       });
@@ -852,7 +874,7 @@
       }
     }
 
-    // ══════════════ 样式切换：0 街道 / 1 卫星 hybrid / 2 暗色 ══════════════
+    // ══════════════ 样式切换：0 暗色（默认黑底）/ 1 卫星 hybrid ══════════════
     function setStyle(index) {
       state.styleIndex = index;
       document.querySelectorAll('.style-btn').forEach(function (b) {
@@ -862,21 +884,19 @@
         if (check) check.textContent = on ? '✓' : '';
       });
       if (state.fallbackMode || !state.map) return;
+      if (index === 0) {
+        // 暗色：重跑降级链（Carto 黑底 → OpenFreeMap 暗化）
+        initMapChain();
+        return;
+      }
       var keepCenter = state.map.getCenter();
       var keepZoom = state.map.getZoom();
-      var styleDef;
-      if (index === 1) {
-        styleDef = satelliteStyle();
-      } else if (index === 2) {
-        styleDef = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
-      } else {
-        var source = MAP_SOURCES[state.currentSourceIndex];
-        styleDef = source ? (typeof source.style === 'function' ? source.style() : source.style) : osmRasterStyle();
-      }
       try { state.map.setTerrain(null); } catch (e) { /* ignore */ }
-      state.map.setStyle(styleDef);
+      state.map.setStyle(satelliteStyle());
       state.map.once('style.load', function () {
         if (!state.map) return;
+        var canvas = document.querySelector('#map .maplibregl-canvas');
+        if (canvas) canvas.style.filter = '';
         var src = MAP_SOURCES[state.currentSourceIndex];
         tryAdd3DTerrain(src);
         tryAdd3DBuildings();
@@ -1122,6 +1142,54 @@
       }
     });
 
+    // ══════════════ 滚轮缩放：锚定真实光标位置 ══════════════
+    // webview_windows 的滚轮事件固定以 (0,0) 坐标下发（SetScrollDelta →
+    // SendScroll 硬编码 point），MapLibre 自带 scrollZoom 会因此锚定到左上角。
+    // 这里接管滚轮：用 mousemove 自行跟踪的光标位置作为缩放锚点。
+    var lastCursor = null;
+    function clampZoom(z) { return Math.max(1, Math.min(20, z)); }
+    document.getElementById('map').addEventListener('mousemove', function (e) {
+      var rect = e.currentTarget.getBoundingClientRect();
+      lastCursor = [e.clientX - rect.left, e.clientY - rect.top];
+    });
+    document.getElementById('map').addEventListener('wheel', function (e) {
+      e.preventDefault();
+      if (!state.map || state.fallbackMode) return;
+      var options = {
+        zoom: clampZoom(state.map.getZoom() + (e.deltaY > 0 ? -0.5 : 0.5)),
+        duration: 150
+      };
+      if (lastCursor) options.around = state.map.unproject(lastCursor);
+      state.map.easeTo(options);
+    }, { passive: false });
+
+    // ══════════════ 离线兜底：拖拽平移 + 滚轮缩放 ══════════════
+    var fbDrag = null;
+    document.getElementById('fallback-map').addEventListener('mousedown', function (e) {
+      fbDrag = { x: e.clientX, y: e.clientY };
+    });
+    window.addEventListener('mousemove', function (e) {
+      if (!state.fallbackMode || !fbDrag) return;
+      var container = document.getElementById('fallback-markers');
+      if (!container) return;
+      var scale = 8000 / Math.pow(2, state.fallbackZoom || 13);
+      state.fallbackCenter.lng -= (e.clientX - fbDrag.x) / scale;
+      state.fallbackCenter.lat += (e.clientY - fbDrag.y) / scale;
+      state.fallbackCenter.lat = Math.max(-80, Math.min(80, state.fallbackCenter.lat));
+      fbDrag = { x: e.clientX, y: e.clientY };
+      loadFallbackTiles();
+      positionFallbackPois();
+    });
+    window.addEventListener('mouseup', function () { fbDrag = null; });
+    document.getElementById('fallback-map').addEventListener('wheel', function (e) {
+      e.preventDefault();
+      if (!state.fallbackMode) return;
+      state.fallbackZoom = Math.max(1, Math.min(18,
+        (state.fallbackZoom || 13) + (e.deltaY > 0 ? -0.5 : 0.5)));
+      loadFallbackTiles();
+      positionFallbackPois();
+    }, { passive: false });
+
     // ══════════════ 图例 ══════════════
     function buildLegend() {
       var poiLegend = document.getElementById('legend-poi');
@@ -1189,6 +1257,7 @@
     // ══════════════ 对外桥接 API（Dart → JS）══════════════
     window.__travelMap = {
       setPois: function (pois) { setPois(pois); },
+      setDefaultCenter: function (lat, lng) { setDefaultCenter(Number(lat), Number(lng)); },
       showDay: function (dayIndex) { showDay(dayIndex == null ? null : Number(dayIndex)); },
       flyTo: function (lat, lng, zoom) { flyTo(Number(lat), Number(lng), zoom == null ? 16 : Number(zoom)); },
       drawRoute: function (segments) { drawRoute(segments); },

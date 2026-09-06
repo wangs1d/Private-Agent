@@ -1,36 +1,31 @@
-import "package:flutter/material.dart";
-import "package:flutter/services.dart" show Clipboard, ClipboardData;
-import "package:qr_flutter/qr_flutter.dart";
-import "package:url_launcher/url_launcher.dart";
+import "dart:async";
+import "dart:io" show Platform;
 
-import "../../core/config/api_config.dart";
-import "../../core/services/image_preview_launcher.dart";
+import "package:flutter/material.dart";
+import "package:url_launcher/url_launcher.dart";
+import "package:webview_windows/webview_windows.dart";
+
+import "../../core/theme/app_theme.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "intelligent_route_planner.dart";
-import "media_thumbnail.dart";
-import "travel_booking_sheet.dart";
 import "travel_detail_sheet.dart";
-import "travel_export_util.dart";
-import "travel_item_editor.dart";
 import "travel_map_controller.dart";
 import "travel_map_view.dart";
-import "travel_plan_api.dart";
 import "travel_plan_models.dart";
+import "travel_web_panel_controller.dart";
+import "travel_web_panel_host.dart";
+import "travel_theme.dart";
 
 // ═══════════════════════════════════════════════════════════════════
-// 双面板行程规划界面（能力一比一移植自 3D-Travel 主界面：
-// 地图 3D / 智能路线 / 行程编辑 / 预订清单 / 详情面板 / 导出分享）
+// 行程规划界面（地图为中心的精简布局）。
+//
+// Windows：整页 WebView 承载深色玻璃拟态面板（assets/travel_map/panel.html，
+// 地图 + 天数栏 + 详情卡 + 路线卡同一网页，经 TravelWebPanelController 桥接）；
+// 非 Windows / WebView 不可用：回退原生 Material 面板（同信息架构）。
 // ═══════════════════════════════════════════════════════════════════
 
-const Color _kAccentBlue = Color(0xFF18D6F3);
-const Color _kAccentGreen = Color(0xFF1ED7A6);
-const Color _kAccentOrange = Color(0xFFD7B85A);
-const Color _kAccentPurple = Color(0xFF8B5CF6);
 
-/// 双面板行程规划界面（左栏天数 + 中部地图 + 右栏当日行程）。
-///
-/// 既可用于右侧分栏面板（聊天 + 规划界面双面板并行），
-/// 也可经全屏入口在独立页面中以更大尺寸呈现。
+/// 行程规划面板入口：按平台分发 WebView 版 / 原生版。
 class TravelPlanPanel extends StatefulWidget {
   const TravelPlanPanel({
     super.key,
@@ -41,35 +36,392 @@ class TravelPlanPanel extends StatefulWidget {
 
   final AgentResultData data;
 
-  /// 是否为全屏模式（全屏页时隐藏内部关闭按钮、强制深色渲染）。
+  /// 是否为全屏模式（全屏页时隐藏内部全屏入口）。
   final bool fullscreen;
 
-  /// 关闭回调（右侧面板模式传 [RightSidePanel] 的关闭，全屏页自身有返回键）。
+  /// 关闭回调（宿主容器需要内部关闭按钮时传入；全屏页自身有返回键）。
   final VoidCallback? onClose;
+
+  /// Windows（WebView2 可用）走整页 WebView 面板；其余平台回退原生面板。
+  /// 测试可覆写以强制走原生路径。
+  static bool webPanelSupported = Platform.isWindows;
 
   @override
   State<TravelPlanPanel> createState() => _TravelPlanPanelState();
 }
 
 class _TravelPlanPanelState extends State<TravelPlanPanel> {
-  late TravelPlanData _plan = TravelPlanData.from(widget.data);
+  @override
+  Widget build(BuildContext context) {
+    if (TravelPlanPanel.webPanelSupported) {
+      return _WebTravelPanel(
+        data: widget.data,
+        fullscreen: widget.fullscreen,
+        onClose: widget.onClose,
+      );
+    }
+    return _NativeTravelPanel(
+      data: widget.data,
+      fullscreen: widget.fullscreen,
+      onClose: widget.onClose,
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// WebView 整页面板（Windows）
+// ═══════════════════════════════════════════════════════════════════
+
+class _WebTravelPanel extends StatefulWidget {
+  const _WebTravelPanel({
+    required this.data,
+    this.fullscreen = false,
+    this.onClose,
+  });
+
+  final AgentResultData data;
+  final bool fullscreen;
+  final VoidCallback? onClose;
+
+  @override
+  State<_WebTravelPanel> createState() => _WebTravelPanelState();
+}
+
+class _WebTravelPanelState extends State<_WebTravelPanel> {
+  late final TravelPlanData _plan = TravelPlanData.from(widget.data);
+
+  /// 面板与全屏页共用进程级 WebView 宿主（单例，App 启动即预加载）：
+  /// 打开面板 / 进出全屏复用同一纹理，地图不再重新加载。
+  TravelWebPanelController get _controller => TravelWebPanelHost.instance.controller;
+
+  /// 全屏路由打开期间置真：卸载本挂载点的 Webview，让全屏页独占渲染同一纹理
+  ///（同一控制器的 Webview 多处同时挂载会导致输入事件双发）。
+  bool _fullscreenOpen = false;
+
+  // 智能路线规划仍在 Dart 侧（单一事实源），结果经桥接下发网页渲染
+  final IntelligentRoutePlanner _planner = IntelligentRoutePlanner();
+  TravelPreferences _prefs = const TravelPreferences();
+  List<RouteWaypoint> _lastWaypoints = const <RouteWaypoint>[];
+
+  @override
+  void initState() {
+    super.initState();
+    // 主题对齐：同步当前变体并监听热切换（网页令牌组 + 地图底图明暗）
+    AppThemeController.instance.addListener(_onThemeChanged);
+    unawaited(TravelWebPanelHost.instance.ensureStarted().then((_) {
+      if (!mounted) return;
+      _bindController();
+      _syncTheme();
+      _pushPlan();
+    }));
+  }
+
+  @override
+  void dispose() {
+    AppThemeController.instance.removeListener(_onThemeChanged);
+    _unbindController(); // 共享宿主不 detach（生命周期 = App）
+    super.dispose();
+  }
+
+  void _onThemeChanged() {
+    if (!mounted) return;
+    _syncTheme();
+  }
+
+  void _syncTheme() {
+    _controller.setTheme(AppThemeController.instance.value.name);
+  }
+
+  /// 绑定网页 → Dart 事件回调（WebView 挂载点切换后需重新绑定）。
+  void _bindController() {
+    final TravelWebPanelController c = _controller;
+    c.onReady = _onWebReady;
+    c.onPlanRoute = _planRoute;
+    c.onSwitchRouteMode = _switchTransportMode;
+    c.onHideRouteCard = _clearRoute;
+    c.onOpenUrl = _launchExternal;
+    c.onClose = () => widget.onClose?.call();
+    c.onFullscreen = _openFullscreen;
+  }
+
+  /// 仅解绑属于自己的回调（不同 State 实例的方法 tearoff 不相等，互不误伤）。
+  /// onClose 闭包无法比较，交由下一个挂载点绑定时覆盖。
+  void _unbindController() {
+    final TravelWebPanelController c = _controller;
+    if (c.onReady == _onWebReady) c.onReady = null;
+    if (c.onPlanRoute == _planRoute) c.onPlanRoute = null;
+    if (c.onSwitchRouteMode == _switchTransportMode) c.onSwitchRouteMode = null;
+    if (c.onHideRouteCard == _clearRoute) c.onHideRouteCard = null;
+    if (c.onOpenUrl == _launchExternal) c.onOpenUrl = null;
+    if (c.onFullscreen == _openFullscreen) c.onFullscreen = null;
+  }
+
+  /// 下发当前行程载荷（共享 WebView 未就绪时由控制器排队，就绪后自动送达）。
+  void _pushPlan() {
+    _controller.loadPlan(TravelWebPanelPayload.build(
+      _plan,
+      fullscreen: widget.fullscreen,
+      closable: widget.onClose != null,
+    ));
+  }
+
+  void _onWebReady() {
+    _pushPlan();
+  }
+
+  // ── 全屏 / 外链 ──────────────────────────────────────────────────
+  Future<void> _openFullscreen() async {
+    // 全屏页复用同一共享 WebView 纹理（不重新加载地图）；
+    // 先卸载本挂载点避免同一控制器被双份转发输入事件
+    setState(() => _fullscreenOpen = true);
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) => TravelPlanFullscreenPage(
+          data: widget.data,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    _bindController(); // 全屏页挂载点曾覆盖回调，返回后夺回
+    _pushPlan();       // 恢复面板态载荷（隐藏网页内全屏按钮等）
+    setState(() => _fullscreenOpen = false);
+  }
+
+  Future<void> _launchExternal(String url) async {
+    if (url.isEmpty) return;
+    final Uri? uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      _toast("无法打开外部链接", error: true);
+    }
+  }
+
+  void _toast(String msg, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: const TextStyle(fontSize: 12)),
+        backgroundColor: error ? Theme.of(context).colorScheme.error : null,
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // 智能路线规划（Dart 计算 → 网页渲染）
+  // ═════════════════════════════════════════════════════════════════
+
+  void _planRoute(int dayIndex) {
+    final int d = dayIndex.clamp(0, _plan.days.length - 1);
+    final List<RouteWaypoint> waypoints = <RouteWaypoint>[
+      for (final TravelDayEntry e in _plan.days[d].entries)
+        if (e.latitude != null && e.longitude != null && e.kind != TravelEntryKind.transport)
+          RouteWaypoint(
+              name: e.title,
+              latitude: e.latitude!,
+              longitude: e.longitude!,
+              type: e.type),
+    ];
+    if (waypoints.length < 2) {
+      _toast("当天可规划路线的地点不足（至少 2 个带坐标的行程点）", error: true);
+      return;
+    }
+    _lastWaypoints = waypoints;
+    _applyRoute(_planner.planIntelligentRoute(waypoints, _prefs));
+  }
+
+  void _switchTransportMode(String mode) {
+    _prefs = TravelPreferences(
+      sceneryPreference: _prefs.sceneryPreference,
+      transportMode: mode,
+      departureTime: _prefs.departureTime,
+      budgetLevel: _prefs.budgetLevel,
+      physicalEffort: _prefs.physicalEffort,
+      avoidCrowds: _prefs.avoidCrowds,
+      prioritizeSpeed: _prefs.prioritizeSpeed,
+    );
+    if (_lastWaypoints.length >= 2) {
+      _applyRoute(_planner.planIntelligentRoute(_lastWaypoints, _prefs));
+    }
+  }
+
+  void _applyRoute(SmartRouteResult result) {
+    _controller.drawRoute(<TravelRouteSegment>[
+      for (final SmartRouteSegment seg in result.segments)
+        TravelRouteSegment(
+          mode: _mapModeOf(seg.transportMode),
+          points: <TravelMapPoint>[
+            TravelMapPoint(latitude: seg.fromLatitude, longitude: seg.fromLongitude),
+            TravelMapPoint(latitude: seg.toLatitude, longitude: seg.toLongitude),
+          ],
+          fromName: seg.fromName,
+          toName: seg.toName,
+        ),
+    ]);
+    _controller.showRouteCard(_routeCardPayload(result));
+  }
+
+  void _clearRoute() {
+    _lastWaypoints = const <RouteWaypoint>[];
+    _controller.clearRoute();
+  }
+
+  static String _mapModeOf(String mode) {
+    switch (mode) {
+      case "public_transit":
+        return "transit";
+      case "walking":
+        return "walking";
+      case "cycling":
+        return "cycling";
+      case "taxi":
+        return "taxi";
+      default:
+        return "driving"; // driving / rental_car
+    }
+  }
+
+  static String _modeName(String mode) {
+    const Map<String, String> names = <String, String>{
+      "driving": "驾车",
+      "rental_car": "租车",
+      "taxi": "网约车",
+      "public_transit": "公交",
+      "cycling": "骑行",
+      "walking": "步行",
+    };
+    return names[mode] ?? mode;
+  }
+
+  Map<String, dynamic> _routeCardPayload(SmartRouteResult route) {
+    return TravelWebPanelPayload.routeCard(
+      totalDistanceText: route.totalDistanceText,
+      totalDurationText: route.totalDurationText,
+      averageCrowdIndex: route.averageCrowdIndex,
+      optimizationScore: route.optimizationScore,
+      assessment: route.assessment,
+      segments: <Map<String, dynamic>>[
+        for (final SmartRouteSegment seg in route.segments)
+          <String, dynamic>{
+            "instruction": seg.instruction,
+            "distanceText": "${(seg.distanceMeters / 1000).toStringAsFixed(1)}km",
+            "durationMinutes": seg.durationMinutes,
+          },
+      ],
+      warnings: <Map<String, dynamic>>[
+        for (final SmartRouteWarning w in route.warnings)
+          <String, dynamic>{"message": w.message, "severity": w.severity},
+      ],
+      alternatives: <Map<String, dynamic>>[
+        for (final TransportRecommendation alt
+            in route.segments.firstOrNull?.alternatives ?? const <TransportRecommendation>[])
+          <String, dynamic>{
+            "mode": alt.mode,
+            "label": _modeName(alt.mode),
+            "reason": alt.reason,
+          },
+      ],
+      links: route.serviceLinks(),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 全屏覆盖期间以深色占位（本挂载点的 Webview 已卸载，共享纹理由全屏页渲染）
+    if (_fullscreenOpen) {
+      return const ColoredBox(color: Color(0xFF0B1220));
+    }
+    return const _WebPanelView();
+  }
+}
+
+/// 共享 WebView 宿主的挂载点：等待初始化完成后渲染同一纹理。
+class _WebPanelView extends StatelessWidget {
+  const _WebPanelView();
+
+  @override
+  Widget build(BuildContext context) {
+    final TravelWebPanelHost host = TravelWebPanelHost.instance;
+    return FutureBuilder<void>(
+      future: host.ensureStarted(),
+      builder: (BuildContext context, AsyncSnapshot<void> snapshot) {
+        if (host.error != null) {
+          return Container(
+            color: const Color(0xFF0B1220),
+            alignment: Alignment.center,
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              host.error!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: Color(0xFF8FA3BF)),
+            ),
+          );
+        }
+        if (snapshot.connectionState != ConnectionState.done ||
+            !host.isInitialized) {
+          return Container(
+            color: const Color(0xFF0B1220),
+            alignment: Alignment.center,
+            child: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(height: 10),
+                Text(
+                  "行程面板加载中…",
+                  style: TextStyle(fontSize: 12, color: Color(0xFF8FA3BF)),
+                ),
+              ],
+            ),
+          );
+        }
+        return Webview(host.webviewController!);
+      },
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 原生兜底面板（非 Windows / WebView 不可用）
+// ═══════════════════════════════════════════════════════════════════
+
+class _NativeTravelPanel extends StatefulWidget {
+  const _NativeTravelPanel({
+    required this.data,
+    this.fullscreen = false,
+    this.onClose,
+  });
+
+  final AgentResultData data;
+  final bool fullscreen;
+  final VoidCallback? onClose;
+
+  @override
+  State<_NativeTravelPanel> createState() => _NativeTravelPanelState();
+}
+
+class _NativeTravelPanelState extends State<_NativeTravelPanel> {
+  late final TravelPlanData _plan = TravelPlanData.from(widget.data);
   int _selectedDay = 0;
+
+  // 左栏天数列表收起状态（收起后为窄边栏，仅显示天数序号）
+  bool _dayListCollapsed = false;
 
   // 地图（WebView + MapLibre，能力移植自 3D-Travel Map3DController）
   final TravelMapController _mapController = TravelMapController();
-  bool _mapOn = true;
 
   // 智能路线规划（移植自 IntelligentRoutePlanner）
   final IntelligentRoutePlanner _planner = IntelligentRoutePlanner();
   TravelPreferences _prefs = const TravelPreferences();
   SmartRouteResult? _route;
   List<RouteWaypoint> _lastWaypoints = const <RouteWaypoint>[];
-
-  // 价格设置（预订清单用，面板级留存）
-  String _memberTier = "normal";
-  List<BoundPlatform> _platforms = const <BoundPlatform>[];
-
-  bool _busy = false; // 编辑类操作进行中
 
   @override
   void initState() {
@@ -120,18 +472,33 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
   }
 
   void _syncMap() {
+    // 真实目的地中心先行下发：POI 缺失/无坐标时地图也不会漂到无关城市
+    final double? centerLat = _plan.centerLatitude;
+    final double? centerLng = _plan.centerLongitude;
+    if (centerLat != null && centerLng != null) {
+      _mapController.setDefaultCenter(centerLat, centerLng);
+    }
     _mapController.setPois(_collectPois());
     _mapController.showDay(_plan.days.length > 1 ? _selectedDay : null);
   }
 
   void _onPoiTap(String name) {
-    // 3D-Travel 中点击标记即弹出地图 Popup（地图内实现）；这里补一次飞行定位
-    for (final TravelMapPoi poi in _collectPois()) {
-      if (poi.name == name) {
-        _mapController.flyTo(poi.latitude, poi.longitude, zoom: 16.5);
-        return;
+    // 地图标记点击 → 飞行定位 + 弹出条目详情（时间线面板移除后的详情入口）
+    for (int d = 0; d < _plan.days.length; d++) {
+      for (final TravelDayEntry e in _plan.days[d].entries) {
+        if (e.title == name && e.latitude != null && e.longitude != null) {
+          _mapController.flyTo(e.latitude!, e.longitude!, zoom: 16.5);
+          TravelDetailSheet.show(context, entry: e, dayLabel: _plan.days[d].label);
+          return;
+        }
       }
     }
+  }
+
+  void _selectDay(int index) {
+    setState(() => _selectedDay = index);
+    _mapController.showDay(_plan.days.length > 1 ? index : null);
+    if (_route != null) _clearRoute();
   }
 
   // ── 全屏 ─────────────────────────────────────────────────────────
@@ -155,98 +522,6 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
         behavior: SnackBarBehavior.floating,
       ),
     );
-  }
-
-  // ═════════════════════════════════════════════════════════════════
-  // 行程编辑（替换 / 提意见重推荐 / 移除 → 服务端持久化）
-  // ═════════════════════════════════════════════════════════════════
-
-  Future<void> _openItemEditor(int dayIndex, int itemIndex) async {
-    final TravelDayEntry entry = _plan.days[dayIndex].entries[itemIndex];
-    if (!_plan.hasPlanId) {
-      _toast("当前行程为文本解析结果，不支持在线编辑", error: true);
-      return;
-    }
-    final TravelItemEditorResult? result = await TravelItemEditor.show(
-      context,
-      entry: entry,
-      destination: _plan.destination,
-    );
-    if (result == null || !mounted) return;
-    setState(() => _busy = true);
-    try {
-      final TravelPlanApi api = TravelPlanApi();
-      final Map<String, dynamic> updated;
-      if (result.item != null) {
-        final Map<String, dynamic> item = Map<String, dynamic>.of(result.item!);
-        item["startTime"] = entry.time; // 替换保留原时间段
-        if ((item["type"]?.toString() ?? "").isEmpty) {
-          item["type"] = entry.type;
-        }
-        updated = await api.replaceItem(_plan.planId, dayIndex, itemIndex, item);
-        _toast("已替换：${item["name"] ?? ""}");
-      } else {
-        updated = await api.commentItem(
-            _plan.planId, dayIndex, itemIndex, result.comment ?? "");
-        _toast("已按你的意见重新推荐");
-      }
-      _applyUpdatedPlan(updated);
-    } catch (e) {
-      _toast("操作失败：$e", error: true);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _removeItem(int dayIndex, int itemIndex) async {
-    if (!_plan.hasPlanId) {
-      _toast("当前行程为文本解析结果，不支持在线编辑", error: true);
-      return;
-    }
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext context) => AlertDialog(
-        title: const Text("移除该行程项", style: TextStyle(fontSize: 15)),
-        content: Text(
-          "确定移除「${_plan.days[dayIndex].entries[itemIndex].title}」吗？",
-          style: const TextStyle(fontSize: 13),
-        ),
-        actions: <Widget>[
-          TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text("取消")),
-          FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text("移除")),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    setState(() => _busy = true);
-    try {
-      final Map<String, dynamic> updated =
-          await TravelPlanApi().removeItem(_plan.planId, dayIndex, itemIndex);
-      _applyUpdatedPlan(updated);
-      _toast("已移除");
-    } catch (e) {
-      _toast("移除失败：$e", error: true);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  /// 服务端返回的更新后行程 → 刷新面板 + 地图（路线已失效则清除）。
-  void _applyUpdatedPlan(Map<String, dynamic> updated) {
-    setState(() {
-      _plan = TravelPlanData.fromPlanJson(updated);
-      if (_selectedDay >= _plan.days.length) _selectedDay = 0;
-      if (_route != null) {
-        _route = null;
-        _lastWaypoints = const <RouteWaypoint>[];
-        _mapController.clearRoute();
-      }
-    });
-    _syncMap();
   }
 
   // ═════════════════════════════════════════════════════════════════
@@ -340,339 +615,6 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
   }
 
   // ═════════════════════════════════════════════════════════════════
-  // 预订 / 偏好 / 分享 / 导出
-  // ═════════════════════════════════════════════════════════════════
-
-  Future<void> _openBooking() async {
-    if (!_plan.hasPlanId) {
-      _toast("当前行程为文本解析结果，暂不支持预订计价", error: true);
-      return;
-    }
-    final (String, List<BoundPlatform>)? applied = await TravelBookingSheet.show(
-      context,
-      planId: _plan.planId,
-      initialTier: _memberTier,
-      initialPlatforms: _platforms,
-    );
-    if (applied != null) {
-      setState(() {
-        _memberTier = applied.$1;
-        _platforms = applied.$2;
-      });
-    }
-  }
-
-  /// 偏好设置弹窗（移植自 _openPreferencesPanel），保存后自动重新规划路线。
-  Future<void> _openPreferences() async {
-    String scenery = _prefs.sceneryPreference;
-    String transportMode = _prefs.transportMode;
-    final TextEditingController timeCtrl =
-        TextEditingController(text: _prefs.departureTime);
-    String budget = _prefs.budgetLevel;
-    String effort = _prefs.physicalEffort;
-    bool avoidCrowds = _prefs.avoidCrowds;
-    bool prioritizeSpeed = _prefs.prioritizeSpeed;
-
-    final bool? saved = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext context) => StatefulBuilder(
-        builder: (BuildContext context, void Function(void Function()) setDialog) {
-          final ColorScheme cs = Theme.of(context).colorScheme;
-          Widget chips<T extends Object>({
-            required String label,
-            required T value,
-            required Map<T, String> options,
-            required void Function(T) onSelect,
-          }) {
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(label,
-                    style: const TextStyle(
-                        fontSize: 12, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: <Widget>[
-                    for (final MapEntry<T, String> o in options.entries)
-                      ChoiceChip(
-                        label: Text(o.value, style: const TextStyle(fontSize: 11)),
-                        selected: value == o.key,
-                        onSelected: (_) => setDialog(() => onSelect(o.key)),
-                      ),
-                  ],
-                ),
-              ],
-            );
-          }
-
-          return Dialog(
-            backgroundColor: cs.surfaceContainer,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 440, maxHeight: 600),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    const Text("智能规划偏好设置",
-                        style: TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 12),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            chips<String>(
-                              label: "景色偏好",
-                              value: scenery,
-                              options: const <String, String>{
-                                "natural": "自然风光",
-                                "cultural": "人文历史",
-                                "balanced": "平衡兼顾",
-                              },
-                              onSelect: (String v) => scenery = v,
-                            ),
-                            const SizedBox(height: 12),
-                            chips<String>(
-                              label: "首选交通方式",
-                              value: transportMode,
-                              options: const <String, String>{
-                                "auto": "自动推荐",
-                                "driving": "驾车",
-                                "public_transit": "公共交通",
-                                "cycling": "骑行",
-                                "walking": "步行",
-                                "taxi": "网约车",
-                                "rental_car": "租车自驾",
-                              },
-                              onSelect: (String v) => transportMode = v,
-                            ),
-                            const SizedBox(height: 12),
-                            Text("出发时间",
-                                style: const TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600)),
-                            const SizedBox(height: 6),
-                            TextField(
-                              controller: timeCtrl,
-                              style: const TextStyle(fontSize: 13),
-                              decoration: InputDecoration(
-                                isDense: true,
-                                hintText: "09:00",
-                                border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(10)),
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            chips<String>(
-                              label: "预算水平",
-                              value: budget,
-                              options: const <String, String>{
-                                "low": "经济实惠",
-                                "medium": "中等预算",
-                                "high": "不差钱",
-                              },
-                              onSelect: (String v) => budget = v,
-                            ),
-                            const SizedBox(height: 12),
-                            chips<String>(
-                              label: "体力要求",
-                              value: effort,
-                              options: const <String, String>{
-                                "easy": "轻松休闲",
-                                "moderate": "适中活动",
-                                "challenging": "挑战自我",
-                              },
-                              onSelect: (String v) => effort = v,
-                            ),
-                            const SizedBox(height: 12),
-                            SwitchListTile(
-                              contentPadding: EdgeInsets.zero,
-                              dense: true,
-                              title: const Text("避开人流高峰",
-                                  style: TextStyle(fontSize: 12)),
-                              value: avoidCrowds,
-                              onChanged: (bool v) =>
-                                  setDialog(() => avoidCrowds = v),
-                            ),
-                            SwitchListTile(
-                              contentPadding: EdgeInsets.zero,
-                              dense: true,
-                              title: const Text("优先速度（vs 景色）",
-                                  style: TextStyle(fontSize: 12)),
-                              value: prioritizeSpeed,
-                              onChanged: (bool v) =>
-                                  setDialog(() => prioritizeSpeed = v),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: <Widget>[
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: () => Navigator.of(context).pop(false),
-                            child: const Text("取消"),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: FilledButton(
-                            onPressed: () => Navigator.of(context).pop(true),
-                            child: const Text("保存并重新规划"),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-    timeCtrl.dispose();
-    if (saved == true) {
-      setState(() {
-        _prefs = TravelPreferences(
-          sceneryPreference: scenery,
-          transportMode: transportMode,
-          departureTime: timeCtrl.text.trim().isNotEmpty
-              ? timeCtrl.text.trim()
-              : "09:00",
-          budgetLevel: budget,
-          physicalEffort: effort,
-          avoidCrowds: avoidCrowds,
-          prioritizeSpeed: prioritizeSpeed,
-        );
-      });
-      _toast("偏好已保存，正在重新规划路线…");
-      _planRoute();
-    }
-  }
-
-  /// 更多菜单（导出 / 分享 / 发送到手机）。
-  Future<void> _openMoreMenu() async {
-    final String? action = await showMenu<String>(
-      context: context,
-      position: const RelativeRect.fromLTRB(double.maxFinite, 60, 12, double.maxFinite),
-      items: const <PopupMenuEntry<String>>[
-        PopupMenuItem<String>(value: "export-json", child: Text("导出 JSON", style: TextStyle(fontSize: 13))),
-        PopupMenuItem<String>(value: "export-text", child: Text("导出文本", style: TextStyle(fontSize: 13))),
-        PopupMenuItem<String>(value: "export-calendar", child: Text("导出日历 (ICS)", style: TextStyle(fontSize: 13))),
-        PopupMenuDivider(),
-        PopupMenuItem<String>(value: "share", child: Text("生成分享码", style: TextStyle(fontSize: 13))),
-        PopupMenuItem<String>(value: "mobile", child: Text("发送到手机", style: TextStyle(fontSize: 13))),
-      ],
-    );
-    if (action == null || !mounted) return;
-    switch (action) {
-      case "export-json":
-      case "export-text":
-      case "export-calendar":
-        final String? msg = await TravelExportUtil.exportItinerary(
-            _plan, action.substring("export-".length));
-        if (msg != null) _toast(msg);
-        break;
-      case "share":
-      case "mobile":
-        await _sharePlan(toMobile: action == "mobile");
-        break;
-    }
-  }
-
-  Future<void> _sharePlan({required bool toMobile}) async {
-    if (!_plan.hasPlanId) {
-      _toast("当前行程为文本解析结果，暂不支持分享", error: true);
-      return;
-    }
-    setState(() => _busy = true);
-    try {
-      final String code = await TravelPlanApi().createShareCode(_plan.planId);
-      if (!mounted) return;
-      if (toMobile) {
-        final String url = "${ApiConfig.httpBase}/travel/share/$code";
-        await showDialog<void>(
-          context: context,
-          builder: (BuildContext context) => AlertDialog(
-            title: const Text("发送到手机", style: TextStyle(fontSize: 15)),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: QrImageView(
-                    data: url,
-                    size: 180,
-                    backgroundColor: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text("手机扫码查看「${_plan.destination}」行程",
-                    style: const TextStyle(fontSize: 12)),
-                const SizedBox(height: 4),
-                SelectableText(url,
-                    style: const TextStyle(fontSize: 10, color: Colors.grey)),
-              ],
-            ),
-            actions: <Widget>[
-              TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text("关闭")),
-            ],
-          ),
-        );
-      } else {
-        await showDialog<void>(
-          context: context,
-          builder: (BuildContext context) => AlertDialog(
-            title: const Text("行程分享码", style: TextStyle(fontSize: 15)),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                SelectableText(code,
-                    style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 4)),
-                const SizedBox(height: 8),
-                const Text("对方在行程面板输入分享码即可查看完整行程",
-                    style: TextStyle(fontSize: 12)),
-              ],
-            ),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: code));
-                  Navigator.of(context).pop();
-                  _toast("分享码已复制");
-                },
-                child: const Text("复制"),
-              ),
-            ],
-          ),
-        );
-      }
-    } catch (e) {
-      _toast("分享失败：$e", error: true);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  // ═════════════════════════════════════════════════════════════════
   // 渲染
   // ═════════════════════════════════════════════════════════════════
 
@@ -690,44 +632,16 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
           _buildHeader(cs, full),
           const Divider(height: 1),
           Expanded(
-            child: Stack(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    if (_plan.days.length > 1) ...<Widget>[
-                      SizedBox(width: leftWidth, child: _buildDayList(cs)),
-                      VerticalDivider(width: 1, color: cs.outline.withValues(alpha: 0.18)),
-                    ],
-                    Expanded(child: _buildMainArea(cs, full)),
-                  ],
-                ),
-                if (_busy)
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: Center(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: cs.surface.withValues(alpha: 0.9),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: <Widget>[
-                              SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(strokeWidth: 2)),
-                              SizedBox(width: 10),
-                              Text("处理中…", style: TextStyle(fontSize: 12)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                if (_plan.days.length > 1) ...<Widget>[
+                  _dayListCollapsed
+                      ? SizedBox(width: 44, child: _buildDayRail(cs))
+                      : SizedBox(width: leftWidth, child: _buildDayList(cs)),
+                  VerticalDivider(width: 1, color: cs.outline.withValues(alpha: 0.18)),
+                ],
+                Expanded(child: _buildMainArea(cs)),
               ],
             ),
           ),
@@ -736,7 +650,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
     );
   }
 
-  // ── 顶栏：目的地 + 标题 + 工具组 ──────────────────────────────────
+  // ── 顶栏：目的地 + 标题 + 全屏 / 关闭 ─────────────────────────────
   Widget _buildHeader(ColorScheme cs, bool full) {
     final String dest =
         _plan.destination.isNotEmpty ? _plan.destination : "行程规划";
@@ -753,22 +667,22 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
-              color: _kAccentBlue.withValues(alpha: 0.12),
+              color: TravelPalette.of(context).accent.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(999),
               border: Border.all(
-                  color: _kAccentBlue.withValues(alpha: 0.35)),
+                  color: TravelPalette.of(context).accent.withValues(alpha: 0.35)),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                const Icon(Icons.flag_outlined, size: 13, color: _kAccentBlue),
-                const SizedBox(width: 4),
+                Icon(Icons.flag_outlined, size: 13, color: TravelPalette.of(context).accent),
+                SizedBox(width: 4),
                 Text(
                   dest,
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
-                    color: _kAccentBlue,
+                    color: TravelPalette.of(context).accent,
                   ),
                 ),
               ],
@@ -788,21 +702,6 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
             ),
           ),
           const SizedBox(width: 4),
-          _headerIconBtn(cs, icon: Icons.route_outlined, tooltip: "规划当日路线",
-              onTap: _planRoute),
-          _headerIconBtn(cs,
-              icon: _mapOn ? Icons.map_rounded : Icons.map_outlined,
-              tooltip: _mapOn ? "收起地图" : "展开地图",
-              color: _mapOn ? _kAccentBlue : null,
-              onTap: () => setState(() => _mapOn = !_mapOn)),
-          _headerIconBtn(cs,
-              icon: Icons.receipt_long_outlined,
-              tooltip: "预订清单",
-              onTap: _openBooking),
-          _headerIconBtn(cs,
-              icon: Icons.tune_outlined, tooltip: "偏好设置", onTap: _openPreferences),
-          _headerIconBtn(cs,
-              icon: Icons.more_horiz, tooltip: "导出 / 分享", onTap: _openMoreMenu),
           if (!full)
             _headerIconBtn(cs, icon: Icons.open_in_full, tooltip: "全屏查看",
                 onTap: _openFullscreen),
@@ -834,43 +733,65 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
     );
   }
 
-  // ── 主区：地图 + 当日时间线 ──────────────────────────────────────
-  Widget _buildMainArea(ColorScheme cs, bool full) {
-    final Widget timeline = _buildDayDetail(cs, full);
-    if (!_mapOn) return timeline;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+  // ── 主区：地图（当前天指示 + 路线规划 + 路线结果卡）────────────────
+  Widget _buildMainArea(ColorScheme cs) {
+    return Stack(
+      fit: StackFit.expand,
       children: <Widget>[
-        Expanded(
-          flex: 5,
-          child: Stack(
-            fit: StackFit.expand,
-            children: <Widget>[
-              TravelMapView(controller: _mapController),
-              // 规划路线悬浮按钮（对应 3D-Travel 的 #plan-route-btn）
-              Positioned(
-                left: 10,
-                top: 10,
-                child: _mapFabButton(
-                  icon: Icons.route_outlined,
-                  label: _route == null ? "规划路线" : "重新规划",
-                  onTap: _planRoute,
-                ),
-              ),
-              // 智能路线结果卡（对应 _showIntelligentRouteResult）
-              if (_route != null)
-                Positioned(
-                  left: 10,
-                  right: 10,
-                  bottom: 10,
-                  child: _buildRouteResultCard(cs),
-                ),
-            ],
+        TravelMapView(controller: _mapController),
+        // 当前天指示徽章（多天时显示，替代原右侧时间线的天标题）
+        if (_plan.days.length > 1)
+          Positioned(left: 10, top: 48, child: _dayBadge()),
+        // 规划路线悬浮按钮（对应 3D-Travel 的 #plan-route-btn）
+        Positioned(
+          left: 10,
+          top: 10,
+          child: _mapFabButton(
+            icon: Icons.route_outlined,
+            label: _route == null ? "规划路线" : "重新规划",
+            onTap: _planRoute,
           ),
         ),
-        VerticalDivider(width: 1, color: cs.outline.withValues(alpha: 0.18)),
-        Expanded(flex: 6, child: timeline),
+        // 智能路线结果卡（对应 _showIntelligentRouteResult）
+        if (_route != null)
+          Positioned(
+            left: 10,
+            right: 10,
+            bottom: 10,
+            child: _buildRouteResultCard(cs),
+          ),
       ],
+    );
+  }
+
+  /// 当前选中天的指示徽章（地图左上角，路线按钮下方）。
+  Widget _dayBadge() {
+    final TravelPlanDay day =
+        _plan.days[_selectedDay.clamp(0, _plan.days.length - 1)];
+    final String text = day.subtitle.isNotEmpty
+        ? "${day.label} · ${day.subtitle}"
+        : day.label;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.65),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(Icons.calendar_today_outlined,
+              size: 12, color: TravelPalette.of(context).accent),
+          const SizedBox(width: 5),
+          Text(
+            text,
+            style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Colors.white),
+          ),
+        ],
+      ),
     );
   }
 
@@ -890,7 +811,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              Icon(icon, size: 14, color: _kAccentBlue),
+              Icon(icon, size: 14, color: TravelPalette.of(context).accent),
               const SizedBox(width: 5),
               Text(label,
                   style: const TextStyle(
@@ -921,8 +842,8 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
               // 总览行
               Row(
                 children: <Widget>[
-                  const Icon(Icons.auto_awesome, size: 14, color: _kAccentBlue),
-                  const SizedBox(width: 6),
+                  Icon(Icons.auto_awesome, size: 14, color: TravelPalette.of(context).accent),
+                  SizedBox(width: 6),
                   Text(
                     "${route.totalDistanceText} · ${route.totalDurationText} · "
                     "人流${route.averageCrowdIndex}/10 · 优化分 ${route.optimizationScore}",
@@ -943,7 +864,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                       fontSize: 11,
-                      color: _kAccentGreen.withValues(alpha: 0.9))),
+                      color: TravelPalette.of(context).green.withValues(alpha: 0.9))),
               const Divider(height: 10, color: Colors.white24),
               // 分段建议（可滚动）
               Flexible(
@@ -1055,13 +976,13 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
         decoration: BoxDecoration(
-          color: _kAccentBlue.withValues(alpha: 0.18),
+          color: TravelPalette.of(context).accent.withValues(alpha: 0.18),
           borderRadius: BorderRadius.circular(8),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Icon(icon, size: 12, color: _kAccentBlue),
+            Icon(icon, size: 12, color: TravelPalette.of(context).accent),
             const SizedBox(width: 4),
             Text(label,
                 style: const TextStyle(
@@ -1105,25 +1026,93 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
     }
   }
 
-  // ── 左栏：天数列表 ──────────────────────────────────────────────
+  // ── 左栏：天数列表（可收起为窄边栏）────────────────────────────────
   Widget _buildDayList(ColorScheme cs) {
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      itemCount: _plan.days.length + (_plan.footer.isEmpty ? 0 : 1),
-      itemBuilder: (BuildContext context, int index) {
-        if (index == _plan.days.length) return _buildFooterCard(cs);
-        final TravelPlanDay day = _plan.days[index];
-        final bool selected = index == _selectedDay;
-        return _DayCard(
-          day: day,
-          selected: selected,
-          onTap: () {
-            setState(() => _selectedDay = index);
-            _mapController.showDay(_plan.days.length > 1 ? index : null);
-            if (_route != null) _clearRoute();
-          },
-        );
-      },
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 6, 8, 0),
+          child: Row(
+            children: <Widget>[
+              _dayListToggleBtn(cs, expand: false),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  "行程天数（共 ${_plan.days.length} 天）",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            itemCount: _plan.days.length + (_plan.footer.isEmpty ? 0 : 1),
+            itemBuilder: (BuildContext context, int index) {
+              if (index == _plan.days.length) return _buildFooterCard(cs);
+              final TravelPlanDay day = _plan.days[index];
+              final bool selected = index == _selectedDay;
+              return _DayCard(
+                day: day,
+                selected: selected,
+                onTap: () => _selectDay(index),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 收起后的窄边栏：展开按钮 + 天数序号圆点（点击切换当天）。
+  Widget _buildDayRail(ColorScheme cs) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: _dayListToggleBtn(cs, expand: true),
+        ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            itemCount: _plan.days.length,
+            itemBuilder: (BuildContext context, int index) => _DayRailChip(
+              index: index,
+              label: _plan.days[index].label,
+              selected: index == _selectedDay,
+              onTap: () => _selectDay(index),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 天数列表 收起/展开 切换按钮。
+  Widget _dayListToggleBtn(ColorScheme cs, {required bool expand}) {
+    return Tooltip(
+      message: expand ? "展开天数列表" : "收起天数列表",
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => setState(() => _dayListCollapsed = !expand),
+        child: Padding(
+          padding: const EdgeInsets.all(5),
+          child: Icon(
+            expand ? Icons.chevron_right : Icons.chevron_left,
+            size: 16,
+            color: cs.onSurfaceVariant,
+          ),
+        ),
+      ),
     );
   }
 
@@ -1143,130 +1132,6 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
           height: 1.45,
           color: cs.onSurfaceVariant,
         ),
-      ),
-    );
-  }
-
-  // ── 右栏：当日行程时间线（点击开详情，悬停出编辑操作）──────────────
-  Widget _buildDayDetail(ColorScheme cs, bool full) {
-    final TravelPlanDay day =
-        _plan.days[_selectedDay.clamp(0, _plan.days.length - 1)];
-    final List<TravelDayEntry> entries = day.entries;
-
-    return CustomScrollView(
-      slivers: <Widget>[
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(full ? 22 : 14, 14, full ? 22 : 14, 6),
-            child: Row(
-              children: <Widget>[
-                Icon(Icons.calendar_today_outlined,
-                    size: 14, color: _kAccentBlue),
-                const SizedBox(width: 6),
-                Text(
-                  day.label,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: cs.onSurface,
-                  ),
-                ),
-                if (day.subtitle.isNotEmpty) ...<Widget>[
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      day.subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: cs.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
-                const Spacer(),
-                Text(
-                  "${entries.length} 项安排",
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: cs.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        if (entries.isEmpty)
-          SliverFillRemaining(
-            hasScrollBody: false,
-            child: Center(
-              child: Text(
-                "这一天的行程还在安排中",
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-              ),
-            ),
-          )
-        else
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (BuildContext context, int i) => _EntryTile(
-                entry: entries[i],
-                dayIndex: _selectedDay,
-                itemIndex: i,
-                dayLabel: day.label,
-                last: i == entries.length - 1,
-                editable: _plan.hasPlanId,
-                onOpenDetail: () => TravelDetailSheet.show(
-                  context,
-                  entry: entries[i],
-                  dayLabel: day.label,
-                ),
-                onEdit: () => _openItemEditor(_selectedDay, i),
-                onRemove: () => _removeItem(_selectedDay, i),
-              ),
-              childCount: entries.length,
-            ),
-          ),
-        if (_plan.footer.isNotEmpty && _mapOn)
-          const SliverToBoxAdapter(child: SizedBox.shrink())
-        else if (_plan.footer.isNotEmpty)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(full ? 22 : 14, 12, full ? 22 : 14, 20),
-              child: _buildInfoPanel(cs),
-            ),
-          ),
-      ],
-    );
-  }
-
-  /// 底部信息区：价格/实用信息提示（footer）。
-  Widget _buildInfoPanel(ColorScheme cs) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHigh.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.15)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          const Icon(Icons.lightbulb_outline, size: 14, color: _kAccentOrange),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              _plan.footer,
-              style: TextStyle(
-                fontSize: 12,
-                height: 1.5,
-                color: cs.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1291,7 +1156,7 @@ class _DayCard extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
       child: Material(
         color: selected
-            ? _kAccentBlue.withValues(alpha: 0.12)
+            ? TravelPalette.of(context).accent.withValues(alpha: 0.12)
             : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
@@ -1303,7 +1168,7 @@ class _DayCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(8),
               border: Border.all(
                 color: selected
-                    ? _kAccentBlue.withValues(alpha: 0.4)
+                    ? TravelPalette.of(context).accent.withValues(alpha: 0.4)
                     : Colors.transparent,
               ),
             ),
@@ -1312,9 +1177,9 @@ class _DayCard extends StatelessWidget {
                 Icon(
                   Icons.place_outlined,
                   size: 14,
-                  color: selected ? _kAccentBlue : cs.onSurfaceVariant,
+                  color: selected ? TravelPalette.of(context).accent : cs.onSurfaceVariant,
                 ),
-                const SizedBox(width: 8),
+                SizedBox(width: 8),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1326,7 +1191,7 @@ class _DayCard extends StatelessWidget {
                           fontWeight: selected
                               ? FontWeight.w700
                               : FontWeight.w500,
-                          color: selected ? _kAccentBlue : cs.onSurface,
+                          color: selected ? TravelPalette.of(context).accent : cs.onSurface,
                         ),
                       ),
                       Text(
@@ -1348,387 +1213,63 @@ class _DayCard extends StatelessWidget {
   }
 }
 
-// ── 右栏时间线条目（悬停操作：编辑/提意见/移除；点击开详情）──────────
-class _EntryTile extends StatefulWidget {
-  const _EntryTile({
-    required this.entry,
-    required this.dayIndex,
-    required this.itemIndex,
-    required this.dayLabel,
-    required this.last,
-    required this.editable,
-    required this.onOpenDetail,
-    required this.onEdit,
-    required this.onRemove,
+// ── 收起态窄边栏的天数序号圆点 ───────────────────────────────────
+class _DayRailChip extends StatelessWidget {
+  const _DayRailChip({
+    required this.index,
+    required this.label,
+    required this.selected,
+    required this.onTap,
   });
 
-  final TravelDayEntry entry;
-  final int dayIndex;
-  final int itemIndex;
-  final String dayLabel;
-  final bool last;
-  final bool editable;
-  final VoidCallback onOpenDetail;
-  final VoidCallback onEdit;
-  final VoidCallback onRemove;
-
-  @override
-  State<_EntryTile> createState() => _EntryTileState();
-}
-
-class _EntryTileState extends State<_EntryTile> {
-  bool _hover = false;
-
-  Color get _kindColor {
-    switch (widget.entry.kind) {
-      case TravelEntryKind.restaurant:
-        return _kAccentOrange;
-      case TravelEntryKind.hotel:
-        return _kAccentGreen;
-      case TravelEntryKind.transport:
-        return _kAccentPurple;
-      case TravelEntryKind.attraction:
-        return _kAccentBlue;
-      case TravelEntryKind.other:
-        return const Color(0xFF9AA0A6);
-    }
-  }
-
-  IconData get _kindIcon {
-    switch (widget.entry.kind) {
-      case TravelEntryKind.restaurant:
-        return Icons.restaurant_outlined;
-      case TravelEntryKind.hotel:
-        return Icons.hotel_outlined;
-      case TravelEntryKind.transport:
-        return Icons.directions_transit_outlined;
-      case TravelEntryKind.attraction:
-        return Icons.attractions_outlined;
-      case TravelEntryKind.other:
-        return Icons.place_outlined;
-    }
-  }
+  final int index;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    final TravelDayEntry entry = widget.entry;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 4, 14, 2),
-      child: IntrinsicHeight(
-        child: MouseRegion(
-          onEnter: (_) => setState(() => _hover = true),
-          onExit: (_) => setState(() => _hover = false),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              // 时间列
-              SizedBox(
-                width: 44,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    entry.time,
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: cs.onSurfaceVariant,
-                    ),
-                  ),
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Center(
+        child: Tooltip(
+          message: label,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(999),
+            onTap: onTap,
+            child: Container(
+              width: 28,
+              height: 28,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: selected
+                    ? TravelPalette.of(context).accent.withValues(alpha: 0.18)
+                    : Colors.transparent,
+                border: Border.all(
+                  color: selected
+                      ? TravelPalette.of(context).accent.withValues(alpha: 0.6)
+                      : cs.outline.withValues(alpha: 0.25),
                 ),
               ),
-              const SizedBox(width: 10),
-              // 时间轴
-              Column(
-                children: <Widget>[
-                  Container(
-                    width: 22,
-                    height: 22,
-                    margin: const EdgeInsets.only(top: 3),
-                    decoration: BoxDecoration(
-                      color: _kindColor.withValues(alpha: 0.12),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                          color: _kindColor.withValues(alpha: 0.45)),
-                    ),
-                    child: Icon(_kindIcon, size: 12, color: _kindColor),
-                  ),
-                  if (!widget.last)
-                    Expanded(
-                      child: Container(
-                        width: 1.5,
-                        color: _kindColor.withValues(alpha: 0.15),
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(width: 10),
-              // 内容卡
-              Expanded(
-                child: GestureDetector(
-                  onTap: widget.onOpenDetail,
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: cs.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                          color: _hover
-                              ? _kindColor.withValues(alpha: 0.4)
-                              : cs.outline.withValues(alpha: 0.12)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Row(
-                          children: <Widget>[
-                            Expanded(
-                              child: Text(
-                                entry.title,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: cs.onSurface,
-                                ),
-                              ),
-                            ),
-                            // 悬停操作：编辑（替换/提意见）+ 移除
-                            AnimatedOpacity(
-                              opacity: _hover ? 1 : 0,
-                              duration: const Duration(milliseconds: 120),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: <Widget>[
-                                  if (widget.editable) ...<Widget>[
-                                    _tileAction(
-                                      icon: Icons.swap_horiz,
-                                      tooltip: "替换 / 提意见",
-                                      color: _kAccentBlue,
-                                      onTap: widget.onEdit,
-                                    ),
-                                    const SizedBox(width: 2),
-                                  ],
-                                  if (widget.editable)
-                                    _tileAction(
-                                      icon: Icons.delete_outline,
-                                      tooltip: "移除",
-                                      color: cs.error,
-                                      onTap: widget.onRemove,
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (entry.priceInfo.isNotEmpty)
-                          _metaText(cs, entry.priceInfo,
-                              color: _kAccentOrange),
-                        if (entry.description.isNotEmpty)
-                          _metaText(cs, entry.description),
-                        if (entry.tips.isNotEmpty)
-                          _metaText(cs, entry.tips.join("；")),
-                        if (entry.address.isNotEmpty)
-                          _metaText(cs, "📍 ${entry.address}"),
-                        if (entry.images.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 8),
-                            child: _buildImageStrip(context, cs),
-                          ),
-                        if (entry.reviews.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 7),
-                            child: _buildReviewLines(cs),
-                          ),
-                        if (entry.videos.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 7),
-                            child: _buildVideoChips(context, cs),
-                          ),
-                      ],
-                    ),
-                  ),
+              child: Text(
+                "${index + 1}",
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: selected ? TravelPalette.of(context).accent : cs.onSurfaceVariant,
                 ),
               ),
-            ],
+            ),
           ),
         ),
       ),
-    );
-  }
-
-  Widget _tileAction({
-    required IconData icon,
-    required String tooltip,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(6),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(3),
-          child: Icon(icon, size: 14, color: color),
-        ),
-      ),
-    );
-  }
-
-  Widget _metaText(ColorScheme cs, String text, {Color? color}) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 3),
-      child: Text(
-        text,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          fontSize: 11,
-          height: 1.45,
-          color: color ?? cs.onSurfaceVariant,
-        ),
-      ),
-    );
-  }
-
-  // ── 媒体区：实拍图条（点击开大图预览）──────────────────────────
-  Widget _buildImageStrip(BuildContext context, ColorScheme cs) {
-    return SizedBox(
-      height: 64,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: widget.entry.images.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 6),
-        itemBuilder: (BuildContext context, int i) {
-          return GestureDetector(
-            onTap: () {
-              // 大图预览（面板顶部的右侧图片预览面板）
-              _openPreview(context, i);
-            },
-            child: MediaThumbnail(
-              url: widget.entry.images[i],
-              cs: cs,
-              width: 84,
-              height: 64,
-              borderRadius: 6,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _openPreview(BuildContext context, int index) {
-    ImagePreviewLauncher.open(
-      url: widget.entry.images[index],
-      title: widget.entry.title,
-      gallery: widget.entry.images,
-      index: index,
-    );
-  }
-
-  // ── 媒体区：本地评论（内联 2 条）────────────────────────────────
-  Widget _buildReviewLines(ColorScheme cs) {
-    final int total = widget.entry.reviews.length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        for (final TravelEntryReview review in widget.entry.reviews)
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Row(
-              children: <Widget>[
-                const Icon(Icons.star_rounded,
-                    size: 13, color: Color(0xFFF5B942)),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    "${review.rating.toStringAsFixed(1)} · "
-                    "${review.author.isEmpty ? "旅友" : review.author}：${review.text}",
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: cs.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        if (total >= 2)
-          Padding(
-            padding: const EdgeInsets.only(top: 3, left: 17),
-            child: Text(
-              "共 $total 条评论",
-              style: TextStyle(
-                fontSize: 10,
-                color: cs.onSurfaceVariant.withValues(alpha: 0.75),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
-  // ── 媒体区：视频入口（元数据 chip，点击跳原平台播放页）──────────
-  Widget _buildVideoChips(BuildContext context, ColorScheme cs) {
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      children: <Widget>[
-        for (final TravelEntryVideo video in widget.entry.videos)
-          if (video.playPageUrl.isNotEmpty)
-            InkWell(
-              borderRadius: BorderRadius.circular(999),
-              onTap: () {
-                final Uri? uri = Uri.tryParse(video.playPageUrl);
-                if (uri != null) {
-                  launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              },
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                decoration: BoxDecoration(
-                  color: _kAccentBlue.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(
-                      color: _kAccentBlue.withValues(alpha: 0.3)),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    const Icon(Icons.play_circle_outline,
-                        size: 13, color: _kAccentBlue),
-                    const SizedBox(width: 4),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 150),
-                      child: Text(
-                        video.title.isEmpty
-                            ? (video.platform.isEmpty ? "相关视频" : video.platform)
-                            : "${video.platform.isEmpty ? "" : "${video.platform} · "}${video.title}",
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: _kAccentBlue,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-      ],
     );
   }
 }
 
-/// 全屏行程规划页：独立路由，沉浸式浏览双面板行程。
+/// 全屏行程规划页：独立路由，沉浸式浏览行程地图。
 class TravelPlanFullscreenPage extends StatelessWidget {
   const TravelPlanFullscreenPage({super.key, required this.data});
 

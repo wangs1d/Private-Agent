@@ -5,6 +5,8 @@ import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "travel_plan_launcher.dart";
+import "travel_plan_models.dart";
+import "travel_theme.dart";
 import "content_summary_detail_formatter.dart";
 import "display_effects/compare_slider.dart";
 import "display_effects/display_effects.dart";
@@ -1135,229 +1137,392 @@ class _MediaCard extends StatelessWidget {
   }
 }
 
-/// 旅游行程双面板卡：行程概览 + 「打开行程规划」入口。
+/// 旅游行程海报卡：景点实拍背景 + 目的地简介 + 出行叮嘱 + 「打开行程规划」入口。
 ///
 /// 与媒体卡同样采用静态回调桥接（[TravelPlanLauncher.open]）：点击入口后
 /// 在右侧双栏打开行程规划界面（左天数 + 右当日行程），界面内另有全屏按钮。
+///
+/// 设计（2026-09 用户反馈）：
+///   - 不再罗列 Day 1/2/3 摘要（与右侧双面板重复），换成目的地一句话简介
+///     + 「记得带」随身物品叮嘱，卡片自身先回答「去哪玩 / 要带什么」；
+///   - 卡片加大（maxWidth 460，气泡宽度在 chat_page 对行程卡放宽），
+///     背景取行程中第一个有实拍图的景点（attraction 优先），压深色渐变
+///     保证白字可读；无图/加载失败退回深青渐变，不闪占位框；
+///   - 无结构化 travelPlan 的历史消息优雅降级：简介/叮嘱行整体隐藏，
+///     海报走渐变兜底，布局不破损。
 class _TravelItineraryCard extends StatelessWidget {
   const _TravelItineraryCard({required this.data, required this.cs});
 
   final AgentResultData data;
   final ColorScheme cs;
 
-  /// 行程卡强调色（与右栏双面板界面一致）。
+  /// 海报区强调色（压在照片深色遮罩上，深浅主题恒可读，不随主题切换）。
   static const Color _accent = Color(0xFF18D6F3);
+
+  /// 海报兜底渐变（无图/图加载中/加载失败时露出）：深海军蓝 → 深青，
+  /// 与 _accent 同族且不随主题切换 —— 海报文字恒为白字，深浅主题都成立。
+  static const List<Color> _posterFallback = <Color>[
+    Color(0xFF123243),
+    Color(0xFF071A24),
+  ];
 
   @override
   Widget build(BuildContext context) {
-    final List<String> lines = <String>[
-      for (final AgentResultItem it in data.items)
-        if (it.text.trim().isNotEmpty) it.text.trim(),
-    ];
+    final TravelPlanData plan = TravelPlanData.from(data);
+    final List<String> gallery = _collectImages(plan);
+    final String? posterUrl = _pickPosterImage(plan);
+    // 卡体强调色随 App 主题对齐（海报区压在照片上，保留恒定霓虹青）
+    final TravelPalette palette = TravelPalette.of(context);
 
-    // 拆分「Day N / 第N天」标题行与具体行程条目
-    final List<String> dayLines = <String>[];
-    final List<String> detailLines = <String>[];
-    for (final String line in lines) {
-      if (RegExp(
-        r'^(?:第\s*[0-9一二三四五六七八九十百]+\s*天|[dD]ay\s*[0-9一二三四五六七八九十百]+)',
-      ).hasMatch(line)) {
-        dayLines.add(line);
-      } else {
-        detailLines.add(line);
-      }
-    }
-
-    final String title = data.title.trim();
-    final String destination = _inferDestination(title, lines);
-    final bool hasPlan = dayLines.isNotEmpty || detailLines.isNotEmpty;
+    // 天数口径由数据来源决定（plan.isStructured 记录 from() 实际走的分支）：
+    // 结构化 travelPlan 的 days 即真实天（空天也是行程中的一天）；
+    // 文本兜底时只数真正有条目的天（fromCard 可能补「全程」空骨架天）。
+    final int dayCount = plan.isStructured
+        ? plan.days.length
+        : plan.days.where((TravelPlanDay d) => d.entries.isNotEmpty).length;
+    final bool hasPlan = plan.days.any((TravelPlanDay d) => d.entries.isNotEmpty);
 
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
-      padding: const EdgeInsets.fromLTRB(12, 11, 12, 12),
+      constraints: const BoxConstraints(maxWidth: 460),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          // ── 顶行：目的地徽章 + 天数 + 全屏入口 ──
-          Row(
-            children: <Widget>[
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: _accent.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(color: _accent.withValues(alpha: 0.35)),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    const Icon(Icons.map_outlined,
-                        size: 13, color: _accent),
-                    const SizedBox(width: 4),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            _buildPoster(plan, gallery, posterUrl, dayCount),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  // ── 出行叮嘱（记得带）──
+                  if (plan.packing.isNotEmpty) ...<Widget>[
+                    _buildPackingRow(plan.packing, palette),
+                    const SizedBox(height: 10),
+                  ],
+                  // ── 主入口按钮（实底强调色，压住卡底）──
+                  if (hasPlan)
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: () => TravelPlanLauncher.open(data),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: palette.accentBg,
+                          foregroundColor: palette.onAccentBg,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 9),
+                          minimumSize: const Size(0, 40),
+                        ),
+                        icon: const Icon(Icons.splitscreen, size: 16),
+                        label: const Text(
+                          "打开行程规划（双面板·可全屏）",
+                          style: TextStyle(
+                              fontSize: 13.5, fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ),
+                  if (data.footer.trim().isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 8),
                     Text(
-                      destination,
+                      data.footer.trim(),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: _accent,
+                        fontSize: 11,
+                        height: 1.45,
+                        color: cs.onSurfaceVariant,
                       ),
                     ),
                   ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── 海报区：实拍背景 + 渐变遮罩 + 目的地徽章/天数/日期 + 标题/简介 ──
+
+  Widget _buildPoster(
+    TravelPlanData plan,
+    List<String> gallery,
+    String? posterUrl,
+    int dayCount,
+  ) {
+    final String dateRange = _dateRangeLabel(plan);
+    return GestureDetector(
+      onTap: posterUrl == null
+          ? null
+          : () => ImagePreviewLauncher.open(
+                url: posterUrl,
+                title: plan.destination.isEmpty ? "行程海报" : plan.destination,
+                gallery: gallery,
+                index: gallery.indexOf(posterUrl),
+              ),
+      child: SizedBox(
+        height: 200,
+        width: double.infinity,
+        child: Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            _buildPosterBackground(posterUrl),
+            // 压暗渐变：顶部轻压（徽章行可读）→ 中段几乎不压 → 底部重压（标题/简介可读）
+            const DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: <Color>[
+                    Color(0x66000000),
+                    Color(0x14000000),
+                    Color(0xE6000000),
+                  ],
+                  stops: <double>[0.0, 0.42, 1.0],
                 ),
               ),
-              if (dayLines.isNotEmpty) ...<Widget>[
-                const SizedBox(width: 8),
-                Text(
-                  "${dayLines.length} 天行程",
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: cs.onSurfaceVariant,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      _buildDestinationBadge(plan.destination),
+                      if (dayCount > 0) ...<Widget>[
+                        const SizedBox(width: 8),
+                        Text(
+                          "$dayCount 天行程",
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: Colors.white.withValues(alpha: 0.85),
+                          ),
+                        ),
+                      ],
+                      const Spacer(),
+                      if (dateRange.isNotEmpty)
+                        Text(
+                          dateRange,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.white.withValues(alpha: 0.72),
+                          ),
+                        ),
+                    ],
                   ),
-                ),
-              ],
-            ],
+                  const Spacer(),
+                  if (plan.title.isNotEmpty)
+                    Text(
+                      plan.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                        height: 1.35,
+                      ),
+                    ),
+                  if (plan.intro.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 5),
+                    Text(
+                      plan.intro,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        height: 1.5,
+                        color: Colors.white.withValues(alpha: 0.82),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 海报背景：兜底渐变常驻底层，图片加载中/失败时自然露出，不闪占位框。
+  Widget _buildPosterBackground(String? posterUrl) {
+    const DecoratedBox fallback = DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: _posterFallback,
+        ),
+      ),
+    );
+    if (posterUrl == null || posterUrl.trim().isEmpty) return fallback;
+    return Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        fallback,
+        Image.network(
+          posterUrl,
+          fit: BoxFit.cover,
+          alignment: Alignment.center,
+          errorBuilder: (_, Object __, StackTrace? ___) =>
+              const SizedBox.shrink(),
+          loadingBuilder: (
+            BuildContext context,
+            Widget child,
+            ImageChunkEvent? progress,
+          ) =>
+              progress == null ? child : fallback,
+        ),
+      ],
+    );
+  }
+
+  /// 目的地徽章（玻璃态：半透明黑底 + 白描边，压在海报上深浅图都可读）。
+  Widget _buildDestinationBadge(String destination) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.32),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          const Icon(Icons.map_outlined, size: 13, color: _accent),
+          const SizedBox(width: 4),
+          Text(
+            destination,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Colors.white,
+            ),
           ),
-          if (title.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 6),
-            Text(
-              title,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: cs.onSurface,
-                height: 1.4,
-              ),
-            ),
-          ],
-          // ── 行程概要预览（最多 3 条天摘要 + 2 条具体条目）──
-          if (hasPlan) ...<Widget>[
-            const SizedBox(height: 8),
-            ..._buildPreviewLines(dayLines, detailLines),
-          ],
-          // ── 主入口按钮 ──
-          if (hasPlan) ...<Widget>[
-            const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.tonalIcon(
-                onPressed: () => TravelPlanLauncher.open(data),
-                style: FilledButton.styleFrom(
-                  backgroundColor: _accent.withValues(alpha: 0.14),
-                  foregroundColor: _accent,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  minimumSize: const Size(0, 34),
-                ),
-                icon: const Icon(Icons.splitscreen, size: 15),
-                label: const Text(
-                  "打开行程规划（双面板·可全屏）",
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                ),
-              ),
-            ),
-          ],
-          if (data.footer.trim().isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            Text(
-              data.footer.trim(),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 11,
-                height: 1.45,
-                color: cs.onSurfaceVariant,
-              ),
-            ),
-          ],
         ],
       ),
     );
   }
 
-  List<Widget> _buildPreviewLines(
-    List<String> dayLines,
-    List<String> detailLines,
-  ) {
-    final List<Widget> widgets = <Widget>[];
-    // 天摘要：最多 3 个胶囊
-    final int dayCount =
-        dayLines.length > 3 ? 3 : dayLines.length;
-    for (int i = 0; i < dayCount; i++) {
-      widgets.add(
+  /// 「记得带」叮嘱行：标签 + 随身物品胶囊（最多 6 个，Wrap 自动换行）。
+  Widget _buildPackingRow(List<String> packing, TravelPalette palette) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
         Padding(
-          padding: const EdgeInsets.only(bottom: 4),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Icon(Icons.calendar_today_outlined,
-                  size: 11, color: _accent.withValues(alpha: 0.85)),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  dayLines[i],
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: cs.onSurface,
-                  ),
-                ),
-              ),
-            ],
+          padding: const EdgeInsets.only(top: 5),
+          child: Icon(
+            Icons.luggage_outlined,
+            size: 14,
+            color: palette.accent.withValues(alpha: 0.9),
           ),
         ),
-      );
-    }
-    // 具体条目：最多 2 条
-    final int detailCount =
-        detailLines.length > 2 ? 2 : detailLines.length;
-    for (int i = 0; i < detailCount; i++) {
-      final String line = detailLines[i];
-      final String shown =
-          line.length > 30 ? "${line.substring(0, 29)}…" : line;
-      widgets.add(
+        const SizedBox(width: 6),
         Padding(
-          padding: const EdgeInsets.only(bottom: 3),
+          padding: const EdgeInsets.only(top: 5),
           child: Text(
-            "• $shown",
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+            "记得带",
             style: TextStyle(
               fontSize: 12,
-              height: 1.4,
+              fontWeight: FontWeight.w600,
               color: cs.onSurfaceVariant,
             ),
           ),
         ),
-      );
-    }
-    return widgets;
+        const SizedBox(width: 8),
+        Expanded(
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 5,
+            children: <Widget>[
+              for (final String item in packing.take(6))
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: palette.accent.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                        color: palette.accent.withValues(alpha: 0.28)),
+                  ),
+                  child: Text(
+                    item,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.3,
+                      color: cs.onSurface.withValues(alpha: 0.9),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
-  /// 目的地推断：优先「目的地：XXX」行；否则从标题剥离天数/后缀词。
-  static String _inferDestination(String title, List<String> lines) {
-    for (final String line in lines) {
-      final RegExpMatch? m = RegExp(
-        r'目的地\s*[:：]\s*([\u4e00-\u9fa5A-Za-z·]{2,12})',
-      ).firstMatch(line);
-      if (m != null) return m.group(1)!.trim();
+  /// 收集行程条目实拍图（去重）：海报选取 + 点击预览画廊共用。
+  static List<String> _collectImages(TravelPlanData plan) {
+    final List<String> urls = <String>[];
+    for (final TravelPlanDay day in plan.days) {
+      for (final TravelDayEntry e in day.entries) {
+        for (final String img in e.images) {
+          if (!urls.contains(img)) urls.add(img);
+        }
+      }
     }
-    final String cleaned = title
-        .replaceAll(
-            RegExp(
-                r'\d+\s*日游|\d+\s*天\s*游|日游|行程|规划|计划|自由行|攻略|旅游|安排|[·\-—|]\s*.*$'),
-            '')
-        .trim();
-    if (cleaned.length >= 2 && cleaned.length <= 12) return cleaned;
-    return title.isEmpty ? "行程规划" : title.substring(0, title.length.clamp(1, 8));
+    return urls;
+  }
+
+  /// 海报图：优先第一个有实拍图的景点（attraction），其次任意有图条目；
+  /// 全无图返回 null（走渐变兜底）。
+  static String? _pickPosterImage(TravelPlanData plan) {
+    String? firstAny;
+    for (final TravelPlanDay day in plan.days) {
+      for (final TravelDayEntry e in day.entries) {
+        if (e.images.isEmpty) continue;
+        if (e.type == "attraction") return e.images.first;
+        firstAny ??= e.images.first;
+      }
+    }
+    return firstAny;
+  }
+
+  /// 日期区间短标签「09-05 ~ 09-09」：优先 startDate/endDate，兜底首尾天日期。
+  static String _dateRangeLabel(TravelPlanData plan) {
+    final List<String> dayDates = <String>[
+      for (final TravelPlanDay d in plan.days)
+        if (d.date.isNotEmpty) d.date,
+    ];
+    final String start = plan.startDate.isNotEmpty
+        ? plan.startDate
+        : (dayDates.isNotEmpty ? dayDates.first : "");
+    final String end = plan.endDate.isNotEmpty
+        ? plan.endDate
+        : (dayDates.length > 1 ? dayDates.last : "");
+    final String s = _shortDate(start);
+    final String e = _shortDate(end);
+    if (s.isEmpty) return "";
+    if (e.isEmpty || e == s) return s;
+    return "$s ~ $e";
+  }
+
+  /// YYYY-MM-DD → MM-DD；非该格式原样返回。
+  static String _shortDate(String raw) {
+    final String t = raw.trim();
+    final RegExpMatch? m = RegExp(r'^\d{4}-(\d{2}-\d{2})').firstMatch(t);
+    if (m != null) return m.group(1)!;
+    return t;
   }
 }
 

@@ -22,6 +22,8 @@ export interface StoredTravelPlan {
   title: string;
   startDate: string;
   endDate: string;
+  /** 目的地地理编码中心（前端地图初始化定位用，替代客户端内置默认中心） */
+  center?: { latitude: number; longitude: number };
   /** 落盘时间（毫秒）；save 未传时自动补 */
   createdAt?: number;
   /** 用户原始诉求（规划输入，供回查时还原语境） */

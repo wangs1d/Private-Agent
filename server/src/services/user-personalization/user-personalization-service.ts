@@ -1,5 +1,5 @@
 import type { AgentMemorySyncService } from "../agent-memory-sync-service.js";
-import { isDirectFactQuery, shouldSuppressFollowUp } from "../../agent/direct-fact-query.js";
+import { isDirectFactQuery } from "../../agent/direct-fact-query.js";
 import type { ExternalChatProvider } from "../../external-model/types.js";
 import { EmotionRecognitionService } from "../emotion-recognition-service.js";
 import { PersonalityAdjuster } from "../../brain/personality-adjuster.js";
@@ -23,7 +23,6 @@ import {
 } from "./profile-heuristics.js";
 import { UserProfileStore } from "./user-profile-store.js";
 import {
-  buildFactPromptSummary,
   decayFactStore,
   defaultFactStore,
   extractFactCandidates,
@@ -465,68 +464,48 @@ function detectDynamicStyleSignals(userText: string): {
   };
 }
 
-function buildAdaptiveStyleGuidance(
-  relationship: RelationshipState,
-  style: StyleProfileState,
-  userText?: string,
-): string {
-  const lines: string[] = [];
-  const suppressFollowUp = userText ? shouldSuppressFollowUp(userText) : false;
-  if (relationship.rapport >= 0.62 && style.playfulTolerance >= 0.58) {
-    lines.push("关系已经熟一点了，可以偶尔顺手逗一句，像熟人聊天那样自然一点。");
-  } else {
-    lines.push("先别硬凹风格，优先自然接话，再一点点贴近用户。");
+/**
+ * 对方语感数据行（2026-09-06 替代原 buildAdaptiveStyleGuidance 的 6 条容忍度说教）。
+ *
+ * 隐性跟随用户 = 给模型"对方现在什么语感"的观察数据，让模型自己模仿，
+ * 而不是给"可以调侃/少堆语气词"这类指令腔（说教本身就是机械感来源）。
+ * 只描述事实：当前这条消息的长度/情绪符号 + 长期平均长度。无用户消息时不注入。
+ */
+function buildRegisterMirrorLine(
+  userText: string,
+  replyLength: ReplyLengthProfileState,
+): string | undefined {
+  const text = userText.trim();
+  if (!text) return undefined;
+  const parts: string[] = [];
+  const chars = text.replace(/\s+/g, "").length;
+  parts.push(`这条约 ${chars} 字`);
+  const expressive = /[!！~～哈哈嘿嘿哇呀啦捏呗嘛嘞诶欸]|😂|😅|🥹|🤔|😎|🥲/u.test(text);
+  parts.push(expressive ? "带情绪符号、语气松" : "语气平");
+  if (replyLength.sampleCount >= 3) {
+    parts.push(`长期均约 ${Math.round(replyLength.avgUserChars)} 字`);
   }
-  if (style.cuteTolerance >= 0.6) {
-    lines.push("用户对软一点、萌一点的表达接受度高，偶尔带一点可爱感也行，但别连着来。");
-  }
-  if (style.teasingTolerance >= 0.56 && relationship.rapport >= 0.58) {
-    lines.push("可以轻微调侃、吐槽、阴阳一下下，但尺度要像熟人拌嘴，不要真冒犯。");
-  }
-  if (suppressFollowUp) {
-    lines.push("这轮更像单一事实查询：回答到结论和依据就停，不要顺手追加追问、兜圈总结或第二遍复述。");
-  } else if (style.followUpTolerance >= 0.58) {
-    lines.push("回答完可以顺手追问半句，把话题接住，别每次都机械收尾。");
-  }
-  if (style.expressiveTolerance >= 0.55) {
-    lines.push("表达可以更有情绪起伏一点，允许少量语气词和表情感。");
-  } else {
-    lines.push("少堆语气词和表情，免得显得太演。");
-  }
-  lines.push("这些都不是固定人设，只能顺着用户当下的说话方式小幅贴近。");
-  return lines.join("\n");
+  return `对方语感：${parts.join("、")}。`;
 }
 
 function relationshipSummaryLine(
   state: RelationshipState,
-  style: StyleProfileState,
+  replyLength: ReplyLengthProfileState,
   userText?: string,
 ): string {
-  const directness =
-    state.directnessPreference >= 0.68
-      ? "用户偏好直接表达，优先先给结论，少铺垫。"
-      : "默认保持简短自然，必要时再补解释。";
-  const humor =
-    state.humorTolerance >= 0.7
-      ? "可带一点轻微玩笑或俏皮感，但不要影响信息密度。"
-      : state.humorTolerance <= 0.35
-        ? "少玩梗少调侃，避免轻浮。"
-        : "可以轻微口语化，不必硬凹幽默。";
-  const care =
-    style.careStyle === "playful"
-      ? "整体语气可轻松一点。"
-      : style.careStyle === "direct"
-        ? "整体语气更利落一点。"
-        : "整体语气保持温和自然。";
-  return [
-    directness,
-    humor,
-    care,
-    buildAdaptiveStyleGuidance(state, style, userText),
-    "无论怎么个性化，默认都要精简、口语化、少废话，避免客服腔和过度正式。",
-    "不要把用户硬归类成某种固定模板，优先根据他这段时间真实的说话方式持续微调。",
-    "优先贴近用户当前说话方式；如果用户明显喜欢某种表达，就往那个方向小幅靠拢，不要突变。",
-  ].join("\n");
+  // 极端偏好才提示，默认行为交给【回复指南】基准行（平调/短句），不再重复
+  const lines: string[] = [];
+  if (state.directnessPreference >= 0.68) {
+    lines.push("用户偏好直接表达，先给结论。");
+  }
+  if (state.humorTolerance >= 0.7) {
+    lines.push("可以带点玩笑。");
+  } else if (state.humorTolerance <= 0.35) {
+    lines.push("少玩梗少调侃。");
+  }
+  const mirror = userText ? buildRegisterMirrorLine(userText, replyLength) : undefined;
+  if (mirror) lines.push(mirror);
+  return lines.join("\n");
 }
 
 function toReplyLengthProfileState(v: unknown): ReplyLengthProfileState {
@@ -587,18 +566,10 @@ function buildReplyLengthGuidance(userText: string, profile: ReplyLengthProfileS
   return "本轮长度控制：默认中短回复，先回答核心问题，再按需要补充；避免重复总结、重复铺垫和连续追问。";
 }
 
-function timeRhythmSummaryLine(rhythm: TimeRhythmState): string | undefined {
-  const topHours = Object.entries(rhythm.receptiveHours)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([hour]) => hour.padStart(2, "0"));
-  const topWeekdays = Object.entries(rhythm.weekdayReceptive)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 2)
-    .map(([day]) => day);
-  if (topHours.length === 0 && topWeekdays.length === 0) return undefined;
-  return `较适合主动互动的时间帧: ${topHours.join("、")}点左右 / ${topWeekdays.join("、")}；深夜容忍度=${rhythm.lateNightTolerance.toFixed(2)}；周末容忍度=${rhythm.weekendTolerance.toFixed(2)}`;
-}
+// timeRhythmSummaryLine / behaviorSummaryLine 已删（2026-09-06 瘦身）：
+// 二者只被 getPromptSlice 的 toneGuidance 引用——触达时段/渠道偏好属于主动推送
+// 调度信息，与本轮回复风格无关；行为倾向（英文行）语义已被用户理解档案/画像覆盖。
+// 底层 State 的学习（applyTimeRhythmSignals / applyBehaviorSignals）保留不变。
 
 function toBehaviorSignals(v: unknown): BehaviorSignals {
   if (!v || typeof v !== "object") return defaultBehaviorSignals();
@@ -633,22 +604,6 @@ function detectBehaviorSignals(userText: string): Partial<BehaviorSignals> {
         ? 1
         : 0,
   };
-}
-
-function behaviorSummaryLine(signal: BehaviorSignals): string | undefined {
-  const pairs: Array<[string, number]> = [
-    ["shopping", signal.shoppingInterest],
-    ["planning", signal.planningInterest],
-    ["companion", signal.companionNeed],
-    ["privacy", signal.privacyConcern],
-  ];
-  pairs.sort((a, b) => b[1] - a[1]);
-  if (pairs[0][1] <= 0) return undefined;
-  if (pairs[0][0] === "companion") {
-    return "用户有陪伴型对话倾向：回复更偏真人聊天感，多倾听与共情，少办事式罗列。";
-  }
-  const top2 = pairs.slice(0, 2).map((x) => x[0]).join(", ");
-  return `User long-term behavior tendency: ${top2}. Prioritize matching response style and actions.`;
 }
 
 function contactPreferenceSummaryLine(
@@ -766,9 +721,9 @@ export class UserPersonalizationService {
     let rhythm = this.loadTimeRhythmState(actorId);
     let style = this.loadStyleProfileState(actorId);
     let replyLength = this.loadReplyLengthProfileState(actorId);
-    const facts = this.loadFactStore(actorId);
-    const decayedFacts = decayFactStore(facts);
     if (userText?.trim()) {
+      // 各 apply* 承担状态学习（副作用），即使产出不再渲染也保留调用，
+      // 保证风格/节奏画像持续演化
       state = this.applyUserSignals(actorId, userText, state);
       behavior = this.applyBehaviorSignals(actorId, userText, behavior);
       relationship = this.applyRelationshipSignals(actorId, userText, relationship, state, behavior);
@@ -780,18 +735,16 @@ export class UserPersonalizationService {
     const maxChars = Number.parseInt(process.env.AGENT_USER_PROFILE_PROMPT_MAX_CHARS ?? "3500", 10);
     const cap = Number.isFinite(maxChars) && maxChars > 400 ? maxChars : 3500;
     const userProfile = profile.length > cap ? `…（较早内容已截断）\n${profile.slice(-cap)}` : profile;
+    // 2026-09-06 瘦身：toneGuidance 只保留本轮长度控制 + 情绪语气（有显著情绪才多行）。
+    // 删除：基础回复纪律（与【回复指南】基准行重复）、触达时段/渠道/行为倾向/事实摘要
+    // （与回复风格无关或已有独立块）。风格基准单点在 prompt-assembler buildReplyStyleGuide。
     return {
       userProfile,
       toneGuidance: [
-        "基础回复纪律：默认用口语化短句，先说重点；除非用户明确要求展开，否则不要长篇铺垫、套话、总结腔。",
         userText?.trim() ? buildReplyLengthGuidance(userText, replyLength) : undefined,
         buildToneGuidance(state),
-        behaviorSummaryLine(behavior),
-        timeRhythmSummaryLine(rhythm),
-        contactPreferenceSummaryLine(this.loadContactPreferenceState(actorId), rhythm),
-        buildFactPromptSummary(decayedFacts, 8),
       ].filter(Boolean).join("\n"),
-      relationshipGuidance: relationshipSummaryLine(relationship, style, userText),
+      relationshipGuidance: relationshipSummaryLine(relationship, replyLength, userText),
     };
   }
 

@@ -99,6 +99,14 @@ class TravelMapController {
 
   // ── 对 JS 的能力调用（未 attach / 未就绪时入队或 no-op）──────────────
 
+  /// 设置目的地默认中心（真实目的地经纬度，替代 HTML 内置的兜底中心）。
+  /// 无行程 POI 或 POI 无坐标时，地图以该中心初始化/复位，避免漂到无关城市。
+  void setDefaultCenter(double latitude, double longitude) {
+    _sendRaw(
+      "window.__travelMap && window.__travelMap.setDefaultCenter($latitude,$longitude);",
+    );
+  }
+
   /// 设置 POI 标记（整体替换）。type: hotel/attraction/restaurant/transport。
   void setPois(List<TravelMapPoi> pois) {
     _send(

@@ -14,6 +14,13 @@ import {
   prewarmToolRouterCatalogHttp,
   searchDeferredToolsViaToolRouterHttp,
 } from "./tool-router-http-client.js";
+import {
+  getRouterEndpointGuard,
+  isStdioDisabled,
+  resolvePrimaryBudgetMs,
+  withPrimaryBudget,
+  PrimaryBudgetExceededError,
+} from "./router-endpoint-guard.js";
 
 type WorkerState = {
   proc: ChildProcessWithoutNullStreams;
@@ -116,38 +123,70 @@ async function searchDeferredToolsViaToolRouterUncached(
     agentContextHash?: string;
   },
 ): Promise<AdaptiveDeferredToolSearchMatch[]> {
+  // 端点守卫（2026-09-06）：熔断打开时零等待抛出，调用方（handlers.searchWithAdaptiveFallback）
+  // 立即降级进程内 adaptive——避免服务不可用时每个新 query 都重付 30s HTTP 超时 /
+  // Python 冷启动的降级代价。
+  const guard = getRouterEndpointGuard();
+  const admission = guard.canAttempt();
+  if (!admission.allowed) {
+    throw new Error(`tool-router primary skipped: ${admission.reason ?? "circuit open"}`);
+  }
+
   // 优先 HTTP REST：独立部署的 FastAPI 服务（配置 TOOL_ROUTER_HTTP_URL 时启用）。
   // 服务不可用（未启动 / 网络失败）时自动回退 stdio bridge_worker 子进程。
+  const budgetMs = resolvePrimaryBudgetMs();
   if (resolveToolRouterHttpUrl()) {
     try {
-      return await searchDeferredToolsViaToolRouterHttp(catalog, query, limit, options);
-    } catch (error) {
-      console.warn(
-        `[tool-search:tool-router] HTTP 服务调用失败，回退 stdio worker: ${
-          error instanceof Error ? error.message : error
-        }`,
+      const result = await withPrimaryBudget(
+        searchDeferredToolsViaToolRouterHttp(catalog, query, limit, options),
+        budgetMs,
       );
+      guard.recordSuccess();
+      return result;
+    } catch (error) {
+      const budgetAbort = error instanceof PrimaryBudgetExceededError;
+      guard.recordFailure({ budgetAbort });
+      if (!budgetAbort || isStdioDisabled()) {
+        console.warn(
+          `[tool-search:tool-router] HTTP primary 失败（${budgetAbort ? `预算 ${budgetMs}ms 超时` : "调用错误"}），降级: ${
+            error instanceof Error ? error.message : error
+          }`,
+        );
+      }
+      if (isStdioDisabled()) throw error;
+      if (budgetAbort) {
+        // 预算超时大概率意味着服务挂死/网络黑洞，stdio 冷启动只会更慢——直接放弃本次 primary
+        throw error;
+      }
+      console.warn("[tool-search:tool-router] HTTP 失败但未超预算，尝试 stdio worker");
     }
+  } else if (isStdioDisabled()) {
+    throw new Error("tool-router primary unavailable: no TOOL_ROUTER_HTTP_URL and stdio disabled");
   }
 
   const exported = getExportedCatalog(catalog, {
     tenantId: options?.tenantId ?? "default",
     environment: resolveToolRouterEnvironment(),
   });
-  const worker = await ensureWorker();
-  await ensureCatalogLoaded(worker, exported);
+  try {
+    const result = await withPrimaryBudget(
+      (async () => {
+        const worker = await ensureWorker();
+        await ensureCatalogLoaded(worker, exported);
+        return sendWorkerCommand(worker, "search", {
+          raw_user_query: query,
+          agent_context_hash: options?.agentContextHash ?? "tool-search-bridge",
+          tenant_id: options?.tenantId ?? "default",
+          environment: resolveToolRouterEnvironment(),
+          limit,
+        });
+      })(),
+      budgetMs,
+    );
+    if (!result?.ok) throw new Error(String(result?.error ?? "tool-router search failed"));
+    guard.recordSuccess();
 
-  const result = await sendWorkerCommand(worker, "search", {
-    raw_user_query: query,
-    agent_context_hash: options?.agentContextHash ?? "tool-search-bridge",
-    tenant_id: options?.tenantId ?? "default",
-    environment: resolveToolRouterEnvironment(),
-    limit,
-  });
-
-  if (!result?.ok) throw new Error(String(result?.error ?? "tool-router search failed"));
-
-  const payload = result.data as {
+    const payload = result.data as {
     parsed_intent: {
       intent: string;
       confidence: number;
@@ -196,12 +235,20 @@ async function searchDeferredToolsViaToolRouterUncached(
       },
     } satisfies AdaptiveDeferredToolSearchMatch;
   });
+  } catch (error) {
+    guard.recordFailure({ budgetAbort: error instanceof PrimaryBudgetExceededError });
+    throw error;
+  }
 }
 
 export function prewarmToolRouterCatalog(
   catalog: DeferredToolCatalog,
   options?: { tenantId?: string; environment?: "dev" | "staging" | "prod" },
 ): Promise<void> {
+  // 熔断打开时跳过预热（服务不可用，预热情节只会白付超时）
+  if (!getRouterEndpointGuard().canAttempt().allowed) {
+    return Promise.resolve();
+  }
   const exported = getExportedCatalog(catalog, {
     tenantId: options?.tenantId ?? "default",
     environment: options?.environment ?? resolveToolRouterEnvironment(),
@@ -209,6 +256,9 @@ export function prewarmToolRouterCatalog(
   // HTTP 模式预加载（服务未配置/未启动时静默跳过，搜索时再回退 stdio）
   if (resolveToolRouterHttpUrl()) {
     prewarmToolRouterCatalogHttp(catalog, options);
+  }
+  if (isStdioDisabled()) {
+    return Promise.resolve();
   }
   const existing = prewarmPromises.get(exported.signature);
   if (existing) return existing;

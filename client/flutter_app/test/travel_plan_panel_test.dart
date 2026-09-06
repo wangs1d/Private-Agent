@@ -1,3 +1,5 @@
+import "dart:io" show Platform;
+
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
@@ -7,7 +9,7 @@ import "package:private_ai_agent/features/chat/travel_booking_sheet.dart";
 import "package:private_ai_agent/features/chat/travel_plan_models.dart";
 import "package:private_ai_agent/features/chat/travel_plan_panel.dart";
 
-/// 服务端结构化 travelPlan 快照（带 planId / 坐标 / 媒体字段）。
+/// 服务端结构化 travelPlan 快照（带 planId / 中心坐标 / 媒体字段）。
 Map<String, dynamic> structuredPlan() => <String, dynamic>{
       "planId": "plan-widget-test",
       "toolName": "travel.plan-itinerary",
@@ -16,6 +18,7 @@ Map<String, dynamic> structuredPlan() => <String, dynamic>{
       "title": "大理2日游·测试",
       "startDate": "2026-08-30",
       "endDate": "2026-08-31",
+      "center": <String, dynamic>{"latitude": 25.69, "longitude": 100.16},
       "days": <dynamic>[
         <String, dynamic>{
           "date": "2026-08-30",
@@ -87,12 +90,18 @@ AgentResultData cardFrom(Map<String, dynamic> plan) => AgentResultData(
     );
 
 void main() {
+  // 本组测试针对原生兜底面板（Windows 宿主上默认走 WebView 版，需强制关闭）
+  setUp(() => TravelPlanPanel.webPanelSupported = false);
+  tearDown(() => TravelPlanPanel.webPanelSupported = Platform.isWindows);
+
   group("TravelPlanData 结构化解析", () {
-    test("planId/坐标/媒体字段齐全，条目类型映射正确", () {
+    test("planId/中心坐标/媒体字段齐全，条目类型映射正确", () {
       final TravelPlanData plan = TravelPlanData.fromPlanJson(structuredPlan());
       expect(plan.hasPlanId, isTrue);
       expect(plan.planId, "plan-widget-test");
       expect(plan.destination, "大理");
+      expect(plan.centerLatitude, closeTo(25.69, 1e-6));
+      expect(plan.centerLongitude, closeTo(100.16, 1e-6));
       expect(plan.days.length, 2);
       final TravelDayEntry hotel = plan.days[0].entries[0];
       expect(hotel.kind, TravelEntryKind.hotel);
@@ -113,12 +122,12 @@ void main() {
   });
 
   group("TravelPlanPanel 渲染与交互", () {
-    Widget host() {
+    Widget host({bool fullscreen = true}) {
       return MaterialApp(
         home: Scaffold(
           body: TravelPlanPanel(
             data: cardFrom(structuredPlan()),
-            fullscreen: true,
+            fullscreen: fullscreen,
           ),
         ),
       );
@@ -130,47 +139,57 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
     }
 
-    testWidgets("双栏骨架 + 天数列表 + 时间线条目渲染", (WidgetTester tester) async {
+    testWidgets("左栏天数 + 地图主区骨架渲染", (WidgetTester tester) async {
       await pumpPanel(tester);
 
       expect(find.text("大理"), findsOneWidget); // 目的地徽章
       expect(find.text("大理2日游·测试"), findsOneWidget); // 标题
+      expect(find.text("行程天数（共 2 天）"), findsOneWidget); // 左栏标题
       expect(find.text("2026-08-30"), findsWidgets); // 天标签
-      expect(find.text("古城客栈"), findsOneWidget); // Day1 条目
-      expect(find.text("洱海生态廊道"), findsOneWidget);
-      expect(find.text("白族私房菜"), findsOneWidget);
+      expect(find.text("2026-08-31"), findsOneWidget);
+      expect(find.text("规划路线"), findsOneWidget); // 地图路线悬浮按钮
     });
 
-    testWidgets("点击第 2 天切换右栏内容", (WidgetTester tester) async {
+    testWidgets("顶栏只保留全屏查看，旧工具按钮全部移除", (WidgetTester tester) async {
+      await pumpWidgetAndSettle(tester, host(fullscreen: false));
+
+      expect(find.byTooltip("全屏查看"), findsOneWidget);
+      expect(find.byTooltip("规划当日路线"), findsNothing);
+      expect(find.byTooltip("收起地图"), findsNothing);
+      expect(find.byTooltip("预订清单"), findsNothing);
+      expect(find.byTooltip("偏好设置"), findsNothing);
+      expect(find.byTooltip("导出 / 分享"), findsNothing);
+    });
+
+    testWidgets("点击第 2 天后地图当前天徽章跟随切换", (WidgetTester tester) async {
       await pumpPanel(tester);
 
+      expect(find.text("2026-08-30 · 第 1 天"), findsOneWidget);
       await tester.tap(find.text("2026-08-31").first);
-      // WebView 初始化占位含无限动画，不能用 pumpAndSettle，用固定时长推进
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pump(const Duration(seconds: 1));
-      expect(find.text("崇圣寺三塔"), findsOneWidget);
-      expect(find.text("古城客栈"), findsNothing);
+      expect(find.text("2026-08-31 · 第 2 天"), findsOneWidget);
     });
 
-    testWidgets("顶栏工具齐全（路线/地图/预订/偏好/更多）", (WidgetTester tester) async {
+    testWidgets("左栏天数列表可收起为窄边栏并再展开", (WidgetTester tester) async {
       await pumpPanel(tester);
 
-      expect(find.byTooltip("规划当日路线"), findsOneWidget);
-      expect(find.byTooltip("收起地图"), findsOneWidget);
-      expect(find.byTooltip("预订清单"), findsOneWidget);
-      expect(find.byTooltip("偏好设置"), findsOneWidget);
-      expect(find.byTooltip("导出 / 分享"), findsOneWidget);
-    });
-
-    testWidgets("地图收起后时间线仍正常渲染", (WidgetTester tester) async {
-      await pumpPanel(tester);
-
-      await tester.tap(find.byTooltip("收起地图"));
+      // 收起：天标签消失，仅剩序号圆点
+      await tester.tap(find.byTooltip("收起天数列表"));
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text("洱海生态廊道"), findsOneWidget);
+      expect(find.text("2026-08-30"), findsNothing);
+      expect(find.text("1"), findsOneWidget);
+      expect(find.text("2"), findsOneWidget);
+
+      // 展开：天标签恢复
+      await tester.tap(find.byTooltip("展开天数列表"));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text("2026-08-30"), findsWidgets);
+      expect(find.text("2026-08-31"), findsOneWidget);
     });
 
-    testWidgets("无 planId 的文本兜底行程：编辑图标不出现（只读）", (WidgetTester tester) async {
+    testWidgets("无 planId 的文本兜底行程也能渲染（地图为中心布局）",
+        (WidgetTester tester) async {
       const AgentResultData textCard = AgentResultData(
         title: "大理2日游",
         items: <AgentResultItem>[
@@ -187,11 +206,8 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await tester.pump(const Duration(seconds: 1));
 
-      // 文本兜底解析出了条目（无坐标/planId）
-      expect(find.text("洱海生态廊道"), findsOneWidget);
-      // 只读：无编辑/移除操作钮
-      expect(find.byTooltip("替换 / 提意见"), findsNothing);
-      expect(find.byTooltip("移除"), findsNothing);
+      expect(find.text("大理"), findsOneWidget); // 目的地徽章（标题推断）
+      expect(find.text("规划路线"), findsOneWidget);
     });
   });
 
@@ -248,4 +264,11 @@ void main() {
       expect(item.checked, isFalse);
     });
   });
+}
+
+/// 固定时长推进（WebView 初始化占位含无限动画，不能用 pumpAndSettle）。
+Future<void> pumpWidgetAndSettle(WidgetTester tester, Widget widget) async {
+  await tester.pumpWidget(widget);
+  await tester.pump(const Duration(seconds: 1));
+  await tester.pump(const Duration(seconds: 1));
 }

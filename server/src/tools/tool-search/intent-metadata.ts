@@ -263,6 +263,72 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       examples: ["use the external platform tool to read a file"],
     },
   },
+  // ── 黄金回归集（test/tool-discover-golden-recall.test.ts）锁定的漏召场 ──
+  // 别名是"用户口语里会出现的短语"：命中（query 整串包含别名）即把 registryName
+  // 拼进检索变体，让 registry 通道给正确工具加权。只收高频、语义明确的表达。
+  {
+    exact: "search_web",
+    metadata: {
+      aliases: ["行情", "价格", "股价", "汇率", "涨跌", "新闻", "最新消息", "什么价"],
+      examples: ["比特币现在什么价", "帮我搜一下最近的新闻"],
+    },
+  },
+  {
+    exact: "wallet.get_balance",
+    metadata: {
+      aliases: ["余额", "还有多少钱", "账上还有", "余额查询"],
+      examples: ["我钱包还有多少钱", "查一下我的余额"],
+    },
+  },
+  {
+    exact: "fetch_web",
+    metadata: {
+      aliases: ["网页", "网址", "链接", "读了什么", "说了什么", "网页内容"],
+      examples: ["读一下这个网页说了什么", "帮我打开这个链接看看内容"],
+    },
+  },
+  {
+    exact: "clock.get_current_time",
+    metadata: {
+      aliases: ["几点", "现在时间", "什么时间", "当前时间"],
+      examples: ["现在几点了"],
+    },
+  },
+  {
+    exact: "search_images",
+    metadata: {
+      aliases: ["照片", "图片", "找图", "壁纸", "表情包", "头像"],
+      examples: ["找几张猫的照片", "帮我找壁纸"],
+    },
+  },
+  {
+    exact: "smart_home.control_device",
+    metadata: {
+      aliases: ["开灯", "关灯", "灯光", "空调", "窗帘", "插座", "智能设备"],
+      examples: ["把客厅的灯打开", "空调调到26度"],
+    },
+  },
+  {
+    exact: "vision.see_device",
+    metadata: {
+      aliases: ["摄像头", "监控", "看家", "看一下门口", "实时画面"],
+      examples: ["看一下门口摄像头", "看看家里现在什么情况"],
+    },
+  },
+  {
+    exact: "geofence.create",
+    metadata: {
+      aliases: ["到家提醒", "离家提醒", "位置提醒", "围栏", "到家的时候", "离开公司"],
+      examples: ["到家的时候提醒我拿快递", "离开公司提醒我打卡"],
+    },
+  },
+  {
+    exact: "care.rhythm_reminder",
+    metadata: {
+      aliases: ["每天提醒", "定期提醒", "天天提醒", "喝水提醒", "睡觉提醒", "运动提醒"],
+      examples: ["每天提醒我喝水", "到点提醒我睡觉"],
+    },
+  },
 ];
 
 const DEFAULT_METADATA_PATH = resolve(process.cwd(), "data", "tool-intent-metadata.json");

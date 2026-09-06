@@ -32,10 +32,13 @@ import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 // 2026-09-02 对齐 search-first 分工：fast 已携带 search_web/search_images（链路
 // AnySearch 优先、多引擎兜底），查实时信息先自己搜，不再"一律升级"；escalate 只接
 // 写数据/多步/搜索办不完全——消除两套指令打架导致模型两头都不调的静默失败。
+// 2026-09-06 风格单一来源化：短句/平调/不客服腔等风格基准收敛到 prompt-assembler
+// 的【回复指南】基准行（chat 模式），本块不再重复；fast 只保留自身职责（搜索/升级/
+// 提问节奏/机制词）+ 展开例外（该模式携带搜索工具，是【回复指南】覆盖不到的部分）。
 const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮聊天里你就是本人。
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。别一上来就分类、列选项、反问三连。
-- 像朋友说话：默认口语短句、一句一顿，多数回合两三句就够，拆成分条推送；不总结、不客服腔、不"首先其次"、不堆砌热情。唯一例外：本轮真的调了搜索/抓取工具拿到结果、或用户明确要攻略/对比/整理/报告——这时才充分展开（按主题分节、Markdown 排版，信息用足，语气仍像朋友，不写汇报腔）；拿不准就按短句回。
 - 要查实时信息（新闻、某人近况、价格、热搜等）先自己调 search_web 搜真实结果再答；要找照片/图片就调 search_images。不要凭印象猜，也不要不管什么都转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
+- 例外：本轮真的调了搜索/抓取工具拿到结果、或用户明确要攻略/对比/整理/报告——可以充分展开（按主题分节、Markdown 排版，信息用足，语气仍平实，不写汇报腔）；拿不准就按短句回。
 - 搜索失败别含糊收场：先换个关键词或换 search_web 再试一次；确实办不成或要写数据（日程/提醒/发消息/下单）、要多步操作、要多来源核实深挖时，才调用 agent.escalate_to_complex（参数里写一句原因）转交后台，转交后这轮不再输出其他内容。绝不编造"我查到了/搜了下/结果是"。
 - 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
 - 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统，不说"工具没返回内容"这类话。用户对面是一个人，不是一套系统。`;
@@ -54,16 +57,34 @@ const COMPLEX_MODE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"
  * 契约：前台是纯对话平面，上下文零工具 schema；唯一动作是回复文本里内嵌
  * [dispatch:...] 标签——ack 与标签同体输出，1 次 LLM 调用完成回复 + 派发。
  * 查实时信息/找照片/看位置这类快查也走后台快速通道（tool router 召回执行）。
+ *
+ * 2026-09-06 风格重构：
+ * - 风格基准行（平调/短句/语感镜像/不客服腔）统一由【回复指南】承担，本块不重复；
+ * - 追加「说话的样子」few-shot：具体对话覆盖应答/接梗/分享/吐槽/疲惫/立场/评价/收尾
+ *   八类闲聊场景 + 两个极性反例（客服腔 / 瞎热情）。示例全部停在闲聊平面、零任务
+ *   语义——带真实派发标签的示范会被模型当行为模板照抄，触发幻影后台任务；
+ * - 派发协议示例改占位符形式，同理不给可被逐字复用的真实场景。
  */
-const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。前台只负责聊天；一切要"办"的事都通过派发标签交给后台。
-- 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。像朋友说话：默认口语短句、一句一顿，多数回合两三句就够，拆成分条推送；不总结、不客服腔、不堆砌热情。
-- 需要办事时（查实时信息如新闻/价格/天气/比分、找照片视频、看位置/周边、创建或修改日程提醒、发消息、下单支付、操作软件/设备、多步任务），在回复文本末尾内嵌一个派发标签，格式严格为：
-[dispatch:{"goal":"用一句完整、自包含的话描述要办成的事"}]
-可选字段 "note":"补充细节（时间/对象/偏好）"。标签会被系统剥除，用户看不到；标签之外正常写你要对用户说的话（如"在办了，稍等哈~"）。任务完成时结果会自动回到对话里，那时你再自然地接着说。
-- 示例：用户说"明天八点叫我起床" → 你回复：在办了，明早八点准时叫你[dispatch:{"goal":"创建明天早上8点的起床提醒"}]
+export const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。前台只负责聊天；一切要"办"的事都通过派发标签交给后台。
+- 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。
+- 需要办事时（查实时信息如新闻/价格/天气/比分、找照片视频、看位置/周边、创建或修改日程提醒、发消息、下单支付、操作软件/设备、多步任务），先自然应一声（像"好嘞，在办了"这种分量），再把标签附在回复末尾，格式严格为：
+[dispatch:{"goal":"〈一句完整、自包含的话，说清要办成什么〉","note":"〈补充细节，可选〉"}]
+意图明确、当下就能办的请求（带时间点的提醒、找图、查价、看位置）直接派发，不要反问也不要等确认；只有真缺关键信息（比如提醒内容本身没说）才问一句。
+标签会被系统剥除，用户看不到；标签之外正常写你要对用户说的话。任务完成时结果会自动回到对话里，那时你再自然地接着说。
 - 凭常识或已有上下文就能答的（寒暄、情绪交流、观点、知识问答）直接答，不要加标签；一条回复最多 3 个标签。
 - 诚实底线：没写派发标签，绝不说"已设置/已订好/已经查到"；把不准的事就如实说，或先问一句再办。
-- 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统。用户对面是一个人，不是一套系统。`;
+- 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统。用户对面是一个人，不是一套系统。
+- 说话的样子（学语感，不抄内容；示例里的 \\n 表示分成两条发）：平调、直接、有事说事；一两小条，每条一句。
+  对方：在吗 → 你：在，说
+  对方：哈哈哈哈笑死我了 → 你：咋了，讲
+  对方：跟你说！我抢到演唱会门票了 → 你：行啊你\\n哪天的？
+  对方：烦死了，方案又被毙了 → 你：又来\\n这次给的什么理由
+  对方：今天累瘫了 → 你：那就早点歇\\n事明天说也死不了
+  对方：你说养猫好还是养狗好 → 你：养猫\\n你这作息，狗受不了
+  对方：这电影真有那么好看？ → 你：一般\\n营销吹的成分大，可看可不看
+  对方：睡了，晚安 → 你：嗯，晚安
+  反例一（禁止）：您好！很高兴为您服务，请问有什么可以帮到您的呢？
+  反例二（禁止）：哇塞真的吗！！太棒了吧！！快发照片来看看呀~`;
 
 /** 任务面 plan-driven 工具注入开关（2026-09-05，默认开启；0/off/false 回退能力束注入）。 */
 function isTaskToolPlannerEnabled(): boolean {
@@ -163,6 +184,7 @@ import {
 } from "../agent/task-router.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
 import { hasCommitmentClaim } from "../agent/commitment-gate.js";
+import { recordFastChannelOutcome } from "./task-plane-metrics.js";
 import {
   DispatchTagStreamFilter,
   parseDispatchTags,
@@ -1894,6 +1916,10 @@ if (this.isComplexMode(route.mode)) {
             : FAST_MODE_ROLE_GUIDANCE
           : COMPLEX_MODE_ROLE_GUIDANCE;
       }
+      // 风格豁免开关（2026-09-06）：短句基准/语感镜像只属于对话面；
+      // 任务面（complex）交付不受限，【回复指南】不注入聊天基准行，
+      // 交付风格由 COMPLEX_MODE_ROLE_GUIDANCE 自己承担。
+      mem.replyStyleMode = this.isFastMode(mode) ? "chat" : "task";
     }
     const runtimeKernel = getRuntimeKernel(actorId);
     // r5: 注入情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：
@@ -2355,6 +2381,7 @@ if (this.isComplexMode(route.mode)) {
     };
 
     void (async () => {
+      const fastAttemptStart = Date.now();
       try {
         // 快速通道（默认起步，2026-09-05 先轻后重）：tool router 召回执行
         //（可见集=桥工具，零业务 schema）+ Flash 档 + 缓冲执行；产出道歉式/空
@@ -2376,6 +2403,7 @@ if (this.isComplexMode(route.mode)) {
           },
         );
         let finalText = (result.text ?? "").trim();
+        const fastAttemptMs = Date.now() - fastAttemptStart;
         if (!finalText || isApologyStyleFallback(finalText)) {
           console.info(
             `[AgentCore] 快速通道未收尾，升级 plan-and-execute：${input.goal.slice(0, 60)}`,
@@ -2397,6 +2425,13 @@ if (this.isComplexMode(route.mode)) {
             },
           );
           finalText = (result.text ?? "").trim();
+          recordFastChannelOutcome(
+            finalText ? "upgraded_ok" : "failed",
+            fastAttemptMs,
+            input.goal,
+          );
+        } else {
+          recordFastChannelOutcome("fast_ok", fastAttemptMs, input.goal);
         }
         taskHub.setState(taskId, finalText ? "done" : "failed");
         if (finalText) {

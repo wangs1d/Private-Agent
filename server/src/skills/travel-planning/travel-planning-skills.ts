@@ -127,6 +127,11 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           title: result.title,
           startDate: result.startDate ?? "",
           endDate: result.endDate ?? "",
+          // 目的地地理编码中心：前端地图以真实目的地为中心初始化
+          center: result.center,
+          // 行程卡海报区文案：目的地一句话简介 + 出行随身物品叮嘱
+          intro: result.travelInfo?.intro,
+          packing: result.travelInfo?.packing,
           days: (result.days ?? []).map((day) => ({
             date: day.date ?? "",
             items: (day.items ?? []).map((item) => ({
@@ -164,6 +169,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           title: result.title,
           startDate: result.startDate ?? "",
           endDate: result.endDate ?? "",
+          // 目的地地理编码中心：行程路由域回读（编辑后刷新）时前端地图仍可定位
+          center: result.center,
           requestInput: rawInput,
           preferences: Array.isArray(input.preferences)
             ? input.preferences.filter((p): p is string => typeof p === "string")

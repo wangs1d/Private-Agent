@@ -3,6 +3,7 @@ import "dart:async";
 import "package:flutter/material.dart";
 
 import "travel_plan_api.dart";
+import "travel_theme.dart";
 import "travel_plan_models.dart";
 
 /// 单项编辑器结果。
@@ -127,9 +128,9 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
               // 头部：当前条目
               Row(
                 children: <Widget>[
-                  const Icon(Icons.edit_location_alt_outlined,
-                      size: 18, color: Color(0xFF18D6F3)),
-                  const SizedBox(width: 8),
+                  Icon(Icons.edit_location_alt_outlined,
+                      size: 18, color: TravelPalette.of(context).accent),
+                  SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       "编辑：${widget.entry.title}",
@@ -167,7 +168,7 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
               // 提意见换一个
               Row(
                 children: <Widget>[
-                  const Icon(Icons.auto_awesome, size: 15, color: Color(0xFFD7B85A)),
+                  Icon(Icons.auto_awesome, size: 15, color: TravelPalette.of(context).orange),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(

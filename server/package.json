@@ -22,7 +22,9 @@
     "eval:routing": "tsx scripts/eval-display-routing.ts",
     "test:master-agent": "tsx test/master-agent.test.ts",
     "bench:ttft": "tsx scripts/bench-ttft.ts",
-    "dev:runtime": "npm run predev:server && node ../scripts/dev-server-watch.mjs runtime"
+    "dev:runtime": "npm run predev:server && node ../scripts/dev-server-watch.mjs runtime",
+    "eval:tool-recall": "tsx scripts/eval-tool-recall.ts",
+    "eval:dispatch-tag": "tsx scripts/eval-dispatch-tag.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

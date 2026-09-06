@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { Bm25Index, tokenize } from "../bm25.js";
 import { cosineSimilarity } from "../tool-embedding-index.js";
 import type { ResourceRecord } from "../registry/models.js";
@@ -20,12 +18,25 @@ export type HybridRetrievedResource = {
   components: HybridScoreComponents;
 };
 
+/**
+ * BM25 别名扩展条目（与 bm25.ts 的 SearchAliasEntry 结构一致）：
+ * 携带工具的中文/多语言 searchAliases 与预计算 trigramSet，让关键词通道
+ * 具备同义词扩展 + 字符级模糊匹配能力——这是中文口语表达能否命中的关键信号。
+ */
+export type HybridAliasEntry = {
+  registryName: string;
+  searchAliases?: string[];
+  trigramSet?: Set<string>;
+};
+
 export type HybridRetrievalInput = {
   query: string;
   candidates: ResourceRecord[];
   queryVector?: number[] | Float32Array;
   limit?: number;
   prebuiltIndex?: Bm25Index; // 预构建 BM25 索引，复用避免每次新建
+  /** 传给 BM25 的别名条目（缺省则退化为纯词面匹配，中文召回明显变差） */
+  aliasEntries?: HybridAliasEntry[];
 };
 
 export type HybridRetrievalWeights = {
@@ -59,14 +70,22 @@ export class HybridRetrievalEngine {
     const candidates = input.candidates.filter((r) => r.level1.status === "online");
     if (candidates.length === 0) return [];
     const limit = Math.max(1, Math.min(100, input.limit ?? candidates.length));
-    const weights = weightsForQuery(input.query);
-    const keywordScores = scoreKeywords(input.query, candidates, input.prebuiltIndex);
+    const hasQueryVector = Boolean(input.queryVector && input.queryVector.length > 0);
+    const weights = weightsForQuery(input.query, hasQueryVector);
+    const keywordScores = scoreKeywords(
+      input.query,
+      candidates,
+      input.prebuiltIndex,
+      input.aliasEntries,
+    );
 
     const out: HybridRetrievedResource[] = [];
     for (const record of candidates) {
       const history = await this.historyStore.getScore(record.level1.resource_id);
       const components: HybridScoreComponents = {
-        embedding_score: scoreEmbedding(input.query, record, input.queryVector),
+        embedding_score: hasQueryVector
+          ? scoreEmbedding(record, input.queryVector as number[] | Float32Array)
+          : 0,
         keyword_score: keywordScores.get(record.level1.resource_id) ?? 0,
         history_success_score: applyColdStartBase(history, record.level1.base_score),
         latency_score: history.latency_score,
@@ -95,12 +114,30 @@ export class HybridRetrievalEngine {
   }
 }
 
-export function weightsForQuery(query: string): HybridRetrievalWeights {
-  const tokenCount = tokenize(query).length;
-  const isShortKeyword = tokenCount <= 3;
+/**
+ * 权重档位：
+ *   - 有真实 query 向量：语义通道主导（长句 0.6 / 短关键词 0.25）；
+ *   - 无 query 向量：embedding 权重归零、关键词主导。
+ *     此前无向量时用 hashTextToVector(query) 与工具哈希向量做 cosine——两个独立哈希的
+ *     相似度是噪声，却在中文 bigram 分词把 token 数抬高后按"长句"拿 0.6 权重，
+ *     直接把 surface.dismiss / shopping.suggest 之类无关工具顶到 top-1。
+ *     legacy 通道（catalog.ts）从来只在真实向量存在时才启用 embedding，这里对齐。
+ */
+export function weightsForQuery(query: string, hasQueryVector = true): HybridRetrievalWeights {
   const history = envFloat("AGENT_TOOL_SEARCH_HISTORY_WEIGHT", 0.2, 0, 1);
   const latency = envFloat("AGENT_TOOL_SEARCH_LATENCY_WEIGHT", 0.1, 0, 1);
   const failure = envFloat("AGENT_TOOL_SEARCH_FAILURE_WEIGHT", 0.2, 0, 1);
+  if (!hasQueryVector) {
+    return normalizeWeights({
+      embedding: 0,
+      keyword: 0.7,
+      history,
+      latency,
+      failure,
+    });
+  }
+  const tokenCount = tokenize(query).length;
+  const isShortKeyword = tokenCount <= 3;
   if (isShortKeyword) {
     return normalizeWeights({
       embedding: 0.25,
@@ -123,13 +160,16 @@ function scoreKeywords(
   query: string,
   candidates: ResourceRecord[],
   prebuiltIndex?: Bm25Index,
+  aliasEntries?: HybridAliasEntry[],
 ): Map<string, number> {
   // 极短 query（1-2 token）跳过 BM25：lexicalToolBoost 已覆盖 token 重叠
   if (tokenize(query).length <= 2) return new Map();
 
   if (prebuiltIndex) {
     const candidateIds = new Set(candidates.map((r) => r.level1.resource_id));
-    const hits = prebuiltIndex.search(query, candidates.length);
+    // 放大 limit：全量索引里其他域的工具会挤占名额，候选集是子集时需多取再过滤
+    const bm25Limit = Math.max(candidates.length * 2, 20);
+    const hits = prebuiltIndex.search(query, bm25Limit, aliasEntries);
     const max = Math.max(...hits.map((h) => h.score), 0);
     const out = new Map<string, number>();
     for (const hit of hits) {
@@ -143,7 +183,7 @@ function scoreKeywords(
     text: searchableText(record),
   }));
   const index = new Bm25Index(docs);
-  const hits = index.search(query, Math.max(candidates.length, 1));
+  const hits = index.search(query, Math.max(candidates.length, 1), aliasEntries);
   const max = Math.max(...hits.map((h) => h.score), 0);
   const out = new Map<string, number>();
   for (const hit of hits) {
@@ -153,17 +193,12 @@ function scoreKeywords(
 }
 
 function scoreEmbedding(
-  query: string,
   record: ResourceRecord,
-  queryVector?: number[] | Float32Array,
+  queryVector: number[] | Float32Array,
 ): number {
   const docVector = record.level1.embedding;
-  if (!docVector.length) return 0;
-  const qVector =
-    queryVector && queryVector.length === docVector.length
-      ? Array.from(queryVector)
-      : hashTextToVector(query, docVector.length);
-  const cosine = cosineSimilarity(qVector, docVector);
+  if (!docVector.length || queryVector.length !== docVector.length) return 0;
+  const cosine = cosineSimilarity(Array.from(queryVector), docVector);
   return clamp01((cosine + 1) / 2);
 }
 
@@ -200,20 +235,6 @@ function normalizeWeights(weights: HybridRetrievalWeights): HybridRetrievalWeigh
     latency: weights.latency / positive,
     failure: weights.failure,
   };
-}
-
-function hashTextToVector(text: string, dim: number): number[] {
-  const out = new Array<number>(dim).fill(0);
-  const tokens = tokenize(text);
-  for (const token of tokens.length ? tokens : [text]) {
-    const hash = createHash("sha256").update(token).digest();
-    for (let i = 0; i < dim; i++) {
-      const byte = hash[i % hash.length] ?? 0;
-      out[i] += byte / 127.5 - 1;
-    }
-  }
-  const norm = Math.sqrt(out.reduce((sum, v) => sum + v * v, 0));
-  return norm > 0 ? out.map((v) => v / norm) : out;
 }
 
 function envFloat(name: string, fallback: number, min: number, max: number): number {

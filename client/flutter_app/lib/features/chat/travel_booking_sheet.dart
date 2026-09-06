@@ -1,10 +1,8 @@
 import "package:flutter/material.dart";
 
 import "travel_plan_api.dart";
+import "travel_theme.dart";
 
-const Color _kAccentBlue = Color(0xFF18D6F3);
-const Color _kAccentGreen = Color(0xFF1ED7A6);
-const Color _kAccentOrange = Color(0xFFD7B85A);
 
 /// 绑定平台账户（对齐 3D-Travel state.boundPlatforms 形状与服务端 pricing-service 目录）。
 class BoundPlatform {
@@ -208,9 +206,9 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                 padding: const EdgeInsets.fromLTRB(16, 14, 8, 10),
                 child: Row(
                   children: <Widget>[
-                    const Icon(Icons.receipt_long_outlined,
-                        size: 18, color: _kAccentGreen),
-                    const SizedBox(width: 8),
+                    Icon(Icons.receipt_long_outlined,
+                        size: 18, color: TravelPalette.of(context).green),
+                    SizedBox(width: 8),
                     const Text("预订清单",
                         style: TextStyle(
                             fontSize: 15, fontWeight: FontWeight.w700)),
@@ -226,13 +224,13 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                     ),
                     IconButton(
                       tooltip: "会员/平台价格设置",
-                      icon: const Icon(Icons.workspace_premium_outlined,
-                          size: 18, color: _kAccentOrange),
+                      icon: Icon(Icons.workspace_premium_outlined,
+                          size: 18, color: TravelPalette.of(context).orange),
                       onPressed: _openPriceSettings,
                     ),
                     IconButton(
                       tooltip: "关闭",
-                      icon: const Icon(Icons.close, size: 18),
+                      icon: Icon(Icons.close, size: 18),
                       onPressed: () => Navigator.of(context).pop(),
                     ),
                   ],
@@ -287,20 +285,20 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                               style: TextStyle(
                                   fontSize: 11, color: cs.onSurfaceVariant)),
                           Text("¥${_totalFinal.toStringAsFixed(0)}",
-                              style: const TextStyle(
+                              style: TextStyle(
                                   fontSize: 19,
                                   fontWeight: FontWeight.w800,
-                                  color: _kAccentOrange)),
+                                  color: TravelPalette.of(context).orange)),
                         ],
                       ),
                     ),
                     if (_totalOriginal > _totalFinal)
                       Text(
                         "已省 ¥${(_totalOriginal - _totalFinal).toStringAsFixed(0)}",
-                        style: const TextStyle(
+                        style: TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
-                            color: _kAccentGreen),
+                            color: TravelPalette.of(context).green),
                       ),
                   ],
                 ),
@@ -322,17 +320,17 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: _kAccentOrange.withValues(alpha: 0.08),
+      color: TravelPalette.of(context).orange.withValues(alpha: 0.08),
       child: Row(
         children: <Widget>[
-          const Icon(Icons.local_offer_outlined, size: 13, color: _kAccentOrange),
-          const SizedBox(width: 6),
+          Icon(Icons.local_offer_outlined, size: 13, color: TravelPalette.of(context).orange),
+          SizedBox(width: 6),
           Expanded(
             child: Text(
               tags.join(" · "),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11, color: _kAccentOrange),
+              style: TextStyle(fontSize: 11, color: TravelPalette.of(context).orange),
             ),
           ),
         ],
@@ -360,12 +358,12 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
           Checkbox(
             value: it.checked,
             visualDensity: VisualDensity.compact,
-            activeColor: _kAccentGreen,
+            activeColor: TravelPalette.of(context).green,
             onChanged: (bool? v) =>
                 setState(() => _items[i].checked = v ?? true),
           ),
-          Icon(icon, size: 17, color: _kAccentBlue),
-          const SizedBox(width: 8),
+          Icon(icon, size: 17, color: TravelPalette.of(context).accent),
+          SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -395,10 +393,10 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: <Widget>[
               Text("¥${it.finalPrice.toStringAsFixed(0)}",
-                  style: const TextStyle(
+                  style: TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w700,
-                      color: _kAccentOrange)),
+                      color: TravelPalette.of(context).orange)),
               if (it.originalPrice > it.finalPrice)
                 Text(
                   "¥${it.originalPrice.toStringAsFixed(0)}",
@@ -483,7 +481,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                               borderRadius: BorderRadius.circular(10),
                               border: Border.all(
                                 color: bound != null
-                                    ? _kAccentBlue.withValues(alpha: 0.4)
+                                    ? TravelPalette.of(context).accent.withValues(alpha: 0.4)
                                     : cs.outline.withValues(alpha: 0.2),
                               ),
                             ),

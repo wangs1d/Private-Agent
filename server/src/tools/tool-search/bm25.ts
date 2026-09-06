@@ -176,20 +176,25 @@ export class Bm25Index {
   /** Token overlap：复用预计算 doc token Set，避免每次 search 重新 tokenize 全部 doc。 */
   private rankByTokenOverlap(queries: string[]): Array<{ id: string }> {
     const scoreById = new Map<string, number>();
+    const N = Math.max(1, this.docs.length);
 
     for (const query of queries) {
       const queryTokens = Array.from(new Set(tokenize(query)));
       if (queryTokens.length === 0) continue;
+      // IDF 加权：「什么/一下」这类全场通用 token 在大量 doc 里出现，
+      // 裸计数会让短描述工具靠通用词登顶；idf 把权重集中到区分性 token 上。
+      const qIdf = queryTokens.map((t) => Math.log(1 + N / ((this.df.get(t) ?? 0) + 0.5)));
+      const qIdfSum = qIdf.reduce((s, v) => s + v, 0) || 1;
 
       for (let i = 0; i < this.docs.length; i++) {
         const docTokens = this.docTokenSets[i]!;
         if (docTokens.size === 0) continue;
-        let shared = 0;
-        for (const token of queryTokens) {
-          if (docTokens.has(token)) shared += 1;
+        let sharedIdf = 0;
+        for (let j = 0; j < queryTokens.length; j++) {
+          if (docTokens.has(queryTokens[j]!)) sharedIdf += qIdf[j]!;
         }
-        if (shared === 0) continue;
-        const score = shared / Math.sqrt(queryTokens.length * docTokens.size);
+        if (sharedIdf === 0) continue;
+        const score = sharedIdf / Math.sqrt(qIdfSum * docTokens.size);
         scoreById.set(this.docs[i]!.id, Math.max(scoreById.get(this.docs[i]!.id) ?? 0, score));
       }
     }
@@ -211,6 +216,23 @@ function rankByTrigramSimilarity(
       ? new Map(aliasEntries.map((e) => [e.registryName, e.trigramSet!]))
       : null;
 
+  // gram 文档频率：跨全部 doc 统计每个 trigram 出现在多少个 doc 里（懒构建一次）。
+  // 「什么/答应/一下」这类通用 gram 几乎每个描述都有，裸 shared 计数会让短描述
+  // 工具凭通用 gram 登顶；按 1/df 加权后权重集中到区分性 gram（如「网页」「读取」）。
+  let gramDf: Map<string, number> | null = null;
+  const gramDfOf = (gram: string): number => {
+    if (!gramDf) {
+      gramDf = new Map<string, number>();
+      const source = docGramsCache
+        ? [...docGramsCache.values()]
+        : docs.map((d) => buildCharacterTrigrams(d.text));
+      for (const grams of source) {
+        for (const g of grams) gramDf.set(g, (gramDf.get(g) ?? 0) + 1);
+      }
+    }
+    return gramDf.get(gram) ?? 1;
+  };
+
   for (const query of queries) {
     const queryGrams = buildCharacterTrigrams(query);
     if (queryGrams.size === 0) continue;
@@ -222,7 +244,7 @@ function rankByTrigramSimilarity(
       if (!docGrams || docGrams.size === 0) continue;
       let shared = 0;
       for (const gram of queryGrams) {
-        if (docGrams.has(gram)) shared += 1;
+        if (docGrams.has(gram)) shared += 1 / gramDfOf(gram);
       }
       if (shared === 0) continue;
       const score = shared / Math.sqrt(queryGrams.size * docGrams.size);
@@ -482,6 +504,18 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
     [/\bnote(s)?\b/gi, "notes 笔记 记录 记忆"],
     [/\bfriend(s)?\b/gi, "friend 好友 朋友 agent 社交"],
     [/\bagent\b/gi, "agent 智能体 好友 消息 发送"],
+    // 高频口语语义场 → 标准工具词（黄金回归集锁定的漏召场，见 test/tool-discover-golden-recall.test.ts）
+    [/几点(?:了)?|现在时间|什么时间|当前时间/gi, "clock 时间 几点 当前 current_time"],
+    [/价格|行情|多少钱|什么价|股价|汇率|涨跌|涨了|跌了|币价|净值/gi, "search_web 实时 行情 价格 查询 search 最新"],
+    [/网页|网址|链接|这个页面|读了?什么|说了?什么|内容是什么/gi, "fetch_web 网页 读取 内容 page url read"],
+    // URL 本体会把无关工具的 registry 词（如 example.com → self.generate_from_example）
+    // 经 registry/trigram 通道顶到最前；归一化成 fetch 语义信号并消除噪声源。
+    [/https?:\/\/\S+/gi, "fetch_web 网页 url page read 读取 内容"],
+    [/摄像头|监控画面|看家|门口/gi, "摄像头 vision camera 监控 看一眼 画面"],
+    [/(?:开|关|调)(?:一下)?灯|灯光|调亮|调暗|空调|窗帘|插座/gi, "smart_home 设备 开关 灯 空调 窗帘 control"],
+    [/到家|回到家|离家|出门|离开公司|到达/gi, "geofence 位置 围栏 到达 离开 提醒"],
+    [/每天提醒|定期提醒|天天提醒|周期提醒/gi, "每天 定时 提醒 rhythm 周期 reminder"],
+    [/照片|图片|找图|壁纸|头像|表情包/gi, "图片 照片 search_images image photo 找图"],
   ];
   for (const [pattern, replacement] of replacements) {
     if (pattern.test(trimmed)) {
@@ -494,24 +528,18 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
   const addedVariants: string[] = [];
   const MAX_VARIANTS = 8; // 限制变体数，避免 BM25/Trigram 多路 RRF 跑 N 次
   if (aliasEntries?.length && queryTokens.length > 0) {
-    // 优化：把每个 entry 的所有 alias 预先拼接并 lowercase 一次，
-    // 然后用 queryToken 逐个做 includes，避免每对 (alias, token) 都重复 substring。
-    // 在 100+ 工具 × 10+ alias × 10+ token 的情况下，旧的 O(N×M×K) substring 拼接约 100ms，
-    // 优化后降到 O(N×K)。
-    // 同时按 entry 的"语义匹配度"（alias 与 query 重叠 token 数）排序，
-    // 只取前 MAX_VARIANTS 个最相关的变体，避免变体爆炸。
+    // 别名命中规则：别名是"用户可能说出的短语"，只有 query 里真的出现了这个别名
+    // （整串包含；或英文多词别名中有完整实词命中）才算。
+    // 旧规则是"query 的任一 bigram 出现在别名串里"——中文 bigram 如「一下」「什么」
+    // 会在无关工具的别名里撞上，于是把该工具的 registryName 拼进 query，
+    // rankByRegistryName 再按前缀把整个 embodiment.* 家族推到最前，
+    // 反而把纯 BM25 已排到 top-1 的正确工具挤下去（召回噪声的主来源之一）。
     type ScoredEntry = { entry: SearchAliasEntry; score: number };
     const scored: ScoredEntry[] = [];
     for (const entry of aliasEntries) {
       if (!entry.searchAliases?.length) continue;
-      const aliasBag = entry.searchAliases.map((a) => a.toLowerCase()).join("|");
-      if (!aliasBag) continue;
-      let overlap = 0;
-      for (const token of queryTokenSet) {
-        if (token.length < 2) continue;
-        if (aliasBag.includes(token)) overlap += 1;
-      }
-      if (overlap > 0) scored.push({ entry, score: overlap });
+      const score = aliasMatchScore(normalized, queryTokenSet, entry.searchAliases);
+      if (score > 0) scored.push({ entry, score });
     }
     scored.sort((a, b) => b.score - a.score);
     for (const s of scored) {
@@ -528,4 +556,35 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
   }
 
   return Array.from(variants).filter(Boolean);
+}
+
+/**
+ * 别名命中打分：
+ *   - 中文/整串别名：normalized query 包含整个别名（长度 ≥ 2）→ 按别名长度计分（长别名更具体）；
+ *   - 英文多词别名（含空格）：任一 ≥ 3 字符的实词等于 query token → 计 1 分。
+ * 返回 0 表示不相关。
+ */
+function aliasMatchScore(
+  normalizedQuery: string,
+  queryTokenSet: Set<string>,
+  aliases: string[],
+): number {
+  let score = 0;
+  for (const raw of aliases) {
+    const alias = raw.trim().toLowerCase();
+    if (alias.length < 2) continue;
+    if (normalizedQuery.includes(alias)) {
+      score += Math.min(4, alias.length);
+      continue;
+    }
+    if (alias.includes(" ")) {
+      for (const word of alias.split(/\s+/)) {
+        if (word.length >= 3 && !STOP_WORDS.has(word) && queryTokenSet.has(word)) {
+          score += 1;
+          break;
+        }
+      }
+    }
+  }
+  return score;
 }

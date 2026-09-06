@@ -1,0 +1,2301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>行程规划</title>
+<!-- MapLibre GL JS v4.7.1（与 3D-Travel 项目同版本） -->
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<style id="theme-vars">
+  /* ══════════ 设计令牌（源自 3D-Travel planning-ui 行程主界面）══════════ */
+  :root {
+    --gt-background: #ffffff;
+    --gt-card: #ffffff;
+    --gt-foreground: #18181b;
+    --gt-muted-foreground: #71717a;
+    --gt-primary: #18181b;
+    --gt-primary-foreground: #fafafa;
+    --gt-secondary: #f4f4f5;
+    --gt-secondary-foreground: #18181b;
+    --gt-accent: #f4f4f5;
+    --gt-accent-foreground: #18181b;
+    --gt-muted: #fafafa;
+    --gt-border: #e4e4e7;
+    --gt-border-strong: #d4d4d8;
+    --gt-input: #e4e4e7;
+    --gt-ring: #a1a1aa;
+    --gt-sidebar: #fafafa;
+    --gt-sidebar-border: #e4e4e7;
+    --gt-sidebar-foreground: #18181b;
+    --gt-chart-1: #3f3f46;
+    --gt-chart-2: #71717a;
+    --gt-chart-3: #d4d4d8;
+    --gt-chart-4: #e4e4e7;
+    --gt-chart-5: #fafafa;
+    --gt-radius: 12px;
+    --gt-radius-sm: 6px;
+    --gt-radius-md: 12px;
+    --gt-radius-lg: 16px;
+    --gt-spacing: 4px;
+    --gt-font: Geist, "MiSans", ui-sans-serif, "Segoe UI", "Microsoft YaHei", sans-serif, system-ui;
+    /* POI 分类型色（标记点 / 图例 / 时间线色条共用；深色主题下换霓虹色阶） */
+    --gt-poi-hotel: #a1a1aa;
+    --gt-poi-attraction: #3f3f46;
+    --gt-poi-restaurant: #71717a;
+    --gt-poi-transport: #d4d4d8;
+  }
+  /* ══════════ 深色主题令牌（对齐 AppPalette 深色系；宿主 setTheme('dark') 切换）══════════ */
+  body.theme-dark {
+    --gt-background: #0f0f0f;
+    --gt-card: #1c1c1c;
+    --gt-foreground: #e8e8e8;
+    --gt-muted-foreground: #989898;
+    --gt-primary: #18d6f3;
+    --gt-primary-foreground: #06222c;
+    --gt-secondary: #232323;
+    --gt-secondary-foreground: #e8e8e8;
+    --gt-accent: #232323;
+    --gt-accent-foreground: #e8e8e8;
+    --gt-muted: #161616;
+    --gt-border: #2a2a2a;
+    --gt-border-strong: #454545;
+    --gt-input: #2a2a2a;
+    --gt-ring: #6b6b6b;
+    --gt-sidebar: #131313;
+    --gt-sidebar-border: #27272a;
+    --gt-sidebar-foreground: #e8e8e8;
+    --gt-chart-1: #52525b;
+    --gt-chart-2: #8a8a8a;
+    --gt-chart-3: #b8b8bc;
+    --gt-chart-4: #d4d4d8;
+    --gt-chart-5: #232323;
+    /* 深色地图上标记/图例需要霓虹色阶才可读（与行程卡深色强调一致） */
+    --gt-poi-hotel: #1ed7a6;
+    --gt-poi-attraction: #18d6f3;
+    --gt-poi-restaurant: #f5b942;
+    --gt-poi-transport: #a78bfa;
+  }
+</style>
+<style>
+  /* ══════════ 基础 ══════════ */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--gt-background); overflow: hidden;
+    font-family: var(--gt-font); color: var(--gt-foreground);
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  }
+  button { font: inherit; cursor: pointer; border: none; background: none; color: inherit; padding: 0; }
+  h1, h2, h3, p { margin: 0; }
+  svg { flex-shrink: 0; }
+  .maplibregl-ctrl-attrib { display: none !important; }
+  .maplibregl-canvas:focus { outline: none; }
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--gt-border); border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--gt-border-strong); }
+
+  /* ══════════ App 布局 ══════════ */
+  .gt-app { display: flex; flex-direction: column; height: 100vh; width: 100%; }
+  .gt-main { display: flex; flex: 1; min-height: 0; position: relative; overflow: hidden; }
+
+  /* ══════════ 顶栏 ══════════ */
+  .gt-topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 56px; padding: 0 16px; flex-shrink: 0; z-index: 20;
+    border-bottom: 1px solid var(--gt-border); background: var(--gt-background);
+  }
+  .gt-topbar-left, .gt-topbar-right { display: flex; align-items: center; gap: calc(var(--gt-spacing) * 2); min-width: 0; }
+
+  /* ══════════ 按钮 ══════════ */
+  .gt-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: calc(var(--gt-spacing) * 2);
+    height: 38px; padding: 0 calc(var(--gt-spacing) * 5);
+    border: 1px solid transparent; border-radius: var(--gt-radius-sm);
+    font-size: 13px; font-weight: 500;
+    transition: background-color .15s ease, border-color .15s ease, opacity .15s ease;
+  }
+  .gt-btn:hover { background: var(--gt-accent); }
+  .gt-btn:active { transform: scale(0.98); }
+  .gt-btn:focus-visible { outline: 2px solid var(--gt-ring); outline-offset: 2px; }
+  .gt-btn-primary { background: var(--gt-primary); color: var(--gt-primary-foreground); }
+  .gt-btn-primary:hover { background: var(--gt-chart-1); }
+  .gt-btn-outline { background: transparent; color: var(--gt-foreground); border: 1px solid var(--gt-border); }
+  .gt-btn-outline:hover { background: var(--gt-accent); border-color: var(--gt-border-strong); }
+  .gt-btn svg { width: 15px; height: 15px; }
+
+  .gt-icon-btn {
+    width: 36px; height: 36px; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--gt-card); color: var(--gt-foreground);
+    border: 1px solid var(--gt-border); border-radius: var(--gt-radius-sm);
+    transition: background-color .15s ease, border-color .15s ease;
+  }
+  .gt-icon-btn:hover { background: var(--gt-accent); border-color: var(--gt-border-strong); }
+  .gt-icon-btn:active { transform: scale(0.96); }
+  .gt-icon-btn:focus-visible { outline: 2px solid var(--gt-ring); outline-offset: 2px; }
+  .gt-icon-btn-sm { width: 32px; height: 32px; }
+  .gt-icon-btn svg { width: 17px; height: 17px; }
+  .gt-icon-btn.gt-icon-btn-sm svg { width: 15px; height: 15px; }
+
+  /* ══════════ 左侧行程栏 ══════════ */
+  .gt-sidebar {
+    background: var(--gt-sidebar); border-right: 1px solid var(--gt-sidebar-border);
+    width: 260px; flex-shrink: 0; display: flex; flex-direction: column;
+    transition: width .3s cubic-bezier(.4, 0, .2, 1);
+    overflow: hidden; position: relative;
+  }
+  .gt-sidebar-expanded {
+    width: 260px; flex-shrink: 0; display: flex; flex-direction: column;
+    height: 100%; transition: opacity .2s ease, visibility .2s ease;
+  }
+  .gt-sidebar-collapsed {
+    position: absolute; top: 0; left: 0; width: 64px; height: 100%;
+    display: flex; flex-direction: column; align-items: center;
+    padding: calc(var(--gt-spacing) * 3) 0; gap: calc(var(--gt-spacing) * 4);
+    opacity: 0; visibility: hidden;
+    transition: opacity .2s ease, visibility .2s ease; transition-delay: 0s;
+  }
+  body.gt-sidebar-collapsed-state .gt-sidebar { width: 64px; }
+  body.gt-sidebar-collapsed-state .gt-sidebar-expanded { opacity: 0; visibility: hidden; transition-delay: 0s; }
+  body.gt-sidebar-collapsed-state .gt-sidebar-collapsed { opacity: 1; visibility: visible; transition-delay: .15s; }
+
+  .gt-sidebar-header {
+    display: flex; align-items: center; justify-content: flex-end;
+    padding: calc(var(--gt-spacing) * 3) calc(var(--gt-spacing) * 4); flex-shrink: 0;
+  }
+  .gt-sidebar-collapsed-header { display: flex; justify-content: center; width: 100%; flex-shrink: 0; }
+
+  /* Day 切换器（横向胶囊） */
+  .gt-day-switcher {
+    display: flex; gap: calc(var(--gt-spacing) * 1);
+    padding: 0 calc(var(--gt-spacing) * 4) calc(var(--gt-spacing) * 4); flex-shrink: 0;
+  }
+  .gt-day-pill {
+    flex: 1; min-width: 0; padding: calc(var(--gt-spacing) * 2) calc(var(--gt-spacing) * 1);
+    border-radius: var(--gt-radius-sm); background: transparent; color: var(--gt-muted-foreground);
+    font-size: 13px; font-weight: 500; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: all .15s ease;
+  }
+  .gt-day-switcher.compact .gt-day-pill { font-size: 11.5px; padding: calc(var(--gt-spacing) * 2) 2px; }
+  .gt-day-pill:hover { color: var(--gt-foreground); background: var(--gt-accent); }
+  .gt-day-pill-active { background: var(--gt-primary); color: var(--gt-primary-foreground); }
+  .gt-day-pill-active:hover { background: var(--gt-chart-1); color: var(--gt-primary-foreground); }
+  .gt-day-num { font-size: 13px; font-weight: 500; }
+
+  /* Day 切换器（收起态竖排圆点） */
+  .gt-day-switcher-vertical {
+    display: flex; flex-direction: column; align-items: center;
+    gap: calc(var(--gt-spacing) * 3); flex-shrink: 0;
+  }
+  .gt-day-dot {
+    width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+    border-radius: 999px; transition: background-color .15s ease;
+  }
+  .gt-day-dot:hover { background: var(--gt-accent); }
+  .gt-day-dot-inner {
+    width: 8px; height: 8px; border-radius: 999px;
+    border: 1.5px solid var(--gt-muted-foreground); background: transparent;
+    transition: all .15s ease;
+  }
+  .gt-day-dot-active .gt-day-dot-inner { background: var(--gt-primary); border-color: var(--gt-primary); }
+
+  /* 时间线（展开态） */
+  .gt-timeline {
+    flex: 1; overflow-y: auto;
+    padding: 0 calc(var(--gt-spacing) * 4) calc(var(--gt-spacing) * 4);
+    display: flex; flex-direction: column;
+  }
+  .gt-timeline-item {
+    display: grid; grid-template-columns: 60px 1fr;
+    gap: calc(var(--gt-spacing) * 3); position: relative;
+  }
+  .gt-timeline-left {
+    display: flex; flex-direction: column; align-items: flex-end;
+    position: relative; padding-top: calc(var(--gt-spacing) * 3);
+  }
+  .gt-time-mark {
+    font-size: 12px; font-weight: 500; color: var(--gt-muted-foreground);
+    font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1;
+  }
+  .gt-time-mark-active { color: var(--gt-foreground); font-weight: 600; }
+  .gt-timeline-line {
+    position: absolute; top: calc(var(--gt-spacing) * 6); right: -7px;
+    width: 1px; height: calc(100% - calc(var(--gt-spacing) * 6));
+    background: var(--gt-border);
+  }
+  .gt-timeline-item.gt-timeline-last .gt-timeline-line { display: none; }
+  .gt-timeline-line-active { background: linear-gradient(to bottom, var(--gt-chart-1), var(--gt-border)); }
+
+  .gt-timeline-card {
+    display: grid; grid-template-columns: 3px 1fr; width: 100%; text-align: left;
+    background: var(--gt-card); border: 1px solid var(--gt-border);
+    border-radius: var(--gt-radius); overflow: hidden;
+    transition: border-color .15s ease, background-color .15s ease;
+    cursor: pointer; margin: calc(var(--gt-spacing) * 1) 0 calc(var(--gt-spacing) * 4);
+  }
+  .gt-timeline-card:hover { border-color: var(--gt-border-strong); }
+  .gt-timeline-card:active { transform: scale(0.995); }
+  .gt-card-type-bar { width: 3px; height: 100%; }
+  .gt-type-attraction { background: var(--gt-poi-attraction); }
+  .gt-type-restaurant { background: var(--gt-poi-restaurant); }
+  .gt-type-stay { background: var(--gt-poi-hotel); }
+  .gt-type-transport { background: var(--gt-poi-transport); }
+  .gt-type-bar-active { width: 4px; }
+  .gt-card-body {
+    padding: calc(var(--gt-spacing) * 3) calc(var(--gt-spacing) * 3.5);
+    display: flex; flex-direction: column; gap: calc(var(--gt-spacing) * 1.5);
+    min-width: 0;
+  }
+  .gt-card-title {
+    font-size: 15px; line-height: 1.3; font-weight: 600; color: var(--gt-foreground);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .gt-card-foot { display: flex; align-items: center; gap: calc(var(--gt-spacing) * 3); }
+  .gt-foot-duration { font-size: 12px; color: var(--gt-muted-foreground); font-weight: 400; }
+  .gt-foot-price { font-size: 12px; color: var(--gt-foreground); font-weight: 500; }
+  .gt-timeline-card-active {
+    border-color: var(--gt-border-strong); background: var(--gt-muted);
+    border-left: none; padding-left: 0;
+  }
+
+  /* 竖向时间轴（收起态） */
+  .gt-timeline-vertical {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    overflow-y: auto; padding: calc(var(--gt-spacing) * 2) 0; width: 100%;
+  }
+  .gt-vtimeline-item {
+    display: flex; flex-direction: column; align-items: center;
+    gap: calc(var(--gt-spacing) * 1.5); position: relative;
+    padding: calc(var(--gt-spacing) * 2) 0;
+  }
+  .gt-vtimeline-item::after {
+    content: ''; position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+    width: 1px; height: calc(var(--gt-spacing) * 4); background: var(--gt-border);
+  }
+  .gt-vtimeline-item.gt-vtimeline-last::after { display: none; }
+  .gt-vtime { font-size: 11px; font-weight: 500; color: var(--gt-muted-foreground); font-variant-numeric: tabular-nums; }
+  .gt-vtime-active { color: var(--gt-foreground); font-weight: 600; }
+  .gt-vdot { width: 8px; height: 8px; border-radius: 999px; }
+  .gt-vdot-active { width: 10px; height: 10px; box-shadow: 0 0 0 3px rgba(24, 24, 27, 0.1); }
+
+  /* ══════════ 内容区（地图 + 分隔条 + 详情）══════════ */
+  .gt-content-area {
+    flex: 1; min-width: 0; display: flex; flex-direction: row;
+    position: relative; overflow: hidden;
+  }
+
+  /* 地图面板 */
+  .gt-map-panel { flex: 1.3; min-width: 0; position: relative; display: flex; overflow: hidden; }
+  .gt-map-container { position: relative; width: 100%; height: 100%; background: var(--gt-card); overflow: hidden; }
+  #map { position: absolute; inset: 0; }
+  #fallback-map { position: absolute; inset: 0; overflow: hidden; }
+  #fallback-markers { position: absolute; inset: 0; }
+  .js-fallback-marker { position: absolute; transform: translate(-50%, -100%); cursor: pointer; }
+
+  /* 地图标记（设计稿小圆点风格，颜色按类型） */
+  .gt-map-marker {
+    position: absolute; transform: translate(-50%, -50%);
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+  }
+  .gt-marker-dot {
+    width: 12px; height: 12px; border-radius: 999px;
+    background: var(--mc, var(--gt-chart-2));
+    border: 2px solid var(--gt-card);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+    position: relative; z-index: 2;
+    transition: width .15s ease, height .15s ease, background-color .15s ease;
+  }
+  .gt-map-marker:hover .gt-marker-dot { width: 15px; height: 15px; }
+  .gt-map-marker.gt-marker-active .gt-marker-dot { background: var(--gt-primary); width: 16px; height: 16px; }
+  .gt-marker-pulse {
+    position: absolute; width: 24px; height: 24px; border-radius: 999px;
+    background: var(--gt-primary); z-index: 0;
+    animation: gt-pulse 2s ease-out infinite;
+  }
+  @keyframes gt-pulse {
+    0% { transform: scale(1); opacity: 0.4; }
+    100% { transform: scale(2.5); opacity: 0; }
+  }
+
+  /* 地图控件（图层/定位） */
+  .gt-map-controls {
+    position: absolute; top: calc(var(--gt-spacing) * 4); left: calc(var(--gt-spacing) * 4);
+    display: flex; align-items: center;
+    background: var(--gt-card); border: 1px solid var(--gt-border);
+    border-radius: var(--gt-radius); padding: calc(var(--gt-spacing) * 1); z-index: 5;
+  }
+  .gt-map-ctrl-btn {
+    width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: var(--gt-radius-sm); color: var(--gt-foreground);
+    transition: background-color .15s ease;
+  }
+  .gt-map-ctrl-btn:hover { background: var(--gt-accent); }
+  .gt-map-ctrl-btn:active { transform: scale(0.95); }
+  .gt-map-ctrl-btn:focus-visible { outline: 2px solid var(--gt-ring); outline-offset: 2px; }
+  .gt-map-ctrl-btn svg { width: 16px; height: 16px; }
+  .gt-map-ctrl-divider {
+    width: 1px; height: 18px; background: var(--gt-border);
+    margin: 0 calc(var(--gt-spacing) * 0.5);
+  }
+
+  /* 图层下拉 */
+  #layer-popover {
+    position: absolute; top: calc(var(--gt-spacing) * 4 + 44px); left: calc(var(--gt-spacing) * 4);
+    z-index: 26; display: none; flex-direction: column; gap: 2px; min-width: 128px;
+    background: var(--gt-card); border: 1px solid var(--gt-border);
+    border-radius: var(--gt-radius); padding: calc(var(--gt-spacing) * 1);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.1);
+  }
+  #layer-popover.open { display: flex; }
+  .lp-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    border-radius: var(--gt-radius-sm); font-size: 12px; color: var(--gt-foreground);
+    cursor: pointer; background: transparent; border: none; text-align: left;
+  }
+  .lp-item:hover { background: var(--gt-accent); }
+  .lp-item.active { background: var(--gt-secondary); color: var(--gt-foreground); font-weight: 600; }
+  .lp-item .lp-check { width: 14px; text-align: center; }
+  .lp-divider { height: 1px; background: var(--gt-border); margin: 4px 2px; }
+
+  /* 图例 */
+  .gt-map-legend {
+    position: absolute; bottom: calc(var(--gt-spacing) * 4); left: calc(var(--gt-spacing) * 4);
+    display: flex; align-items: center; gap: calc(var(--gt-spacing) * 3);
+    padding: calc(var(--gt-spacing) * 2) calc(var(--gt-spacing) * 4);
+    background: var(--gt-card); border: 1px solid var(--gt-border);
+    border-radius: 999px; z-index: 5; max-width: calc(100% - 120px);
+  }
+  .gt-legend-items { display: flex; align-items: center; gap: calc(var(--gt-spacing) * 3); }
+  #legend-route { display: none; border-left: 1px solid var(--gt-border); padding-left: calc(var(--gt-spacing) * 3); }
+  #legend-route.has { display: flex; }
+  .gt-legend-item {
+    display: inline-flex; align-items: center; gap: calc(var(--gt-spacing) * 1.5);
+    font-size: 11px; color: var(--gt-muted-foreground); white-space: nowrap;
+  }
+  .gt-legend-dot { width: 8px; height: 8px; border-radius: 999px; }
+  .gt-legend-bar { width: 14px; height: 3px; border-radius: 2px; }
+
+  /* 缩放 */
+  .gt-map-zoom {
+    position: absolute; bottom: calc(var(--gt-spacing) * 4); right: calc(var(--gt-spacing) * 4);
+    display: flex; flex-direction: column; gap: calc(var(--gt-spacing) * 0.5);
+    background: var(--gt-card); border: 1px solid var(--gt-border);
+    border-radius: var(--gt-radius); padding: calc(var(--gt-spacing) * 1); z-index: 5;
+  }
+
+  /* 路线途经点徽标 */
+  .route-waypoint-badge {
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--gt-card); color: var(--gt-foreground);
+    font-size: 11px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px solid var(--gt-chart-1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  }
+  .route-waypoint-badge.route-waypoint-start { background: var(--gt-primary); color: var(--gt-primary-foreground); border-color: var(--gt-primary); }
+
+  /* ══════════ 路线结果卡（地图底部浮层）══════════ */
+  #fab-route {
+    position: absolute; bottom: calc(var(--gt-spacing) * 4); left: 50%; transform: translateX(-50%);
+    z-index: 26;
+  }
+  #route-card {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: calc(var(--gt-spacing) * 4 + 54px); z-index: 27;
+    width: min(520px, calc(100% - 32px));
+    background: var(--gt-card); border: 1px solid var(--gt-border);
+    border-radius: var(--gt-radius-lg); padding: 14px 16px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+    display: none;
+  }
+  #route-card.open { display: block; }
+  .rc-total { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
+  .rc-total svg { width: 14px; height: 14px; color: var(--gt-chart-1); flex: none; }
+  .rc-total .close {
+    margin-left: auto; cursor: pointer; color: var(--gt-muted-foreground);
+    display: inline-flex; width: 24px; height: 24px;
+    align-items: center; justify-content: center; border-radius: var(--gt-radius-sm);
+  }
+  .rc-total .close:hover { color: var(--gt-foreground); background: var(--gt-accent); }
+  .rc-total .close svg { width: 13px; height: 13px; color: inherit; }
+  .rc-assess { margin-top: 5px; font-size: 12px; color: var(--gt-muted-foreground); }
+  .rc-segs {
+    margin-top: 9px; max-height: 132px; overflow-y: auto;
+    border-top: 1px solid var(--gt-border); padding-top: 9px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .rc-seg { font-size: 12px; color: var(--gt-muted-foreground); line-height: 1.5; }
+  .rc-seg .dot { color: var(--gt-chart-1); }
+  .rc-warn { font-size: 12px; line-height: 1.5; color: #b45309; }
+  .rc-warn.high { color: #dc2626; }
+  .rc-alts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .rc-alt {
+    padding: 4px 11px; border-radius: 999px; font-size: 11px; cursor: pointer;
+    color: var(--gt-muted-foreground); background: var(--gt-muted);
+    border: 1px solid var(--gt-border); transition: all .15s ease;
+  }
+  .rc-alt:hover { color: var(--gt-foreground); border-color: var(--gt-border-strong); }
+  .rc-actions { display: flex; align-items: center; gap: 8px; margin-top: 11px; }
+  .rc-act {
+    display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+    padding: 6px 12px; border-radius: var(--gt-radius-sm);
+    border: 1px solid var(--gt-border); font-size: 12px; font-weight: 500;
+    color: var(--gt-foreground); background: var(--gt-card);
+    transition: background-color .15s ease, border-color .15s ease;
+  }
+  .rc-act:hover { background: var(--gt-accent); border-color: var(--gt-border-strong); }
+  .rc-act svg { width: 13px; height: 13px; }
+  .rc-act.spacer { margin-left: auto; background: transparent; border: none; pointer-events: none; }
+
+  /* 可拖动分隔条：详情面板未打开时隐藏 */
+  .gt-divider {
+    width: 6px; flex-shrink: 0; background: transparent; cursor: col-resize;
+    position: relative; display: none; align-items: center; justify-content: center;
+    transition: background-color .15s ease; z-index: 10;
+  }
+  .gt-content-area.has-selection .gt-divider { display: flex; }
+  .gt-divider:hover, .gt-divider.gt-divider-dragging { background: var(--gt-border); }
+  .gt-divider-grip {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 12px 2px; border-radius: 4px; background: transparent;
+    transition: background-color .15s ease;
+  }
+  .gt-divider:hover .gt-divider-grip,
+  .gt-divider.gt-divider-dragging .gt-divider-grip { background: var(--gt-border-strong); }
+  .gt-grip-dot { width: 3px; height: 3px; border-radius: 999px; background: var(--gt-muted-foreground); }
+  body.gt-dragging { user-select: none; cursor: col-resize; }
+  body.gt-dragging * { cursor: col-resize !important; }
+
+  /* ══════════ 详情面板（选中地点时滑出）══════════ */
+  .gt-detail-panel {
+    flex: 0 1 0%; min-width: 0; width: 0;
+    background: var(--gt-card); overflow: hidden;
+    transition: flex-grow .28s cubic-bezier(.4, 0, .2, 1);
+  }
+  .gt-content-area.has-selection .gt-detail-panel {
+    flex: 1 1 0%;
+    border-left: 1px solid var(--gt-border);
+  }
+  .gt-detail-inner {
+    display: flex; flex-direction: column; height: 100%;
+    min-width: 380px; /* 滑出动画期间内容不塌缩，由面板裁剪 */
+    position: relative;
+  }
+  .gt-detail-cover { width: 100%; height: 180px; flex-shrink: 0; overflow: hidden; position: relative; background: var(--gt-muted); }
+  .gt-detail-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .gt-detail-cover svg { width: 100%; height: 100%; display: block; }
+  .gt-detail-close {
+    position: absolute; top: 10px; right: 12px; z-index: 2;
+    width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 999px; cursor: pointer;
+    background: rgba(250, 250, 250, 0.92); color: var(--gt-foreground);
+    border: 1px solid var(--gt-border);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14);
+    transition: background-color .15s ease;
+  }
+  .gt-detail-close:hover { background: var(--gt-card); }
+  .gt-detail-close svg { width: 14px; height: 14px; }
+
+  .gt-detail-body {
+    flex: 1; overflow-y: auto; padding: calc(var(--gt-spacing) * 6);
+    display: flex; flex-direction: column;
+  }
+  .gt-detail-empty {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    color: var(--gt-muted-foreground); font-size: 13px; text-align: center;
+    padding: 0 calc(var(--gt-spacing) * 6); line-height: 1.7;
+    white-space: pre-line;
+  }
+  .gt-detail-section { padding: calc(var(--gt-spacing) * 4) 0; }
+  .gt-detail-section:first-child { padding-top: 0; }
+  .gt-detail-divider { height: 1px; background: var(--gt-border); flex-shrink: 0; }
+  .gt-detail-tags {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: calc(var(--gt-spacing) * 2); margin-bottom: calc(var(--gt-spacing) * 3);
+  }
+  .gt-type-tag {
+    display: inline-flex; align-items: center; gap: calc(var(--gt-spacing) * 1);
+    padding: calc(var(--gt-spacing) * 1) calc(var(--gt-spacing) * 2.5);
+    border-radius: 999px; font-size: 11px; font-weight: 500;
+    background: var(--gt-secondary); color: var(--gt-secondary-foreground);
+  }
+  .gt-type-tag svg { width: 12px; height: 12px; }
+  .gt-detail-rating {
+    display: inline-flex; align-items: center; gap: calc(var(--gt-spacing) * 1);
+    font-size: 13px; font-weight: 600; color: var(--gt-foreground);
+  }
+  .gt-detail-rating svg { width: 14px; height: 14px; color: #f59e0b; }
+  .gt-detail-title { font-size: 22px; line-height: 1.2; font-weight: 600; margin-bottom: calc(var(--gt-spacing) * 3); }
+  .gt-detail-desc { color: var(--gt-muted-foreground); font-size: 13px; line-height: 1.6; }
+  .gt-detail-subtitle { font-size: 14px; line-height: 1.2; font-weight: 600; margin-bottom: calc(var(--gt-spacing) * 3); }
+
+  .gt-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: calc(var(--gt-spacing) * 4); }
+  .gt-info-item { display: flex; flex-direction: column; gap: calc(var(--gt-spacing) * 1); min-width: 0; }
+  .gt-info-label {
+    font-size: 11px; color: var(--gt-muted-foreground);
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .gt-info-value { font-size: 13px; font-weight: 500; word-break: break-all; }
+
+  .gt-dish-list { display: flex; flex-wrap: wrap; gap: calc(var(--gt-spacing) * 2); }
+  .gt-dish-tag {
+    padding: calc(var(--gt-spacing) * 1.5) calc(var(--gt-spacing) * 3);
+    background: var(--gt-muted); color: var(--gt-foreground);
+    border: 1px solid var(--gt-border); border-radius: var(--gt-radius-sm); font-size: 12px;
+  }
+  .gt-detail-note { color: var(--gt-muted-foreground); font-size: 13px; line-height: 1.6; }
+  .gt-review-list { display: flex; flex-direction: column; gap: calc(var(--gt-spacing) * 2); }
+  .gt-review { display: flex; gap: 6px; font-size: 12px; line-height: 1.55; color: var(--gt-muted-foreground); }
+  .gt-review .star { color: #f59e0b; flex: none; }
+  .gt-review .who { color: var(--gt-foreground); font-weight: 500; }
+  .gt-video-list { display: flex; flex-wrap: wrap; gap: calc(var(--gt-spacing) * 2); }
+  .gt-video-chip {
+    display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+    padding: calc(var(--gt-spacing) * 1.5) calc(var(--gt-spacing) * 3);
+    border-radius: var(--gt-radius-sm); font-size: 12px;
+    color: var(--gt-foreground); background: var(--gt-muted);
+    border: 1px solid var(--gt-border); transition: background-color .15s ease;
+  }
+  .gt-video-chip:hover { background: var(--gt-accent); border-color: var(--gt-border-strong); }
+  .gt-video-chip svg { width: 12px; height: 12px; }
+
+  .gt-detail-footer {
+    flex-shrink: 0; padding: calc(var(--gt-spacing) * 4) calc(var(--gt-spacing) * 6);
+    border-top: 1px solid var(--gt-border);
+    display: grid; grid-template-columns: 1fr 1fr; gap: calc(var(--gt-spacing) * 3);
+    background: var(--gt-card);
+  }
+
+  /* ══════════ 加载遮罩 ══════════ */
+  #loading-overlay {
+    position: fixed; inset: 0; z-index: 60;
+    background: var(--gt-background);
+    display: flex; flex-direction: column; gap: 12px;
+    align-items: center; justify-content: center;
+    color: var(--gt-muted-foreground); font-size: 12px;
+    transition: opacity 0.5s ease;
+  }
+  .loading-spinner {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 3px solid var(--gt-border); border-top-color: var(--gt-chart-1);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ══════════ 3DGS 沉浸式实景（保持深色全屏）══════════ */
+  #splat-overlay { position: fixed; inset: 0; z-index: 100; display: none; background: #05080f; }
+  #splat-overlay.active { display: block; }
+  #splat-container { position: absolute; inset: 0; }
+  #splat-title {
+    position: absolute; top: 14px; left: 16px; z-index: 2;
+    color: #e2e8f0; font-size: 13px; font-weight: 600;
+    background: rgba(17, 26, 44, 0.7); border-radius: 8px; padding: 5px 12px;
+  }
+  #splat-close {
+    position: absolute; top: 12px; right: 14px; z-index: 3;
+    width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
+    background: rgba(17, 26, 44, 0.8); color: #cbd5e1;
+    border: 1px solid rgba(148, 163, 184, 0.4); font-size: 14px;
+  }
+  #splat-loading, #splat-error {
+    position: absolute; inset: 0; z-index: 2;
+    display: flex; flex-direction: column; gap: 10px;
+    align-items: center; justify-content: center; color: #94a3b8; font-size: 12px;
+  }
+  #splat-error { color: #f87171; }
+  #splat-error .sub { color: #64748b; font-size: 11px; max-width: 320px; text-align: center; }
+  #splat-loading .loading-spinner { border-color: rgba(148, 163, 184, 0.25); border-top-color: #94a3b8; }
+</style>
+</head>
+<body>
+<main class="gt-app">
+  <!-- 顶部导航栏 -->
+  <header class="gt-topbar">
+    <div class="gt-topbar-left">
+      <button class="gt-icon-btn" type="button" id="btn-sidebar-toggle" aria-label="切换侧边栏">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="gt-topbar-right">
+      <button class="gt-icon-btn" type="button" id="btn-fullscreen" title="全屏查看" aria-label="全屏查看">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+      </button>
+      <button class="gt-icon-btn" type="button" id="btn-close" title="关闭" aria-label="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- 主内容区 -->
+  <div class="gt-main">
+    <!-- 左侧行程栏 -->
+    <aside class="gt-sidebar" id="gtSidebar">
+      <!-- 展开态 -->
+      <div class="gt-sidebar-expanded">
+        <div class="gt-sidebar-header">
+          <button class="gt-icon-btn gt-icon-btn-sm" type="button" id="gtSidebarCollapse" aria-label="收起侧边栏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+        </div>
+        <div class="gt-day-switcher" id="daySwitcher"></div>
+        <div class="gt-timeline" id="gtTimeline"></div>
+      </div>
+      <!-- 收起态 -->
+      <div class="gt-sidebar-collapsed">
+        <div class="gt-sidebar-collapsed-header">
+          <button class="gt-icon-btn gt-icon-btn-sm" type="button" id="gtSidebarExpand" aria-label="展开侧边栏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+        <div class="gt-day-switcher-vertical" id="dayDots"></div>
+        <div class="gt-timeline-vertical" id="gtVTimeline"></div>
+      </div>
+    </aside>
+
+    <!-- 内容区域（地图 + 分隔条 + 详情面板） -->
+    <div class="gt-content-area" id="gtContentArea">
+      <!-- 地图面板 -->
+      <section class="gt-map-panel" id="gtMapPanel">
+        <div class="gt-map-container">
+          <div id="map"></div>
+          <div id="fallback-map" style="display:none"></div>
+
+          <!-- 左上角控制栏（图层/定位） -->
+          <div class="gt-map-controls">
+            <button class="gt-map-ctrl-btn" type="button" id="btn-layers" aria-label="图层" title="图层">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            </button>
+            <div class="gt-map-ctrl-divider"></div>
+            <button class="gt-map-ctrl-btn" type="button" id="btn-locate" aria-label="复位视角" title="复位视角">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="M2 12h3"/><path d="M19 12h3"/></svg>
+            </button>
+          </div>
+
+          <!-- 图层下拉 -->
+          <div id="layer-popover">
+            <button type="button" class="lp-item style-btn" data-style="3"><span class="lp-check"></span><span>明亮</span></button>
+            <button type="button" class="lp-item style-btn" data-style="0"><span class="lp-check"></span><span>街道</span></button>
+            <button type="button" class="lp-item style-btn" data-style="1"><span class="lp-check"></span><span>卫星</span></button>
+            <button type="button" class="lp-item style-btn" data-style="2"><span class="lp-check"></span><span>暗色</span></button>
+            <div class="lp-divider"></div>
+            <button type="button" class="lp-item" id="btn-3d"><span class="lp-check" id="lp-3d-check">✓</span><span id="lp-3d-label">3D 视角</span></button>
+          </div>
+
+          <!-- 左下角图例 -->
+          <div class="gt-map-legend">
+            <div class="gt-legend-items" id="legend-poi"></div>
+            <div class="gt-legend-items" id="legend-route"></div>
+          </div>
+
+          <!-- 右下角缩放 -->
+          <div class="gt-map-zoom">
+            <button class="gt-map-ctrl-btn" type="button" id="btn-zoom-in" aria-label="放大" title="放大">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+            </button>
+            <button class="gt-map-ctrl-btn" type="button" id="btn-zoom-out" aria-label="缩小" title="缩小">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+            </button>
+          </div>
+
+          <!-- 底部中央：规划路线悬浮按钮 -->
+          <div id="fab-route">
+            <button class="gt-btn gt-btn-primary" type="button" id="btn-route">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>
+              <span id="btn-route-text">规划路线</span>
+            </button>
+          </div>
+
+          <!-- 路线结果卡 -->
+          <section id="route-card"></section>
+        </div>
+      </section>
+
+      <!-- 垂直可拖动分隔条 -->
+      <div class="gt-divider" id="gtDivider" role="separator" aria-orientation="vertical">
+        <div class="gt-divider-grip">
+          <span class="gt-grip-dot"></span>
+          <span class="gt-grip-dot"></span>
+          <span class="gt-grip-dot"></span>
+        </div>
+      </div>
+
+      <!-- 详情面板（选中地点时滑出） -->
+      <aside class="gt-detail-panel" id="gtDetailPanel">
+        <div class="gt-detail-inner">
+          <button class="gt-detail-close" type="button" id="detail-close" title="收起详情" aria-label="收起详情">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+          <div class="gt-detail-cover" id="detail-cover"></div>
+          <div class="gt-detail-body" id="detail-body"></div>
+          <div class="gt-detail-footer" id="detail-footer" style="display:none">
+            <button class="gt-btn gt-btn-outline gt-btn-secondary" type="button" id="detail-splat">沉浸式 3D 实景</button>
+            <button class="gt-btn gt-btn-primary" type="button" id="detail-nav">导航前往</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+</main>
+
+<div id="loading-overlay">
+  <div class="loading-spinner"></div>
+  <div>地图加载中…</div>
+</div>
+
+<!-- 3DGS 沉浸式实景 -->
+<div id="splat-overlay">
+  <div id="splat-container"></div>
+  <div id="splat-title"></div>
+  <button type="button" id="splat-close" title="关闭实景">✕</button>
+  <div id="splat-loading"><div class="loading-spinner"></div><div>3D 实景加载中…</div></div>
+  <div id="splat-error" style="display:none">
+    <div>3D 实景素材不可用</div>
+    <div class="sub" id="splat-error-msg"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ══════════════ 常量（引擎层移植自 3D-Travel / map.html，配色对齐设计稿 zinc 阶）══════════════
+  var ROUTE_COLORS = {
+    driving: { color: '#3b82f6', glow: '#93c5fd', label: '驾车' },
+    taxi:    { color: '#8b5cf6', glow: '#c4b5fd', label: '打车' },
+    transit: { color: '#ef4444', glow: '#fca5a5', label: '公交' },
+    walking: { color: '#10b981', glow: '#6ee7b7', label: '步行' },
+    cycling: { color: '#f59e0b', glow: '#fdba74', label: '骑行' }
+  };
+  // POI 分类型色引用主题令牌（--gt-poi-*）：浅色为设计稿 zinc 阶，
+  // 深色主题（body.theme-dark）自动换霓虹色阶，标记/图例在暗底上保持可读
+  var POI_STYLES = {
+    hotel:      { color: 'var(--gt-poi-hotel)', label: '住宿', bar: 'gt-type-stay' },
+    attraction: { color: 'var(--gt-poi-attraction)', label: '景点', bar: 'gt-type-attraction' },
+    restaurant: { color: 'var(--gt-poi-restaurant)', label: '餐厅', bar: 'gt-type-restaurant' },
+    transport:  { color: 'var(--gt-poi-transport)', label: '交通', bar: 'gt-type-transport' }
+  };
+  var TYPE_ICONS = {
+    hotel: 'M3 18v-6a9 9 0 0 1 18 0v6M3 18h18M3 22h18M21 13h1a2 2 0 0 1 0 4h-1',
+    attraction: 'M12 2l2.4 7.2H22l-6 4.8 2.4 7.2L12 16.8 5.6 21.2 8 14 2 9.2h7.6z',
+    restaurant: 'M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 1v3M10 1v3M14 1v3',
+    transport: 'M4 11V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v5M4 11h16M4 11v6a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1h10v1a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-6M7.5 15.5h.01M16.5 15.5h.01'
+  };
+  var DEFAULT_CENTER = [100.1595, 25.6904]; // 内置兜底；宿主 loadPlan 下发真实目的地中心后覆盖
+  var DEFAULT_ZOOM = 13;
+  var MAP_PITCH = 55;
+  var MAP_BEARING = -15;
+  var SOURCE_TIMEOUT = 6000;
+  var DARK_STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+
+  var ROUTE_SOURCE_ID = 'route-source';
+  var ROUTE_LAYER_ID = 'route-layer';
+
+  // ══════════════ 运行时状态 ══════════════
+  var state = {
+    httpBase: '',
+    maptilerKey: '',
+    defaultCenter: null,
+    map: null,
+    markers: [],          // { key, poi, marker }
+    waypointBadges: [],
+    styleIndex: 3,        // 明亮优先（与设计稿浅色基调一致）
+    is3D: true,
+    currentSourceIndex: 0,
+    fallbackMode: false,
+    fallbackZoom: 13,
+    fallbackCenter: { lng: DEFAULT_CENTER[0], lat: DEFAULT_CENTER[1] },
+    pois: [],
+    entryIndex: {},       // key → { entry, dayIndex, dayLabel }
+    routeSegments: null,
+    libPromise: null,
+    booted: false,
+    routeHasData: false,
+    // ── 面板层 ──
+    data: null,           // loadPlan 载荷
+    selectedDay: 0,
+    selectedKey: null,    // 当前选中的行程条目 key（'天索引-条目索引'）
+    routeOpen: false
+  };
+
+  // ══════════════ 工具 ══════════════
+  function postEvent(obj) {
+    try {
+      if (window.chrome && window.chrome.webview && window.chrome.webview.postMessage) {
+        window.chrome.webview.postMessage(JSON.stringify(obj));
+      }
+    } catch (e) { /* 非宿主环境忽略 */ }
+  }
+  function $(id) { return document.getElementById(id); }
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function svgIcon(path, stroke) {
+    var ns = 'http://www.w3.org/2000/svg';
+    var s = document.createElementNS(ns, 'svg');
+    s.setAttribute('viewBox', '0 0 24 24');
+    s.setAttribute('fill', 'none');
+    s.setAttribute('stroke', stroke || 'currentColor');
+    s.setAttribute('stroke-width', '2');
+    s.setAttribute('stroke-linecap', 'round');
+    s.setAttribute('stroke-linejoin', 'round');
+    var p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', path);
+    s.appendChild(p);
+    return s;
+  }
+  function poiStyle(type) {
+    return POI_STYLES[type] || { color: '#71717a', label: '地点', bar: 'gt-type-transport' };
+  }
+  function typeOfEntry(type) {
+    return POI_STYLES[type] ? type : 'transport';
+  }
+  function validCoord(c) {
+    return c && typeof c[0] === 'number' && typeof c[1] === 'number' &&
+      (c[0] !== 0 || c[1] !== 0) && isFinite(c[0]) && isFinite(c[1]);
+  }
+  function activeDefaultCenter() {
+    return (state.defaultCenter && validCoord(state.defaultCenter)) ? state.defaultCenter : DEFAULT_CENTER;
+  }
+  function timeTextOf(entry) {
+    return fmtTime(entry.time);
+  }
+  // 服务端 startTime 为 ISO 串（2025-07-05T08:00:00）→ 面板统一显示 HH:mm；
+  // 已是 HH:mm 或其他自由文本时原样保留
+  function fmtTime(time) {
+    if (!time) return '';
+    var m = /T(\d{1,2}:\d{2})/.exec(time);
+    if (m) return m[1];
+    m = /^(\d{1,2}:\d{2})/.exec(time);
+    if (m) return m[1];
+    return time;
+  }
+  // 服务端天 label 为日期串（2025-07-05）→ 短日期（7月5日）；解析失败原样返回
+  function fmtShortDate(s) {
+    var m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s || '');
+    if (m) return Number(m[2]) + '月' + Number(m[3]) + '日';
+    return s || '';
+  }
+  function hourOf(time) {
+    var t = fmtTime(time);
+    var m = /^(\d{1,2})/.exec(t);
+    if (!m) return '--';
+    var h = Number(m[1]);
+    return (h < 10 ? '0' : '') + h;
+  }
+  function coverSvg() {
+    return '<svg viewBox="0 0 400 200" preserveAspectRatio="xMidYMid slice" aria-hidden="true">' +
+      '<defs><linearGradient id="coverGrad" x1="0%" y1="0%" x2="100%" y2="100%">' +
+      '<stop offset="0%" style="stop-color: #3f3f46"/><stop offset="100%" style="stop-color: #71717a"/>' +
+      '</linearGradient></defs>' +
+      '<rect width="400" height="200" fill="url(#coverGrad)"/>' +
+      '<path d="M0,150 Q100,130 200,140 T400,135" stroke="#fafafa" stroke-width="1.5" fill="none" opacity="0.2"/>' +
+      '<path d="M0,170 Q150,155 300,165 T400,160" stroke="#fafafa" stroke-width="1" fill="none" opacity="0.15"/>' +
+      '<path d="M0,120 Q80,110 160,120 T320,115 T400,125" stroke="#fafafa" stroke-width="1" fill="none" opacity="0.1"/>' +
+      '</svg>';
+  }
+
+  // ══════════════ 地图源（降级链）══════════════
+  function osmRasterStyle() {
+    return {
+      version: 8,
+      sources: {
+        'osm-tiles': {
+          type: 'raster',
+          tiles: [
+            'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
+          ],
+          tileSize: 256, attribution: '© OpenStreetMap', maxzoom: 19
+        }
+      },
+      layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm-tiles' }],
+      glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'
+    };
+  }
+  function satelliteStyle() {
+    return {
+      version: 8,
+      sources: {
+        'esri-imagery': {
+          type: 'raster',
+          tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+          tileSize: 256, maxzoom: 19, attribution: '© Esri World Imagery'
+        },
+        'esri-labels': {
+          type: 'raster',
+          tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
+          tileSize: 256, maxzoom: 19, attribution: '© Esri'
+        }
+      },
+      layers: [
+        { id: 'esri-imagery', type: 'raster', source: 'esri-imagery' },
+        { id: 'esri-labels', type: 'raster', source: 'esri-labels', paint: { 'raster-opacity': 0.85 } }
+      ]
+    };
+  }
+  function esriStreetStyle() {
+    return {
+      version: 8,
+      sources: {
+        'esri-street': {
+          type: 'raster',
+          tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}'],
+          tileSize: 256, maxzoom: 19, attribution: '© Esri'
+        }
+      },
+      layers: [{ id: 'esri-street', type: 'raster', source: 'esri-street' }]
+    };
+  }
+  function buildSources() {
+    var sources = [
+      { name: 'OpenFreeMap', style: 'https://tiles.openfreemap.org/styles/liberty', terrainUrl: null },
+      { name: 'OSM Raster', style: osmRasterStyle, terrainUrl: null },
+      { name: 'Esri Street', style: esriStreetStyle, terrainUrl: null }
+    ];
+    if (state.maptilerKey) {
+      sources.push({
+        name: 'MapTiler (3D 地形)',
+        style: 'https://api.maptiler.com/streets-v2/style.json?key=' + state.maptilerKey,
+        terrainUrl: 'https://api.maptiler.com/tiles/terrain-tiles.json?key=' + state.maptilerKey
+      });
+    }
+    return sources;
+  }
+  var MAP_SOURCES = [];
+  function styleDefOf(source) {
+    if (state.styleIndex === 1) return satelliteStyle();
+    if (state.styleIndex === 2) return DARK_STYLE_URL;
+    if (state.styleIndex === 0) return osmRasterStyle();
+    return typeof source.style === 'function' ? source.style() : source.style; // 3 → 当前源（明亮）
+  }
+
+  // ══════════════ 启动：多源降级链 ══════════════
+  function boot() {
+    if (state.booted) return;
+    state.booted = true;
+    MAP_SOURCES = buildSources();
+    buildLegend();
+    emptyDetail();
+    initMapChain();
+  }
+  function initMapChain() {
+    destroyMapOnly();
+    hideFallback();
+    tryLoadChain(0);
+  }
+  function tryLoadChain(index) {
+    if (index >= MAP_SOURCES.length) {
+      console.warn('[Map] 所有在线地图源失败，使用离线兜底模式');
+      showFallback();
+      return;
+    }
+    state.currentSourceIndex = index;
+    var source = MAP_SOURCES[index];
+    tryLoadMap(source).then(function () {
+      hideLoadingOverlay();
+      postEvent({ event: 'ready' });
+    }).catch(function (err) {
+      console.warn('[Map] 地图源 "' + source.name + '" 失败:', err && err.message);
+      destroyMapOnly();
+      tryLoadChain(index + 1);
+    });
+  }
+  function tryLoadMap(source) {
+    return new Promise(function (resolve, reject) {
+      try {
+        var container = $('map');
+        container.innerHTML = '';
+        var map = new maplibregl.Map({
+          container: container,
+          style: styleDefOf(source),
+          center: activeDefaultCenter(),
+          zoom: DEFAULT_ZOOM,
+          pitch: state.is3D ? MAP_PITCH : 0,
+          bearing: state.is3D ? MAP_BEARING : 0,
+          scrollZoom: false, // 滚轮由下方自定义 handler 接管（锚定真实光标）
+          attributionControl: false
+        });
+        state.map = map;
+        var resolved = false;
+        map.on('load', function () {
+          if (resolved) return;
+          resolved = true;
+          state.markers = [];
+          tryAdd3DTerrain(source);
+          tryAdd3DBuildings();
+          addRouteLayers();
+          state.routeHasData = false;
+          syncRouteLegend();
+          if (state.routeSegments) { drawRoute(state.routeSegments); }
+          renderPois();
+          syncStyleButtons();
+          resolve(true);
+        });
+        map.on('error', function (e) {
+          if (resolved) return;
+          resolved = true;
+          reject(new Error((e && e.error && e.error.message) || '地图资源加载失败'));
+        });
+        setTimeout(function () {
+          if (resolved) return;
+          resolved = true;
+          reject(new Error('地图源加载超时'));
+        }, SOURCE_TIMEOUT);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+  function destroyMapOnly() {
+    if (state.map) {
+      try { state.map.remove(); } catch (e) { /* ignore */ }
+      state.map = null;
+    }
+    $('map').innerHTML = '';
+    state.markers = [];
+    state.waypointBadges = [];
+  }
+  function hideLoadingOverlay() {
+    var overlay = $('loading-overlay');
+    if (overlay) {
+      overlay.style.opacity = '0';
+      setTimeout(function () { overlay.style.display = 'none'; }, 500);
+    }
+  }
+
+  // ══════════════ 3D：地形 + 建筑 ══════════════
+  function terrainUrlOf(source) {
+    if (source && source.terrainUrl) return typeof source.terrainUrl === 'function' ? source.terrainUrl() : source.terrainUrl;
+    if (state.maptilerKey) return 'https://api.maptiler.com/tiles/terrain-tiles.json?key=' + state.maptilerKey;
+    return null;
+  }
+  function tryAdd3DTerrain(source) {
+    if (!state.map) return;
+    var url = terrainUrlOf(source);
+    if (!url) return;
+    try {
+      if (!state.map.getSource('terrain')) {
+        state.map.addSource('terrain', { type: 'raster-dem', url: url, tileSize: 256 });
+      }
+      if (state.is3D) state.map.setTerrain({ source: 'terrain', exaggeration: 1.2 });
+    } catch (e) { /* 非致命 */ }
+  }
+  function tryAdd3DBuildings() {
+    if (!state.map) return;
+    try {
+      var sources = (state.map.getStyle() || {}).sources || {};
+      var buildingSource = Object.keys(sources).filter(function (s) {
+        return s.indexOf('openmaptiles') >= 0 || s.indexOf('maptiler') >= 0;
+      })[0];
+      if (buildingSource && !state.map.getLayer('building-3d')) {
+        state.map.addLayer({
+          id: 'building-3d',
+          type: 'fill-extrusion',
+          source: buildingSource,
+          'source-layer': 'building',
+          minzoom: 14,
+          paint: {
+            'fill-extrusion-color': ['interpolate', ['linear'], ['zoom'], 14, '#e4e4e7', 16, '#a1a1aa'],
+            'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 5],
+            'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
+            'fill-extrusion-opacity': 0.85
+          }
+        });
+      }
+    } catch (e) { /* 非致命 */ }
+  }
+
+  // ══════════════ 路线图层 ══════════════
+  function findFirstLabelLayerId() {
+    if (!state.map) return undefined;
+    var layers = (state.map.getStyle() || {}).layers || [];
+    for (var i = 0; i < layers.length; i++) {
+      if (layers[i].type === 'symbol' && layers[i].id.indexOf('label') >= 0) return layers[i].id;
+    }
+    return undefined;
+  }
+  function addRouteLayers() {
+    if (!state.map || state.map.getSource(ROUTE_SOURCE_ID)) return;
+    try {
+      state.map.addSource(ROUTE_SOURCE_ID, {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+      var beforeLayer = findFirstLabelLayerId();
+      state.map.addLayer({
+        id: ROUTE_LAYER_ID + '-glow', type: 'line', source: ROUTE_SOURCE_ID,
+        paint: { 'line-color': ['get', 'glowColor'], 'line-width': 14, 'line-opacity': 0.28, 'line-blur': 6 }
+      }, beforeLayer);
+      state.map.addLayer({
+        id: ROUTE_LAYER_ID, type: 'line', source: ROUTE_SOURCE_ID,
+        paint: { 'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.95 }
+      }, beforeLayer);
+      state.map.addLayer({
+        id: ROUTE_LAYER_ID + '-flow', type: 'line', source: ROUTE_SOURCE_ID,
+        paint: { 'line-color': '#ffffff', 'line-width': 2.5, 'line-opacity': 0.8, 'line-dasharray': DASH_SEQ[0] }
+      }, beforeLayer);
+    } catch (e) { /* 非致命 */ }
+  }
+  var DASH_SEQ = [
+    [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5], [2, 4, 1],
+    [2.5, 4, 0.5], [3, 4, 0], [0, 0.5, 3, 3.5], [0, 1, 3, 3], [0, 1.5, 3, 2.5],
+    [0, 2, 3, 2], [0, 2.5, 3, 1.5], [0, 3, 3, 1], [0, 3.5, 3, 0.5]
+  ];
+  var dashIdx = 0;
+  setInterval(function () {
+    dashIdx = (dashIdx + 1) % DASH_SEQ.length;
+    try {
+      if (state.map && state.routeHasData && state.map.getLayer(ROUTE_LAYER_ID + '-flow')) {
+        state.map.setPaintProperty(ROUTE_LAYER_ID + '-flow', 'line-dasharray', DASH_SEQ[dashIdx]);
+      }
+    } catch (e) { /* ignore */ }
+  }, 90);
+  function setRouteData(features) {
+    if (!state.map || !state.map.getSource(ROUTE_SOURCE_ID)) return;
+    state.map.getSource(ROUTE_SOURCE_ID).setData({
+      type: 'FeatureCollection', features: features
+    });
+    state.routeHasData = features.length > 0;
+    syncRouteLegend();
+  }
+  function drawRoute(segments) {
+    state.routeSegments = segments || [];
+    if (state.fallbackMode) { drawFallbackRoute(); return; }
+    if (!state.map || !state.routeSegments.length) return;
+    var features = [];
+    var waypoints = [];
+    for (var i = 0; i < state.routeSegments.length; i++) {
+      var seg = state.routeSegments[i];
+      var pts = [];
+      for (var p = 0; p < (seg.points || []).length; p++) {
+        var c = [Number(seg.points[p].longitude), Number(seg.points[p].latitude)];
+        if (validCoord(c)) pts.push(c);
+      }
+      if (pts.length < 2) continue;
+      if (waypoints.length === 0) waypoints.push(pts[0]);
+      waypoints.push(pts[pts.length - 1]);
+      var palette = ROUTE_COLORS[seg.mode] || ROUTE_COLORS.driving;
+      features.push({
+        type: 'Feature',
+        properties: {
+          color: palette.color, glowColor: palette.glow, modeLabel: palette.label,
+          mode: seg.mode, fromName: seg.fromName || '', toName: seg.toName || '', segIndex: i
+        },
+        geometry: { type: 'LineString', coordinates: pts }
+      });
+    }
+    if (!features.length) return;
+    var bounds = new maplibregl.LngLatBounds();
+    waypoints.forEach(function (c) { bounds.extend(c); });
+    state.map.fitBounds(bounds, {
+      padding: 100, duration: 1200,
+      pitch: state.is3D ? MAP_PITCH : 0, bearing: state.is3D ? MAP_BEARING : 0,
+      maxZoom: 15
+    });
+    setRouteData([]);
+    setRouteData(features);
+    addWaypointBadges(waypoints);
+  }
+  function addWaypointBadges(coords) {
+    clearWaypointBadges();
+    coords.forEach(function (coord, i) {
+      var badge = el('div', 'route-waypoint-badge' + (i === 0 ? ' route-waypoint-start' : ''), i === 0 ? '起' : String(i + 1));
+      var marker = new maplibregl.Marker({ element: badge, anchor: 'center' })
+        .setLngLat(coord)
+        .addTo(state.map);
+      state.waypointBadges.push(marker);
+    });
+  }
+  function clearWaypointBadges() {
+    state.waypointBadges.forEach(function (m) { try { m.remove(); } catch (e) { /* ignore */ } });
+    state.waypointBadges = [];
+  }
+  function clearRoute() {
+    state.routeSegments = null;
+    setRouteData([]);
+    clearWaypointBadges();
+    if (state.fallbackMode) clearFallbackRoute();
+  }
+
+  // ══════════════ POI 标记 ══════════════
+  function setPois(pois) {
+    state.pois = pois || [];
+    renderPois();
+  }
+  function renderPois() {
+    if (state.fallbackMode) { renderFallbackPois(); return; }
+    if (!state.map) return;
+    clearMarkers();
+    for (var i = 0; i < state.pois.length; i++) {
+      var poi = state.pois[i];
+      var lat = Number(poi.latitude), lng = Number(poi.longitude);
+      if (!isFinite(lat) || !isFinite(lng) || (lat === 0 && lng === 0)) continue;
+      var st = poiStyle(poi.type);
+      var dom = el('div', 'gt-map-marker' + (poi.key === state.selectedKey ? ' gt-marker-active' : ''));
+      dom.style.setProperty('--mc', st.color);
+      dom.dataset.key = poi.key;
+      dom.appendChild(el('span', 'gt-marker-dot'));
+      if (poi.key === state.selectedKey) dom.appendChild(el('span', 'gt-marker-pulse'));
+      dom.addEventListener('click', (function (p) {
+        return function (e) {
+          e.stopPropagation();
+          selectEntry(p.key, true);
+        };
+      })(poi));
+      var marker = new maplibregl.Marker({ element: dom, anchor: 'center' })
+        .setLngLat([lng, lat])
+        .addTo(state.map);
+      state.markers.push({ key: poi.key, poi: poi, marker: marker });
+    }
+    applyDayFilter();
+  }
+  function clearMarkers() {
+    state.markers.forEach(function (m) { try { m.marker.remove(); } catch (e) { /* ignore */ } });
+    state.markers = [];
+  }
+  function updateMarkerActive() {
+    state.markers.forEach(function (m) {
+      var dom = m.marker.getElement && m.marker.getElement();
+      if (!dom) return;
+      var on = m.key === state.selectedKey;
+      dom.classList.toggle('gt-marker-active', on);
+      var pulse = dom.querySelector('.gt-marker-pulse');
+      if (on && !pulse) dom.appendChild(el('span', 'gt-marker-pulse'));
+      if (!on && pulse) pulse.remove();
+    });
+  }
+  function visibleInDay(poi, dayIndex) {
+    if (dayIndex == null) return true;
+    if (poi.dayIndex == null) return true;
+    return Number(poi.dayIndex) === Number(dayIndex);
+  }
+  function applyDayFilter() {
+    var visible = [];
+    state.markers.forEach(function (m) {
+      var dom = m.marker.getElement && m.marker.getElement();
+      var ok = visibleInDay(m.poi, state.selectedDay);
+      if (dom) dom.style.display = ok ? '' : 'none';
+      if (ok) visible.push(m.poi);
+    });
+    fitBoundsOfPois(visible);
+  }
+  function fitBoundsOfPois(pois) {
+    if (state.fallbackMode) { centerFallback(pois); return; }
+    if (!state.map || !pois.length) return;
+    var coords = [];
+    pois.forEach(function (p) {
+      var c = [Number(p.longitude), Number(p.latitude)];
+      if (validCoord(c)) coords.push(c);
+    });
+    if (!coords.length) return;
+    var bounds = new maplibregl.LngLatBounds();
+    coords.forEach(function (c) { bounds.extend(c); });
+    state.map.fitBounds(bounds, {
+      padding: 90, duration: 1000, maxZoom: 15,
+      pitch: state.is3D ? MAP_PITCH : 0, bearing: state.is3D ? MAP_BEARING : 0
+    });
+  }
+
+  // ══════════════ 视角控制 ══════════════
+  function flyTo(lat, lng, zoom) {
+    if (state.fallbackMode) {
+      state.fallbackCenter = { lng: lng, lat: lat };
+      state.fallbackZoom = Math.max(1, Math.min(18, zoom || 16));
+      loadFallbackTiles();
+      positionFallbackPois();
+      return;
+    }
+    if (!state.map) return;
+    state.map.flyTo({
+      center: [lng, lat],
+      zoom: zoom || 16,
+      pitch: state.is3D ? MAP_PITCH : 0,
+      bearing: state.is3D ? MAP_BEARING : 0,
+      duration: 1500, essential: true
+    });
+  }
+  function flyToPoi(poi) {
+    var lat = Number(poi.latitude), lng = Number(poi.longitude);
+    if (!isFinite(lat) || !isFinite(lng) || (lat === 0 && lng === 0)) return;
+    flyTo(lat, lng, 16);
+  }
+  function resetView() {
+    if (state.fallbackMode) {
+      var fbCenter = activeDefaultCenter();
+      state.fallbackCenter = { lng: fbCenter[0], lat: fbCenter[1] };
+      state.fallbackZoom = DEFAULT_ZOOM;
+      loadFallbackTiles();
+      positionFallbackPois();
+      return;
+    }
+    if (!state.map) return;
+    var all = state.pois.filter(function (p) { return visibleInDay(p, state.selectedDay); });
+    if (all.length) { fitBoundsOfPois(all); return; }
+    state.map.flyTo({
+      center: activeDefaultCenter(), zoom: DEFAULT_ZOOM,
+      pitch: state.is3D ? MAP_PITCH : 0,
+      bearing: state.is3D ? MAP_BEARING : 0, duration: 1500
+    });
+  }
+  function setDefaultCenter(lat, lng) {
+    var c = [lng, lat];
+    if (!validCoord(c)) return;
+    state.defaultCenter = c;
+    state.fallbackCenter = { lng: lng, lat: lat };
+    var visible = state.pois.filter(function (p) { return visibleInDay(p, state.selectedDay); });
+    var hasCoord = visible.some(function (p) {
+      return validCoord([Number(p.longitude), Number(p.latitude)]);
+    });
+    if (hasCoord) return;
+    if (state.fallbackMode) {
+      loadFallbackTiles();
+      positionFallbackPois();
+      return;
+    }
+    if (!state.map) return;
+    state.map.flyTo({
+      center: c, zoom: DEFAULT_ZOOM,
+      pitch: state.is3D ? MAP_PITCH : 0,
+      bearing: state.is3D ? MAP_BEARING : 0, duration: 1500
+    });
+  }
+
+  // ══════════════ 3D / 样式切换 ══════════════
+  function toggle3D() {
+    state.is3D = !state.is3D;
+    update3DButton();
+    if (state.fallbackMode || !state.map) return;
+    if (state.is3D) {
+      var source = MAP_SOURCES[state.currentSourceIndex];
+      tryAdd3DTerrain(source);
+      state.map.setPitch(MAP_PITCH);
+      state.map.setBearing(MAP_BEARING);
+    } else {
+      try { state.map.setTerrain(null); } catch (e) { /* ignore */ }
+      state.map.setPitch(0);
+      state.map.setBearing(0);
+    }
+  }
+  function update3DButton() {
+    var check = $('lp-3d-check');
+    if (check) check.textContent = state.is3D ? '✓' : '';
+    var label = $('lp-3d-label');
+    if (label) label.textContent = state.is3D ? '3D 视角' : '2D 平面';
+  }
+  function syncStyleButtons() {
+    document.querySelectorAll('.style-btn').forEach(function (b) {
+      var on = Number(b.getAttribute('data-style')) === state.styleIndex;
+      b.classList.toggle('active', on);
+      var check = b.querySelector('.lp-check');
+      if (check) check.textContent = on ? '✓' : '';
+    });
+  }
+  function setStyle(index) {
+    state.styleIndex = index;
+    syncStyleButtons();
+    if (state.fallbackMode || !state.map) return;
+    var keepCenter = state.map.getCenter();
+    var keepZoom = state.map.getZoom();
+    var source = MAP_SOURCES[state.currentSourceIndex] || { style: osmRasterStyle };
+    var styleDef = styleDefOf(source);
+    try { state.map.setTerrain(null); } catch (e) { /* ignore */ }
+    state.map.setStyle(styleDef);
+    state.map.once('style.load', function () {
+      if (!state.map) return;
+      var src = MAP_SOURCES[state.currentSourceIndex];
+      tryAdd3DTerrain(src);
+      tryAdd3DBuildings();
+      addRouteLayers();
+      if (state.routeSegments) { drawRoute(state.routeSegments); }
+      state.map.jumpTo({ center: keepCenter, zoom: keepZoom });
+      if (state.is3D) { state.map.setPitch(MAP_PITCH); state.map.setBearing(MAP_BEARING); }
+    });
+  }
+
+  // ══════════════ 3DGS 沉浸式实景 ══════════════
+  function loadSplatLib() {
+    if (!state.libPromise) {
+      state.libPromise = import('https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@3.0.1/+esm')
+        .catch(function () {
+          return import('https://esm.sh/@mkkellogg/gaussian-splats-3d@3.0.1')
+            .catch(function (e2) { state.libPromise = null; throw e2; });
+        });
+    }
+    return state.libPromise;
+  }
+  function openSplat(rawUrl, title) {
+    var url = rawUrl;
+    if (url && !/^https?:/i.test(url) && state.httpBase) {
+      url = state.httpBase.replace(/\/+$/, '') + (url.charAt(0) === '/' ? url : '/' + url);
+    }
+    if (!url) return;
+    postEvent({ event: 'splat', url: url });
+    $('splat-overlay').classList.add('active');
+    $('splat-loading').style.display = 'flex';
+    $('splat-error').style.display = 'none';
+    $('splat-container').innerHTML = '';
+    $('splat-title').textContent = title || '3D 实景';
+    loadSplatLib().then(function (GaussianSplats3D) {
+      disposeSplatViewer();
+      state.viewer = new GaussianSplats3D.Viewer({
+        cameraUp: [0, -1, -0.6],
+        initialCameraPosition: [-1, -4, 6],
+        initialCameraLookAt: [0, 4, 0],
+        sharedMemoryForWorkers: false,
+        integerBasedSort: true
+      });
+      return state.viewer.addSplatScene(url, {
+        splatAlphaRemovalThreshold: 5,
+        showLoadingUI: false,
+        progressiveLoad: true
+      }).then(function () {
+        $('splat-loading').style.display = 'none';
+        state.viewer.start();
+      });
+    }).catch(function (err) {
+      console.error('[ImmersiveViewer] 加载失败:', err);
+      $('splat-loading').style.display = 'none';
+      $('splat-error').style.display = 'flex';
+      $('splat-error-msg').textContent = (err && err.message) ? String(err.message) : '网络或格式错误';
+      disposeSplatViewer();
+    });
+  }
+  function disposeSplatViewer() {
+    if (state.viewer) {
+      try { state.viewer.dispose(); } catch (e) { /* ignore */ }
+      state.viewer = null;
+    }
+    $('splat-container').innerHTML = '';
+  }
+  function closeSplat() {
+    $('splat-overlay').classList.remove('active');
+    $('splat-loading').style.display = 'none';
+    $('splat-error').style.display = 'none';
+    disposeSplatViewer();
+  }
+
+  // ══════════════ 离线兜底 ══════════════
+  function showFallback() {
+    state.fallbackMode = true;
+    destroyMapOnly();
+    hideLoadingOverlay();
+    var fb = $('fallback-map');
+    fb.style.display = 'block';
+    fb.innerHTML =
+      '<div id="tile-layer" style="position:absolute;inset:0"></div>' +
+      '<div id="fallback-markers" style="position:absolute;inset:0"></div>' +
+      '<div style="position:absolute;top:60px;left:16px;background:var(--gt-card);border:1px solid var(--gt-border);' +
+      'border-radius:999px;padding:4px 12px;font-size:11px;color:var(--gt-muted-foreground);">离线模式 · 简化地图</div>';
+    loadFallbackTiles();
+    renderFallbackPois();
+    postEvent({ event: 'ready' });
+  }
+  function hideFallback() {
+    state.fallbackMode = false;
+    $('fallback-map').style.display = 'none';
+  }
+  function loadFallbackTiles() {
+    var tileContainer = document.getElementById('tile-layer');
+    if (!tileContainer) return;
+    var z = Math.max(1, Math.min(18, Math.round(state.fallbackZoom || 13)));
+    var lng = state.fallbackCenter.lng;
+    var lat = state.fallbackCenter.lat;
+    var x = Math.floor(((lng + 180) / 360) * Math.pow(2, z));
+    var y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, z));
+    var html = '';
+    for (var dy = -1; dy <= 1; dy++) {
+      for (var dx = -1; dx <= 1; dx++) {
+        html += '<img src="https://tile.openstreetmap.org/' + z + '/' + (x + dx) + '/' + (y + dy) + '.png" ' +
+          'loading="lazy" onerror="this.style.display=\'none\'" ' +
+          'style="position:absolute;left:' + ((dx + 1) * 33.33) + '%;top:' + ((dy + 1) * 33.33) + '%;' +
+          'width:33.33%;height:33.33%;object-fit:cover;">';
+      }
+    }
+    tileContainer.innerHTML = html;
+  }
+  // 兜底模式投影：Web 墨卡托（与瓦片网格对齐），保证标记随缩放正确散开
+  function fallbackWorldSize() { return 256 * Math.pow(2, state.fallbackZoom || 13); }
+  function clampLat(lat) { return Math.max(-85, Math.min(85, lat)); }
+  function lngToWorldX(lng, ws) { return ws * ((lng + 180) / 360); }
+  function latToWorldY(lat, ws) {
+    var s = Math.sin(clampLat(lat) * Math.PI / 180);
+    return ws * (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI));
+  }
+  function worldYToLat(y, ws) {
+    var n = Math.PI * (1 - 2 * y / ws);
+    return Math.atan(Math.sinh(n)) * 180 / Math.PI;
+  }
+  function fallbackLngLatToPx(lng, lat, container) {
+    var ws = fallbackWorldSize();
+    var cx = lngToWorldX(state.fallbackCenter.lng, ws);
+    var cy = latToWorldY(state.fallbackCenter.lat, ws);
+    return [
+      container.offsetWidth / 2 + (lngToWorldX(lng, ws) - cx),
+      container.offsetHeight / 2 + (latToWorldY(lat, ws) - cy)
+    ];
+  }
+  function centerFallback(pois) {
+    if (!pois || !pois.length) return;
+    var sx = 0, sy = 0;
+    pois.forEach(function (p) { sx += Number(p.longitude); sy += Number(p.latitude); });
+    state.fallbackCenter = { lng: sx / pois.length, lat: sy / pois.length };
+    loadFallbackTiles();
+    positionFallbackPois();
+  }
+  function renderFallbackPois() {
+    var container = document.getElementById('fallback-markers');
+    if (!container) return;
+    container.querySelectorAll('.js-fallback-marker').forEach(function (elx) { elx.remove(); });
+    state.pois.forEach(function (poi) {
+      var lat = Number(poi.latitude), lng = Number(poi.longitude);
+      if (!isFinite(lat) || !isFinite(lng) || (lat === 0 && lng === 0)) return;
+      var st = poiStyle(poi.type);
+      var px = fallbackLngLatToPx(lng, lat, container);
+      var wrap = el('div', 'js-fallback-marker');
+      wrap.style.left = px[0] + 'px';
+      wrap.style.top = px[1] + 'px';
+      var badge = el('div', 'gt-map-marker' + (poi.key === state.selectedKey ? ' gt-marker-active' : ''));
+      badge.style.position = 'static';
+      var dot = el('span', 'gt-marker-dot');
+      dot.style.setProperty('--mc', st.color);
+      badge.appendChild(dot);
+      wrap.appendChild(badge);
+      wrap.addEventListener('click', function () { selectEntry(poi.key, false); });
+      wrap._fbVisible = visibleInDay(poi, state.selectedDay);
+      wrap.style.display = wrap._fbVisible ? '' : 'none';
+      wrap._fbPoi = poi;
+      container.appendChild(wrap);
+    });
+    if (state.routeSegments) drawFallbackRoute();
+  }
+  function positionFallbackPois() {
+    var container = document.getElementById('fallback-markers');
+    if (!container) return;
+    container.querySelectorAll('.js-fallback-marker').forEach(function (elx) {
+      var poi = elx._fbPoi;
+      if (!poi) return;
+      var px = fallbackLngLatToPx(Number(poi.longitude), Number(poi.latitude), container);
+      elx.style.left = px[0] + 'px';
+      elx.style.top = px[1] + 'px';
+    });
+    if (state.routeSegments) {
+      clearFallbackRoute();
+      drawFallbackRoute();
+    }
+  }
+  function drawFallbackRoute() {
+    var container = document.getElementById('fallback-markers');
+    if (!container || !state.routeSegments) return;
+    var segPaths = [];
+    var allWps = [];
+    state.routeSegments.forEach(function (seg) {
+      var pts = (seg.points || [])
+        .map(function (p) { return [Number(p.longitude), Number(p.latitude)]; })
+        .filter(function (c) { return validCoord(c); });
+      if (pts.length < 2) return;
+      if (!allWps.length) allWps.push(pts[0]);
+      allWps.push(pts[pts.length - 1]);
+      var palette = ROUTE_COLORS[seg.mode] || ROUTE_COLORS.driving;
+      segPaths.push({ points: pts, color: palette.color, glow: palette.glow });
+    });
+    if (!segPaths.length) return;
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'fallback-route-svg');
+    svg.setAttribute('style', 'position:absolute;inset:0;pointer-events:none;width:100%;height:100%');
+    var inner = '';
+    segPaths.forEach(function (s) {
+      var ptsStr = s.points.map(function (c) {
+        var px = fallbackLngLatToPx(c[0], c[1], container);
+        return px[0].toFixed(1) + ',' + px[1].toFixed(1);
+      }).join(' ');
+      inner += '<polyline points="' + ptsStr + '" fill="none" stroke="' + s.glow + '" stroke-width="12" stroke-linecap="round" opacity="0.25"/>';
+      inner += '<polyline points="' + ptsStr + '" fill="none" stroke="' + s.color + '" stroke-width="4" stroke-linecap="round" opacity="0.95"/>';
+      inner += '<polyline points="' + ptsStr + '" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.8" stroke-dasharray="6 6"/>';
+    });
+    svg.innerHTML = inner;
+    container.insertBefore(svg, container.firstChild);
+    allWps.forEach(function (coord, i) {
+      var px = fallbackLngLatToPx(coord[0], coord[1], container);
+      var badge = el('div', 'route-waypoint-badge' + (i === 0 ? ' route-waypoint-start' : ''), i === 0 ? '起' : String(i + 1));
+      badge.style.cssText = 'position:absolute;left:' + px[0] + 'px;top:' + px[1] + 'px;transform:translate(-50%,-50%);z-index:5;';
+      container.appendChild(badge);
+    });
+  }
+  function clearFallbackRoute() {
+    var container = document.getElementById('fallback-markers');
+    if (!container) return;
+    container.querySelectorAll('.fallback-route-svg').forEach(function (elx) { elx.remove(); });
+    container.querySelectorAll('.route-waypoint-badge').forEach(function (elx) { elx.remove(); });
+  }
+  window.addEventListener('resize', function () {
+    if (state.fallbackMode) positionFallbackPois();
+  });
+
+  // ══════════════ 图例 ══════════════
+  function buildLegend() {
+    var poiLegend = $('legend-poi');
+    var routeLegend = $('legend-route');
+    if (poiLegend) {
+      poiLegend.innerHTML = '';
+      Object.keys(POI_STYLES).forEach(function (k) {
+        var item = el('span', 'gt-legend-item');
+        var dot = el('span', 'gt-legend-dot');
+        dot.style.background = POI_STYLES[k].color;
+        item.appendChild(dot);
+        item.appendChild(el('span', null, POI_STYLES[k].label));
+        poiLegend.appendChild(item);
+      });
+    }
+    if (routeLegend) {
+      routeLegend.innerHTML = '';
+      Object.keys(ROUTE_COLORS).forEach(function (k) {
+        var item = el('span', 'gt-legend-item');
+        var bar = el('span', 'gt-legend-bar');
+        bar.style.background = ROUTE_COLORS[k].color;
+        item.appendChild(bar);
+        item.appendChild(el('span', null, ROUTE_COLORS[k].label));
+        routeLegend.appendChild(item);
+      });
+    }
+  }
+  function syncRouteLegend() {
+    var routeLegend = $('legend-route');
+    if (routeLegend) routeLegend.classList.toggle('has', state.routeHasData);
+  }
+
+  // ══════════════ 面板层：载荷渲染 ══════════════
+  // 主题对齐：dark = AppPalette 深色系（body.theme-dark 令牌组）；
+  // 地图底图随主题自动明暗对齐（卫星为显式选择，不参与自动切换）
+  function applyTheme(mode) {
+    var dark = mode === 'dark';
+    state.theme = dark ? 'dark' : 'light';
+    document.body.classList.toggle('theme-dark', dark);
+    if (state.fallbackMode || !state.map) return;
+    if (dark && (state.styleIndex === 3 || state.styleIndex === 0)) {
+      setStyle(2); // 明亮/街道 → 暗色
+    } else if (!dark && state.styleIndex === 2) {
+      setStyle(3); // 暗色 → 明亮
+    }
+  }
+
+  function loadPlan(payload) {
+    state.data = payload || {};
+    state.httpBase = payload.httpBase || state.httpBase;
+    if (payload.theme) applyTheme(payload.theme);
+    var days = state.data.days || [];
+
+    // 顶栏（设计稿顶栏无标题区，目的地/标题仅写入页面标题）
+    var title = state.data.title || ((state.data.destination || '行程规划') + ' 行程');
+    document.title = state.data.destination ? title : '行程规划';
+    $('btn-fullscreen').style.display = payload.fullscreen ? 'none' : '';
+    $('btn-close').style.display = payload.closable ? '' : 'none';
+
+    // 真实目的地中心（无 POI 时兜底定位）
+    var c = payload.center;
+    if (c && isFinite(Number(c.latitude)) && isFinite(Number(c.longitude))) {
+      state.defaultCenter = [Number(c.longitude), Number(c.latitude)];
+      state.fallbackCenter = { lng: Number(c.longitude), lat: Number(c.latitude) };
+    }
+
+    // 条目索引 + POI（来自行程条目）
+    var pois = [];
+    state.entryIndex = {};
+    days.forEach(function (day, di) {
+      (day.entries || []).forEach(function (entry, ei) {
+        var key = di + '-' + ei;
+        var ref = {
+          key: key,
+          dayIndex: di,
+          dayLabel: day.label || ('Day ' + (di + 1)),
+          entry: entry
+        };
+        state.entryIndex[key] = ref;
+        if (entry.latitude == null || entry.longitude == null) return;
+        pois.push({
+          key: key,
+          name: entry.name,
+          type: typeOfEntry(entry.type),
+          latitude: entry.latitude,
+          longitude: entry.longitude,
+          splatUrl: entry.splatUrl || '',
+          dayIndex: di,
+          address: entry.address || '',
+          entryRef: entry,
+          dayLabel: ref.dayLabel
+        });
+      });
+    });
+    state.pois = pois;
+    if (state.selectedKey && !state.entryIndex[state.selectedKey]) state.selectedKey = null;
+
+    // 行程栏
+    state.selectedDay = 0;
+    renderDays();
+    setPois(pois);
+    applyDayFilter();
+    if (state.selectedKey) {
+      var selRef = state.entryIndex[state.selectedKey];
+      if (selRef) {
+        openDetail(selRef);
+        setContentOpen(true);
+      } else {
+        emptyDetail();
+        setContentOpen(false);
+      }
+    } else {
+      emptyDetail();
+      setContentOpen(false);
+    }
+  }
+
+  function renderDays() {
+    var days = (state.data && state.data.days) || [];
+    var sw = $('daySwitcher');
+    var dots = $('dayDots');
+    sw.innerHTML = '';
+    dots.innerHTML = '';
+    // 天数较多时压缩胶囊字号，避免 "Day N" 截断
+    sw.classList.toggle('compact', days.length > 4);
+    days.forEach(function (day, i) {
+      // 服务端 label 为日期串（2025-07-05）→ 胶囊固定 "Day N"，日期放 tooltip
+      var dateHint = fmtShortDate(day.label);
+      var tipParts = ['Day ' + (i + 1)];
+      if (dateHint && dateHint !== day.label) tipParts.push(dateHint);
+      else if (day.label && day.label !== ('Day ' + (i + 1))) tipParts.push(day.label);
+      if (day.subtitle) tipParts.push(day.subtitle);
+      var tip = tipParts.join(' · ');
+
+      var pill = el('button', 'gt-day-pill' + (i === state.selectedDay ? ' gt-day-pill-active' : ''));
+      pill.type = 'button';
+      pill.title = tip;
+      pill.appendChild(el('span', 'gt-day-num', 'Day ' + (i + 1)));
+      pill.addEventListener('click', function () { selectDay(i); });
+      sw.appendChild(pill);
+
+      var dot = el('button', 'gt-day-dot' + (i === state.selectedDay ? ' gt-day-dot-active' : ''));
+      dot.type = 'button';
+      dot.setAttribute('aria-label', tip);
+      dot.title = tip;
+      dot.appendChild(el('span', 'gt-day-dot-inner'));
+      dot.addEventListener('click', function () { selectDay(i); });
+      dots.appendChild(dot);
+    });
+    renderTimeline();
+  }
+
+  function renderTimeline() {
+    var days = (state.data && state.data.days) || [];
+    var box = $('gtTimeline');
+    var vbox = $('gtVTimeline');
+    box.innerHTML = '';
+    vbox.innerHTML = '';
+    var di = state.selectedDay;
+    var day = days[di];
+    if (!day) return;
+    var entries = day.entries || [];
+    entries.forEach(function (entry, ei) {
+      var key = di + '-' + ei;
+      var sel = key === state.selectedKey;
+      var st = poiStyle(typeOfEntry(entry.type));
+      var last = ei === entries.length - 1;
+
+      // 展开态卡片
+      var item = el('div', 'gt-timeline-item' + (last ? ' gt-timeline-last' : ''));
+      item.dataset.key = key;
+      var left = el('div', 'gt-timeline-left');
+      left.appendChild(el('span', 'gt-time-mark' + (sel ? ' gt-time-mark-active' : ''), timeTextOf(entry)));
+      if (!last) left.appendChild(el('div', 'gt-timeline-line' + (sel ? ' gt-timeline-line-active' : '')));
+      var card = el('button', 'gt-timeline-card' + (sel ? ' gt-timeline-card-active' : ''));
+      card.type = 'button';
+      card.appendChild(el('div', 'gt-card-type-bar ' + st.bar + (sel ? ' gt-type-bar-active' : '')));
+      var body = el('div', 'gt-card-body');
+      body.appendChild(el('h3', 'gt-card-title', entry.name || ''));
+      if (entry.priceInfo) {
+        var foot = el('div', 'gt-card-foot');
+        foot.appendChild(el('span', 'gt-foot-price', entry.priceInfo));
+        body.appendChild(foot);
+      }
+      card.appendChild(body);
+      card.addEventListener('click', function () { selectEntry(key, true); });
+      item.appendChild(left);
+      item.appendChild(card);
+      box.appendChild(item);
+
+      // 收起态竖向时间轴
+      var v = el('div', 'gt-vtimeline-item' + (last ? ' gt-vtimeline-last' : '') + (sel ? ' gt-vtimeline-active' : ''));
+      v.appendChild(el('span', 'gt-vtime' + (sel ? ' gt-vtime-active' : ''), hourOf(entry.time)));
+      var vdot = el('span', 'gt-vdot' + (sel ? ' gt-vdot-active' : ''));
+      vdot.style.background = st.color;
+      v.appendChild(vdot);
+      vbox.appendChild(v);
+    });
+  }
+
+  function selectDay(i) {
+    state.selectedDay = i;
+    if (state.selectedKey) {
+      var ref = state.entryIndex[state.selectedKey];
+      if (!ref || ref.dayIndex !== i) closeDetail();
+    }
+    renderDays();
+    applyDayFilter();
+    if (state.routeOpen) hideRouteCard(true);
+  }
+
+  function selectEntry(key, fly) {
+    var ref = state.entryIndex[key];
+    if (!ref) return;
+    state.selectedKey = key;
+    renderTimeline();
+    updateMarkerActive();
+    openDetail(ref);
+    setContentOpen(true);
+    if (fly) flyToPoi(ref);
+  }
+
+  // ══════════ 详情面板滑出/收起 ══════════
+  function setContentOpen(open) {
+    $('gtContentArea').classList.toggle('has-selection', open);
+    if (state.map) {
+      state.map.resize();
+      setTimeout(function () { if (state.map) state.map.resize(); }, 320);
+    }
+  }
+  function closeDetail() {
+    state.selectedKey = null;
+    renderTimeline();
+    updateMarkerActive();
+    emptyDetail();
+    setContentOpen(false);
+  }
+
+  // ══════════════ 详情面板 ══════════════
+  function emptyDetail() {
+    $('detail-cover').innerHTML = coverSvg();
+    var body = $('detail-body');
+    body.innerHTML = '';
+    body.appendChild(el('div', 'gt-detail-empty', '从左侧行程或地图标记中选择地点\n查看详情'));
+    $('detail-footer').style.display = 'none';
+  }
+
+  function openDetail(ref) {
+    var entry = ref.entry || {};
+    var st = poiStyle(typeOfEntry(entry.type));
+
+    // 封面：首图或灰色渐变
+    var cover = $('detail-cover');
+    var imgs = entry.images || [];
+    if (imgs.length) {
+      cover.innerHTML = '';
+      var img = document.createElement('img');
+      img.loading = 'lazy';
+      img.src = imgs[0];
+      cover.appendChild(img);
+    } else {
+      cover.innerHTML = coverSvg();
+    }
+
+    var body = $('detail-body');
+    body.innerHTML = '';
+
+    // 类型标签 + 评分
+    var tags = el('div', 'gt-detail-tags');
+    var typeTag = el('span', 'gt-type-tag');
+    typeTag.appendChild(svgIcon(TYPE_ICONS[typeOfEntry(entry.type)] || TYPE_ICONS.attraction));
+    typeTag.appendChild(el('span', null, st.label));
+    tags.appendChild(typeTag);
+    var rating = avgRating(entry.reviews);
+    if (rating != null) {
+      var rate = el('span', 'gt-detail-rating');
+      var star = svgIcon('M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z', 'none');
+      star.setAttribute('fill', 'currentColor');
+      star.removeAttribute('stroke');
+      rate.appendChild(star);
+      rate.appendChild(el('span', null, rating.toFixed(1)));
+      tags.appendChild(rate);
+    }
+    var sec1 = el('div', 'gt-detail-section');
+    sec1.appendChild(tags);
+    sec1.appendChild(el('h2', 'gt-detail-title', entry.name || ''));
+    if (entry.description) sec1.appendChild(el('p', 'gt-detail-desc', entry.description));
+    body.appendChild(sec1);
+
+    // 信息网格
+    var infos = [];
+    if (entry.address) infos.push(['地址', entry.address]);
+    if (entry.time) infos.push(['到访时间', fmtTime(entry.time)]);
+    if (entry.priceInfo) infos.push(['费用', entry.priceInfo]);
+    if (infos.length) {
+      body.appendChild(el('div', 'gt-detail-divider'));
+      var secInfo = el('div', 'gt-detail-section');
+      var grid = el('div', 'gt-info-grid');
+      infos.forEach(function (pair) {
+        var it = el('div', 'gt-info-item');
+        it.appendChild(el('span', 'gt-info-label', pair[0]));
+        it.appendChild(el('span', 'gt-info-value', pair[1]));
+        grid.appendChild(it);
+      });
+      secInfo.appendChild(grid);
+      body.appendChild(secInfo);
+    }
+
+    // 贴士
+    if ((entry.tips || []).length) {
+      body.appendChild(el('div', 'gt-detail-divider'));
+      var secTips = el('div', 'gt-detail-section');
+      secTips.appendChild(el('h3', 'gt-detail-subtitle', '贴士'));
+      var tipList = el('div', 'gt-dish-list');
+      entry.tips.forEach(function (t) { tipList.appendChild(el('span', 'gt-dish-tag', t)); });
+      secTips.appendChild(tipList);
+      body.appendChild(secTips);
+    }
+
+    // 评论
+    if ((entry.reviews || []).length) {
+      body.appendChild(el('div', 'gt-detail-divider'));
+      var secRev = el('div', 'gt-detail-section');
+      secRev.appendChild(el('h3', 'gt-detail-subtitle', '旅行者评价'));
+      var revs = el('div', 'gt-review-list');
+      entry.reviews.forEach(function (r) {
+        var line = el('div', 'gt-review');
+        line.appendChild(el('span', 'star', '★'));
+        var txt = el('span');
+        txt.appendChild(el('span', 'who', (r.rating != null ? r.rating.toFixed(1) + ' · ' : '') + (r.author || '旅友') + '：'));
+        txt.appendChild(document.createTextNode(r.text || ''));
+        line.appendChild(txt);
+        revs.appendChild(line);
+      });
+      secRev.appendChild(revs);
+      body.appendChild(secRev);
+    }
+
+    // 视频
+    var videoChips = [];
+    (entry.videos || []).forEach(function (v) {
+      if (!v.playPageUrl) return;
+      videoChips.push(v);
+    });
+    if (videoChips.length) {
+      body.appendChild(el('div', 'gt-detail-divider'));
+      var secVid = el('div', 'gt-detail-section');
+      secVid.appendChild(el('h3', 'gt-detail-subtitle', '相关视频'));
+      var vids = el('div', 'gt-video-list');
+      videoChips.forEach(function (v) {
+        var chip = el('button', 'gt-video-chip');
+        chip.type = 'button';
+        chip.appendChild(svgIcon('M23 7l-7 5 7 5V7z'));
+        chip.appendChild(el('span', null, v.title || v.platform || '相关视频'));
+        chip.addEventListener('click', function () {
+          postEvent({ event: 'openUrl', url: v.playPageUrl });
+        });
+        vids.appendChild(chip);
+      });
+      secVid.appendChild(vids);
+      body.appendChild(secVid);
+    }
+
+    // 底部操作：3D 实景 + 导航
+    var footer = $('detail-footer');
+    footer.style.display = '';
+    var splatBtn = $('detail-splat');
+    if (entry.splatUrl) {
+      splatBtn.style.display = '';
+      footer.style.gridTemplateColumns = '1fr 1fr';
+      splatBtn.onclick = function () { openSplat(entry.splatUrl, entry.name); };
+    } else {
+      splatBtn.style.display = 'none';
+      footer.style.gridTemplateColumns = '1fr';
+    }
+    $('detail-nav').onclick = function () {
+      if (entry.latitude == null || entry.longitude == null) return;
+      var from = state.defaultCenter || DEFAULT_CENTER;
+      var url = 'https://uri.amap.com/navigation?to=' + entry.longitude + ',' + entry.latitude +
+        ',' + encodeURIComponent(entry.name || '') + '&mode=car&policy=1&src=myapp';
+      if (from) url = 'https://uri.amap.com/navigation?from=' + from[0] + ',' + from[1] + '&to=' +
+        entry.longitude + ',' + entry.latitude + '&mode=car&policy=1&src=myapp';
+      postEvent({ event: 'openUrl', url: url });
+    };
+  }
+
+  function avgRating(reviews) {
+    if (!reviews || !reviews.length) return null;
+    var sum = 0, n = 0;
+    reviews.forEach(function (r) {
+      var v = Number(r.rating);
+      if (isFinite(v) && v > 0) { sum += v; n++; }
+    });
+    return n ? sum / n : null;
+  }
+
+  // ══════════════ 路线结果卡 ══════════════
+  function showRouteCard(data) {
+    state.routeOpen = true;
+    $('btn-route-text').textContent = '重新规划';
+    var card = $('route-card');
+    card.innerHTML = '';
+
+    var total = el('div', 'rc-total');
+    total.appendChild(svgIcon('M12 2l2.4 7.2H22l-6 4.8 2.4 7.2L12 16.8 5.6 21.2 8 14 2 9.2h7.6z'));
+    total.appendChild(el('span', null,
+      (data.totalDistanceText || '') + ' · ' + (data.totalDurationText || '') +
+      ' · 人流' + (data.averageCrowdIndex || '0') + '/10 · 优化分 ' + (data.optimizationScore || 0)));
+    var close = el('span', 'close');
+    close.appendChild(svgIcon('M18 6L6 18M6 6l12 12'));
+    close.addEventListener('click', function () { hideRouteCard(false); });
+    total.appendChild(close);
+    card.appendChild(total);
+
+    if (data.assessment) card.appendChild(el('div', 'rc-assess', data.assessment));
+
+    var segs = el('div', 'rc-segs');
+    (data.segments || []).forEach(function (seg) {
+      var line = el('div', 'rc-seg');
+      line.appendChild(el('span', 'dot', '• '));
+      line.appendChild(document.createTextNode(
+        (seg.instruction || '') + '（' + (seg.distanceText || '') + ' · ' + (seg.durationMinutes || 0) + '分钟）'));
+      segs.appendChild(line);
+    });
+    (data.warnings || []).forEach(function (w) {
+      segs.appendChild(el('div', 'rc-warn' + (w.severity === 'high' ? ' high' : ''), '⚠ ' + (w.message || '')));
+    });
+    card.appendChild(segs);
+
+    if ((data.alternatives || []).length) {
+      var alts = el('div', 'rc-alts');
+      data.alternatives.forEach(function (alt) {
+        var chip = el('button', 'rc-alt', (alt.label || alt.mode) + ' ' + (alt.reason || ''));
+        chip.type = 'button';
+        chip.addEventListener('click', function () {
+          postEvent({ event: 'switchRouteMode', mode: alt.mode });
+        });
+        alts.appendChild(chip);
+      });
+      card.appendChild(alts);
+    }
+
+    var actions = el('div', 'rc-actions');
+    function act(label, iconPath, url) {
+      var b = el('button', 'rc-act');
+      b.type = 'button';
+      b.appendChild(svgIcon(iconPath));
+      b.appendChild(el('span', null, label));
+      b.addEventListener('click', function () { postEvent({ event: 'openUrl', url: url }); });
+      return b;
+    }
+    var links = data.links || {};
+    if (links.didi) actions.appendChild(act('一键叫车', 'M13 3l7 7-9.5 9.5a3 3 0 0 1-4.2 0L3 16.3a3 3 0 0 1 0-4.2L12.5 2.5', links.didi));
+    if (links.ctripCar) actions.appendChild(act('租车自驾', 'M5 17h14M6 18a1.5 1.5 0 1 0 3 0M15 18a1.5 1.5 0 1 0 3 0M4 16v-4l2-5h12l2 5v4h-2M6 16H4', links.ctripCar));
+    var spacer = el('span', 'rc-act spacer');
+    actions.appendChild(spacer);
+    if (links.gaode) actions.appendChild(act('高德导航', 'M12 2a7.5 7.5 0 0 1 7.5 7.5c0 5.3-7.5 12.5-7.5 12.5S4.5 14.8 4.5 9.5A7.5 7.5 0 0 1 12 2z', links.gaode));
+    if (links.baidu) actions.appendChild(act('百度导航', 'M12 2a7.5 7.5 0 0 1 7.5 7.5c0 5.3-7.5 12.5-7.5 12.5S4.5 14.8 4.5 9.5A7.5 7.5 0 0 1 12 2z', links.baidu));
+    card.appendChild(actions);
+
+    card.classList.add('open');
+  }
+  function hideRouteCard(fromDart) {
+    state.routeOpen = false;
+    $('btn-route-text').textContent = '规划路线';
+    $('route-card').classList.remove('open');
+    $('route-card').innerHTML = '';
+    if (!fromDart) postEvent({ event: 'hideRouteCard' });
+    clearRoute();
+  }
+
+  // ══════════════ 控件事件 ══════════════
+  function toggleSidebar() {
+    document.body.classList.toggle('gt-sidebar-collapsed-state');
+  }
+  $('btn-sidebar-toggle').addEventListener('click', toggleSidebar);
+  $('gtSidebarCollapse').addEventListener('click', toggleSidebar);
+  $('gtSidebarExpand').addEventListener('click', toggleSidebar);
+  // 侧栏宽度动画结束后校正地图尺寸
+  $('gtSidebar').addEventListener('transitionend', function (e) {
+    if (e.propertyName === 'width' && state.map) state.map.resize();
+  });
+
+  $('btn-layers').addEventListener('click', function (e) {
+    e.stopPropagation();
+    $('layer-popover').classList.toggle('open');
+  });
+  $('btn-locate').addEventListener('click', function (e) {
+    e.stopPropagation();
+    resetView();
+  });
+  $('btn-zoom-in').addEventListener('click', function (e) {
+    e.stopPropagation();
+    zoomStep(1);
+  });
+  $('btn-zoom-out').addEventListener('click', function (e) {
+    e.stopPropagation();
+    zoomStep(-1);
+  });
+  document.addEventListener('click', function () {
+    $('layer-popover').classList.remove('open');
+  });
+  $('layer-popover').addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (e.target.closest('.style-btn') || e.target.closest('#btn-3d')) {
+      $('layer-popover').classList.remove('open');
+    }
+  });
+  function zoomStep(delta) {
+    if (state.fallbackMode) {
+      state.fallbackZoom = Math.max(1, Math.min(18, Math.round(state.fallbackZoom || 13) + delta));
+      loadFallbackTiles();
+      positionFallbackPois();
+      return;
+    }
+    if (!state.map) return;
+    state.map.easeTo({ zoom: state.map.getZoom() + delta, duration: 250 });
+  }
+  document.querySelectorAll('.style-btn').forEach(function (b) {
+    b.addEventListener('click', function () { setStyle(Number(b.getAttribute('data-style'))); });
+  });
+  $('btn-3d').addEventListener('click', toggle3D);
+  $('splat-close').addEventListener('click', closeSplat);
+  $('detail-close').addEventListener('click', closeDetail);
+  // 详情面板滑出/收起动画结束后校正地图尺寸
+  $('gtDetailPanel').addEventListener('transitionend', function (e) {
+    if (e.propertyName === 'flex-grow' && state.map) state.map.resize();
+  });
+  $('btn-route').addEventListener('click', function () {
+    postEvent({ event: 'planRoute', dayIndex: state.selectedDay });
+  });
+  $('btn-fullscreen').addEventListener('click', function () {
+    postEvent({ event: 'fullscreen' });
+  });
+  $('btn-close').addEventListener('click', function () {
+    postEvent({ event: 'close' });
+  });
+
+  // ══════════════ 垂直分隔条拖动 ══════════════
+  (function () {
+    var divider = $('gtDivider');
+    var mapPanel = $('gtMapPanel');
+    var detailPanel = $('gtDetailPanel');
+    var contentArea = divider.parentElement;
+    var isDragging = false;
+
+    // 宽度比例限制：地图占 30%-70%
+    var MIN_RATIO = 0.30;
+    var MAX_RATIO = 0.70;
+
+    function startDrag(e) {
+      isDragging = true;
+      divider.classList.add('gt-divider-dragging');
+      document.body.classList.add('gt-dragging');
+      e.preventDefault();
+    }
+    function onDrag(e) {
+      if (!isDragging) return;
+      var rect = contentArea.getBoundingClientRect();
+      var dividerWidth = divider.offsetWidth;
+      var clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+      var relativeX = clientX - rect.left;
+      var totalWidth = rect.width - dividerWidth;
+      var ratio = relativeX / totalWidth;
+      ratio = Math.max(MIN_RATIO, Math.min(MAX_RATIO, ratio));
+      var detailRatio = 1 - ratio;
+      mapPanel.style.flex = ratio + ' 1 0%';
+      detailPanel.style.flex = detailRatio + ' 1 0%';
+      if (state.map) state.map.resize();
+    }
+    function endDrag() {
+      if (!isDragging) return;
+      isDragging = false;
+      divider.classList.remove('gt-divider-dragging');
+      document.body.classList.remove('gt-dragging');
+      if (state.map) state.map.resize();
+    }
+    divider.addEventListener('mousedown', startDrag);
+    document.addEventListener('mousemove', onDrag);
+    document.addEventListener('mouseup', endDrag);
+    divider.addEventListener('touchstart', startDrag, { passive: false });
+    document.addEventListener('touchmove', onDrag, { passive: false });
+    document.addEventListener('touchend', endDrag);
+  })();
+
+  // ══════════════ 滚轮缩放：锚定真实光标位置 ══════════════
+  // webview_windows 的滚轮事件固定以 (0,0) 坐标下发（SetScrollDelta →
+  // SendScroll 硬编码 point），MapLibre 自带 scrollZoom 会因此锚定到左上角。
+  // 这里接管滚轮：用 mousemove 自行跟踪的光标位置作为缩放锚点。
+  var lastCursor = null;
+  function clampZoom(z) { return Math.max(1, Math.min(20, z)); }
+  $('map').addEventListener('mousemove', function (e) {
+    var rect = e.currentTarget.getBoundingClientRect();
+    lastCursor = [e.clientX - rect.left, e.clientY - rect.top];
+  });
+  $('map').addEventListener('wheel', function (e) {
+    e.preventDefault();
+    if (!state.map || state.fallbackMode) return;
+    var options = {
+      zoom: clampZoom(state.map.getZoom() + (e.deltaY > 0 ? -0.5 : 0.5)),
+      duration: 150
+    };
+    if (lastCursor) options.around = state.map.unproject(lastCursor);
+    state.map.easeTo(options);
+  }, { passive: false });
+
+  // ══════════════ 离线兜底：拖拽平移 + 滚轮缩放 ══════════════
+  var fbDrag = null;
+  $('fallback-map').addEventListener('mousedown', function (e) {
+    fbDrag = { x: e.clientX, y: e.clientY };
+  });
+  window.addEventListener('mousemove', function (e) {
+    if (!state.fallbackMode || !fbDrag) return;
+    var ws = fallbackWorldSize();
+    var cx = lngToWorldX(state.fallbackCenter.lng, ws);
+    var cy = latToWorldY(state.fallbackCenter.lat, ws);
+    var ncx = cx - (e.clientX - fbDrag.x);
+    var ncy = cy - (e.clientY - fbDrag.y);
+    state.fallbackCenter.lng = ncx / ws * 360 - 180;
+    state.fallbackCenter.lat = clampLat(worldYToLat(ncy, ws));
+    fbDrag = { x: e.clientX, y: e.clientY };
+    loadFallbackTiles();
+    positionFallbackPois();
+  });
+  window.addEventListener('mouseup', function () { fbDrag = null; });
+  $('fallback-map').addEventListener('wheel', function (e) {
+    e.preventDefault();
+    if (!state.fallbackMode) return;
+    state.fallbackZoom = Math.max(1, Math.min(18,
+      (state.fallbackZoom || 13) + (e.deltaY > 0 ? -0.5 : 0.5)));
+    loadFallbackTiles();
+    positionFallbackPois();
+  }, { passive: false });
+
+  // ══════════════ 对外桥接 API（Dart → JS）══════════════
+  window.__travelPanel = {
+    loadPlan: function (payload) { loadPlan(payload); },
+    showRouteCard: function (data) { showRouteCard(data); },
+    hideRouteCard: function () { hideRouteCard(true); },
+    drawRoute: function (segments) { drawRoute(segments); },
+    clearRoute: function () { clearRoute(); },
+    showDay: function (i) {
+      state.selectedDay = Number(i) || 0;
+      renderDays();
+      applyDayFilter();
+    },
+    flyTo: function (lat, lng, zoom) { flyTo(Number(lat), Number(lng), zoom == null ? 16 : Number(zoom)); },
+    setDefaultCenter: function (lat, lng) { setDefaultCenter(Number(lat), Number(lng)); },
+    resetView: function () { resetView(); },
+    setStyle: function (i) { setStyle(Number(i)); },
+    setTheme: function (m) { applyTheme(m === 'dark' ? 'dark' : 'light'); },
+    toggle3D: function () { toggle3D(); }
+  };
+
+  // 兜底启动：宿主未来得及调 loadPlan 时也能自行加载地图
+  setTimeout(boot, 400);
+})();
+</script>
+</body>
+</html>

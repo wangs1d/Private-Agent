@@ -23,6 +23,12 @@ export interface TravelItinerarySnapshot {
   title: string;
   startDate: string;
   endDate: string;
+  /** 目的地地理编码中心（前端地图初始化定位用，替代客户端内置默认中心） */
+  center?: { latitude: number; longitude: number };
+  /** 目的地一句话简介（行程卡海报区展示；知识库未命中时缺省） */
+  intro?: string;
+  /** 出行随身物品叮嘱（行程卡「记得带」胶囊） */
+  packing?: string[];
   days: Array<{
     date: string;
     items: Array<{

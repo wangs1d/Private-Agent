@@ -179,6 +179,15 @@ export type AgentPromptMemoryContext = {
    */
   conversationTimeline?: string;
   modeRoleGuidance?: string;
+  /**
+   * 回复风格模式（2026-09-06）：决定【回复指南】是否注入聊天基准行
+   * （平调短句 + 语感镜像 + 不客服腔）。
+   * - chat：对话面（fast/foreground），注入基准行；
+   * - task：任务面（complex/后台派发），不注入——交付内容充分展开不受短句约束，
+   *   风格由 modeRoleGuidance（COMPLEX_MODE_ROLE_GUIDANCE）自行承担。
+   * 未设置时按 chat 处理。由 agent-core 与 modeRoleGuidance 同点注入。
+   */
+  replyStyleMode?: "chat" | "task";
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

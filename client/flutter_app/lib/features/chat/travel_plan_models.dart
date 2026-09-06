@@ -212,9 +212,14 @@ class TravelPlanData {
     this.planId = "",
     this.startDate = "",
     this.endDate = "",
+    this.centerLatitude,
+    this.centerLongitude,
+    this.intro = "",
+    this.packing = const <String>[],
     this.preferences = const <String>[],
     this.footer = "",
     this.rawItems = const <String>[],
+    this.isStructured = false,
   });
 
   final String title;
@@ -224,10 +229,24 @@ class TravelPlanData {
   final String planId;
   final String startDate;
   final String endDate;
+
+  /// 目的地地理编码中心（地图初始化定位用；文本兜底/旧数据时为 null）。
+  final double? centerLatitude;
+  final double? centerLongitude;
+
+  /// 目的地一句话简介（行程卡海报区展示；文本兜底时为空，前端隐藏该行）。
+  final String intro;
+
+  /// 出行随身物品叮嘱（行程卡「记得带」胶囊；文本兜底时为空，前端隐藏该行）。
+  final List<String> packing;
   final List<String> preferences;
   final List<TravelPlanDay> days;
   final String footer;
   final List<String> rawItems;
+
+  /// 数据来源：true = 服务端结构化 travelPlan JSON（days 即真实天，空天也计入
+  /// 天数口径）；false = 卡片文本行兜底解析（可能补「全程」空骨架天，空天不计）。
+  final bool isStructured;
 
   bool get hasPlanId => planId.isNotEmpty;
 
@@ -281,6 +300,14 @@ class TravelPlanData {
       planId: tp["planId"]?.toString() ?? "",
       startDate: tp["startDate"]?.toString() ?? "",
       endDate: tp["endDate"]?.toString() ?? "",
+      centerLatitude: (tp["center"]?["latitude"] as num?)?.toDouble(),
+      centerLongitude: (tp["center"]?["longitude"] as num?)?.toDouble(),
+      intro: tp["intro"]?.toString() ?? "",
+      isStructured: true,
+      packing: <String>[
+        for (final dynamic p in (tp["packing"] as List<dynamic>? ?? const <dynamic>[]))
+          if (p != null && p.toString().trim().isNotEmpty) p.toString().trim(),
+      ],
       preferences: <String>[
         for (final dynamic p in (tp["preferences"] as List<dynamic>? ?? const <dynamic>[]))
           if (p != null) p.toString(),

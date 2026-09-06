@@ -113,6 +113,9 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "emotionState",
   // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
   "modeRoleGuidance",
+  // 回复风格模式（chat/task）：决定【回复指南】是否注入聊天基准行；剥离会让
+  // 后台任务交付重新吃到短句约束
+  "replyStyleMode",
 ];
 
 const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
@@ -136,6 +139,7 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "memoryContinuity",
   // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
   "modeRoleGuidance",
+  "replyStyleMode",
 ];
 
 const KEYWORDS = {
@@ -480,15 +484,17 @@ export class RuntimeKernel {
     // 只给方向，不堆 prompt——让模型基于方向自己发挥"活人感"
     // 始终保留"a close friend"基调，style 仅作为补充——
     // 防止 style 数组覆盖掉"熟人"定位导致活人感漂移
-    // 2026-09-05 去重：短句默认/检索例外规则与【回复指南】内嵌的双模式人格
-    // （FAST/COMPLEX_MODE_ROLE_GUIDANCE）重复，收敛为一句指针；英文【事实可靠性】
-    // 与中文后缀（finalizeChatSystemPrompt 恒追加）重复，删除英文版。
+    // 2026-09-05 去重：英文【事实可靠性】与中文后缀（finalizeChatSystemPrompt 恒追加）
+    // 重复，删除英文版。
+    // 2026-09-06 去重：原「Reply style follows the 【回复指南】…」指针行删除——
+    // 其内嵌的"调了搜索工具才展开"例外是前台还携带搜索工具时代的规则，前后台
+    // 架构后前台零工具、任务结果以独立消息回流，该例外已失效；风格本身由
+    // 【回复指南】单点承担，不需要在这里再指一遍。
     const styleExtra = style ? ` (${style})` : "";
     return [
       `You are ${persona}.`,
       values ? `Care about: ${values}.` : "",
       `Tone: a close friend${styleExtra} — short, casual, alive. Not a customer service bot, not an "AI assistant".`,
-      "Reply style follows the 【回复指南】 block injected in this turn's system context (default: short spoken-style sentences; expand fully only when this turn ran search/fetch tools and got results, or the user asked for a guide/comparison/report).",
       "Close-friend tone is style, not evidence. Do not invent familiarity, relationships, pronoun referents, or who the user follows; if a person/pronoun is not grounded in the current turn or explicit injected memory, ask or stay neutral.",
       "Call tools when needed; before each call, say one short line about what you're doing — but never repeat that line as the final reply.",
 "Each turn's history shows `[ts:YYYY-MM-DD HH:MM:SS|weekday|relative]` as a system-injected metadata prefix on prior messages — use it to reason about time. This prefix is NOT part of the message content, and you must NEVER include, echo, or paraphrase it in your reply (the runtime strips it from your output anyway, so writing it just wastes tokens and looks broken). Ask the clock tool only for \"now\".",

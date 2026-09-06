@@ -1663,6 +1663,20 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
   String get _rawTarget => widget.mainMessage.text;
 
+  // 消息内嵌的 Agent 结果卡（按文本记忆化：流式期间逐帧 build，
+  // 避免每帧对全文重复跑正则 + JSON 解析）。
+  AgentResultData? _cachedAgentResult;
+  String? _cachedAgentResultSource;
+
+  AgentResultData? get _agentResult {
+    final String text = widget.mainMessage.text;
+    if (_cachedAgentResultSource != text) {
+      _cachedAgentResult = AgentResultParser.parse(text).data;
+      _cachedAgentResultSource = text;
+    }
+    return _cachedAgentResult;
+  }
+
   /// 是否处于打字机展示中(打字中或光标闪烁中)
   bool get _typewriterActive => _typewriter.active;
 
@@ -1799,10 +1813,16 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     } else {
       // Agent 回复描边框：宽度收敛为可用宽度的 75%（2026-09-03 用户反馈，
       // 相比全宽减少 1/4），文字与照片都框在内；短回复仍按内容自适应收窄。
+      // 行程海报卡例外（2026-09-06 用户反馈）：放宽到 92%，配合卡内
+      // maxWidth 460 让海报/简介/叮嘱有足够幅面。与正文渲染同源：判定用
+      // 解析出的 cardType（[_agentResult]），不探测原始文本子串——
+      // cardType 改名或标记格式调整时只需改解析器一处。
+      final bool isTravelCard = _agentResult?.cardType == "travel_itinerary";
+      final double widthFactor = isTravelCard ? 0.92 : 0.75;
       // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
       bubble = LayoutBuilder(
         builder: (BuildContext context, BoxConstraints constraints) {
-          final double maxBubbleWidth = constraints.maxWidth * 0.75;
+          final double maxBubbleWidth = constraints.maxWidth * widthFactor;
           return ConstrainedBox(
             constraints: BoxConstraints(maxWidth: maxBubbleWidth),
             child: _buildMessageCard(context, highlight: widget.isSelected),

@@ -93,39 +93,42 @@ const TONE_LABEL: Record<PreferredTone, string> = {
   balanced: "自然均衡",
 };
 
+/**
+ * 语气指南（2026-09-06 瘦身）：只在偏离默认时说话。
+ * - preferredTone=balanced 且情绪中性 → 返回空串（默认语气由【回复指南】基准行承担，
+ *   此前这条路径输出"口语短句、避免客服腔"与基准行完全重复，且是最常见路径）；
+ * - 情绪偏低/偏高、或用户明确偏好正式/幽默/温馨 → 一到两行方向性提示。
+ * - 「近几轮情绪轨迹」元信息行已删：标签序列对 LLM 无可执行信息。
+ */
 export function buildToneGuidance(state: EmotionState): string {
   const mood = dominantRecentEmotion(state.recent);
-  const lines: string[] = [
-    `用户沟通偏好语气：${TONE_LABEL[state.preferredTone]}。`,
-  ];
+  const lines: string[] = [];
+
+  if (state.preferredTone !== "balanced") {
+    lines.push(`用户沟通偏好语气：${TONE_LABEL[state.preferredTone]}。`);
+  }
 
   if (mood === "negative" || mood === "stressed") {
     lines.push(
-      "用户近期情绪偏低或压力较大：请用更温柔、安抚的语气回复；先简短共情再回答问题，避免说教、冷笑话或过度活泼。",
+      "用户近期情绪偏低或压力较大：语气放柔，先简短共情再回答；别说教、别冷笑话、别过度活泼。",
     );
     if (state.preferredTone === "humor") {
-      lines.push("即使用户平时喜欢幽默，本轮也请克制玩笑，以陪伴与安慰为主。");
+      lines.push("即使用户平时喜欢幽默，本轮也克制玩笑，以陪伴为主。");
     }
   } else if (mood === "positive") {
     if (state.preferredTone === "humor") {
-      lines.push("用户情绪不错且偏好轻松：可适当幽默、俏皮，但仍保持回复精简。");
+      lines.push("用户情绪不错且偏好轻松：可适当幽默，仍保持精简。");
     } else if (state.preferredTone === "warm") {
-      lines.push("用户情绪不错：保持温馨、肯定的语气。");
+      lines.push("用户情绪不错：保持温和、肯定的语气。");
     } else {
-      lines.push("用户近期情绪积极：语气可轻快一些，但仍以解决问题为先。");
+      lines.push("用户近期情绪积极：语气可轻快一些。");
     }
   } else if (state.preferredTone === "formal") {
-    lines.push("保持正式、条理清晰，避免过多 emoji 与口语化夸张。");
+    lines.push("保持正式、条理清晰，少 emoji 与口语化夸张。");
   } else if (state.preferredTone === "humor") {
-    lines.push("可适当幽默，但不要牺牲准确性与简洁。");
+    lines.push("可适当幽默，但不牺牲准确与简洁。");
   } else if (state.preferredTone === "warm") {
-    lines.push("语气亲切自然，像可信赖的朋友，避免机械感。");
-  } else {
-    lines.push("像真人朋友聊天：口语短句、自然亲切、有活人感，避免客服腔和机械列举。");
-  }
-
-  if (state.recent.length >= 2) {
-    lines.push(`近几轮情绪轨迹：${state.recent.join(" → ")}。`);
+    lines.push("语气亲切自然。");
   }
 
   return lines.join("\n");

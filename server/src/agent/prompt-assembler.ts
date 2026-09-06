@@ -90,13 +90,24 @@ export function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
 
 /**
  * 动态风格层 → 单一【回复指南】块（收敛为唯一风格决策源）。
- * - 基准行恒在：短句、先结论、有人味。
- * - 语气/情绪/关系边界/模式职责四路合并为小节。
+ *
+ * 2026-09-06 风格单一来源化：
+ * - 基准行（平调/短句/语感镜像/不客服腔）仅在 chat 模式注入（replyStyleMode）；
+ *   task 模式不注入——后台任务交付不受短句约束，交付风格由模式人格
+ *   （COMPLEX_MODE_ROLE_GUIDANCE）承担，此前两种基准互相打架导致任务汇报"半长不长"。
+ * - 语感镜像（跟随用户）是隐性规则：只描述"跟着对方走"，禁止向用户点破。
+ * - 语气/情绪/关系边界三路合并为小节，每路至多一两行。
  */
 function buildReplyStyleGuide(memory: AgentPromptMemoryContext): string {
-  const lines = [
-    "基准：口吻短句为主、一句一顿，先亮结论，再给建议与下一步方案；有人味，不客服腔、不总结腔、不机械罗列。",
-  ];
+  const isChat = memory.replyStyleMode !== "task";
+  const lines: string[] = [];
+  if (isChat) {
+    lines.push(
+      "基准：平调、直接、有事说事，先亮结论；口语短句为主，一两小条。" +
+        "语感跟着对方走：对方短你就短、对方正经你就收着、对方明显起劲才跟着起一点，" +
+        "像被对方带节奏，别提这件事本身。不客服腔、不瞎热情、不总结腔。",
+    );
+  }
   if (memory.modeRoleGuidance) lines.push(`模式：${memory.modeRoleGuidance}`);
   if (memory.toneGuidance) lines.push(`语气：${memory.toneGuidance}`);
   if (memory.emotionState) lines.push(`情绪：${memory.emotionState}`);

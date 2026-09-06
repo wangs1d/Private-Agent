@@ -696,7 +696,8 @@ export class McpClientService {
       headers["Mcp-Session-Id"] = session.sessionId;
     }
 
-    const response = await fetch(server.url!, {
+    // url 中的 query 参数（如滴滴 MCP 的 ?key=）同样支持 ${ENV_VAR} 展开
+    const response = await fetch(this.expandEnvVars(server.url!), {
       method: "POST",
       headers,
       body: JSON.stringify(body),

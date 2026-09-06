@@ -108,6 +108,8 @@ const DEFAULT_CONTEXT_HASH = "tool-search-bridge";
 const ROUTE_CACHE_TTL_MS = 300_000; // 5 分钟（原 20s），session 级复用
 const INTENT_CACHE_TTL_MS = 300_000; // 意图分解缓存 5 分钟
 const MAX_INDEX_CACHE = 32;
+/** 路由-召回融合时并入候选集的全量词面 top-N（99 个工具下 BM25 毫秒级，取 12 足够覆盖同义簇）。 */
+const GLOBAL_LEXICAL_FLOOR_N = 12;
 const intentRouter = new IntentRouter({ redisUrl: undefined });
 const retrievalEngine = new HybridRetrievalEngine({ historyStore: sharedHistoryStore });
 const topPSelector = new AdaptiveTopPSelector();
@@ -173,43 +175,31 @@ export async function adaptiveSearchDeferredTools(
   }> = [];
   const selectedById = new Map<string, HybridRetrievedResource>();
 
+  // 路由-召回融合（route-or-recall）：域路由只是"倾向"，不是硬排除。
+  // 意图分解/域推断建立在英文正则启发式上，中文口语（"比特币现在什么价"→ shopping/clock）
+  // 判错域时正确工具根本不在候选集里，后面再怎么打分都救不回来。
+  // 这里用全量 BM25（含别名扩展）取词面最相关的 top-N 与路由候选取并集，
+  // 保证词面上最明显的工具永远在场——与 legacy 通道的 Level-3 全量兜底对齐。
+  const lexicalFloor = globalLexicalCandidates(index, catalog, trimmedQuery, GLOBAL_LEXICAL_FLOOR_N);
+
   await Promise.all(
     intentRoutes.map(async ({ intent, route }) => {
-      if (route.resources.length === 0) {
+      const candidates = mergeCandidateRecords(route.resources, lexicalFloor);
+      if (candidates.length === 0) {
         routingParts.push({ intent, route, topP: topPForIntent(intent) });
         return;
       }
 
-      // 小路由短路径：资源 < 10 时跳过 BM25 检索，直接用 base_score
-      if (route.resources.length < 10) {
-        const sorted = route.resources.map((r) => ({
-          item: {
-            resource: r,
-            final_score: r.level1.base_score,
-            components: {
-              embedding_score: 0,
-              keyword_score: 0,
-              history_success_score: 0,
-              latency_score: 0,
-              failure_penalty: 0,
-              base_score: r.level1.base_score,
-            },
-          } satisfies HybridRetrievedResource,
-          score: r.level1.base_score,
-        })).sort((a, b) => b.score - a.score);
-        topPSelector.select(sorted, { confidence: intent.confidence }).selected.forEach((s) => {
-          selectedById.set(s.item.resource.level1.resource_id, s.item);
-        });
-        routingParts.push({ intent, route, topP: topPForIntent(intent) });
-        return;
-      }
-
+      // 统一走 hybrid 检索（关键词+历史+基础分）——旧实现对 <10 候选的"小路由"
+      // 只按 base_score 静态排序、完全不看 query，导致路由到 wallet 域后固定返回
+      // wallet.recharge 而不是 get_balance。99 个工具的 BM25 只有毫秒级成本，没必要短路。
       const retrieved = await retrievalEngine.search({
         query: intent.intent || trimmedQuery,
-        candidates: route.resources,
+        candidates,
         queryVector: options?.queryVector,
         limit: Math.min(50, Math.max(10, limit * 4)),
         prebuiltIndex: index.bm25Index,
+        aliasEntries: catalog.entries,
       });
       const boostedRetrieved = applyAdaptiveIntentBoost(index, retrieved, intent.intent || trimmedQuery);
       const topP = topPSelector.select(
@@ -261,6 +251,7 @@ export async function adaptiveSearchDeferredTools(
     queryVector: options?.queryVector,
     limit: 25,
     prebuiltIndex: index.bm25Index,
+    aliasEntries: catalog.entries,
   });
   const reranked = await rerankingPipeline.rerank({
     raw_query: trimmedQuery,
@@ -282,6 +273,39 @@ export function summarizeAdaptiveCatalog(
   catalog: DeferredToolCatalog,
 ): AdaptiveCatalogSummary {
   return getOrCreateAdaptiveCatalogIndex(catalog).summary;
+}
+
+/** 全量 BM25（含别名扩展）词面 top-N → 在线资源记录，供路由-召回融合兜底。 */
+function globalLexicalCandidates(
+  index: AdaptiveCatalogIndex,
+  catalog: DeferredToolCatalog,
+  query: string,
+  topN: number,
+): ResourceRecord[] {
+  if (tokenize(query).length === 0) return [];
+  const hits = index.bm25Index.search(query, topN, catalog.entries);
+  const out: ResourceRecord[] = [];
+  for (const hit of hits) {
+    const record = index.recordsById.get(hit.id);
+    if (record && record.level1.status === "online") out.push(record);
+  }
+  return out;
+}
+
+/** 按 resource_id 去重合并（保持路由候选优先顺序，词面兜底追加在后）。 */
+function mergeCandidateRecords(
+  primary: ResourceRecord[],
+  extra: ResourceRecord[],
+): ResourceRecord[] {
+  if (extra.length === 0) return primary;
+  const seen = new Set(primary.map((r) => r.level1.resource_id));
+  const out = [...primary];
+  for (const record of extra) {
+    if (seen.has(record.level1.resource_id)) continue;
+    seen.add(record.level1.resource_id);
+    out.push(record);
+  }
+  return out;
 }
 
 export function loadAdaptiveCatalogSchema(
@@ -623,8 +647,15 @@ function applyAdaptiveIntentBoost(
     if (cached !== undefined) return cached;
     let boost = 0;
     if (resourceId === "calendar.list_tasks" && has(/\btasks?\b|\btodo\b/)) boost += 0.32;
-    if (resourceId === "search_web" && has(/\bsearch\b|\bnews\b|\blatest\b/)) boost += 0.42;
-    if (resourceId === "fetch_web" && has(/\bread\b|\bfetch\b|\bpage\b|\bcontent\b|\burl\b/)) boost += 0.42;
+    if (resourceId === "search_web" && has(/\bsearch\b|\bnews\b|\blatest\b|搜(?:索|一下|一搜)|查一下|查询|行情|价格|新闻|最新/)) boost += 0.42;
+    if (resourceId === "fetch_web" && has(/\bread\b|\bfetch\b|\bpage\b|\bcontent\b|\burl\b|网页|网址|链接|读一下|说了什么|读了什么/)) boost += 0.42;
+    if (resourceId === "search_videos" && has(/视频|影片|录像/)) boost += 0.35;
+    if (resourceId === "search_images" && has(/照片|图片|壁纸|表情包|头像|找图/)) boost += 0.35;
+    if (resourceId === "clock.get_current_time" && has(/几点|现在时间|什么时间|当前时间/)) boost += 0.3;
+    if (resourceId === "smart_home.control_device" && has(/开灯|关灯|灯打开|打开灯|灯光|调亮|调暗|空调|窗帘|插座/)) boost += 0.35;
+    if (resourceId === "vision.see_device" && has(/摄像头|监控|看家|门口/)) boost += 0.35;
+    if (resourceId === "geofence.create" && has(/到家|回到家|离家|出门|离开公司|到达.*提醒|位置提醒/)) boost += 0.35;
+    if (resourceId === "care.rhythm_reminder" && has(/每天提醒|定期提醒|天天提醒|周期提醒|规律/)) boost += 0.3;
     if (resourceId === "info.inspect_webpage" && has(/\bsearch\b|\bnews\b|\blatest\b/)) boost -= 0.1;
     if (resourceId === "info.inspect_webpage" && has(/\bread\b|\bfetch\b|\bcontent\b/) && !has(/\binspect\b/)) boost -= 0.08;
     if (resourceId === "agent.query_capabilities" && has(/\bcapabilit(?:y|ies)\b|\btools?\b|\bcan you\b/)) boost += 0.3;
