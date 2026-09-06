@@ -1,10 +1,17 @@
 import "dart:convert";
 import "dart:io";
 
+import "package:http/http.dart" as http;
 import "package:path_provider/path_provider.dart";
+
+import "../../core/config/api_config.dart";
 
 /// 收藏持久化（对应 3D-Travel 的 toggleFavorite）：本地 JSON 文件，
 /// key 为「type:name」，value 为收藏时间戳。
+///
+/// 服务端同步（C5）：变更后 fire-and-forget 全量同步到 /travel/favorites，
+/// 供下次 travel.plan-itinerary 排序加权（收藏过的地点优先排入）。同步失败
+/// 静默——本地收藏始终是权威源，网络不可用不影响收藏体验。
 class TravelFavorites {
   TravelFavorites._();
   static final TravelFavorites instance = TravelFavorites._();
@@ -53,6 +60,20 @@ class TravelFavorites {
     await _ensureLoaded();
     if (!_keys.remove(key)) _keys.add(key);
     await _persist();
+    _syncToServer();
     return _keys.contains(key);
+  }
+
+  /// 全量同步到服务端（fire-and-forget，失败静默）。
+  void _syncToServer() {
+    final List<String> snapshot = _keys.toList();
+    http
+        .post(
+          Uri.parse("${ApiConfig.httpBase}/travel/favorites"),
+          headers: const <String, String>{"content-type": "application/json"},
+          body: jsonEncode(<String, dynamic>{"favorites": snapshot}),
+        )
+        .timeout(const Duration(seconds: 5))
+        .catchError((_) => http.Response("", 0));
   }
 }

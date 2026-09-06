@@ -167,6 +167,15 @@ function readTickIntervalMs(): number {
 }
 /** 通用路径最近主动行为记忆条数（防重复） */
 const RECENT_INITIATIVES_LIMIT = 8;
+/** 对话后主动评估去抖（默认 90s：聊完歇一会儿再决定要不要补一句，模拟人类节奏） */
+const INITIATIVE_DEBOUNCE_DEFAULT_MS = 90_000;
+
+function readInitiativeDebounceMs(): number {
+  const raw = process.env.PROACTIVITY_INITIATIVE_DEBOUNCE_MS;
+  if (!raw) return INITIATIVE_DEBOUNCE_DEFAULT_MS;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : INITIATIVE_DEBOUNCE_DEFAULT_MS;
+}
 
 /** 读布尔 env（默认 fallback） */
 function readEnvBool(name: string, fallback: boolean): boolean {
@@ -251,6 +260,9 @@ export class ProactivityHub {
   /** 上次 tick 拉到的日程快照（去重：日程没变不重复推观察） */
   private readonly lastScheduleSnapshot = new Map<string, string>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  /** 对话后去抖评估定时器（每 actor 一个，新对话轮重置） */
+  private readonly initiativeDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly initiativeDebounceMs = readInitiativeDebounceMs();
   private started = false;
 
   constructor(private readonly deps: ProactivityHubDeps) {
@@ -304,10 +316,11 @@ export class ProactivityHub {
     }, intervalMs);
     // 不阻塞进程退出
     if (typeof this.tickTimer.unref === "function") this.tickTimer.unref();
-    const engineOn =
-      this.llmInitiativeEnabled && this.engine.isEnabled()
-        ? "+LLM 通用路径"
-        : "（LLM 通用路径关闭，快路径规则 + complex→fast 主动）";
+    const engineOn = this.llmInitiativeEnabled
+      ? this.engine.isEnabled()
+        ? "+LLM 通用路径（对话后去抖评估 + 周期 tick）"
+        : "（LLM 通用路径开关已开，但外部模型未配置——实际仅规则快路径；请检查 server/.env 的 MOONSHOT_API_KEY / MINIMAX_API_KEY / OPENAI_API_KEY）"
+      : "（LLM 通用路径已手动关闭，仅规则快路径）";
     console.log(
       `[ProactivityHub] 已启动（tick=${Math.round(intervalMs / 60000)}min，每日预算=${this.governor.getBudget()}${engineOn}）`,
     );
@@ -318,6 +331,8 @@ export class ProactivityHub {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
+    for (const timer of this.initiativeDebounceTimers.values()) clearTimeout(timer);
+    this.initiativeDebounceTimers.clear();
     this.started = false;
   }
 
@@ -347,6 +362,32 @@ export class ProactivityHub {
         console.log(`[ProactivityHub] 对话规则判断失败（忽略）: ${err}`);
       });
     });
+    // 对话后去抖即时评估（对话轮是最有决策依据的观察，比 30min tick 新鲜得多——
+    // 否则 agent「明明刚聊完却半小时无反应」）。频控/负向缓存/预算短路照常兜底。
+    this.scheduleDebouncedInitiative(actorId);
+  }
+
+  /**
+   * 对话后的主动评估去抖：静默 PROACTIVITY_INITIATIVE_DEBOUNCE_MS（默认 90s，0=禁用）
+   * 后做一次通用路径评估；连续对话不断重置（等用户真正停下才评估，不打断对话流）。
+   * 评估会消费感知流窗口，周期 tick 不会对同批观察重复调 LLM。
+   */
+  private scheduleDebouncedInitiative(actorId: string): void {
+    if (!this.llmInitiativeEnabled || !this.engine.isEnabled() || this.initiativeDebounceMs <= 0) {
+      return;
+    }
+    const prev = this.initiativeDebounceTimers.get(actorId);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      this.initiativeDebounceTimers.delete(actorId);
+      void this.evaluateInitiative(actorId, new Date(), this.lastInteractionAt.get(actorId) ?? null).catch(
+        (err) => {
+          console.log(`[ProactivityHub] 对话后主动评估失败（忽略）: ${err}`);
+        },
+      );
+    }, this.initiativeDebounceMs);
+    if (typeof timer.unref === "function") timer.unref();
+    this.initiativeDebounceTimers.set(actorId, timer);
   }
 
   /**

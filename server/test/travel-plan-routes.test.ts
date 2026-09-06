@@ -107,6 +107,8 @@ function makeStubService(options: { alternative?: typeof alternativePoi | null }
         tags: ["公园"],
       },
     ],
+    // 编辑路由在坐标变更/替换/删除后会调用局部重排（P0）；桩用 no-op 保持断言口径
+    retimeDayAfterEdit: async () => ({ dayEndMin: 0 }),
   } as unknown as PlanningService;
 }
 

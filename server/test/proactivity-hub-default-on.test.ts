@@ -140,3 +140,47 @@ test("LLM 决策被分 kind 冷却拦截后记入负向缓存（同类窗口不�
   await hub.onTick(ACTOR, new Date());
   assert.equal(llmCalls, 2, "拦截已入缓存，同指纹窗口不应再调 LLM");
 });
+
+test("对话后去抖评估：observeConversationTurn 触发通用路径（不必等周期 tick）", async () => {
+  process.env.PROACTIVITY_INITIATIVE_DEBOUNCE_MS = "10";
+  try {
+    let llmCalls = 0;
+    const llmComplete: LlmCompleteFn = async () => {
+      llmCalls += 1;
+      return speakDecision();
+    };
+    const { deps, signals } = makeDeps({ llmComplete });
+    const hub = new ProactivityHub(deps);
+
+    hub.observeConversationTurn(ACTOR, "今天聊了很多工作的事，有点累");
+    // 去抖 10ms 后应触发评估（连续对话轮会重置定时器，这里单轮即可）
+    await new Promise((r) => setTimeout(r, 150));
+    assert.ok(llmCalls >= 1, "对话结束后应触发去抖评估");
+    assert.equal(hub.getFeed().pendingCount(ACTOR), 0, "评估应消费感知流窗口");
+  } finally {
+    delete process.env.PROACTIVITY_INITIATIVE_DEBOUNCE_MS;
+  }
+});
+
+test("对话后去抖评估：连续对话轮重置定时器（等用户停下才评估）", async () => {
+  process.env.PROACTIVITY_INITIATIVE_DEBOUNCE_MS = "50";
+  try {
+    let llmCalls = 0;
+    const llmComplete: LlmCompleteFn = async () => {
+      llmCalls += 1;
+      return speakDecision();
+    };
+    const { deps } = makeDeps({ llmComplete });
+    const hub = new ProactivityHub(deps);
+
+    hub.observeConversationTurn(ACTOR, "第一句");
+    await new Promise((r) => setTimeout(r, 20));
+    hub.observeConversationTurn(ACTOR, "第二句（应重置去抖定时器）");
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(llmCalls, 0, "去抖窗口内的新对话轮应重置定时器，未到时间不评估");
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(llmCalls, 1, "用户停下后（最后一次对话 + 去抖时长）评估恰好一次");
+  } finally {
+    delete process.env.PROACTIVITY_INITIATIVE_DEBOUNCE_MS;
+  }
+});

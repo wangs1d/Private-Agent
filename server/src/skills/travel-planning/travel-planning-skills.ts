@@ -9,17 +9,133 @@
  *   - travel.search-poi       浏览目的地 POI（景点/酒店/餐厅）
  *   - travel.destination-info 目的地实用信息（签证/货币/最佳季节/应急等）
  *   - travel.compute-route    两点间交通计算
+ *   - travel.get-itinerary    行程明细按需回查（冷层）
+ *   - travel.edit-itinerary   聊天式行程编辑（删除/同类替换/字段微调）
  *
  * 数据流：缓存优先 → 网络实时搜索（高德/OSM，失败自动降级）→ 内置知识库/合成兜底。
  */
 import type { SkillDefinition } from "../types.js";
-import type { PlanningService } from "./travel-planning-service.js";
+import type { PlanningService, PlannedDay, POISummary } from "./travel-planning-service.js";
 import { travelItineraryStore } from "./travel-itinerary-store.js";
-import { travelPlanStore } from "./travel-plan-store.js";
+import { travelPlanStore, type StoredTravelPlan } from "./travel-plan-store.js";
+import {
+  pricingService,
+  formatQuotePriceInfo,
+  type PriceQuote,
+} from "./pricing-service.js";
 
 type Deps = {
   travelPlanningService: PlanningService;
 };
+
+/** 按条目类型选计价入口（edit-itinerary 的 replace 路径复用 HTTP comment 端点的口径） */
+function quoteByType(
+  service: typeof pricingService,
+  name: string,
+  tags: string[],
+  type: "attraction" | "hotel" | "restaurant",
+  destination: string,
+): PriceQuote {
+  const ctx = { destination, preferences: {} };
+  if (type === "hotel") return service.quoteHotel(name, tags, ctx);
+  if (type === "attraction") return service.quoteAttraction(name, tags, ctx);
+  return service.quoteRestaurant(name, tags, ctx);
+}
+
+/**
+ * 行程条目字段映射（StoredDayItem 结构，travel-planning-service 的 days → 落盘/快照）。
+ * 原先在 itineraryStore 与 planStore 两处各抄一份完全相同的映射，现统一于此。
+ * transportFromPrev/visitDuration 一并落盘：编辑局部重排与前端展示依赖。
+ */
+function mapDaysToStored(days: PlannedDay[] | undefined) {
+  return (days ?? []).map((day) => ({
+    date: day.date ?? "",
+    items: (day.items ?? []).map((item) => ({
+      type: item.type,
+      name: item.name,
+      startTime: item.startTime ?? item.name,
+      latitude: item.latitude,
+      longitude: item.longitude,
+      address: item.address ?? "",
+      priceInfo: item.priceInfo ?? "",
+      description: item.description ?? "",
+      tips: item.tips,
+      images: item.images,
+      splatUrl: item.splatUrl,
+      transportFromPrev: item.transportFromPrev,
+      visitDuration: item.visitDuration,
+      reviews: item.reviews,
+      videos: item.videos,
+    })),
+  }));
+}
+
+/** 候选 POI 池映射（行程卡地图常驻展示用，两处写入共用） */
+function mapPoisToStored(pois: POISummary[] | undefined) {
+  return (pois ?? []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    type: p.type,
+    latitude: p.latitude,
+    longitude: p.longitude,
+    address: p.address,
+    rating: p.rating,
+  }));
+}
+
+/**
+ * 行程编辑后刷新结构化快照：让同一会话内随后产出的 travel_itinerary 卡直读改后数据。
+ * 由 StoredTravelPlan 重建快照（候选 POI 池/偏好等编辑路径不涉及的字段留空）。
+ */
+function refreshItinerarySnapshot(plan: StoredTravelPlan): void {
+  if (!plan.destination) return;
+  travelItineraryStore.set({
+    toolName: "travel.edit-itinerary",
+    ts: Date.now(),
+    planId: plan.planId,
+    ...(plan.dataQuality ? { dataQuality: plan.dataQuality } : {}),
+    destination: plan.destination,
+    title: plan.title,
+    startDate: plan.startDate,
+    endDate: plan.endDate,
+    center: plan.center,
+    days: plan.days.map((day) => ({
+      date: day.date,
+      items: day.items.map((item) => ({ ...item })),
+    })),
+  });
+}
+
+/**
+ * B3 偏好记忆：召回同目的地历史行程中用户表达过的偏好标签。
+ * 查询文本含目的地关键词的近期行程（≤2 份）→ 取 preferences 去重（≤6 个）。
+ * 查不到返回空数组，不阻塞规划主流程。
+ */
+function recallSameDestinationPreferenceLabels(
+  destOrInput: string,
+  currentPrefs: string[],
+): string[] {
+  try {
+    const summaries = travelPlanStore.listSummaries(8);
+    const text = destOrInput.toLowerCase();
+    const matched: string[] = [];
+    for (const s of summaries) {
+      const dest = (s.destination || "").toLowerCase();
+      if (!dest || (!text.includes(dest) && !dest.includes(text))) continue;
+      const plan = travelPlanStore.get(s.planId);
+      for (const p of plan?.preferences ?? []) {
+        const label = p.trim();
+        if (label && !matched.includes(label) && !currentPrefs.includes(label)) {
+          matched.push(label);
+        }
+      }
+      if (matched.length >= 6) break;
+    }
+    return matched.slice(0, 6);
+  } catch {
+    return [];
+  }
+}
 
 /**
  * 生成结果中按天行程的摘要（LLM 工具返回值）。
@@ -48,6 +164,13 @@ function summarizeItinerary(result: unknown): Record<string, unknown> {
   }
   const pricing = r.pricingSummary as Record<string, unknown> | null | undefined;
   const totalFinal = Number(pricing?.totalFinal);
+  const quality = typeof r.dataQuality === "string" ? r.dataQuality : "real";
+  const qualityNote =
+    quality === "synthetic"
+      ? "（注意：当前为离线合成占位数据，请在回复中明确告知用户这是估算结果，建议联网后重新规划）"
+      : quality === "knowledge"
+        ? "（注意：当前为内置知识库数据，景点/酒店为真实地点但非实时搜索结果，可顺带向用户说明）"
+        : "";
   return {
     ok: true,
     id: r.id,
@@ -58,7 +181,9 @@ function summarizeItinerary(result: unknown): Record<string, unknown> {
     dayCount: days.length,
     ...(Number.isFinite(totalFinal) && totalFinal > 0 ? { totalCost: Math.round(totalFinal) } : {}),
     ...(highlights.length > 0 ? { highlights } : {}),
+    dataQuality: quality,
     displayNote:
+      qualityNote +
       "完整行程已生成，前端会自动展开行程卡（双面板规划界面）向用户展示全部明细，" +
       "且卡片会保留在回复中供用户随时回看。" +
       "请勿在回复中复述 JSON、逐条罗列行程或重复任何明细数据；" +
@@ -106,23 +231,36 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       // 图片/评论/视频已改为本地媒体库直读 + 后台离线回填，不再占用请求时间
       timeoutMs: 120_000,
     },
-    handler: async (input) => {
+    handler: async (input, execContext) => {
       const rawInput = typeof input.input === "string" ? input.input.trim() : "";
       if (!rawInput) {
         return { ok: false, error: "缺少必填参数 input：请描述出行需求，如「去成都玩5天，喜欢美食和古迹」" };
       }
+      // B3 偏好记忆：同目的地历史行程中用户表达过的偏好自动并入本次规划
+      // （用户没重说也生效；跨目的地偏好不强并，避免旧旅程标签污染新需求）
+      const explicitDest =
+        typeof input.destination === "string" && input.destination.trim() ? input.destination.trim() : undefined;
+      const userPrefs = Array.isArray(input.preferences)
+        ? input.preferences.filter((p): p is string => typeof p === "string")
+        : undefined;
+      const memoryPrefs = recallSameDestinationPreferenceLabels(explicitDest ?? rawInput, userPrefs ?? []);
+      const mergedPrefs = [...(userPrefs ?? []), ...memoryPrefs.filter((p) => !(userPrefs ?? []).includes(p))];
       try {
         const result = await travelPlanningService.generateItinerary({
           input: rawInput,
-          destination: typeof input.destination === "string" && input.destination.trim() ? input.destination.trim() : undefined,
+          // 进度流式：规划引擎各阶段经 travel-progress-bus 汇报，聊天侧按 sessionId 订阅下发
+          sessionId: execContext?.sessionId,
+          destination: explicitDest,
           days: typeof input.days === "number" && input.days > 0 ? input.days : undefined,
-          preferences: Array.isArray(input.preferences) ? input.preferences.filter((p): p is string => typeof p === "string") : undefined,
+          preferences: mergedPrefs.length > 0 ? mergedPrefs : undefined,
         });
+        const quality = typeof result.dataQuality === "string" ? result.dataQuality : "real";
         // 写入结构化行程数据桥：travel_itinerary 卡前端可直接消费，无需文本正则
         travelItineraryStore.set({
           toolName: "travel.plan-itinerary",
           ts: Date.now(),
           planId: String(result.id ?? ""),
+          dataQuality: quality,
           destination: result.destination,
           title: result.title,
           startDate: result.startDate ?? "",
@@ -132,39 +270,15 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           // 行程卡海报区文案：目的地一句话简介 + 出行随身物品叮嘱
           intro: result.travelInfo?.intro,
           packing: result.travelInfo?.packing,
-          days: (result.days ?? []).map((day) => ({
-            date: day.date ?? "",
-            items: (day.items ?? []).map((item) => ({
-              type: item.type,
-              name: item.name,
-              startTime: item.startTime ?? item.name,
-              latitude: item.latitude,
-              longitude: item.longitude,
-              address: item.address ?? "",
-              priceInfo: item.priceInfo ?? "",
-              description: item.description ?? "",
-              tips: item.tips,
-              images: item.images,
-              splatUrl: item.splatUrl,
-              reviews: item.reviews,
-              videos: item.videos,
-            })),
-          })),
+          days: mapDaysToStored(result.days),
           // 候选 POI 池：全量酒店/餐厅/景点摘要（含未排入日程的备选），前端地图一并展示
-          pois: (result.pois ?? []).map((p) => ({
-            id: p.id,
-            name: p.name,
-            type: p.type,
-            latitude: p.latitude,
-            longitude: p.longitude,
-            address: p.address,
-            rating: p.rating,
-          })),
+          pois: mapPoisToStored(result.pois),
         });
         // 冷层落盘：完整明细按 planId 持久化，供跨轮/跨重启的 travel.get-itinerary
         // 按需回查；LLM 上下文只留 summarizeItinerary 的极简回执
         travelPlanStore.save({
           planId: String(result.id ?? ""),
+          dataQuality: quality,
           destination: result.destination,
           title: result.title,
           startDate: result.startDate ?? "",
@@ -175,33 +289,25 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           preferences: Array.isArray(input.preferences)
             ? input.preferences.filter((p): p is string => typeof p === "string")
             : undefined,
+          // 卡片海报区文案与候选 POI 池：冷层补齐后，planId 直读建卡（A4）不缺数据
+          intro: result.travelInfo?.intro,
+          packing: result.travelInfo?.packing,
+          pois: mapPoisToStored(result.pois),
           totalCost: (result as { pricingSummary?: { totalFinal?: number } }).pricingSummary
             ?.totalFinal,
-          days: (result.days ?? []).map((day) => ({
-            date: day.date ?? "",
-            items: (day.items ?? []).map((item) => ({
-              type: item.type,
-              name: item.name,
-              startTime: item.startTime ?? item.name,
-              latitude: item.latitude,
-              longitude: item.longitude,
-              address: item.address ?? "",
-              priceInfo: item.priceInfo ?? "",
-              description: item.description ?? "",
-              tips: item.tips,
-              images: item.images,
-              splatUrl: item.splatUrl,
-              reviews: item.reviews,
-              videos: item.videos,
-            })),
-          })),
+          days: mapDaysToStored(result.days),
         });
-        return summarizeItinerary(result);
+        // 乐观锁基准：规划回执带 version，模型后续编辑（edit-itinerary）凭它做冲突校验
+        const savedVersion = travelPlanStore.get(String(result.id ?? ""))?.version;
+        return {
+          ...summarizeItinerary(result),
+          ...(savedVersion != null ? { version: savedVersion } : {}),
+        };
       } catch (err) {
         return {
           ok: false,
           error: `行程规划失败：${err instanceof Error ? err.message : String(err)}`,
-          hint: "可换个表达方式描述目的地/天数/偏好后重试，或先用 travel.search-poi 确认目的地支持情况",
+          hint: "规划失败不会生成估算/占位行程（真实数据保证）。可稍后重试（多为网络波动），换个表达方式描述目的地，或先用 travel.search-poi 确认目的地支持情况",
         };
       }
     },
@@ -414,6 +520,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         startDate: plan.startDate,
         endDate: plan.endDate,
         dayCount: plan.days.length,
+        // 乐观锁基准：模型编辑（edit-itinerary 的 version 参数）以此为准
+        ...(plan.version != null ? { version: plan.version } : {}),
         ...(plan.totalCost != null ? { totalCost: plan.totalCost } : {}),
       };
 
@@ -430,25 +538,246 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         };
       }
 
-      // 概览：条目名级（不含描述/贴士/坐标），控制 token
+      // 概览：条目名级（不含描述/贴士/坐标），控制 token；index 供 edit-itinerary 定位
       return {
         ok: true,
         plan: overview,
-        days: plan.days.map((d) => ({
+        days: plan.days.map((d, dayIdx) => ({
+          day: dayIdx + 1,
           date: d.date,
-          items: d.items.map((it) => ({
+          items: d.items.map((it, itemIdx) => ({
+            index: itemIdx + 1,
             type: it.type,
             name: it.name,
             startTime: it.startTime,
             priceInfo: it.priceInfo,
           })),
         })),
-        hint: "需要某天完整明细（地址/贴士/坐标）时带上 day 参数再调",
+        hint: "day=天数（1 起），items[].index=条目序号（1 起）——两者即 travel.edit-itinerary 的定位参数。需要完整明细时带上 day 参数再调",
       };
     },
   };
 
-  return [plan_itinerary, search_poi, destination_info, compute_route, get_itinerary];
+  /** 6. 编辑行程（聊天式修改：添加/删除/替换/微调单条目） */
+  const edit_itinerary: SkillDefinition = {
+    metadata: {
+      name: "travel.edit-itinerary",
+      version: "1.1.0",
+      displayName: "编辑已有行程",
+      description:
+        "对已生成的行程做单条目修改，支持四种动作：" +
+        "add（添加条目，如「第二天帮我加个博物馆」「把这家餐厅加到晚餐」，按名称/关键词定位 POI 后插入并重排当天时间）、" +
+        "remove（删除条目，如「第二天太赶了去掉一个景点」）、" +
+        "replace（同类替换条目，可带意见，如「这个餐厅换成安静点的」，按坐标找同类替代并重新计价）、" +
+        "update（修改名称/时间/地址等字段）。" +
+        "定位参数 day/item 均从 1 起，可用 travel.get-itinerary 的 days[].day 与 items[].index。" +
+        "version 建议传上一次回执中的行程版本号：若行程刚被用户在面板上改过会返回冲突错误，此时应告知用户。" +
+        "用户要求改行程/换地点/删掉某项时调用；需要多处修改时逐次调用（每次一个动作）。",
+      kind: "builtin",
+      tags: ["travel", "行程", "编辑", "修改", "替换", "添加", "itinerary"],
+      icon: "✏️",
+      parameters: [
+        { name: "planId", type: "string", required: true, description: "行程 ID（回执中的 id 字段）" },
+        { name: "action", type: "string", required: true, enum: ["add", "remove", "replace", "update"], description: "动作：add=添加 / remove=删除 / replace=同类替换 / update=修改字段" },
+        { name: "day", type: "number", required: true, description: "天序号（1 起，对应 get-itinerary 的 day）" },
+        { name: "item", type: "number", required: false, description: "条目序号（1 起，add 不需要；其余动作为必填，对应 get-itinerary 的 items[].index）" },
+        { name: "type", type: "string", required: false, enum: ["attraction", "hotel", "restaurant"], description: "add 时的条目类型（景点/酒店/餐厅）" },
+        { name: "name", type: "string", required: false, description: "add 时的地点名称或关键词（如「博物馆」「海底捞」），引擎自动定位 POI" },
+        { name: "version", type: "number", required: false, description: "乐观锁版本号：传本次会话中见到的行程 version（规划/get-itinerary/编辑回执均返回），不一致时返回冲突错误" },
+        { name: "comment", type: "string", required: false, description: "replace 时的替换意见（如「想要海景」「安静一点」）" },
+        { name: "patch", type: "object", required: false, description: "update 时的字段补丁 {name?,startTime?,address?,priceInfo?,description?}" },
+      ],
+      outputSchema: {
+        ok: "是否成功",
+        planId: "行程 ID",
+        action: "执行的动作",
+        edited: "被修改条目的摘要 {name,startTime,priceInfo}",
+        added: "add 时的新条目摘要",
+        replacement: "replace 时的新条目摘要",
+        version: "保存后的最新版本号（下次编辑带上）",
+        dayCount: "修改后总天数",
+        dayScheduleNote: "重排后当天偏晚时的提示（可选）",
+        hint: "展示提示",
+      },
+      permissions: ["network:external"],
+      timeoutMs: 60_000,
+    },
+    handler: async (input) => {
+      const planId = typeof input.planId === "string" ? input.planId.trim() : "";
+      const action = typeof input.action === "string" ? input.action.trim() : "";
+      const dayIdx = typeof input.day === "number" && input.day > 0 ? Math.floor(input.day) - 1 : -1;
+      const itemIdx = typeof input.item === "number" && input.item > 0 ? Math.floor(input.item) - 1 : -1;
+      if (!planId || !action) {
+        return { ok: false, error: "缺少必填参数 planId / action" };
+      }
+      if (!["add", "remove", "replace", "update"].includes(action)) {
+        return { ok: false, error: `未知动作：${action}（支持 add/remove/replace/update）` };
+      }
+      const plan = travelPlanStore.get(planId);
+      if (!plan) {
+        return { ok: false, error: `行程不存在：${planId}`, hint: "可用 travel.get-itinerary 不带参数列出最近行程" };
+      }
+      // 乐观锁（A6）：模型带上它会话中见到的版本号，与面板编辑互斥——
+      // 版本不一致说明行程刚被用户改过，拒绝覆盖并让模型转告用户
+      const expectVersion = typeof input.version === "number" ? Math.floor(input.version) : undefined;
+      if (expectVersion != null && plan.version != null && plan.version !== expectVersion) {
+        return {
+          ok: false,
+          conflict: true,
+          error: `行程版本冲突：当前版本 ${plan.version}，你基于版本 ${expectVersion} 编辑——行程可能刚被用户在行程面板上修改过。请先告知用户存在修改，再决定是否重新编辑（可先用 travel.get-itinerary 读取最新内容）`,
+          currentVersion: plan.version,
+        };
+      }
+      const day = plan.days[dayIdx];
+      if (!day && action !== "add") {
+        return { ok: false, error: `定位失败：行程只有 ${plan.days.length} 天，没有第 ${dayIdx + 1} 天` };
+      }
+      if (action === "add") {
+        if (!day) {
+          return { ok: false, error: `定位失败：行程只有 ${plan.days.length} 天，没有第 ${dayIdx + 1} 天` };
+        }
+        const type = typeof input.type === "string" ? input.type.trim() : "";
+        if (!(["attraction", "hotel", "restaurant"] as const).includes(type as "attraction")) {
+          return { ok: false, error: "add 需要有效参数 type：attraction/hotel/restaurant" };
+        }
+        const nameOrKeyword = typeof input.name === "string" ? input.name.trim() : "";
+        if (!nameOrKeyword) {
+          return { ok: false, error: "add 需要有效参数 name：地点名称或关键词（如「博物馆」「海底捞」）" };
+        }
+        const poiType = type as "attraction" | "hotel" | "restaurant";
+        const typeLabel = poiType === "attraction" ? "景点" : poiType === "hotel" ? "酒店" : "餐厅";
+        let candidates: Awaited<ReturnType<typeof travelPlanningService.searchPois>> = [];
+        try {
+          candidates = await travelPlanningService.searchPois(plan.destination, poiType, nameOrKeyword, 5);
+        } catch (err) {
+          return { ok: false, error: `候选搜索失败：${err instanceof Error ? err.message : String(err)}` };
+        }
+        if (candidates.length === 0) {
+          return {
+            ok: false,
+            error: `「${plan.destination}」未找到匹配的${typeLabel}（关键词：${nameOrKeyword}）`,
+            hint: "可换个说法重试，或用 travel.search-poi 浏览候选列表",
+          };
+        }
+        const exact = candidates.find((c) => c.name.trim().toLowerCase() === nameOrKeyword.toLowerCase());
+        const poi = exact ?? candidates[0]!;
+        const quote = quoteByType(pricingService, poi.name, poi.tags || [], poiType, plan.destination);
+        day.items.push({
+          type: poiType,
+          name: poi.name,
+          // 占位时刻：局部重排会按新坐标与当天时钟重算（追加的餐厅按晚餐锚定）
+          startTime: "19:00",
+          latitude: poi.latitude,
+          longitude: poi.longitude,
+          address: poi.address || "",
+          priceInfo: formatQuotePriceInfo(quote),
+          description: travelPlanningService.describePoi(poi, poiType),
+        });
+        // 局部重排（P0）：新条目起的当天时间轴按真实坐标重算
+        await travelPlanningService.retimeDayAfterEdit(day.items, day.items.length - 1);
+        travelPlanStore.save(plan);
+        refreshItinerarySnapshot(plan);
+        const added = day.items[day.items.length - 1]!;
+        const dayEndMin = day.items.length > 0 ? Number(added.startTime.slice(0, 2)) * 60 + Number(added.startTime.slice(3, 5)) : 0;
+        return {
+          ok: true,
+          planId,
+          action,
+          added: { name: added.name, type: added.type, startTime: added.startTime, priceInfo: added.priceInfo },
+          ...(plan.version != null ? { version: plan.version } : {}),
+          dayCount: plan.days.length,
+          ...(dayEndMin > 22 * 60 ? { dayScheduleNote: "该天安排已到深夜，建议提醒用户考虑删减其他条目或换到其他天" } : {}),
+          displayNote:
+            "行程已添加并保存，前端行程卡数据已同步刷新。请勿复述条目 JSON；" +
+            "用一两句话告知用户加了什么（哪天、什么地点、大概排在几点）即可。",
+        };
+      }
+      const item = day?.items[itemIdx];
+      if (!item) {
+        return { ok: false, error: `定位失败：第 ${dayIdx + 1} 天没有第 ${itemIdx + 1} 个条目（该天共 ${day?.items.length ?? 0} 项）` };
+      }
+      const before = { name: item.name, startTime: item.startTime, priceInfo: item.priceInfo };
+
+      try {
+        if (action === "remove") {
+          day!.items.splice(itemIdx, 1);
+          // 局部重排（P0）：删除点之后的条目交通腿/时间按新相邻关系重算
+          if (day!.items.length > itemIdx) {
+            await travelPlanningService.retimeDayAfterEdit(day!.items, itemIdx);
+          }
+        } else if (action === "replace") {
+          const comment = typeof input.comment === "string" ? input.comment.trim() : "";
+          if (!(["attraction", "hotel", "restaurant"] as const).includes(item.type as "attraction")) {
+            return { ok: false, error: `该条目类型（${item.type}）不支持替换` };
+          }
+          const poi = await travelPlanningService.findAlternativePoi(
+            item.type as "attraction" | "hotel" | "restaurant",
+            item.latitude,
+            item.longitude,
+            item.name,
+            comment,
+          );
+          if (!poi) {
+            return { ok: false, error: "未找到可替换的同类地点（附近搜索无结果），可稍后重试或改用 update 直接修改" };
+          }
+          const type = item.type as "attraction" | "hotel" | "restaurant";
+          const quote = quoteByType(pricingService, poi.name, poi.tags || [], type, plan.destination);
+          day!.items[itemIdx] = {
+            ...item,
+            name: poi.name,
+            latitude: poi.latitude,
+            longitude: poi.longitude,
+            address: poi.address || item.address,
+            priceInfo: formatQuotePriceInfo(quote),
+            description: travelPlanningService.describePoi(poi, type),
+            images: poi.images && poi.images.length > 0 ? poi.images : [],
+            reviews: [],
+            videos: [],
+          };
+          // 局部重排（P0）：新坐标变了，被替换条目起的交通腿与时间全部按新位置重算
+          await travelPlanningService.retimeDayAfterEdit(day!.items, itemIdx);
+        } else {
+          // update：字段补丁（字段级白名单，与 HTTP itemPatchSchema 一致的子集）
+          const patch = (input.patch ?? {}) as Record<string, unknown>;
+          const allowed = ["name", "startTime", "address", "priceInfo", "description"] as const;
+          let applied = 0;
+          for (const key of allowed) {
+            const v = patch[key];
+            if (typeof v === "string" && v.trim()) {
+              (item as unknown as Record<string, unknown>)[key] = v.trim();
+              applied += 1;
+            }
+          }
+          if (applied === 0) {
+            return { ok: false, error: "update 需要至少一个有效字段：name/startTime/address/priceInfo/description" };
+          }
+        }
+
+        travelPlanStore.save(plan);
+        // 同步刷新结构化快照：同一会话随后再出 travel_itinerary 卡时拿到的是改后数据
+        refreshItinerarySnapshot(plan);
+        const afterItems = plan.days[dayIdx]!.items;
+        const editedItem =
+          action === "remove" ? before : (afterItems[Math.min(itemIdx, afterItems.length - 1)] ?? before);
+        return {
+          ok: true,
+          planId,
+          action,
+          edited: action === "remove" ? before : { name: editedItem.name, startTime: editedItem.startTime, priceInfo: editedItem.priceInfo },
+          ...(action === "replace" ? { replacement: { name: editedItem.name } } : {}),
+          ...(plan.version != null ? { version: plan.version } : {}),
+          dayCount: plan.days.length,
+          displayNote:
+            "行程已修改并保存，前端行程卡数据已同步刷新。请勿复述条目 JSON；" +
+            "用一两句话告知用户改了什么（哪天、哪个条目、换成了什么）即可。",
+        };
+      } catch (err) {
+        return { ok: false, error: `行程编辑失败：${err instanceof Error ? err.message : String(err)}` };
+      }
+    },
+  };
+
+  return [plan_itinerary, search_poi, destination_info, compute_route, get_itinerary, edit_itinerary];
 }
 
 /**

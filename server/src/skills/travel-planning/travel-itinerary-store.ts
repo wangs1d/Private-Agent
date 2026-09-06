@@ -12,6 +12,8 @@
  * formatter 通过 findForText 按卡片文本中的目的地名匹配对应快照，
  * 修复了旧版「只留一份、后写覆盖先写」导致的串卡问题。
  */
+import type { StoredDayItem } from "./travel-plan-store.js";
+
 export interface TravelItinerarySnapshot {
   /** 产生该行程的工具名（用于匹配 travel_itinerary 卡） */
   toolName: string;
@@ -19,6 +21,8 @@ export interface TravelItinerarySnapshot {
   ts: number;
   /** 行程 ID（travel-planning-service 生成，形如 plan-1788076649218；供前端面板调行程路由域编辑/预订/分享） */
   planId: string;
+  /** 数据可信度（real/knowledge/synthetic），前端据此展示数据来源角标 */
+  dataQuality?: string;
   destination: string;
   title: string;
   startDate: string;
@@ -31,24 +35,8 @@ export interface TravelItinerarySnapshot {
   packing?: string[];
   days: Array<{
     date: string;
-    items: Array<{
-      type: string;
-      name: string;
-      startTime: string;
-      latitude: number;
-      longitude: number;
-      address: string;
-      priceInfo: string;
-      description: string;
-      tips?: string[];
-      images?: string[];
-      /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL（.ply/.splat/.ksplat，无则省略） */
-      splatUrl?: string;
-      /** 本地评论（媒体库，最新优先，前端行程面板直读） */
-      reviews?: unknown[];
-      /** 相关视频元数据（播放页跳转，不自托管） */
-      videos?: Array<Record<string, unknown>>;
-    }>;
+    /** 与 StoredTravelPlan 共用同一份条目结构（StoredDayItem） */
+    items: StoredDayItem[];
   }>;
   /**
    * 候选 POI 池（规划涉及的酒店/餐厅/景点全量摘要，含未排入日程的备选）。

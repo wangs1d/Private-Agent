@@ -91,7 +91,10 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = "搜索失败：$e";
+        // 404 = 行程已被清理/过期：引导用户重新生成，而非展示裸错误码
+        _error = e is TravelApiException && e.isNotFound
+            ? "行程已过期或不存在，请在对话中让 AI 重新生成行程"
+            : "搜索失败：$e";
         _loading = false;
       });
     }

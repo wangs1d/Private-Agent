@@ -99,8 +99,10 @@ class TravelBookingItem {
   bool checked;
 }
 
-/// 预订清单面板 —— 移植自 3D-Travel 的 booking-panel：
-/// 从行程提取酒店/门票/餐饮，勾选、删除、合计、已省金额，会员 + 平台价格设置。
+/// 费用清单面板 —— 移植自 3D-Travel 的 booking-panel，定位为「预算测算/报价单」：
+/// 从行程提取酒店/门票/餐饮逐项报价，勾选、删除、合计、已省金额，会员 + 平台价格设置。
+/// 注意：当前价格为估算/静态库报价（见服务端 pricing-service），不构成可下单的真实预订；
+/// 文案与图标避免「预订/下单」语义，防止用户误解。
 class TravelBookingSheet extends StatefulWidget {
   const TravelBookingSheet({
     super.key,
@@ -175,7 +177,9 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = "计价失败：$e";
+        _error = e is TravelApiException && e.isNotFound
+            ? "行程已过期或不存在，请在对话中让 AI 重新生成行程"
+            : "计价失败：$e";
         _loading = false;
       });
     }
@@ -209,7 +213,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                     Icon(Icons.receipt_long_outlined,
                         size: 18, color: TravelPalette.of(context).green),
                     SizedBox(width: 8),
-                    const Text("预订清单",
+                    const Text("费用清单",
                         style: TextStyle(
                             fontSize: 15, fontWeight: FontWeight.w700)),
                     const SizedBox(width: 8),
@@ -223,7 +227,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                       onPressed: _refresh,
                     ),
                     IconButton(
-                      tooltip: "会员/平台价格设置",
+                      tooltip: "会员/平台折扣设置（估算报价）",
                       icon: Icon(Icons.workspace_premium_outlined,
                           size: 18, color: TravelPalette.of(context).orange),
                       onPressed: _openPriceSettings,
@@ -253,7 +257,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                         : _items.isEmpty
                             ? Center(
                                 child: Text(
-                                  "行程里暂无可预订项目",
+                                  "行程里暂无可计价项目",
                                   style: TextStyle(
                                       fontSize: 12, color: cs.onSurfaceVariant),
                                 ))
