@@ -6,6 +6,11 @@ import { AgenticMemoryIngestService } from "./ingest.js";
 import { AgenticMemoryRetrievalService } from "./retrieval.js";
 import { AgenticMemoryLifecycleService } from "./memory-lifecycle.js";
 import { AgenticMemoryRecallCompressor } from "./recall-compressor.js";
+import {
+  MemoryReinforcementStore,
+  configureMemoryReinforcement,
+} from "./memory-reinforcement.js";
+import { isMemoryReinforcementEnabled } from "./env.js";
 
 export type AgenticMemoryRuntime = {
   memory: Memory;
@@ -33,7 +38,22 @@ export function getAgenticMemoryRuntime(): AgenticMemoryRuntime | null {
 
   try {
     const memory = new Memory(config);
-    const lifecycle = new AgenticMemoryLifecycleService(memory);
+
+    // 召回强化侧表（SQLite）：初始化失败仅降级（TTL 回退纯时间判据），不阻塞 runtime
+    let reinforcement: MemoryReinforcementStore | null = null;
+    if (isMemoryReinforcementEnabled()) {
+      try {
+        reinforcement = new MemoryReinforcementStore();
+      } catch (err) {
+        console.warn(
+          "[agentic-memory] reinforcement store init failed（降级）:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    configureMemoryReinforcement(reinforcement);
+
+    const lifecycle = new AgenticMemoryLifecycleService(memory, reinforcement);
     lifecycle.start();
 
     singleton = {
@@ -60,6 +80,10 @@ export { AgenticMemoryRetrievalService } from "./retrieval.js";
 export { AgenticMemoryLifecycleService } from "./memory-lifecycle.js";
 export { AgenticMemoryRecallCompressor } from "./recall-compressor.js";
 export {
+  AgenticMemoryFtsStore,
+  createMemoryFtsStoreIfEnabled,
+} from "./fts-store.js";
+export {
   getAgenticMemoryCollection,
   getAgenticMemoryDir,
   getAgenticMemoryTopK,
@@ -78,6 +102,9 @@ export interface AgenticMemoryComponents {
   provenance: import("./provenance.js").ProvenanceService | null;
   bridge: import("./memory-bridge-service.js").MemoryBridgeService | null;
   understandingStore: import("./user-understanding-store.js").UserUnderstandingStore | null;
+  factStore: import("./structured-fact-store.js").StructuredFactStore | null;
+  /** FTS 关键词第三路（混合检索 P0）；bridge 融合召回的 BM25 rank 来源 */
+  fts: import("./fts-store.js").AgenticMemoryFtsStore | null;
 }
 
 const components: AgenticMemoryComponents = {
@@ -86,6 +113,8 @@ const components: AgenticMemoryComponents = {
   provenance: null,
   bridge: null,
   understandingStore: null,
+  factStore: null,
+  fts: null,
 };
 
 export function registerMemoryComponents(part: Partial<AgenticMemoryComponents>): void {

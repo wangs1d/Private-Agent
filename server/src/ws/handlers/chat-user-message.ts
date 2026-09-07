@@ -49,6 +49,7 @@ import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker
 import { captionMediaCards, isImageCaptionEnabled } from "../../services/image-caption-service.js";
 import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
+import { buildReplyBlocks } from "../../services/reply-envelope.js";
 import {
   isOnlyTimestampFrames,
   stripAllTimestampFrameLines,
@@ -1132,6 +1133,12 @@ async function processBatchedMessage(
     finalText = processor.processAssistantText(finalText, {
       userText: batched.text,
       toolName: reply.toolName,
+      // 注册工具（weather/wallet/calendar…）的结构化回执直出卡：不依赖 LLM
+      // 把结果抄写成 markdown 列表（tool-card-registry，B 阶段）
+      toolResult:
+        toolResult?.ok && toolResult.result
+          ? (toolResult.result as Record<string, unknown>)
+          : undefined,
     });
     // 旅游行程确定性附卡：工具返回已瘦身，LLM 口头回复不再携带明细、也写不出
     // 能被切卡的逐日列表，卡片由代码直接从工具原始结果生成（autoOpen=true，
@@ -1288,6 +1295,12 @@ async function processBatchedMessage(
     // 命中（极端异步路径），这里二次清理避免内部格式透出到用户可见消息。
     finalText = stripDsmlToolCallMarkup(finalText);
 
+    // 回复信封（A 阶段）：finalText 里的卡片标记在服务端确定性拆成 blocks，
+    // 随 done 可选下发。text 仍是唯一事实源，blocks 是派生视图——旧客户端
+    // 忽略 blocks 照旧解析标记，新客户端优先 blocks（消除解析漂移/标记泄漏）。
+    // 含 v1 未支持标记（RENDER_AS/data_brief/video/summary）时返回 null，不下发。
+    const replyBlocks = buildReplyBlocks(finalText);
+
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantDone,
@@ -1302,6 +1315,8 @@ async function processBatchedMessage(
           // 交错渲染块：按正文顺序切好的「文字段+媒体组」，前端按序渲染
           // → 「一段文字介绍后放一组照片，再一段文字，再一组照片」。
           ...(renderBlocks.length > 0 ? { renderBlocks } : {}),
+          // 回复信封块：text+card 的结构化序列，前端优先按 blocks 渲染
+          ...(replyBlocks && replyBlocks.length > 0 ? { blocks: replyBlocks } : {}),
         },
       }),
     );

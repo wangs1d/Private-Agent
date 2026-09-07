@@ -20,6 +20,7 @@ import {
   applyProfilePatches,
   extractProfilePatches,
   syncPreferredToneInProfile,
+  truncateProfileForPrompt,
 } from "./profile-heuristics.js";
 import { UserProfileStore } from "./user-profile-store.js";
 import {
@@ -734,7 +735,8 @@ export class UserPersonalizationService {
     const profile = await this.store.read(actorId);
     const maxChars = Number.parseInt(process.env.AGENT_USER_PROFILE_PROMPT_MAX_CHARS ?? "3500", 10);
     const cap = Number.isFinite(maxChars) && maxChars > 400 ? maxChars : 3500;
-    const userProfile = profile.length > cap ? `…（较早内容已截断）\n${profile.slice(-cap)}` : profile;
+    // 结构感知截断：超长时先丢备注/兴趣等次要 section，绝不丢【基本信息】里的姓名/所在地
+    const userProfile = truncateProfileForPrompt(profile, cap);
     // 2026-09-06 瘦身：toneGuidance 只保留本轮长度控制 + 情绪语气（有显著情绪才多行）。
     // 删除：基础回复纪律（与【回复指南】基准行重复）、触达时段/渠道/行为倾向/事实摘要
     // （与回复风格无关或已有独立块）。风格基准单点在 prompt-assembler buildReplyStyleGuide。
@@ -859,14 +861,31 @@ export class UserPersonalizationService {
     void this.observeTurnAsync(actorId, userText, assistantText).catch(() => {});
   }
 
+  /**
+   * 是否由聚合器（UserProfileAggregator）承担 USER_PROFILE.md 的画像事实写入。
+   * 由 bootstrap 注入；为 true 时本服务不再走正则 patches 与周期性 LLM 整文件重写，
+   * 避免与聚合器的 LLM 结构化抽取互相覆盖（旧正则曾把「我叫什么？」的
+   * 疑问词"什么"写成称呼，污染画像）。
+   */
+  private profileWritesDelegatedToAggregator = false;
+
+  setProfileWritesDelegatedToAggregator(delegated: boolean): void {
+    this.profileWritesDelegatedToAggregator = delegated;
+  }
+
   private async observeTurnAsync(actorId: string, userText: string, assistantText: string): Promise<void> {
-    const patches = extractProfilePatches(userText);
-    let md = await this.store.read(actorId);
-    if (patches.length > 0) md = applyProfilePatches(md, patches);
+    const md = await this.store.read(actorId);
+    let nextMd = md;
+    if (!this.profileWritesDelegatedToAggregator) {
+      const patches = extractProfilePatches(userText);
+      if (patches.length > 0) nextMd = applyProfilePatches(nextMd, patches);
+    }
     let state = this.loadEmotionState(actorId);
-    md = syncPreferredToneInProfile(md, TONE_ZH[state.preferredTone]);
-    await this.store.write(actorId, md);
-    this.syncProfileKv(actorId, md);
+    nextMd = syncPreferredToneInProfile(nextMd, TONE_ZH[state.preferredTone]);
+    // 内容无变化则跳过文件写，缩小与聚合器（LLM 抽取）read-modify-write 的竞态窗口；
+    // KV 副本仍同步，保证 prompt 后备基底与最新画像一致。
+    if (nextMd !== md) await this.store.write(actorId, nextMd);
+    this.syncProfileKv(actorId, nextMd);
     this.updateFactStore(actorId, userText);
     this.learnFromAssistantStyle(actorId, assistantText);
 
@@ -924,8 +943,15 @@ export class UserPersonalizationService {
     }
 
     const everyN = profileLlmEveryNTurns();
-    if (everyN > 0 && state.turnCount > 0 && state.turnCount % everyN === 0) {
-      await this.refineProfileWithLlm(actorId, userText, md);
+    // 画像事实写入已交给聚合器的每轮 LLM 结构化抽取时，
+    // 不再做周期性 LLM 整文件重写（避免与增量抽取互相覆盖）。
+    if (
+      !this.profileWritesDelegatedToAggregator &&
+      everyN > 0 &&
+      state.turnCount > 0 &&
+      state.turnCount % everyN === 0
+    ) {
+      await this.refineProfileWithLlm(actorId, userText, nextMd);
     }
   }
 

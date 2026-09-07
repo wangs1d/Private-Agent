@@ -25,8 +25,11 @@ const CJK_RE = /[\u4e00-\u9fa5]/;
  * 分词（P2 关键修复）：中文无空格，纯空格切分会让整句中文成一个 token，
  * 词重叠/指纹对中文完全失效。含中文的 token 切 2-gram（bigram），英文子串按词保留；
  * 混合词拆出的单字符（如「记忆A」的 A）保留——它是序号/实体的区分信号。
+ *
+ * 导出：FTS 关键词第三路（fts-store）用同一分词器建索引与解析 query，
+ * 保证词法路与仲裁器 overlapFactor 的 token 粒度一致。
  */
-function tokenize(line: string): string[] {
+export function tokenize(line: string): string[] {
   const out: string[] = [];
   for (const token of normalizeMemoryLine(line).split(" ")) {
     if (!token) continue;

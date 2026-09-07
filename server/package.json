@@ -20,6 +20,7 @@
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "eval:recall": "tsx scripts/eval-memory-recall.ts",
     "eval:routing": "tsx scripts/eval-display-routing.ts",
+    "eval:reply-format": "tsx scripts/eval-reply-format.ts",
     "test:master-agent": "tsx test/master-agent.test.ts",
     "bench:ttft": "tsx scripts/bench-ttft.ts",
     "dev:runtime": "npm run predev:server && node ../scripts/dev-server-watch.mjs runtime",

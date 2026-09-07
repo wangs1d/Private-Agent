@@ -58,6 +58,11 @@ export type AgentPromptMemoryContext = {
    * 称呼不当真实事实转述）。
    */
   userUnderstanding?: string;
+  /**
+   * 结构化事实块（用户档案字段的确定性记录：称呼/职业/居住地/技术栈…）。
+   * KV 式精确记录，确定性高于语义检索来源；同字段新值实时覆盖旧值。
+   */
+  userFacts?: string;
   memorySummary?: string;
   memoryPreferences?: string;
   memoryFacts?: string;

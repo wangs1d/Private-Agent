@@ -5,17 +5,28 @@
  * commitment-extractor（承诺识别）——最多 3 次调用，且前两次的输入高度重叠。
  * 本模块合并为**一次调用**，同时产出：
  *   - decision：写入决策（remember/decay/reject，替代 decideMemoryWrite）
+ *   - scores：五维重要性评分（持久性/频率/情感强度/影响范围/确定性）——代码侧
+ *     加权合成综合分并按阈值闸门裁决，无用的消息（低持久+低影响的日常琐事）
+ *     不会被植入长期记忆（防 LLM 单一直觉分手松，见 applyPromotionGate）
  *   - memories：独立可召回的陈述条目（替代 Mem0 infer，落库走 infer:false）
  *   - commitments：承诺识别（含 category，替代 commitment-extractor）
  *   - corrections：用户纠正（"不对，是周二"→ oldClaim/newClaim，驱动账本
  *     supersession + 溯源级联作废，见 bootstrap 钩子）
+ *   - understandings：对话理解（理解档案 topic 级 upsert）
+ *   - facts：结构化事实（事实库字段级 latest-wins upsert，实时更新用户档案）
  *
  * 失败/无 key 返回 null → 调用方整体回退旧三段路径（渐进降级，不阻塞写入）。
  */
 
 import OpenAI from "openai";
 
-import { getAgenticMemoryLlmModel, resolveOpenAiApiKey } from "./env.js";
+import {
+  getAgenticMemoryLlmModel,
+  getMemoryPersistenceFloor,
+  getMemoryPromoteThreshold,
+  getMemoryUselessThreshold,
+  resolveOpenAiApiKey,
+} from "./env.js";
 import type { ExtractedCommitment } from "./commitment-board.js";
 
 export interface UnifiedCorrection {
@@ -37,15 +48,58 @@ export interface UnifiedUnderstanding {
   confidence?: number;
 }
 
+/**
+ * 结构化事实条目（结构化事实库入参）：用户关于自身的**字面为真**的确定性
+ * 字段值（称呼/职业/居住地/技术栈…）。与 understandings 的分工：玩笑/粉丝式
+ * 称呼/比喻只进 understandings（kind≠literal），绝不进 facts；疑问不算事实。
+ * 同字段再次出现时由事实库按 latest-wins 覆盖（搬家/换工作天然更新）。
+ */
+export interface UnifiedFact {
+  /** 短字段名（用户档案字段，如：称呼|职业|居住地|技术栈|生日） */
+  field: string;
+  /** 确定性短值（"张三"/"全栈开发"/"杭州"） */
+  value: string;
+  confidence?: number;
+}
+
+/**
+ * 五维重要性评分（植入裁决「评分」步，2026-09-07）：LLM 对候选逐维打 0-1 分，
+ * 代码侧加权合成综合分并按阈值闸门裁决是否植入长期库——不信任单一直觉分，
+ * 确保无用的消息（低持久+低影响的日常琐事）不会被植入长期记忆。
+ */
+export interface UnifiedScoreDimensions {
+  /** 持久性：信息是否长期有效（"用户是全栈开发"≈0.9；"今天天气好"≈0.1） */
+  persistence: number;
+  /** 频率：是否反复出现（多次提到的技术栈/习惯≈0.8；首次随口一提≈0.2） */
+  frequency: number;
+  /** 情感强度：用户是否强烈表达（"我非常讨厌X"≈0.9；中性陈述≈0.3） */
+  emotion: number;
+  /** 影响范围：影响多少未来决策/回答（"项目用React"≈0.8；"我喝了咖啡"≈0.1） */
+  impact: number;
+  /** 确定性：明确陈述还是随口一说（明确陈述≈0.9；猜测/听说/可能≈0.2） */
+  certainty: number;
+}
+
 export interface UnifiedExtraction {
   decision: "remember" | "decay" | "reject";
   semanticClass?: string;
+  /**
+   * 连续重要性分（0-1）：记忆值得长期保留的程度。补齐"只有 highSignal 布尔、
+   * 没有连续分数"的缺口——落库进 metadata.importance，检索按分数加权、
+   * TTL 按分数豁免（见 retrieval.ts / memory-lifecycle.ts）。缺省由 decision 推导。
+   * 五维分存在时代码按加权重算（不采信 LLM 自报值）。
+   */
+  importance?: number;
+  /** 五维评分（LLM 缺失任一维则整体缺省，回退旧单分行为） */
+  scores?: UnifiedScoreDimensions;
   /** 独立、自包含、可长期召回的陈述条目（第三人称、保留语气/性质/语境） */
   memories: string[];
   commitments: ExtractedCommitment[];
   corrections: UnifiedCorrection[];
   /** 对话理解（理解档案 topic 级 upsert + 演变历史） */
   understandings: UnifiedUnderstanding[];
+  /** 结构化事实（事实库字段级 latest-wins upsert，实时生效） */
+  facts: UnifiedFact[];
 }
 
 export function isMemoryUnifiedExtractEnabled(): boolean {
@@ -57,7 +111,14 @@ export function isMemoryUnifiedExtractEnabled(): boolean {
 const SYSTEM_PROMPT = [
   "你是记忆理解处理器，一次完成四件事，输出严格 JSON（不要任何其他文字）：",
   "{",
-  '"decision":"remember|decay|reject",  // remember=值得长期记住；decay=临时上下文；reject=无价值/重复/敏感',
+  '"decision":"remember|decay|reject",  // remember=值得长期记住；decay=临时上下文（近期有用、过期即弃）；reject=无价值/寒暄/日常琐事/重复/敏感',
+  '"scores":{"persistence":0到1,"frequency":0到1,"emotion":0到1,"impact":0到1,"certainty":0到1},  // 五维重要性评分，逐维独立打分：',
+  "  // persistence 持久性=信息是否长期有效：「用户是全栈开发」≈0.9，「今天天气好」≈0.1；",
+  "  // frequency 频率=是否反复出现：多次提到的技术栈/习惯≈0.8，首次随口一提≈0.2；",
+  "  // emotion 情感强度=用户是否强烈表达：「我非常讨厌X」≈0.9，中性陈述≈0.3；",
+  "  // impact 影响范围=会影响多少未来决策/回答：「项目用React」≈0.8，「我喝了咖啡」≈0.1；",
+  "  // certainty 确定性=明确陈述还是随口一说：明确陈述≈0.9，猜测/听说/可能/大概≈0.2",
+  '"importance":0到1,  // 你的综合判断（系统会按五维加权重算，并据阈值裁决是否值得植入长期库）',
   '"semanticClass":"事实|偏好|计划|承诺|人物|事件|其他",',
   '"memories":["你对这段对话的理解记录（第三人称、自包含、可长期召回；无则空数组）"],',
   "  // memories 必须保留语气与性质（玩笑/粉丝式称呼/比喻/正式），不要剥掉语境输出字面断言：",
@@ -69,10 +130,19 @@ const SYSTEM_PROMPT = [
   "  // note 必须写明「粉丝式称呼，并非真实关系」——除非用户明确表示是真实关系；",
   "  // 玩笑/调侃 kind=joke；比喻夸张 kind=figurative；改口/更正 kind=correction（note 写明从什么改成什么）；",
   "  // 字面陈述（我叫X/我住在X）kind=literal",
+  '"facts":[{"field":"档案字段名","value":"确定值","confidence":0到1}]',
+  "  // 用户关于自身的字面为真的确定性字段，只收字面陈述（我叫X→称呼:X；我住在X→居住地:X；",
+  "  // 我是做后端的→职业:后端开发；我用 TS 和 Python→技术栈:TS/Python）。",
+  "  // 疑问、玩笑、粉丝式称呼、比喻、假设一律不进 facts（那些只进 understandings）；",
+  "  // 拿不准是不是字面为真就不输出。用户更正旧信息时 facts 输出新值（字段级覆盖由系统完成）。",
+  "  // field 用短字段名（称呼|职业|居住地|技术栈|生日|公司|学历 或其他 ≤6 字字段）；value 是确定短值（≤20 字）",
   '"commitments":[{"text":"承诺内容（第三人称）","committedBy":"user|agent|third_party","deadline":"ISO 8601 或 null","confidence":0到1,"evidence":"原文片段","category":"报价|交付|会面|转账|其他"}],',
   '"corrections":[{"oldClaim":"被纠正的旧陈述","newClaim":"纠正后的新陈述"}]  // 用户明确否认/更正既有信息时才有',
   "}",
   "规则：memories 合并重复信息、拒绝寒暄；",
+  "裁决基准：持久性与影响范围双低的日常琐事（天气、吃了什么、喝了咖啡、",
+  "寒暄问候、今天的心情）必须 reject，绝不允许 remember；今天的安排/临时",
+  "事项 decay；只有长期有效且影响未来回答的信息才 remember；",
   "承诺只收真正的承诺（排除意愿/假设/客套）；对话中转述的第三方承诺",
   "（如「老板说下周三前交付」「他说周五前发货」）也是承诺，committedBy=third_party；",
   "deadline 的相对时间（明天/周五/下周三/晚上8点）必须结合输入给出的当前时间",
@@ -84,10 +154,13 @@ const SYSTEM_PROMPT = [
 interface RawUnified {
   decision?: unknown;
   semanticClass?: unknown;
+  importance?: unknown;
+  scores?: unknown;
   memories?: unknown;
   commitments?: unknown;
   corrections?: unknown;
   understandings?: unknown;
+  facts?: unknown;
 }
 
 function asStringArray(raw: unknown): string[] {
@@ -183,14 +256,101 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
         .slice(0, 6)
     : [];
 
-  return {
+  const facts = Array.isArray(raw.facts)
+    ? (raw.facts as Array<Record<string, unknown>>)
+        .map((f) => {
+          const field = typeof f.field === "string" ? f.field.trim() : "";
+          const value = typeof f.value === "string" ? f.value.trim() : "";
+          if (!field || !value) return null;
+          const conf = Number(f.confidence);
+          return {
+            field,
+            value,
+            ...(Number.isFinite(conf) ? { confidence: Math.max(0, Math.min(1, conf)) } : {}),
+          } as UnifiedFact;
+        })
+        .filter((f): f is UnifiedFact => f !== null)
+        .slice(0, 6)
+    : [];
+
+  const scores = parseScores(raw.scores);
+  return applyPromotionGate({
     decision,
     ...(typeof raw.semanticClass === "string" ? { semanticClass: raw.semanticClass } : {}),
+    importance: clampImportance(raw.importance, decision),
+    ...(scores ? { scores } : {}),
     memories: decision === "reject" ? [] : asStringArray(raw.memories),
     commitments,
     corrections,
     understandings,
-  };
+    facts,
+  });
+}
+
+/** 五维权重：持久性 > 影响范围 > 确定性 > 情感强度 > 频率（频率在单段文本里最不可观测） */
+const SCORE_WEIGHTS: Array<{ key: keyof UnifiedScoreDimensions; weight: number }> = [
+  { key: "persistence", weight: 0.3 },
+  { key: "impact", weight: 0.25 },
+  { key: "certainty", weight: 0.2 },
+  { key: "emotion", weight: 0.15 },
+  { key: "frequency", weight: 0.1 },
+];
+
+/** 五维加权综合分（0-1）——植入裁决与落库 importance 的唯一依据 */
+export function compositeImportance(scores: UnifiedScoreDimensions): number {
+  let total = 0;
+  for (const { key, weight } of SCORE_WEIGHTS) {
+    total += scores[key] * weight;
+  }
+  return Math.max(0, Math.min(1, total));
+}
+
+/** 解析五维分：任一维缺失/非法即视为整体缺失（回退旧的单分行为，兼容旧输出） */
+function parseScores(raw: unknown): UnifiedScoreDimensions | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+  const out: Partial<UnifiedScoreDimensions> = {};
+  for (const { key } of SCORE_WEIGHTS) {
+    const num = Number(obj[key]);
+    if (!Number.isFinite(num)) return null;
+    out[key] = Math.max(0, Math.min(1, num));
+  }
+  return out as UnifiedScoreDimensions;
+}
+
+/**
+ * 植入闸门（确定性代码裁决，防 LLM 手松把无用消息写进长期库）：
+ *   - remember：综合分 < 无用线 → reject（连短期缓冲都不进）；
+ *     综合分 < 植入线 或 持久性 < 下限 → decay（转瞬即逝的内容最多临时保留）；
+ *   - decay：综合分 < 无用线 → reject（纯噪声不落库）；
+ *   - reject：维持原判（敏感/重复不因高分翻案），仅把分数校准为综合分。
+ * 无五维分（旧模型输出/旧测试夹具）时原样返回，行为与旧版完全一致。
+ */
+function applyPromotionGate(e: UnifiedExtraction): UnifiedExtraction {
+  if (!e.scores) return e;
+  const composite = compositeImportance(e.scores);
+  const useless = getMemoryUselessThreshold();
+  if (e.decision === "reject") return { ...e, importance: composite };
+  if (composite < useless) {
+    return { ...e, decision: "reject", importance: composite, memories: [] };
+  }
+  if (e.decision === "remember") {
+    const durableEnough =
+      composite >= getMemoryPromoteThreshold() &&
+      e.scores.persistence >= getMemoryPersistenceFloor();
+    if (!durableEnough) return { ...e, decision: "decay", importance: composite };
+  }
+  return { ...e, importance: composite };
+}
+
+/**
+ * importance 归一：LLM 缺失/非法时按 decision 推导缺省分
+ * （remember=0.7 / decay=0.3），保证落库分数连续可比。
+ */
+function clampImportance(raw: unknown, decision: "remember" | "decay" | "reject"): number {
+  const num = Number(raw);
+  if (Number.isFinite(num)) return Math.max(0, Math.min(1, num));
+  return decision === "remember" ? 0.7 : 0.3;
 }
 
 /** 最小 LLM 客户端外观（测试注入 fake；生产传 OpenAI 实例） */

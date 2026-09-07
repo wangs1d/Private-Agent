@@ -141,3 +141,47 @@ export function syncPreferredToneInProfile(md: string, toneLabel: string): strin
     replaceBulletPrefix(body, "语气风格：", `语气风格：${toneLabel}（系统会根据对话自动调整）`),
   );
 }
+
+/**
+ * 结构感知截断：画像超长时按 section 重要性整块裁剪，而不是尾部 slice
+ * （尾部 slice 会先丢掉文件头部的「基本信息」——姓名/所在地恰恰在最前）。
+ * 保留优先级：文件头 + 基本信息 > 沟通偏好 > 兴趣与习惯 > 备注。
+ * 即超长时先丢「备注」，再丢「兴趣与习惯」，再丢「沟通偏好」；
+ * 「基本信息」与文件头（标题+引用块）永不裁剪。
+ */
+const TRUNCATE_DROP_ORDER = ["## 备注", "## 兴趣与习惯", "## 沟通偏好"] as const;
+
+export function truncateProfileForPrompt(md: string, maxChars: number): string {
+  if (md.length <= maxChars) return md;
+
+  // 拆成 header（第一个 ## 之前）+ 各 section 块（含标题行到下一个 ## 之前）
+  const firstHeading = md.search(/^## /m);
+  if (firstHeading < 0) return `…（画像过长已截断）\n${md.slice(0, maxChars)}`;
+  const header = md.slice(0, firstHeading);
+  const marks: number[] = [];
+  const re = /^## .*$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md)) !== null) marks.push(m.index);
+  const blocks: Array<{ heading: string; text: string }> = [];
+  for (let i = 0; i < marks.length; i++) {
+    const end = i + 1 < marks.length ? marks[i + 1] : md.length;
+    const text = md.slice(marks[i], end);
+    blocks.push({ heading: text.split("\n")[0].trim(), text });
+  }
+
+  const render = (kept: Array<{ heading: string; text: string }>) =>
+    header + kept.map((b) => b.text).join("");
+
+  // 按丢弃顺序逐块移除，一旦装得下即停；基本信息始终保留
+  let kept = blocks;
+  for (const drop of TRUNCATE_DROP_ORDER) {
+    if (render(kept).length <= maxChars) return render(kept);
+    kept = kept.filter((b) => b.heading !== drop);
+  }
+  const result = render(kept);
+  if (result.length <= maxChars) return result;
+  // 仅剩 header + 基本信息仍超长（极端情况）：丢文件头（只是时间戳引用块），保基本信息
+  const basicIdx = result.search(/^## /m);
+  const body = basicIdx >= 0 ? result.slice(basicIdx) : result;
+  return `…（画像过长已截断）\n${body.slice(0, maxChars)}`;
+}

@@ -3,6 +3,7 @@
  *
  * 覆盖：
  *   1. 统一抽取器纯函数（P1-6）：JSON 剥壳 / 决策校验 / 承诺+纠正规范化
+ *      / 五维评分植入闸门（无用消息 reject、临时内容 decay）
  *   2. ledger FTS5 检索 + 保留策略 + purgeActor（P1-10 / P0-2）
  *   3. bridge 删除调和 / 删除失败封顶 / 存量回填 / purgeActor（P0-3 / P2-15 / P0-2）
  *   4. board 升级退避表 / 类别维度经验学习 / statsByStatus（P2-14 / P2-13）
@@ -74,6 +75,89 @@ test("normalizeUnified：决策校验 / 承诺规范化 / 纠正项 / 无效决�
 
   assert.equal(normalizeUnified({ decision: "maybe" }), null);
   assert.equal(normalizeUnified({ decision: "reject", memories: ["不应带出"] })!.memories.length, 0);
+});
+
+// ── 五维评分植入闸门（持久性/频率/情感强度/影响范围/确定性 → 加权综合分裁决） ──
+
+test("评分闸门：无用消息（低持久+低影响）即使 LLM 误标 remember 也被 reject", () => {
+  const gated = normalizeUnified({
+    decision: "remember",
+    semanticClass: "事件",
+    memories: ["用户说今天天气很好"],
+    scores: { persistence: 0.05, frequency: 0.1, emotion: 0.3, impact: 0.05, certainty: 0.8 },
+  });
+  assert.ok(gated);
+  assert.equal(gated.decision, "reject");
+  assert.equal(gated.memories.length, 0, "无用消息不携带 memories 落库");
+  // 综合分 = 0.3*0.05+0.25*0.05+0.2*0.8+0.15*0.3+0.1*0.1 ≈ 0.24 < 无用线 0.3
+  assert.ok(gated.importance !== undefined && gated.importance < 0.3);
+});
+
+test("评分闸门：转瞬即逝（高情感低持久）remember 降级 decay", () => {
+  const gated = normalizeUnified({
+    decision: "remember",
+    memories: ["用户今天特别开心"],
+    scores: { persistence: 0.1, frequency: 0.1, emotion: 0.9, impact: 0.2, certainty: 0.8 },
+  });
+  assert.ok(gated);
+  assert.equal(gated.decision, "decay", "今天的心情无论多强烈都不植入长期库");
+});
+
+test("评分闸门：中间带（临时安排）remember 降级 decay", () => {
+  const gated = normalizeUnified({
+    decision: "remember",
+    memories: ["用户明天下午三点开会"],
+    scores: { persistence: 0.2, frequency: 0.2, emotion: 0.3, impact: 0.5, certainty: 0.9 },
+  });
+  assert.ok(gated);
+  assert.equal(gated.decision, "decay");
+});
+
+test("评分闸门：达标的长期事实保持 remember，importance 取五维综合分而非 LLM 自报值", () => {
+  const gated = normalizeUnified({
+    decision: "remember",
+    memories: ["用户是全栈开发，项目用 React"],
+    importance: 0.99,
+    scores: { persistence: 0.9, frequency: 0.6, emotion: 0.3, impact: 0.8, certainty: 0.9 },
+  });
+  assert.ok(gated);
+  assert.equal(gated.decision, "remember");
+  // 综合分 = 0.3*0.9+0.25*0.8+0.2*0.9+0.15*0.3+0.1*0.6 = 0.755
+  assert.ok(gated.importance !== undefined && Math.abs(gated.importance - 0.755) < 0.005);
+});
+
+test("评分闸门：decay 候选综合分低于无用线升级 reject（纯噪声不落库）", () => {
+  const gated = normalizeUnified({
+    decision: "decay",
+    memories: ["用户打了个招呼"],
+    scores: { persistence: 0.05, frequency: 0.1, emotion: 0.2, impact: 0.05, certainty: 0.7 },
+  });
+  assert.ok(gated);
+  assert.equal(gated.decision, "reject");
+  assert.equal(gated.memories.length, 0);
+});
+
+test("评分闸门：reject 不因高分翻案（敏感/重复维持拒存），仅校准分数", () => {
+  const gated = normalizeUnified({
+    decision: "reject",
+    memories: [],
+    scores: { persistence: 0.9, frequency: 0.8, emotion: 0.7, impact: 0.9, certainty: 0.9 },
+  });
+  assert.ok(gated);
+  assert.equal(gated.decision, "reject");
+});
+
+test("评分闸门：五维缺任一维视为整体缺失，回退旧单分行为", () => {
+  const partial = normalizeUnified({
+    decision: "remember",
+    memories: ["用户喜欢喝拿铁"],
+    importance: 0.6,
+    scores: { persistence: 0.8, frequency: 0.5, emotion: 0.3, impact: 0.9 },
+  });
+  assert.ok(partial);
+  assert.equal(partial.decision, "remember");
+  assert.equal(partial.importance, 0.6);
+  assert.equal(partial.scores, undefined);
 });
 
 // ============================================================

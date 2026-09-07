@@ -3,6 +3,8 @@ import { getNightlyMemoryTaskService } from "../../services/nightly-memory-task-
 import { getDailyChatSyncService } from "../../services/daily-chat-sync-service.js";
 import type { ChatSyncRecord } from "../../services/daily-chat-sync-service.js";
 import { getHumanLikeMemoryService } from "../../services/human-like-memory-service.js";
+import { getAgenticMemoryRuntime } from "../../agentic-memory/index.js";
+import { getMemoryConsolidationService } from "../../services/memory-consolidation-service.js";
 
 export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
   app.get("/api/nightly-memory/status", async (_request, reply) => {
@@ -182,5 +184,51 @@ export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
 
     const actorId = request.query.actorId;
     return syncService.getSyncStatus(actorId);
+  });
+
+  // ─── 记忆管理层手动触发（lifecycle 巡检 / 统一写入者固化） ───
+
+  app.post("/api/memory/lifecycle/run", async (_request, reply) => {
+    const runtime = getAgenticMemoryRuntime();
+    if (!runtime) {
+      return reply.status(503).send({
+        error: "Agentic memory runtime not initialized",
+        success: false,
+      });
+    }
+    try {
+      const result = await runtime.lifecycle.runCycle();
+      return { success: true, result, triggeredAt: new Date().toISOString() };
+    } catch (err) {
+      return reply.status(500).send({
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post("/api/memory/consolidation/flush", async (_request, reply) => {
+    const service = getMemoryConsolidationService();
+    if (!service) {
+      return reply.status(503).send({
+        error: "Memory consolidation service not initialized",
+        success: false,
+      });
+    }
+    const pendingBefore = service.pendingCount();
+    try {
+      await service.flushAll();
+      return {
+        success: true,
+        pendingBefore,
+        pendingAfter: service.pendingCount(),
+        triggeredAt: new Date().toISOString(),
+      };
+    } catch (err) {
+      return reply.status(500).send({
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 }

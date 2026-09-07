@@ -5,8 +5,6 @@ import {
   resolveOpenAiApiKey,
   getAgenticMemoryLlmModel,
   getCommitmentExtractScope,
-  getLowSignalBufferMaxItems,
-  getLowSignalBufferMaxChars,
 } from "./env.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 import { isEphemeralActorId, warnEphemeralActorMemoryBlocked } from "../agent/actor-id.js";
@@ -17,15 +15,6 @@ import {
   type UnifiedUnderstanding,
   type UnifiedLlmClient,
 } from "./unified-extractor.js";
-
-interface BufferEntry {
-  actorId: string;
-  sourceId: string;
-  text: string;
-  createdAt: number;
-  /** "main" 主会话 / "notes" 笔记学习会话；用于跨上下文过滤 */
-  context: "main" | "notes";
-}
 
 /** Mem0 add(infer:true) 抽取出的单条记忆 */
 export interface Mem0WrittenItem {
@@ -54,6 +43,8 @@ export interface Mem0WriteEvent {
   corrections?: import("./unified-extractor.js").UnifiedCorrection[];
   /** 统一抽取路径携带：对话理解（钩子走理解档案 topic 级 upsert + 演变历史） */
   understandings?: UnifiedUnderstanding[];
+  /** 统一抽取路径携带：结构化事实（钩子走事实库字段级 latest-wins upsert） */
+  facts?: import("./unified-extractor.js").UnifiedFact[];
 }
 
 export type Mem0WriteHook = (event: Mem0WriteEvent) => void;
@@ -79,9 +70,6 @@ function extractKeyLowSignalLines(text: string): string[] {
 }
 
 export class AgenticMemoryIngestService {
-  private lowSignalBuffer: Map<string, BufferEntry[]> = new Map();
-  private lowSignalTotalChars: Map<string, number> = new Map();
-  private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private lowSignalSink: LowSignalSink | null = null;
   private writeHooks: Mem0WriteHook[] = [];
   /** 统一抽取 LLM 客户端（测试注入 fake；生产为 null 走内部 OpenAI 构造） */
@@ -162,7 +150,8 @@ export class AgenticMemoryIngestService {
           if (
             orphan.commitments.length === 0 &&
             orphan.corrections.length === 0 &&
-            orphan.understandings.length === 0
+            orphan.understandings.length === 0 &&
+            orphan.facts.length === 0
           ) {
             return;
           }
@@ -176,6 +165,7 @@ export class AgenticMemoryIngestService {
             corrections: orphan.corrections.length > 0 ? orphan.corrections : undefined,
             understandings:
               orphan.understandings.length > 0 ? orphan.understandings : undefined,
+            facts: orphan.facts.length > 0 ? orphan.facts : undefined,
           });
         })
         .catch((err) =>
@@ -191,7 +181,13 @@ export class AgenticMemoryIngestService {
       return;
     }
 
-    this.bufferLowSignal(actorId, sourceId, t, context);
+    // 统一写入者未接管（AGENT_MEMORY_CONSOLIDATION_ENABLED=0 / 测试）：
+    // 原内置内存缓冲（10 条/8000 字/30s 定时摘要）已删除——与
+    // memory-consolidation-service 逐字重复的双轨遗留。降级为直写 Mem0
+    // （infer:true，decay 语义），由生命周期遗忘机制回收。
+    await this.writeDecidedDetailed(actorId, sourceId, t, context, false).catch((err) => {
+      console.error("[agentic-memory] 低信号直写失败（忽略）:", err);
+    });
   }
 
   private async ingestHighSignal(
@@ -222,14 +218,15 @@ export class AgenticMemoryIngestService {
     await this.writeDecidedDetailed(actorId, sourceId, body, context, true, {
       memoryDecision: decision.decision,
       memorySemanticClass: decision.semanticClass,
+      importance: decision.importance,
     });
   }
 
   /**
    * 统一抽取产物直存（所有 unified 路径共用的落库核心）：
    *   - memories 以 infer:false 直存（抽取已在 extractUnified 完成，Mem0 不再二次调 LLM）；
-   *   - 落库后 fire 钩子，携带 results + understandings + commitments + corrections——
-   *     bootstrap 钩子据此做账本落账 / 理解档案 upsert（含演变历史）/ 承诺落板 / 纠正级联；
+ *   - 落库后 fire 钩子，携带 results + understandings + commitments + corrections + facts——
+ *     bootstrap 钩子据此做账本落账 / 理解档案 upsert（含演变历史）/ 承诺落板 / 纠正级联 / 事实库更新；
    *   - decision=reject 时记忆不落库，但承诺/纠正/理解仍经钩子落地（P0-2 解耦语义）；
    *   - memories 为空且非 reject 时回退 fallbackText（高信号=原句；整合路径传截断后的合并文本）。
    * 供 ingestHighSignal 与 memory-consolidation-service（统一写入者）复用。
@@ -254,10 +251,11 @@ export class AgenticMemoryIngestService {
       extraction.commitments.length > 0 ? extraction.commitments : undefined;
     const corrections =
       extraction.corrections.length > 0 ? extraction.corrections : undefined;
+    const facts = extraction.facts.length > 0 ? extraction.facts : undefined;
 
     if (extraction.decision === "reject") {
-      // 被拒存：results 为空（账本不落 claim），但承诺/纠正/理解仍要落地
-      if (understandings || commitments || corrections) {
+      // 被拒存：results 为空（账本不落 claim），但承诺/纠正/理解/事实仍要落地
+      if (understandings || commitments || corrections || facts) {
         this.fireWriteHooks({
           actorId,
           sourceId,
@@ -267,6 +265,7 @@ export class AgenticMemoryIngestService {
           commitments,
           corrections,
           understandings,
+          facts,
         });
       }
       return [];
@@ -290,6 +289,8 @@ export class AgenticMemoryIngestService {
             context,
             highSignal,
             memoryDecision: extraction.decision,
+            // 连续重要性分（0-1）：检索加权与 TTL 豁免的依据（unified 缺省按 decision 推导）
+            importance: extraction.importance ?? (extraction.decision === "remember" ? 0.7 : 0.3),
             ...(extraction.semanticClass
               ? { memorySemanticClass: extraction.semanticClass }
               : {}),
@@ -307,8 +308,8 @@ export class AgenticMemoryIngestService {
         console.error("[agentic-memory] unified 直存失败（跳过该条）:", err);
       }
     }
-    // Mem0 全部写入失败但承诺/纠正/理解存在时也要触发钩子（不随存储失败丢失）
-    if (results.length > 0 || understandings || commitments || corrections) {
+    // Mem0 全部写入失败但承诺/纠正/理解/事实存在时也要触发钩子（不随存储失败丢失）
+    if (results.length > 0 || understandings || commitments || corrections || facts) {
       this.fireWriteHooks({
         actorId,
         sourceId,
@@ -318,6 +319,7 @@ export class AgenticMemoryIngestService {
         commitments,
         corrections,
         understandings,
+        facts,
       });
     }
     return results;
@@ -369,6 +371,9 @@ export class AgenticMemoryIngestService {
         context,
         highSignal,
         ...(highSignal ? { memoryDecision: "remember" } : { memoryDecision: "decay" }),
+        // 连续重要性分缺省（infer 路径无统一抽取分数）：高信号 0.7 / 低信号 0.3，
+        // 调用方可经 extraMetadata 覆盖（如 ingestHighSignal 回退路径带真实决策分）
+        importance: highSignal ? 0.7 : 0.3,
         ...extraMetadata,
       },
       infer: true,
@@ -379,165 +384,5 @@ export class AgenticMemoryIngestService {
       this.fireWriteHooks({ actorId, sourceId, context, highSignal, results });
     }
     return results;
-  }
-
-  private bufferLowSignal(
-    actorId: string,
-    sourceId: string,
-    body: string,
-    context: "main" | "notes",
-  ): void {
-    const trimmed = body.length > 12_000 ? `${body.slice(0, 12_000)}...` : body;
-
-    let entries = this.lowSignalBuffer.get(actorId);
-    if (!entries) {
-      entries = [];
-      this.lowSignalBuffer.set(actorId, entries);
-    }
-
-    entries.push({ actorId, sourceId, text: trimmed, createdAt: Date.now(), context });
-    const totalChars = (this.lowSignalTotalChars.get(actorId) ?? 0) + trimmed.length;
-    this.lowSignalTotalChars.set(actorId, totalChars);
-
-    const maxItems = getLowSignalBufferMaxItems();
-    const maxChars = getLowSignalBufferMaxChars();
-
-    if (entries.length >= maxItems || totalChars >= maxChars) {
-      void this.flushBuffer(actorId).catch((err) => {
-        console.error("[agentic-memory] flushBuffer failed (check embedding config):", err);
-      });
-      return;
-    }
-
-    if (!this.flushTimer) {
-      this.flushTimer = setTimeout(() => this.periodicFlush(), 30_000);
-      this.flushTimer.unref();
-    }
-  }
-
-  private async flushBuffer(actorId: string): Promise<void> {
-    const entries = this.lowSignalBuffer.get(actorId);
-    if (!entries || entries.length === 0) return;
-
-    this.lowSignalBuffer.delete(actorId);
-    this.lowSignalTotalChars.delete(actorId);
-
-    try {
-      // 按 context 分桶：每桶独立成一段，方便后续按 context 检索
-      const grouped = new Map<"main" | "notes", BufferEntry[]>();
-      for (const e of entries) {
-        const key = e.context;
-        let arr = grouped.get(key);
-        if (!arr) {
-          arr = [];
-          grouped.set(key, arr);
-        }
-        arr.push(e);
-      }
-
-      for (const [context, ctxEntries] of grouped.entries()) {
-        const sorted = [...ctxEntries].sort((a, b) => a.createdAt - b.createdAt);
-        const combined = sorted
-          .map((entry) => `[${entry.sourceId}] ${entry.text}`)
-          .join("\n\n---\n\n");
-
-        if (combined.length < 20) continue;
-
-        const summarized = await this.summarizeLowSignal(combined);
-        // 摘要已是 LLM 产物，落库裁决不再二次调 LLM 复判——原路径一次 flush 最多
-        // 三次 LLM（摘要 + 决策复判 + Mem0 infer 抽取），中间这次收益最低。
-        const decision = await decideMemoryWrite(
-          summarized,
-          {
-            actorId,
-            source: "chat:low_signal_summary",
-            heuristicHint: "decay",
-          },
-          { allowLlm: false },
-        );
-
-        // reject 的摘要不落库；decay 保留（临时上下文仍可短期召回，由遗忘机制回收）
-        if (decision.decision === "reject") continue;
-
-        const body = summarized.length > 12_000 ? `${summarized.slice(0, 12_000)}...` : summarized;
-        await this.memory.add([{ role: "user", content: body }], {
-          userId: actorId,
-          metadata: {
-            source: "chat:low_signal_summary",
-            actorId,
-            context,
-            highSignal: decision.decision === "remember" || decision.decision === "overwrite",
-            memoryDecision: decision.decision,
-            memorySemanticClass: decision.semanticClass,
-          },
-          infer: true,
-        });
-      }
-    } catch (err) {
-      // 失败回灌：原实现先删 buffer 再写库，摘要/落库中途异常会静默丢失整批内容。
-      // 回灌到该 actor 的 buffer 头部（保持时间序），由下一次 flush 重试。
-      const existing = this.lowSignalBuffer.get(actorId) ?? [];
-      this.lowSignalBuffer.set(actorId, [...entries, ...existing]);
-      const retriedChars = entries.reduce((sum, e) => sum + e.text.length, 0);
-      this.lowSignalTotalChars.set(
-        actorId,
-        retriedChars + (this.lowSignalTotalChars.get(actorId) ?? 0),
-      );
-      console.error("[agentic-memory] flushBuffer 失败（内容已回灌待重试）:", err);
-    }
-  }
-
-  private async periodicFlush(): Promise<void> {
-    this.flushTimer = null;
-    const actorIds = [...this.lowSignalBuffer.keys()];
-    for (const actorId of actorIds) {
-      await this.flushBuffer(actorId).catch(() => {});
-    }
-  }
-
-  private async summarizeLowSignal(text: string): Promise<string> {
-    const apiKey = resolveOpenAiApiKey();
-    const keyLines = extractKeyLowSignalLines(text);
-    if (!apiKey) {
-      return [...keyLines, text.slice(0, 3000)].filter(Boolean).join("\n");
-    }
-
-    try {
-      const openai = new OpenAI({ apiKey });
-      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-        {
-          role: "system",
-          content:
-            "你是信息摘要器。把多轮低信号对话压缩成简洁中文摘要，保留关键事实、偏好、决定与待办，删除寒暄和无信息量内容。输出纯文本，500字内。",
-        },
-        { role: "user", content: text },
-      ];
-      const response = await openai.chat.completions.create({
-        model: getAgenticMemoryLlmModel(),
-        temperature: 0.3,
-        messages,
-      });
-      const summary = response.choices[0]?.message?.content?.trim() || text.slice(0, 3000);
-      // Token 审计：低信号批量摘要
-      const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
-      recordLlmUsageByChars({
-        stage: "memory_flush_summarize",
-        inputChars: JSON.stringify(messages).length,
-        outputChars: summary.length,
-        model: getAgenticMemoryLlmModel(),
-      });
-      return [...keyLines, summary].filter(Boolean).join("\n");
-    } catch {
-      return [...keyLines, text.slice(0, 3000)].filter(Boolean).join("\n");
-    }
-  }
-
-  async flushAll(): Promise<void> {
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = null;
-    }
-    const actorIds = [...this.lowSignalBuffer.keys()];
-    await Promise.all(actorIds.map((actorId) => this.flushBuffer(actorId).catch(() => {})));
   }
 }

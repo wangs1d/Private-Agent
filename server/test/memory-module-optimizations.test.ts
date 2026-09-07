@@ -3,7 +3,7 @@
  * - P1-1 RecallQueryExpander：指代消解补上下文实体、多意图拆分、普通查询不误扩展
  * - P1-3 隐式反馈检测：纠正/认同/换话题 → 正/负/弱负信号
  * - P2-1 MemoryInventory：目录统计、TTL 缓存、同步缓存读（prompt 注入路径）
- * - P0-1 UserProfileAggregator：强信号快速路径真实落盘 USER_PROFILE.md（幂等）
+ * - P0-1 UserProfileAggregator：结构化画像操作确定性落位 USER_PROFILE.md（幂等/校验/持久化队列）
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -14,7 +14,13 @@ import { join } from "node:path";
 import { expandRecallQuery } from "../src/brain/memory-query-expander.js";
 import { detectImplicitFeedback } from "../src/brain/memory-implicit-feedback.js";
 import { MemoryInventory } from "../src/brain/memory-inventory.js";
-import { UserProfileAggregator } from "../src/brain/user-profile-aggregator.js";
+import {
+  UserProfileAggregator,
+  applyProfileOps,
+  verifyProfileOps,
+  parseExtractOps,
+} from "../src/brain/user-profile-aggregator.js";
+import { truncateProfileForPrompt } from "../src/services/user-personalization/profile-heuristics.js";
 
 // ── P1-1：召回查询扩展 ──────────────────────────────────────
 
@@ -158,32 +164,133 @@ test("P2-1 空记忆返回空摘要", async () => {
   assert.equal(report.summary, "");
 });
 
-// ── P0-1：画像聚合器强信号快速路径（真实落盘）──────────────
+// ── P0-1：画像聚合器 结构化操作确定性落位（不经 LLM）──────────────
 
-test("P0-1 强信号：observeTurn 立即写入 USER_PROFILE.md 并幂等", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "profile-test-"));
+const SAMPLE_PROFILE = `# 用户画像
+
+> 本文件由 Agent 在与你的对话中持续更新。最后更新：2026-09-07T00:00:00.000Z
+
+## 基本信息
+
+- 所在地：贵州省兴义市
+
+## 兴趣与习惯
+
+- 喜欢：游泳
+
+## 沟通偏好
+
+- 回复偏好：短句、口语化
+
+## 备注
+
+- （重要但不宜归类到以上的信息）
+`;
+
+test("P0-1 applyProfileOps：ADD 写入正确 section 且幂等", () => {
+  const { profile, applied } = applyProfileOps(SAMPLE_PROFILE, [
+    { op: "ADD", section: "basic", line: "称呼：王铭川" },
+    { op: "ADD", section: "basic", line: "称呼：王铭川" },
+  ]);
+  assert.equal(applied.length, 2);
+  // 只应出现一次（幂等）
+  assert.equal(profile.split("称呼：王铭川").length - 1, 1, "相同 ADD 应幂等不重复");
+  // 落在【基本信息】section 内
+  const failures = verifyProfileOps(profile, applied);
+  assert.equal(failures.length, 0, "ADD 应校验通过");
+});
+
+test("P0-1 applyProfileOps：UPDATE 按定位词替换旧条目", () => {
+  const { profile, applied } = applyProfileOps(SAMPLE_PROFILE, [
+    { op: "UPDATE", section: "basic", line: "所在地：云南省大理市", match: "所在地" },
+  ]);
+  assert.ok(profile.includes("所在地：云南省大理市"), "UPDATE 后应含新值");
+  assert.ok(!profile.includes("兴义市"), "UPDATE 应替换掉旧值");
+  assert.equal(verifyProfileOps(profile, applied).length, 0);
+});
+
+test("P0-1 applyProfileOps：DELETE 移除目标 section 内含关键词的行", () => {
+  const { profile, applied } = applyProfileOps(SAMPLE_PROFILE, [
+    { op: "DELETE", section: "interest", match: "游泳" },
+  ]);
+  assert.ok(!profile.includes("喜欢：游泳"), "DELETE 后不应再含该条");
+  assert.equal(verifyProfileOps(profile, applied).length, 0);
+});
+
+test("P0-1 verifyProfileOps：错段落位应被检出为失败", () => {
+  // 手工构造：把"称呼"塞进【沟通偏好】，但校验时声明 section=basic
+  const wrong = SAMPLE_PROFILE.replace("## 沟通偏好\n\n- 回复偏好：短句、口语化", "## 沟通偏好\n\n- 回复偏好：短句、口语化\n- 称呼：王铭川");
+  const failures = verifyProfileOps(wrong, [{ op: { op: "ADD", section: "basic", line: "称呼：王铭川" }, expectLine: "称呼：王铭川" }]);
+  assert.equal(failures.length, 1, "落在错误 section 的操作应校验失败");
+});
+
+test("P0-1 parseExtractOps：解析 JSON + 丢弃非法项 + 去围栏", () => {
+  const raw = '```json\n{"ops":[{"op":"ADD","section":"basic","line":"称呼：王铭川"},{"op":"FOO","section":"basic","line":"x"},{"op":"ADD","section":"nonsense","line":"y"},{"op":"DELETE","section":"note","match":"过时"}]}\n```';
+  const ops = parseExtractOps(raw);
+  assert.equal(ops.length, 2, `应保留 2 条合法操作，实际 ${ops.length}`);
+  assert.equal(ops[0].line, "称呼：王铭川");
+  assert.equal(ops[1].op, "DELETE");
+});
+
+test("P0-1 observeTurn：轮次持久化到 pending-turns.json（重启不丢）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "profile-queue-test-"));
   const prevDir = process.env.AGENT_USER_PROFILE_DIR;
   process.env.AGENT_USER_PROFILE_DIR = dir;
   try {
-    // synthesisTurnThreshold 拉满：单次 observeTurn 不会触发 LLM 深度合成，
-    // 只验证强信号快速路径的真实落盘行为。
-    const agg = new UserProfileAggregator({ synthesisTurnThreshold: 1_000_000 });
-
-    agg.observeTurn("test-actor", "我喜欢吃火锅，另外我叫小明", "好的，记住了");
-    await new Promise((r) => setTimeout(r, 300)); // 快速路径是 fire-and-forget
-
-    let profile = await readFile(join(dir, "test-actor", "USER_PROFILE.md"), "utf8");
-    assert.ok(profile.includes("喜欢：吃火锅"), `【兴趣与习惯】应含喜欢项，实际:\n${profile}`);
-    assert.ok(profile.includes("称呼：小明"), `【基本信息】应含称呼，实际:\n${profile}`);
-
-    // 幂等：同一句再来一次不重复追加
-    agg.observeTurn("test-actor", "我喜欢吃火锅", "嗯");
-    await new Promise((r) => setTimeout(r, 300));
-    profile = await readFile(join(dir, "test-actor", "USER_PROFILE.md"), "utf8");
-    assert.equal(profile.split("喜欢：吃火锅").length - 1, 1, "相同信号应幂等不重复");
+    // 无 LLM key：extractAndApply/synthesis 跳过，但队列仍应落盘
+    const agg = new UserProfileAggregator({ synthesisTurnThreshold: 1_000_000, extractEnabled: false });
+    agg.observeTurn("queue-actor", "王铭川 记住没有", "记住了");
+    await new Promise((r) => setTimeout(r, 200)); // fire-and-forget 落盘
+    const raw = await readFile(join(dir, "queue-actor", "pending-turns.json"), "utf8");
+    const list = JSON.parse(raw);
+    assert.ok(Array.isArray(list) && list.length === 1, `队列应持久化 1 条，实际: ${raw}`);
+    assert.ok(list[0].includes("王铭川"), "队列内容应含原始用户话语");
   } finally {
     if (prevDir === undefined) delete process.env.AGENT_USER_PROFILE_DIR;
     else process.env.AGENT_USER_PROFILE_DIR = prevDir;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ── P0-1：画像结构感知截断（基本信息永不丢）──────────────────
+
+const LONG_PROFILE = `# 用户画像
+
+> 本文件由 Agent 在与你的对话中持续更新。最后更新：2026-09-07T00:00:00.000Z
+
+## 基本信息
+
+- 称呼：王铭川
+- 所在地：贵州省兴义市
+
+## 兴趣与习惯
+
+- 喜欢：游泳、旅行规划，长期关注娱乐圈动态与明星近况，习惯频繁设置喝水提醒
+- 偏好轻松节奏的旅行行程，不赶景点，喜欢洱海慢晃
+
+## 沟通偏好
+
+- 回复偏好：默认短句、口语化、少解释，像熟人回话，不要客服腔和长篇总结
+
+## 备注
+
+- 用户近期搜索景甜照片，可能对景甜也有兴趣，涉及景甜的内容需基于真实可检索信息回答不得编造
+- 用户曾提出打电话需求，执行通话类操作前应先确认接通对象与用途再行动，避免误拨
+`;
+
+test("P0-1 truncateProfileForPrompt：不超长时原样返回", () => {
+  assert.equal(truncateProfileForPrompt(LONG_PROFILE, 10_000), LONG_PROFILE);
+});
+
+test("P0-1 truncateProfileForPrompt：超长时先丢备注，基本信息始终保留", () => {
+  const out = truncateProfileForPrompt(LONG_PROFILE, 200);
+  assert.ok(out.includes("称呼：王铭川"), "基本信息（姓名）必须保留");
+  assert.ok(out.includes("所在地：贵州省兴义市"), "基本信息（所在地）必须保留");
+  assert.ok(!out.includes("## 备注"), "备注应最先被丢弃");
+  assert.ok(out.length <= 200 + 20, `应不超预算太多，实际 ${out.length}`);
+});
+
+test("P0-1 truncateProfileForPrompt：极端预算下仍保留基本信息", () => {
+  const out = truncateProfileForPrompt(LONG_PROFILE, 60);
+  assert.ok(out.includes("称呼：王铭川"), "即使极端截断也不能丢姓名");
 });

@@ -585,7 +585,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         continue;
       }
       final ChatMessage existing = dedupedMessages[existingIdx];
-      if (m.text.length > existing.text.length ||
+      // 带媒体卡片（mediaCards/renderBlocks）的一条优先：文本长短不代表完整性，
+      // 避免用「文本更长但丢图」的版本覆盖「带图」的版本。
+      final bool mHasMedia = _hasRenderableMedia(m);
+      final bool existingHasMedia = _hasRenderableMedia(existing);
+      if (mHasMedia != existingHasMedia) {
+        if (mHasMedia) {
+          dedupedMessages[existingIdx] = m;
+        }
+      } else if (m.text.length > existing.text.length ||
           (m.text.length == existing.text.length &&
               m.timestamp.isAfter(existing.timestamp))) {
         dedupedMessages[existingIdx] = m;
@@ -990,6 +998,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             contentType: prev.contentType,
             durationMs: prev.durationMs,
             waveform: prev.waveform,
+            mediaCards: prev.mediaCards,
+            renderBlocks: prev.renderBlocks,
+            pendingMediaCards: prev.pendingMediaCards,
           );
           setState(() {
             _messages[idx] = updated;
@@ -1198,6 +1209,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               streaming: previous.streaming,
               mediaCards: previous.mediaCards,
               renderBlocks: previous.renderBlocks,
+              replyBlocks: previous.replyBlocks,
               pendingMediaCards: updatedPending,
             );
           });
@@ -1280,6 +1292,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                       .whereType<Map<String, dynamic>>()
                       .toList()
                   : null;
+          // 回复信封块（A 阶段）：服务端把卡片标记确定性拆成的 text/card 序列。
+          // 仅实时渲染用（不持久化，历史消息走正文标记解析，两者渲染等价）。
+          final List<Map<String, dynamic>>? replyBlocksFromPayload =
+              payload["blocks"] is List
+                  ? (payload["blocks"] as List)
+                      .whereType<Map<String, dynamic>>()
+                      .toList()
+                  : null;
           final int? idx = _messageIndexById(messageId);
           if (idx != null) {
             // 默认保留流式阶段已经显示出来的正文，避免 done 到来时整段闪烁替换；
@@ -1312,6 +1332,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 waveform: previous.waveform,
                 mediaCards: resolvedMediaCards,
                 renderBlocks: renderBlocksFromPayload,
+                replyBlocks: replyBlocksFromPayload,
               );
             });
             await _store.saveMessage(_messages[idx]);
@@ -1326,6 +1347,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               playUrl: playUrl,
               mediaCards: mediaCardsFromPayload,
               renderBlocks: renderBlocksFromPayload,
+              replyBlocks: replyBlocksFromPayload,
             );
             setState(() {
               _messages.add(finalMessage);
@@ -2069,6 +2091,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           streaming: previous.streaming,
           // 边说边出图：保留已挂载的临时媒体卡片（不随 chunk 重置）
           pendingMediaCards: previous.pendingMediaCards,
+          mediaCards: previous.mediaCards,
+          renderBlocks: previous.renderBlocks,
         );
       });
     } else {
@@ -2152,6 +2176,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (message.role != "assistant") return message;
     final String sanitizedText = _sanitizeAssistantVisibleText(message.text);
     if (sanitizedText == message.text) return message;
+    // 重建时必须带上媒体字段：mediaCards/renderBlocks 是图片卡片的唯一来源，
+    // 漏掉会导致「正文含协议标记的消息重启后图片全部消失」。
     return ChatMessage(
       messageId: message.messageId,
       sessionId: message.sessionId,
@@ -2164,7 +2190,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       contentType: message.contentType,
       durationMs: message.durationMs,
       waveform: message.waveform,
+      mediaCards: message.mediaCards,
+      renderBlocks: message.renderBlocks,
+      pendingMediaCards: message.pendingMediaCards,
     );
+  }
+
+  /// 消息是否带有可渲染的媒体内容（图片/视频卡片或交错渲染块）。
+  bool _hasRenderableMedia(ChatMessage message) {
+    final List<Map<String, dynamic>>? cards = message.mediaCards;
+    final List<Map<String, dynamic>>? blocks = message.renderBlocks;
+    return (cards != null && cards.isNotEmpty) ||
+        (blocks != null && blocks.isNotEmpty);
   }
 
   void _clearAgentProcessingState({bool done = false}) {
@@ -2392,6 +2429,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             timestamp: previous.timestamp,
             attachmentImageCount: previous.attachmentImageCount,
             playUrl: previous.playUrl,
+            mediaCards: previous.mediaCards,
+            renderBlocks: previous.renderBlocks,
+            pendingMediaCards: previous.pendingMediaCards,
           );
         }
       });
@@ -2459,6 +2499,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         timestamp: previous.timestamp,
         attachmentImageCount: previous.attachmentImageCount,
         playUrl: playUrl,
+        mediaCards: previous.mediaCards,
+        renderBlocks: previous.renderBlocks,
+        pendingMediaCards: previous.pendingMediaCards,
       );
     });
   }
@@ -4459,8 +4502,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                           onOpenUserMenuSettings: _openUserMenuSettings,
                           onOpenUserMenuHelp: _openUserMenuHelp,
                           onOpenDevices: _openDevicesPage,
-                          onOpenCatalog: _openCatalogPage,
-                          onOpenApprovals: _openApprovalsPanel,
                           onLogout: _logout,
                           totalUnread: _unreadByPlatform.values
                               .fold(0, (int a, int b) => a + b),
@@ -4630,17 +4671,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 用户菜单「待确认」:右侧面板展示待确认收件箱
-  void _openApprovalsPanel() {
-    setState(() {
-      _tabIndex = 0;
-      _rightPanel = RightPanelKind.approvals;
-      _previousSplitRatio = _splitRatio;
-      _previousRightPanelWidth = _rightPanelWidth;
-      _splitRatio = RightPanelKind.approvals.defaultSplitRatio;
-    });
-  }
-
   /// 用户菜单「帮助与反馈」:暂未实现,先弹个 SnackBar 留位
   void _openUserMenuHelp() {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -4649,17 +4679,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         duration: Duration(seconds: 2),
       ),
     );
-  }
-
-  /// 用户菜单「能力面板」:右侧面板展示 Feature Catalog 生活域能力总览
-  void _openCatalogPage() {
-    setState(() {
-      _tabIndex = 0;
-      _rightPanel = RightPanelKind.catalog;
-      _previousSplitRatio = _splitRatio;
-      _previousRightPanelWidth = _rightPanelWidth;
-      _splitRatio = RightPanelKind.catalog.defaultSplitRatio;
-    });
   }
 
   /// 用户菜单「我的设备」:与对话框构成双面板分栏

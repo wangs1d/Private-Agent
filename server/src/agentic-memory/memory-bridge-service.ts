@@ -25,7 +25,13 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import type { Mem0WrittenItem } from "./ingest.js";
 import type { AgenticMemoryCandidate } from "./retrieval.js";
-import { getBridgeFusedTopK, getBridgeForgetSyncIntervalMin, isMemoryBridgeEnabled } from "./env.js";
+import type { FtsMemoryCandidate } from "./fts-store.js";
+import {
+  getBridgeFusedTopK,
+  getBridgeForgetSyncIntervalMin,
+  getMemoryFtsTopK,
+  isMemoryBridgeEnabled,
+} from "./env.js";
 import { openAgenticSqlite, fromJsonColumn, toJsonColumn } from "./sqlite-store.js";
 import { semanticFingerprint } from "../services/memory-record-utils.js";
 
@@ -103,15 +109,24 @@ export interface BridgeRetrievalLike {
   ): Promise<AgenticMemoryCandidate[]>;
 }
 
+/** FTS 关键词路外观（AgenticMemoryFtsStore 结构兼容即可；P0 混合检索第三路） */
+export interface BridgeFtsLike {
+  search(
+    actorId: string,
+    query: string,
+    opts?: { context?: "main" | "notes" | "any"; topK?: number },
+  ): FtsMemoryCandidate[];
+}
+
 // ============================================================
 // 融合召回类型
 // ============================================================
 
-export type BridgeRecallChannel = "mem0" | "graph" | "both";
+export type BridgeRecallChannel = "mem0" | "graph" | "fts" | "both";
 
 export interface FusedMemoryCandidate {
   content: string;
-  /** RRF 融合分（两路 rank 的 Σ 1/(k+rank)，非概率语义，仅用于排序） */
+  /** RRF 融合分（多路 rank 的 Σ 1/(k+rank)，非概率语义，仅用于排序） */
   fusedScore: number;
   channels: BridgeRecallChannel[];
   mem0Score?: number;
@@ -174,6 +189,7 @@ export class MemoryBridgeService {
     private readonly ingest: BridgeIngestLike,
     private readonly retrieval: BridgeRetrievalLike,
     db?: SqliteDatabase,
+    private readonly fts?: BridgeFtsLike | null,
   ) {
     this.db = db ?? openAgenticSqlite();
     this.db.exec(`
@@ -299,7 +315,7 @@ export class MemoryBridgeService {
   }
 
   // ------------------------------------------------------------
-  // 2. 融合召回（Mem0 结构化 + 认知图，RRF 合排）
+  // 2. 融合召回（Mem0 结构化 + 认知图 + FTS 关键词，RRF 合排）
   // ------------------------------------------------------------
 
   async searchFused(
@@ -318,6 +334,17 @@ export class MemoryBridgeService {
         .buildRecall(actorId, query, { context, crossDomain: true, detailLevel: "summary" })
         .catch(() => ({ recalledNodeIds: [] as string[], confidence: 0, text: "" })),
     ]);
+
+    // FTS 关键词第三路（同步 SQLite，BM25 词面排序）：专名/技术栈等低语义
+    // 密度 query 上补向量的短板。检索失败静默降级为空（rank 列表缺席无害）。
+    let ftsCandidates: FtsMemoryCandidate[] = [];
+    if (this.fts) {
+      try {
+        ftsCandidates = this.fts.search(actorId, query, { context, topK: getMemoryFtsTopK() });
+      } catch {
+        ftsCandidates = [];
+      }
+    }
 
     const nodeSummaries = new Map(
       this.graph
@@ -388,6 +415,14 @@ export class MemoryBridgeService {
       if (!summary) return;
       upsert(summary, "graph", idx + 1, { graphNodeId: nodeId });
     });
+    ftsCandidates.forEach((cand, idx) => {
+      if (!cand.content) return;
+      upsert(cand.content, "fts", idx + 1, {
+        ...(cand.createdAt ? { timestamp: cand.createdAt } : {}),
+        // 仅 true 时传入：FTS 行缺该标记时不得覆盖 mem0/graph 侧已写入的 true
+        ...(cand.highSignal === true ? { highSignal: true } : {}),
+      });
+    });
 
     const fused: FusedMemoryCandidate[] = [];
     for (const entry of merged.values()) {
@@ -395,7 +430,7 @@ export class MemoryBridgeService {
       fused.push({
         content: entry.representative,
         fusedScore: Number(rrf.toFixed(6)),
-        channels: entry.channels.length === 2 ? ["both"] : entry.channels,
+        channels: entry.channels.length >= 2 ? ["both"] : entry.channels,
         ...(entry.mem0Score !== undefined ? { mem0Score: entry.mem0Score } : {}),
         ...(entry.graphNodeId ? { graphNodeId: entry.graphNodeId } : {}),
         ...(entry.timestamp ? { timestamp: entry.timestamp } : {}),
@@ -417,7 +452,8 @@ export class MemoryBridgeService {
     if (items.length === 0) return "";
 
     const channelLabel = (channels: BridgeRecallChannel[]): string => {
-      if (channels.includes("both")) return "双通道";
+      if (channels.includes("both")) return "多通道";
+      if (channels.includes("fts")) return "关键词";
       return channels.includes("mem0") ? "Mem0" : "认知图";
     };
 
@@ -425,7 +461,7 @@ export class MemoryBridgeService {
       const scorePercent = Math.min(100, Math.round(item.fusedScore * 100 * 5)).toString();
       return `${i + 1}. 融合相关度 ${scorePercent}% · 来源[${channelLabel(item.channels)}]\n${item.content}`;
     });
-    return `以下为桥接融合召回（Mem0 记忆图 × 认知图谱，RRF 合排 + 跨通道去重）：\n${parts.join("\n\n")}`;
+    return `以下为桥接融合召回（Mem0 记忆图 × 认知图谱 × FTS 关键词，RRF 合排 + 跨通道去重）：\n${parts.join("\n\n")}`;
   }
 
   // ------------------------------------------------------------
@@ -719,12 +755,20 @@ export function createMemoryBridgeIfEnabled(opts: {
   graph: BridgeGraphLike | null;
   ingest: BridgeIngestLike | null;
   retrieval: BridgeRetrievalLike | null;
+  fts?: BridgeFtsLike | null;
   db?: SqliteDatabase;
   autoStart?: boolean;
 }): MemoryBridgeService | null {
   const enabled = opts.enabled ?? isMemoryBridgeEnabled();
   if (!enabled || !opts.memory || !opts.graph || !opts.ingest || !opts.retrieval) return null;
-  const bridge = new MemoryBridgeService(opts.memory, opts.graph, opts.ingest, opts.retrieval, opts.db);
+  const bridge = new MemoryBridgeService(
+    opts.memory,
+    opts.graph,
+    opts.ingest,
+    opts.retrieval,
+    opts.db,
+    opts.fts,
+  );
   if (opts.autoStart !== false) bridge.startForgettingSync();
   return bridge;
 }

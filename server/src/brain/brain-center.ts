@@ -1736,7 +1736,8 @@ export class BrainCenter {
     }
 
     // === 阶段 3.6.1 — 用户画像聚合（P0-1）===
-    // 观察本轮对话：强画像信号走快速路径立即更新 USER_PROFILE.md；
+    // 观察本轮对话：轮次进入持久化队列；每轮由轻量 LLM 结构化抽取
+    // （ADD/UPDATE/DELETE）确定性更新 USER_PROFILE.md；
     // 每 N 轮触发 LLM 深度画像合成（异步，不阻塞响应）。
     if (this.userProfileAggregator) {
       try {

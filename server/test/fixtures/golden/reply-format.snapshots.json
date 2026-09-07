@@ -1,0 +1,135 @@
+{
+  "description": "回复格式黄金快照。由 `npm run eval:reply-format -- --update` 生成；cardId 已归一化。更新后必须逐条人工审核是否符合语料 note 声明的意图。",
+  "snapshots": {
+    "pos-weekend-itinerary-report": {
+      "hint": "result_card",
+      "output": "好的，耳机已下单，预计周六送达。\n\n[AGENT_RESULT_CARD_START]{\n  \"avatar\": \"NB\",\n  \"avatarStyle\": \"default\",\n  \"title\": \"本周末行程已为你规划：\",\n  \"items\": [\n    {\n      \"type\": \"num\",\n      \"text\": \"周六上午：去你说过的那家新店探店\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"周六下午：健身 + 采购下周末食材\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"周日：在家看你收藏的那部电影\",\n      \"depth\": 0\n    }\n  ],\n  \"footer\": \"需要调整吗？\",\n  \"cardType\": \"timeline\",\n  \"actions\": [\n    {\n      \"id\": \"keep\",\n      \"label\": \"就这样\",\n      \"variant\": \"primary\",\n      \"payload\": {}\n    },\n    {\n      \"id\": \"adjust\",\n      \"label\": \"调整一下\",\n      \"variant\": \"secondary\",\n      \"payload\": {}\n    }\n  ],\n  \"speak\": \"high\",\n  \"cardId\": \"card_<id>\"\n}[AGENT_RESULT_CARD_END]",
+      "cardType": "timeline"
+    },
+    "pos-task-done-two-items": {
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"要改时间随时说。\",\"items\":[{\"text\":\"工作日 07:30 起床闹钟\",\"type\":\"num\"},{\"text\":\"周末 09:00 起床闹钟\",\"type\":\"num\"},{\"text\":\"要改时间随时说。\",\"type\":\"num\"}],\"footer\":\"\",\"cardType\":\"metric\",\"actions\":[],\"speak\":\"high\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": "metric"
+    },
+    "pos-weather-tool-short": {
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]{\n  \"avatar\": \"NB\",\n  \"avatarStyle\": \"default\",\n  \"title\": \"明天天气不错：\",\n  \"items\": [\n    {\n      \"type\": \"num\",\n      \"text\": \"晴转多云\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"气温 18~26℃\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"微风\",\n      \"depth\": 0\n    }\n  ],\n  \"footer\": \"\",\n  \"cardType\": \"weather\",\n  \"actions\": [],\n  \"speak\": \"\",\n  \"cardId\": \"card_<id>\"\n}[AGENT_RESULT_CARD_END]",
+      "cardType": "weather"
+    },
+    "pos-ordered-steps": {
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]{\n  \"avatar\": \"NB\",\n  \"avatarStyle\": \"default\",\n  \"title\": \"已为你创建好退货流程：\",\n  \"items\": [\n    {\n      \"type\": \"num\",\n      \"text\": \"在订单页点击「申请售后」\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"选择退货原因并提交\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"等快递员上门取件\",\n      \"depth\": 0\n    }\n  ],\n  \"footer\": \"\",\n  \"cardType\": \"steps\",\n  \"actions\": [],\n  \"speak\": \"\",\n  \"cardId\": \"card_<id>\"\n}[AGENT_RESULT_CARD_END]",
+      "cardType": "steps"
+    },
+    "pos-substeps-depth": {
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]{\n  \"avatar\": \"NB\",\n  \"avatarStyle\": \"default\",\n  \"title\": \"健身计划已经帮你排好了：\",\n  \"items\": [\n    {\n      \"type\": \"num\",\n      \"text\": \"热身放松\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"开合跳\",\n      \"depth\": 1\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"高抬腿\",\n      \"depth\": 1\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"正式训练\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"卧推\",\n      \"depth\": 1\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"划船\",\n      \"depth\": 1\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"拉伸整理\",\n      \"depth\": 0\n    }\n  ],\n  \"footer\": \"\",\n  \"cardType\": \"chips\",\n  \"actions\": [],\n  \"speak\": \"\",\n  \"cardId\": \"card_<id>\"\n}[AGENT_RESULT_CARD_END]",
+      "cardType": "chips"
+    },
+    "pos-blockquote-quote": {
+      "hint": "plain",
+      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"少即是多。先做完，再做好。\",\"items\":[],\"footer\":\"—— 今天的开发心得\",\"cardType\":\"quote\",\"actions\":[],\"speak\":\"high\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": "quote"
+    },
+    "pos-llm-declared-card-hint": {
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"旅行清单已经帮你整理好：\",\"items\":[{\"type\":\"num\",\"text\":\"护照和身份证\",\"depth\":0},{\"type\":\"num\",\"text\":\"充电宝和转换插头\",\"depth\":0},{\"type\":\"num\",\"text\":\"防晒霜\",\"depth\":0}],\"footer\":\"\",\"cardType\":\"\",\"actions\":[],\"speak\":\"\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": ""
+    },
+    "pos-raw-search-json-rescue": {
+      "hint": "plain",
+      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"搜索结果\",\"items\":[{\"type\":\"num\",\"text\":\"降噪耳机选购指南: 从降噪原理到佩戴舒适度的完整对比  \\n来源:搜索\",\"url\":\"https://example.com/headphone-guide\",\"source\":\"搜索\"},{\"type\":\"num\",\"text\":\"2026 年耳机评测汇总: 10 款主流降噪耳机实测  \\n来源:搜索\",\"url\":\"https://example.com/headphone-review\",\"source\":\"搜索\"}],\"footer\":\"共 2 条结果\",\"cardType\":\"search_result\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": "search_result"
+    },
+    "pos-raw-travel-json-rescue": {
+      "hint": "long_text",
+      "output": "马尔代夫行程安排好啦：\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"马尔代夫2日游\",\"items\":[{\"type\":\"num\",\"text\":\"Day 1 · 2026-09-10：当地民宿 → 当地自然风光区\"},{\"type\":\"num\",\"text\":\"Day 2 · 2026-09-11：环礁潜水\"}],\"footer\":\"共 2 天 · 3 项安排\",\"cardType\":\"travel_itinerary\",\"autoOpen\":true,\"cardId\":\"card_<id>\",\"travelPlan\":{\"toolName\":\"travel.plan-itinerary\",\"ts\":<ts>,\"destination\":\"马尔代夫\",\"title\":\"马尔代夫2日游\",\"startDate\":\"2026-09-10\",\"endDate\":\"2026-09-11\",\"days\":[{\"date\":\"2026-09-10\",\"items\":[{\"type\":\"hotel\",\"name\":\"当地民宿\",\"startTime\":\"2026-09-10T08:00:00\",\"latitude\":0,\"longitude\":0,\"address\":\"\",\"priceInfo\":\"\",\"description\":\"位置便利\"},{\"type\":\"attraction\",\"name\":\"当地自然风光区\",\"startTime\":\"2026-09-10T09:00:00\",\"latitude\":0,\"longitude\":0,\"address\":\"\",\"priceInfo\":\"\",\"description\":\"知名自然风光\"}]},{\"date\":\"2026-09-11\",\"items\":[{\"type\":\"attraction\",\"name\":\"环礁潜水\",\"startTime\":\"2026-09-11T10:00:00\",\"latitude\":0,\"longitude\":0,\"address\":\"\",\"priceInfo\":\"\",\"description\":\"浮潜体验\"}]}]}}\n[AGENT_RESULT_CARD_END]",
+      "cardType": "travel_itinerary"
+    },
+    "pos-media-search-tool": {
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]{\n  \"avatar\": \"NB\",\n  \"avatarStyle\": \"default\",\n  \"title\": \"找到几张相关图片：\",\n  \"items\": [\n    {\n      \"type\": \"num\",\n      \"text\": \"日落海边 https://example.com/sunset.jpg\",\n      \"depth\": 0,\n      \"url\": \"https://example.com/sunset.jpg\"\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"城市夜景 https://example.com/night.jpg\",\n      \"depth\": 0,\n      \"url\": \"https://example.com/night.jpg\"\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"山间晨雾 https://example.com/mist.jpg\",\n      \"depth\": 0,\n      \"url\": \"https://example.com/mist.jpg\"\n    }\n  ],\n  \"footer\": \"\",\n  \"cardType\": \"carousel\",\n  \"actions\": [],\n  \"speak\": \"\",\n  \"cardId\": \"card_<id>\"\n}[AGENT_RESULT_CARD_END]",
+      "cardType": "carousel"
+    },
+    "tool-weather-prose-no-list": {
+      "hint": "result_card",
+      "output": "明天天气不错，温度很舒服，适合出门走走。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"明天晴转多云，适合出行\",\"items\":[{\"type\":\"num\",\"text\":\"晴转多云\"},{\"type\":\"num\",\"text\":\"气温 18–26\"},{\"type\":\"num\",\"text\":\"湿度 62%\"},{\"type\":\"num\",\"text\":\"风速 8 km/h\"},{\"type\":\"num\",\"text\":\"峰值降水概率 10%\"}],\"footer\":\"早晚温差大，建议带件薄外套\",\"cardType\":\"weather\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": "weather"
+    },
+    "tool-wallet-prose-no-list": {
+      "hint": "plain",
+      "output": "查好了，余额充足，放心花。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"钱包余额\",\"items\":[{\"type\":\"num\",\"text\":\"1000 CNY\"}],\"footer\":\"查询成功\",\"cardType\":\"wallet\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": "wallet"
+    },
+    "tool-calendar-prose-no-list": {
+      "hint": "plain",
+      "output": "接下来就这两个安排，都记着呢。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"日程安排\",\"items\":[{\"type\":\"num\",\"text\":\"09-10 09:30 牙医复诊\"},{\"type\":\"num\",\"text\":\"09-11 20:00 给妈妈打电话\"}],\"footer\":\"共 2 项\",\"cardType\":\"schedule\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": "schedule"
+    },
+    "tool-unregistered-falls-through": {
+      "hint": "plain",
+      "output": "笔记已经保存好了。",
+      "cardType": ""
+    },
+    "tool-registered-but-plaintext-mode": {
+      "hint": "result_card",
+      "output": "明天天气不错，温度很舒服，适合出门走走。",
+      "cardType": ""
+    },
+    "neg-plain-narrative-chat": {
+      "hint": "plain",
+      "output": "今天过得怎么样？我记得你上午说要去见客户，如果聊得顺利，晚上可以奖励自己一顿好吃的。",
+      "cardType": ""
+    },
+    "neg-chinese-enumeration-no-markdown": {
+      "hint": "plain",
+      "output": "你的快递、外卖和洗衣都已经安排好了，明天上午陆续到，注意查收。",
+      "cardType": ""
+    },
+    "neg-two-items-no-task-done": {
+      "hint": "brief",
+      "output": "[RENDER_AS:brief]\n冰箱里有这些：\n- 鸡蛋\n- 牛奶",
+      "cardType": ""
+    },
+    "neg-list-split-by-long-paragraph": {
+      "hint": "result_card",
+      "output": "关于周末的安排：\n- 周六上午探店\n另外我查了一下那家新店的评价，好评不少，排队情况据说周末会比较严重，建议早点出发，或者先取号再逛别的地方。\n- 周日下午健身\n- 周日晚看电影",
+      "cardType": ""
+    },
+    "neg-kpi-list-suppressed-by-data-brief": {
+      "hint": "data_brief",
+      "output": "[RENDER_AS:data_brief]\n[DATA_BRIEF_START]{\"conclusion\":\"本周进度小结：\",\"kpis\":[{\"label\":\"专注时长\",\"value\":\"320 分\"},{\"label\":\"跑步\",\"value\":\"12 公里\"},{\"label\":\"阅读\",\"value\":\"5 小时\"},{\"label\":\"目标达成率\",\"value\":\"85%\"}],\"restText\":\"- 专注时长 320 分钟\\n- 跑步 12 公里\\n- 阅读 5 小时\\n- 目标达成率 85%\\n整体节奏比上周稳了很多，下周继续保持这个状态就行，不用刻意加量。\"}[DATA_BRIEF_END]",
+      "cardType": ""
+    },
+    "neg-markdown-table-with-list": {
+      "hint": "long_text",
+      "output": "[RENDER_AS:structured]\n对比一下两台笔记本：\n\n| 型号 | 价格 | 续航 |\n| ---- | ---- | ---- |\n| X1 | 9999 | 18h |\n| Air | 7999 | 15h |\n\n- X1 更贵但续航长\n- Air 性价比更高",
+      "cardType": ""
+    },
+    "neg-long-structured-summary-card": {
+      "hint": "summary_card",
+      "output": "[CONTENT_SUMMARY_V2_START]\n{\"type\":\"content_summary_v2\",\"id\":\"sum_<id>\",\"category\":\"multi_section\",\"title\":\"帮你把这份健康指南整理好了：\",\"cardIcon\":\"☰\",\"cardLabel\":\"帮你把这份健康指南整理好了：\",\"subjectLabel\":\"帮你把这份健康指南整理好了：\",\"briefCount\":2,\"detailContent\":\"帮你把这份健康指南整理好了：\\n\\n## 饮食\\n每天保证一斤蔬菜、半斤水果，主食里加一点粗粮。蛋白质优先选鱼虾和豆制品，红肉控制在每周三次以内。晚饭尽量在七点前吃完，睡前三小时不要再进食，晚上饿了可以喝一杯温牛奶，但不要吃甜食，避免血糖波动影响睡眠质量。\\n\\n## 运动\\n每周至少完成三次有氧，每次三十分钟以上，快走和游泳都可以。力量训练每周两次，重点放在下肢和核心，避免连续两天练同一部位。运动前要充分热身，运动后做十分钟的拉伸，这样既能减少受伤概率，也能缓解第二天的肌肉酸痛。\\n\\n## 睡眠\\n固定作息时间，周末补觉不要超过一小时。睡前一小时远离手机，卧室温度保持在二十度左右更容易入睡。如果躺下二十分钟还没有睡意，可以起来看一会儿纸质书，等有困意再回到床上，不要在床上刷手机。\\n\\n## 复查\\n每半年做一次体检，重点关注血脂和尿酸指标，如果有异常遵医嘱增加复查频率。体检前三天保持平时的饮食习惯，不要刻意清淡，也不要饮酒，这样结果才更接近真实水平。\\n\\n## 心态\\n压力大的时候先做几次深呼吸，把注意力放回当下。可以每周给自己安排一段完全放空的缓冲时间，散散步、听听音乐都可以，长期紧绷的状态对血糖和血压都不友好。\",\"sections\":[{\"title\":\"饮食\",\"pointCount\":1},{\"title\":\"运动\",\"pointCount\":1},{\"title\":\"睡眠\",\"pointCount\":1},{\"title\":\"复查\",\"pointCount\":1},{\"title\":\"心态\",\"pointCount\":1}],\"metadata\":{\"subjectLabel\":\"帮你把这份健康指南整理好了：\",\"wordCount\":504,\"itemCount\":2,\"sectionCount\":5,\"hasTable\":false,\"hasList\":false}}\n[CONTENT_SUMMARY_V2_END]\n\n☰ 帮你把这份健康指南整理好了：：帮你把这份健康指南整理好了：\n\n<details_card ref=\"sum_<id>\" />",
+      "cardType": ""
+    },
+    "neg-plaintext-mode-disables-card": {
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"好的，耳机已下单，预计周六送达。\",\"items\":[{\"text\":\"好的，\",\"type\":\"num\"},{\"text\":\"耳机已下单，\",\"type\":\"num\"},{\"text\":\"预计周六送达。\",\"type\":\"num\"},{\"text\":\"周六上午：去你说过的那家新店探店\",\"type\":\"num\"},{\"text\":\"周六下午：健身 + 采购下周末食材\",\"type\":\"num\"},{\"text\":\"周日：在家看你收藏的那部电影\",\"type\":\"num\"}],\"footer\":\"\",\"cardType\":\"timeline\",\"actions\":[],\"speak\":\"high\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": "timeline"
+    },
+    "neg-already-marked-passthrough": {
+      "hint": "plain",
+      "output": "前导说明。\n[AGENT_RESULT_CARD_START]\n{\"title\":\"已有卡片\",\"items\":[{\"type\":\"check\",\"text\":\"条目一\"},{\"type\":\"check\",\"text\":\"条目二\"},{\"type\":\"check\",\"text\":\"条目三\"}],\"footer\":\"\"}\n[AGENT_RESULT_CARD_END]",
+      "cardType": ""
+    },
+    "edge-list-exactly-300-chars": {
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]{\n  \"avatar\": \"NB\",\n  \"avatarStyle\": \"default\",\n  \"title\": \"这几个习惯建议保持：\",\n  \"items\": [\n    {\n      \"type\": \"num\",\n      \"text\": \"早起后喝一杯温水\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"午饭后散步十五分钟\",\n      \"depth\": 0\n    },\n    {\n      \"type\": \"num\",\n      \"text\": \"睡前做一组拉伸\",\n      \"depth\": 0\n    }\n  ],\n  \"footer\": \"\",\n  \"cardType\": \"fold_list\",\n  \"actions\": [],\n  \"speak\": \"high\",\n  \"cardId\": \"card_<id>\"\n}[AGENT_RESULT_CARD_END]\n\n另外补充一句：这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持",
+      "cardType": "fold_list"
+    },
+    "edge-list-301-chars": {
+      "hint": "long_text",
+      "output": "这几个习惯建议保持：\n- 早起后喝一杯温水\n- 午饭后散步十五分钟\n- 睡前做一组拉伸\n另外补充一句：这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下去。这个习惯对长期健康很有帮助，值得坚持下",
+      "cardType": ""
+    }
+  }
+}

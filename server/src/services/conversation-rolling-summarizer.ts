@@ -17,6 +17,12 @@ import OpenAI from "openai";
  * 「上下文窗口内的短期→中期连续性」，外部记忆负责「长期召回」，turn WAL/journal
  * 负责「全量归档与检索兜底」。
  *
+ * 关键钉（key pins，混合式上下文策略的中间层）：最终注入 = [历史摘要]（全局脉络压缩，
+ * 可被时间分层裁剪）+ [关键钉]（不可忘的事实，逐字保留）+ 最近 K 轮原文 + 当前 Query。
+ * LLM 每批除摘要行外还可输出 `[关键钉]` 节（承诺/约定/硬性约束/重要偏好/关键决定，
+ * 每批最多 maxPins 条）；钉与已有钉合并后只增不改，不参与摘要的时间分层压缩，
+ * 超预算才淘汰最旧（最旧事实通常已沉淀进摘要区）。详见 parseRecapSummaryOutput / mergeKeyPins。
+ *
  * 契约（2026-09-05 漂移修复，必须与 chat-thread-store.enhanceRecap 的合并逻辑对齐）：
  * - 返回值是「新增摘要行」，不是全量 recap；
  * - 已有行若交由 LLM 重发，小模型改写会合并/曲解/脑补事实（与 recall-compressor
@@ -28,18 +34,39 @@ import OpenAI from "openai";
 export type RecapSummarizerContext = {
   /** 已有摘要行（已 strip 前缀；仅供去重参考，禁止复述/改写） */
   existingLines: string[];
+  /** 已有关键钉（不可忘事实；仅供去重参考，禁止复述/改写） */
+  pinLines?: string[];
   /** [unsummarized] 待归纳原文行（尚未被摘要过，需吸收进新摘要行） */
   pendingLines?: string[];
   /** 本次滑动窗口溢出、需要被吸收进摘要的历史消息 */
   droppedMessages: ChatCompletionMessageParam[];
 };
 
-export type RecapSummarizer = (ctx: RecapSummarizerContext) => Promise<string[] | null>;
+/** 摘要器输出：普通摘要行 + 新关键钉（mock 摘要器可只返回 string[]，见 normalize）。 */
+export type RecapSummaryResult = { lines: string[]; pins: string[] };
+
+export type RecapSummarizer = (
+  ctx: RecapSummarizerContext,
+) => Promise<string[] | RecapSummaryResult | null>;
+
+/** 兼容两种返回形态：旧式 string[]（无钉）与新式 RecapSummaryResult。 */
+export function normalizeRecapSummaryResult(
+  result: string[] | RecapSummaryResult | null | undefined,
+): RecapSummaryResult | null {
+  if (!result) return null;
+  if (Array.isArray(result)) return { lines: result, pins: [] };
+  if (Array.isArray(result.lines) || Array.isArray(result.pins)) {
+    return { lines: result.lines ?? [], pins: result.pins ?? [] };
+  }
+  return null;
+}
 
 const DEFAULT_MODEL = "gpt-4.1-mini";
 /** 单批摘要行上限默认值（新对话 + 待归纳原文吸收；可用环境变量覆盖） */
 const DEFAULT_MAX_LINES = 30;
 const DEFAULT_MAX_LINE_CHARS = 160;
+/** 单批关键钉上限默认值（不可忘事实，宁缺勿滥；可用环境变量覆盖） */
+const DEFAULT_MAX_PINS = 3;
 
 function parseIntEnv(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
@@ -47,10 +74,11 @@ function parseIntEnv(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-export function loadRecapSummarizerBudget(): { maxLines: number; maxLineChars: number } {
+export function loadRecapSummarizerBudget(): { maxLines: number; maxLineChars: number; maxPins: number } {
   return {
     maxLines: parseIntEnv(process.env.AGENT_RECAP_SUMMARY_MAX_LINES, DEFAULT_MAX_LINES),
     maxLineChars: parseIntEnv(process.env.AGENT_RECAP_SUMMARY_MAX_LINE_CHARS, DEFAULT_MAX_LINE_CHARS),
+    maxPins: parseIntEnv(process.env.AGENT_RECAP_SUMMARY_MAX_PINS, DEFAULT_MAX_PINS),
   };
 }
 
@@ -127,11 +155,73 @@ export function parseRecapLinesFromLlmOutput(
   return lines;
 }
 
+/** LLM 输出中「关键钉」节的标记行（`[关键钉]` 为主，兼容 ASCII 别名 `[key-pins]`）。 */
+const KEY_PINS_OUTPUT_MARKER_RE = /^\[(?:关键钉|key-pins)\]/;
+
+/**
+ * 解析 LLM 输出为「摘要行 + 新关键钉」：
+ * - 出现 `[关键钉]` 标记行时，其前为普通摘要行、其后为钉行（各按行解析去重限长）；
+ * - 没有标记行时全部视为摘要行（小模型没学会格式时优雅降级，不产钉）。
+ */
+export function parseRecapSummaryOutput(
+  output: string,
+  maxLines = DEFAULT_MAX_LINES,
+  maxLineChars = DEFAULT_MAX_LINE_CHARS,
+  maxPins = DEFAULT_MAX_PINS,
+): RecapSummaryResult {
+  if (!output) return { lines: [], pins: [] };
+  const rawLines = output.split("\n");
+  const markerIdx = rawLines.findIndex((l) => KEY_PINS_OUTPUT_MARKER_RE.test(l.trim().replace(/^[-*\s]+/, "")));
+  const summaryPart = markerIdx >= 0 ? rawLines.slice(0, markerIdx).join("\n") : output;
+  const pinsPart = markerIdx >= 0 ? rawLines.slice(markerIdx + 1).join("\n") : "";
+  return {
+    lines: parseRecapLinesFromLlmOutput(summaryPart, maxLines, maxLineChars),
+    pins: parseRecapLinesFromLlmOutput(pinsPart, maxPins, maxLineChars),
+  };
+}
+
+/** 关键钉合并预算（行数 + 总字符；超限淘汰最旧的钉）。 */
+export type KeyPinBudget = { maxLines: number; maxChars: number };
+
+/** 关键钉预算默认值（与 chat-thread-store 的 SESSION_KEY_PINS_* 默认值保持一致）。 */
+export const DEFAULT_KEY_PIN_BUDGET: KeyPinBudget = { maxLines: 10, maxChars: 1000 };
+
+/**
+ * 合并关键钉（只增不改契约）：新钉规范化后追加到已有钉之后（精确去重），
+ * 行数/字符超预算时淘汰最旧（数组头部）的钉、保留最新——最旧事实通常已在钉入
+ * 当批沉淀进摘要区，且全文在 turn WAL 可兜底。
+ */
+export function mergeKeyPins(
+  existingPins: string[],
+  newPins: string[],
+  budget: KeyPinBudget = DEFAULT_KEY_PIN_BUDGET,
+): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const src of [...existingPins, ...newPins]) {
+    const line = src.replace(/\s+/g, " ").trim();
+    if (!line || seen.has(line)) continue;
+    seen.add(line);
+    merged.push(line);
+  }
+  const kept: string[] = [];
+  let totalChars = 0;
+  for (let i = merged.length - 1; i >= 0; i--) {
+    const line = merged[i]!;
+    if (kept.length >= budget.maxLines || totalChars + line.length > budget.maxChars) break;
+    kept.unshift(line);
+    totalChars += line.length;
+  }
+  return kept;
+}
+
 function buildSummarizeMessages(
   ctx: RecapSummarizerContext,
-  budget: { maxLines: number; maxLineChars: number } = loadRecapSummarizerBudget(),
+  budget: { maxLines: number; maxLineChars: number; maxPins: number } = loadRecapSummarizerBudget(),
 ): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
   const existing = ctx.existingLines.length > 0 ? ctx.existingLines.map((l) => `- ${l}`).join("\n") : "（空）";
+  const existingPins =
+    ctx.pinLines && ctx.pinLines.length > 0 ? ctx.pinLines.map((l) => `- ${l}`).join("\n") : "（无）";
   const pending = ctx.pendingLines && ctx.pendingLines.length > 0
     ? ctx.pendingLines.map((l) => `- ${l}`).join("\n")
     : "（无）";
@@ -155,10 +245,19 @@ function buildSummarizeMessages(
     `6. 总共不超过 ${budget.maxLines} 行；若空间不足，压缩最旧、最琐碎的细节，绝不丢用户偏好/承诺/决定；`,
     "7. 时间线顺序：新事件在前、旧事件在后，不要乱序；",
     "8. 只输出新摘要行本身，不要任何解释、标题或代码块，也不要输出「已有摘要」中的任何一行。",
+    "",
+    "关键钉（不可忘的事实，输出格式）：",
+    `- 摘要行之后，若存在不可忘的事实，先输出一行「[关键钉]」，其下每行以「- 」开头列出这些事实，最多 ${budget.maxPins} 条；`,
+    "  什么算不可忘：用户明确要求记住的事、承诺与约定、硬性约束（时间/地点/方式/数量）、重要偏好与禁忌、关键决定；",
+    "  关键钉会跨轮逐字长期保留（不随摘要压缩改写），时间、数字、金额、人名、地名必须照抄原文表述，并带同样的时间标签；",
+    "- 「已有关键钉」中已有的内容禁止重复输出；没有新的不可忘事实时，不要输出「[关键钉]」行。",
   ].join("\n");
   const user = [
     "已有摘要（已覆盖，仅供去重参考，禁止输出这些行）：",
     existing,
+    "",
+    "已有关键钉（已钉住，仅供去重参考，禁止输出这些行）：",
+    existingPins,
     "",
     "待归纳原文（此前滑出窗口、尚未摘要过的原文行，需吸收进新摘要行）：",
     pending,
@@ -166,7 +265,7 @@ function buildSummarizeMessages(
     "新对话（即将从窗口中折叠，需要你生成摘要）：",
     dropped || "（无有效内容）",
     "",
-    "请输出新摘要行：",
+    "请输出新摘要行（如无可钉事实则不要输出「[关键钉]」节）：",
   ].join("\n");
   return [
     { role: "system", content: system },
@@ -187,6 +286,7 @@ export function createLlmRollingRecapSummarizer(opts?: {
   model?: string;
   maxLines?: number;
   maxLineChars?: number;
+  maxPins?: number;
 }): RecapSummarizer | null {
   // 快速路径：任一已配置的 provider 密钥（Moonshot / OpenAI）均可启用。
   // 具体 key/baseURL/model 在调用时懒加载 resolvePrimaryLlmClientConfig 决定，
@@ -197,12 +297,14 @@ export function createLlmRollingRecapSummarizer(opts?: {
     !!process.env.MOONSHOT_API_KEY?.trim() ||
     !!process.env.OPENAI_API_KEY?.trim();
   if (!hasAnyProviderKey) return null;
+  const defaultBudget = loadRecapSummarizerBudget();
   const budget = {
-    maxLines: opts?.maxLines ?? loadRecapSummarizerBudget().maxLines,
-    maxLineChars: opts?.maxLineChars ?? loadRecapSummarizerBudget().maxLineChars,
+    maxLines: opts?.maxLines ?? defaultBudget.maxLines,
+    maxLineChars: opts?.maxLineChars ?? defaultBudget.maxLineChars,
+    maxPins: opts?.maxPins ?? defaultBudget.maxPins,
   };
 
-  return async (ctx): Promise<string[] | null> => {
+  return async (ctx): Promise<RecapSummaryResult | null> => {
     try {
       // 懒加载避免静态循环依赖：external-model/providers → abstract-chat-provider → chat-thread-store → 本模块
       const { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } =
@@ -238,8 +340,8 @@ export function createLlmRollingRecapSummarizer(opts?: {
         });
       }
       if (!content) return null;
-      const lines = parseRecapLinesFromLlmOutput(content, budget.maxLines, budget.maxLineChars);
-      return lines.length > 0 ? lines : null;
+      const result = parseRecapSummaryOutput(content, budget.maxLines, budget.maxLineChars, budget.maxPins);
+      return result.lines.length > 0 || result.pins.length > 0 ? result : null;
     } catch (err) {
       console.warn(`[RollingRecap] LLM 摘要失败（降级保留旧 recap）: ${err instanceof Error ? err.message : err}`);
       return null;

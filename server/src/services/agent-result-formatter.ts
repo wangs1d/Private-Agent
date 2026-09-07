@@ -25,6 +25,8 @@
  *   - LLM 主动声明锚点的升级点：把 `findExtractableCardSegment` 换成锚点识别即可
  */
 
+import { appendFileSync } from "node:fs";
+
 import { LIST_ITEM_RE } from "./render-hint-service.js";
 import {
   extractSemanticItems,
@@ -46,9 +48,10 @@ function logRoutingDecision(
   cardType: string,
   input: DisplayRouteInput,
 ): void {
-  const top = [...scoreDisplayEffects(input)]
+  const ranked = [...scoreDisplayEffects(input)]
     .sort((a, b) => b.score - a.score)
-    .slice(0, 2)
+    .slice(0, 2);
+  const top = ranked
     .map(
       (d) =>
         `${d.type || "(generic)"}=${d.score.toFixed(3)}(content=${d.contentScore.toFixed(2)},tool=${d.toolScore.toFixed(2)})`,
@@ -57,6 +60,32 @@ function logRoutingDecision(
   console.log(
     `[DisplayRoute] ${where}: card=${cardType || "(generic)"} tool=${toolName ?? "-"} top: ${top || "none"}`,
   );
+  // 线上采集（可选）：设置 DISPLAY_ROUTE_CAPTURE=<jsonl路径> 后，每次路由把
+  // 完整输入/输出落 JSONL。console 日志只有 title/footer 摘要、不含 fullText，
+  // 事后无法回放管线；这里补全可回放字段，供 scripts/eval-reply-format.ts
+  // 的 --from-capture 把真实流量沉淀为黄金集样本。未设置 env 时零开销。
+  const capturePath = process.env.DISPLAY_ROUTE_CAPTURE;
+  if (capturePath) {
+    try {
+      appendFileSync(
+        capturePath,
+        `${JSON.stringify({
+          ts: new Date().toISOString(),
+          where,
+          toolName,
+          cardType,
+          top: ranked.map((d) => ({ type: d.type, score: d.score })),
+          title: input.title,
+          items: input.items.map((i) => i.text),
+          footer: input.footer,
+          fullText: input.fullText,
+        })}\n`,
+        "utf8",
+      );
+    } catch {
+      // 采集失败不影响主链路
+    }
+  }
 }
 
 /** 列表项类型推断 */
@@ -200,7 +229,10 @@ export function findExtractableCardSegment(text: string): CardSegment | null {
     titleLines.unshift(ln);
     if (titleLineIdx === -1) titleLineIdx = k;
   }
-  const title = titleLines[0] ?? "";
+  // 标题取「离列表最近的引导行」：titleLines 按扫描顺序 unshift 后末位即最近行。
+  // 取 [0]（最远行）会把前导对话误当标题、并让真正的引导行凭空消失——
+  // 协议示例（文件头）中前导「耳机已下单…」与标题「周末行程已为你规划」必须各归其位。
+  const title = titleLines[titleLines.length - 1] ?? "";
 
   // 在列表段之后找 footer：向后最多 2 行内的非空、非列表短句
   const footerLines: string[] = [];

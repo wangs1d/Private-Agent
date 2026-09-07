@@ -32,11 +32,18 @@ import type {
 } from "./memory-cognitive/memory-experience-learning-loop.js";
 import {
   arbitrateMemories,
+  fuseRankLists,
   loadArbitratorConfigFromEnv,
   shouldShortCircuitAgentic,
   type ChannelRecallResult,
   type MemoryArbitratorConfig,
 } from "./memory-arbitrator.js";
+import { rerankTexts } from "../agentic-memory/reranker.js";
+import {
+  getMemoryRerankerCandidates,
+  getMemoryRerankerMinScore,
+  getMemoryRerankerMode,
+} from "../agentic-memory/env.js";
 import { semanticFingerprint } from "../services/memory-record-utils.js";
 import {
   MemoryStrengthModel,
@@ -1130,7 +1137,7 @@ export class MemoryCortex {
           return {
             actorId,
             query,
-            items: this.finalizeRecallItems(actorId, query, items, opts),
+            items: await this.finalizeRecallItems(actorId, query, items, opts),
             domain: "working",
             mode: "single_domain",
             recalledAt: now,
@@ -1171,7 +1178,7 @@ export class MemoryCortex {
       return {
         actorId,
         query,
-        items: this.finalizeRecallItems(
+        items: await this.finalizeRecallItems(
           actorId,
           query,
           this.textToRecallItems(text, "narrative"),
@@ -1192,7 +1199,7 @@ export class MemoryCortex {
         return {
           actorId,
           query,
-          items: this.finalizeRecallItems(
+          items: await this.finalizeRecallItems(
             actorId,
             query,
             summary ? this.textToRecallItems(summary, "relationship") : [],
@@ -1228,7 +1235,7 @@ export class MemoryCortex {
         return {
           actorId,
           query,
-          items: this.finalizeRecallItems(
+          items: await this.finalizeRecallItems(
             actorId,
             query,
             this.fusedCandidatesToItems(fused, domain),
@@ -1252,7 +1259,7 @@ export class MemoryCortex {
         return {
           actorId,
           query,
-          items: this.finalizeRecallItems(
+          items: await this.finalizeRecallItems(
             actorId,
             query,
             this.humanLikeResultToItems(result, domain),
@@ -1271,7 +1278,7 @@ export class MemoryCortex {
         return {
           actorId,
           query,
-          items: this.finalizeRecallItems(
+          items: await this.finalizeRecallItems(
             actorId,
             query,
             this.agenticCandidatesToItems(candidates, domain),
@@ -1301,13 +1308,25 @@ export class MemoryCortex {
     /** 仲裁阶段已应用强度加成时为 true（finalize 收尾跳过二次强度重排） */
     let strengthBoostApplied = false;
 
+    /**
+     * 多意图（subQuery）并行召回的跨列表 RRF 融合（P2-3）：
+     * 同一记忆被多个子查询 rank 命中时按共识上浮（cap 0.35），替代旧的
+     * 「同内容取最高分」合并——后者感知不到跨子查询的 rank 一致性。
+     * 输出分数保持 0-1 语义（短路判断与仲裁归一化的输入依赖它）。
+     */
+    const fuseSubQueryLists = (lists: MemoryRecallItem[][]): MemoryRecallItem[] =>
+      fuseRankLists(lists, {
+        keyOf: (item) => (typeof item.content === "string" ? item.content.trim().slice(0, 64) : ""),
+        scoreOf: (item) => item.score ?? 0,
+      }).map((e) => ({ ...e.item, score: Number(e.consensusScore.toFixed(4)) }));
+
     // 1) agentic 主通道：结构化召回（带原始时间戳，时间衰减统一交仲裁器按 domain τ 施加）。
     //    此前走「格式化文本 → 正则解析」往返，时间戳粒度退化且检索层多扣一次全局半衰期。
     //    P2-2 多意图并行召回：subQueries 存在时对每个子 query 并行检索，
-    //    各自合并去重（后续统一仲裁），单一 query 时保持原逻辑。
+    //    fuseRankLists 做 RRF 共识融合，单一 query 时保持原逻辑（单列表融合=恒等）。
     let agenticItems: MemoryRecallItem[] = [];
     if (this.bridge) {
-      // P1-7 统一召回：bridge 融合（Mem0×认知图 RRF + 跨通道去重）作为单一候选源。
+      // P1-7 统一召回：bridge 融合（Mem0×认知图×FTS RRF + 跨通道去重）作为单一候选源。
       // 此前 agentic 通道查 Mem0、narrative 通道再取一遍融合文本，同源内容双重计入。
       const subQueries = (opts?.subQueries ?? [query])
         .map((q) => (q ?? "").trim())
@@ -1319,47 +1338,23 @@ export class MemoryCortex {
           this.safeRecall(() => this.bridge!.searchFused(actorId, q, { context: "main" })),
         ),
       );
-      const merged = new Map<string, MemoryRecallItem>();
-      for (const candidates of candidateLists) {
-        for (const item of this.fusedCandidatesToItems(candidates ?? [])) {
-          const key = item.content.trim().slice(0, 64);
-          const existing = merged.get(key);
-          if (!existing || (item.score ?? 0) > (existing.score ?? 0)) {
-            merged.set(key, item);
-          }
-        }
-      }
-      agenticItems = [...merged.values()];
+      agenticItems = fuseSubQueryLists(
+        candidateLists.map((candidates) => this.fusedCandidatesToItems(candidates ?? [])),
+      );
     } else if (this.agentic) {
       const subQueries = (opts?.subQueries ?? [query])
         .map((q) => (q ?? "").trim())
         .filter((q) => q.length > 0 && q !== query)
         .slice(0, 3);
       const allQueries = [query, ...subQueries];
-      if (allQueries.length === 1) {
-        const candidates =
-          (await this.safeRecall(() =>
-            this.agentic!.retrieval.searchStructured(actorId, query),
-          )) ?? [];
-        agenticItems = this.agenticCandidatesToItems(candidates);
-      } else {
-        const candidateLists = await Promise.all(
-          allQueries.map((q) =>
-            this.safeRecall(() => this.agentic!.retrieval.searchStructured(actorId, q)),
-          ),
-        );
-        const merged = new Map<string, MemoryRecallItem>();
-        for (const candidates of candidateLists) {
-          for (const item of this.agenticCandidatesToItems(candidates ?? [])) {
-            const key = item.content.trim().slice(0, 64);
-            const existing = merged.get(key);
-            if (!existing || (item.score ?? 0) > (existing.score ?? 0)) {
-              merged.set(key, item);
-            }
-          }
-        }
-        agenticItems = [...merged.values()];
-      }
+      const candidateLists = await Promise.all(
+        allQueries.map((q) =>
+          this.safeRecall(() => this.agentic!.retrieval.searchStructured(actorId, q)),
+        ),
+      );
+      agenticItems = fuseSubQueryLists(
+        candidateLists.map((candidates) => this.agenticCandidatesToItems(candidates ?? [])),
+      );
     }
 
     // 2) 短路判断：仅在显式禁用仲裁时保留旧低延迟路径。
@@ -1530,7 +1525,7 @@ export class MemoryCortex {
     // 统一召回收尾：敏感过滤 → 反馈加成/惩罚重排 → 去重限长，
     // 并异步触发记忆联想合成 + 引用锚点记录（与分域召回共用同一收尾，见 finalizeRecallItems）。
     // 仲裁路径已把强度并入统一排序，此处跳过二次强度重排，避免破坏 domain 配额。
-    const feedbackAdjustedItems = this.finalizeRecallItems(actorId, query, mergedItems, {
+    const feedbackAdjustedItems = await this.finalizeRecallItems(actorId, query, mergedItems, {
       ...opts,
       skipStrengthBoost: strengthBoostApplied,
     });
@@ -1871,20 +1866,21 @@ export class MemoryCortex {
   }
 
   /**
-   * 统一召回收尾：敏感过滤 → 反馈加成重排 → 去重限长，并异步触发
+   * 统一召回收尾：敏感过滤 → 反馈加成重排 → 精排（可选）→ 去重限长，并异步触发
    * 「记忆联想合成」与「引用锚点记录」两个后置副作用。
    *
    * 默认路径、分域路径与 recallCrossDomain 全部复用本方法，保证：
    * - 反馈在线学习（纠错/点赞/点踩加成）覆盖所有召回入口；
    * - 连续性诊断（最近注入了什么锚点）覆盖所有召回入口；
-   * - LLM 跨记忆联想闭环覆盖所有召回入口。
+   * - LLM 跨记忆联想闭环覆盖所有召回入口；
+   * - P1 精排（Cross-Encoder/LLM rerank）单点覆盖所有召回入口。
    */
-  private finalizeRecallItems(
+  private async finalizeRecallItems(
     actorId: string,
     query: string,
     items: MemoryRecallItem[],
     opts?: { includeRestricted?: boolean; limit?: number; skipStrengthBoost?: boolean },
-  ): MemoryRecallItem[] {
+  ): Promise<MemoryRecallItem[]> {
     const limit = Math.max(1, opts?.limit ?? this.arbitratorConfig.topN);
     const filtered = this.filterBySensitivity(items, opts?.includeRestricted);
     // 仲裁路径（skipStrengthBoost=true）已在统一排序中应用强度因子，此处跳过，
@@ -1892,7 +1888,10 @@ export class MemoryCortex {
     const boosted = opts?.skipStrengthBoost
       ? filtered
       : this.applyFeedbackBoost(filtered, actorId);
-    const finalItems = this.dedupeAndLimitRecallItems(boosted, limit);
+    // P1 精排：对候选做 (query, memory) 联合打分并按 relevance 重排/闸弃
+    // （AGENT_MEMORY_RERANKER，默认 off）。关闭/超时/失败返回 null → 原序透传。
+    const reranked = await this.rerankRecallItems(query, boosted);
+    const finalItems = this.dedupeAndLimitRecallItems(reranked ?? boosted, limit);
 
     // 记忆联想性增强：命中 ≥ 2 条时异步用 LLM 合成跨记忆新关联（高置信回灌 humanLike 图）
     if (finalItems.length >= 2) {
@@ -1932,6 +1931,39 @@ export class MemoryCortex {
     }
 
     return finalItems;
+  }
+
+  /**
+   * 精排（P1，AGENT_MEMORY_RERANKER=off|llm|api）：取融合排序头部候选拼池，
+   * 用 rerankTexts 做 (query, memory) 联合打分（Cross-Encoder 语义 / LLM listwise），
+   * relevance 直接作为注入分重排；低于 minScore 的条目丢弃（「召回后验证」闸，
+   * 挡语义分虚高但与当前问题无关的串台记忆）。
+   * 任何不可用（关闭/超时/失败/单条以下）返回 null，调用方透传原序——
+   * 精排是增强，绝不阻塞召回主链路。
+   */
+  private async rerankRecallItems(
+    query: string,
+    items: MemoryRecallItem[],
+  ): Promise<MemoryRecallItem[] | null> {
+    if (getMemoryRerankerMode() === "off" || items.length < 2 || !query.trim()) return null;
+    const poolSize = Math.min(items.length, getMemoryRerankerCandidates());
+    const pool = items.slice(0, poolSize);
+    const rest = items.slice(poolSize);
+    const scored = await rerankTexts(
+      query,
+      pool.map((item) => (typeof item.content === "string" ? item.content : "")),
+    );
+    if (!scored) return null;
+    const relevanceOf = new Map(scored.map((s) => [s.index, s.relevance]));
+    const minScore = getMemoryRerankerMinScore();
+    const rerankedPool = pool
+      .map((item, i) => ({ item, relevance: relevanceOf.get(i) ?? 0 }))
+      .filter(({ relevance }) => relevance >= minScore)
+      .sort((a, b) => b.relevance - a.relevance)
+      .map(({ item, relevance }) => ({ ...item, score: Number(relevance.toFixed(4)) }));
+    // 精排把候选全部闸弃时不强行清空（可用性保护，回退原序）
+    if (rerankedPool.length === 0) return null;
+    return [...rerankedPool, ...rest];
   }
 
   async rememberBatch(actorId: string, items: MemoryItem[]): Promise<void> {
@@ -1976,7 +2008,7 @@ export class MemoryCortex {
       return {
         actorId,
         query,
-        items: this.finalizeRecallItems(
+        items: await this.finalizeRecallItems(
           actorId,
           query,
           this.humanLikeResultToItems(result, "episodic"),
@@ -1995,7 +2027,7 @@ export class MemoryCortex {
       return {
         actorId,
         query,
-        items: this.finalizeRecallItems(
+        items: await this.finalizeRecallItems(
           actorId,
           query,
           this.textToRecallItems(text, "narrative"),
@@ -2024,7 +2056,7 @@ export class MemoryCortex {
     return {
       actorId,
       query,
-      items: this.finalizeRecallItems(actorId, query, mergedItems),
+      items: await this.finalizeRecallItems(actorId, query, mergedItems),
       domain: "semantic",
       mode: "cross_domain",
       recalledAt: now,
@@ -2311,7 +2343,9 @@ export class MemoryCortex {
           ? "bridge_fused"
           : c.channels.includes("mem0")
             ? "mem0"
-            : "graph",
+            : c.channels.includes("fts")
+              ? "fts"
+              : "graph",
         score: c.mem0Score ?? c.fusedScore,
         ...(c.timestamp ? { timestamp: c.timestamp } : {}),
       }));

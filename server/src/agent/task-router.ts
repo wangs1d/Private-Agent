@@ -60,14 +60,14 @@ export function planFieldsForMode(mode: LlmExecutionMode): {
 }
 
 /* ────────────────────────────────────────────────────────────
- * 前台自决模式（2026-09-05 前后台架构，默认开启）
+ * 前台自决模式（2026-09-05 引入，2026-09-07 退役为「触发权威」）
  *
- * 契约：前台常驻对话，手里只有两个动作原语——task.dispatch（派后台）
- * 与 search_web（快查）。「这轮要不要办事」由前台模型在一个调用里顺带
- * 决定，不再需要独立路由 LLM 调用（每轮对话 LLM 调用收敛到恒 1 次）；
- * 判错的兜底不在路由层，而在出口诚实闸（commitment-gate）与后台
- * TurnOutcomeGate——前台不再是无能力平面，误判的代价只是多聊一句。
- * AGENT_FOREGROUND_DISPATCH=0 可回退到独立路由 LLM 判定（遗留灰度）。
+ * 失败模式已被实证：前台模型收到 task.dispatch/search_web schema 仍口头
+ * 推脱（"这条路不通/翻不到"），触发是概率事件，出口词表闸永远慢一步。
+ * 2026-09-07 前置路由门：「要不要办事」由 routeTurnByLlm 在主回复之前判定，
+ * plane=task 由程序层确定性路由到任务执行器。前台白名单里的 task.dispatch
+ * 保留为分类假阴性的安全网（+ 出口诚实闸/闪避闸兜底），不再是唯一触发路径。
+ * isForegroundDispatchMode 现仅控制：标签协议灰度与前台人格指引选择。
  * ──────────────────────────────────────────────────────────── */
 
 export function isForegroundDispatchMode(): boolean {
@@ -86,19 +86,6 @@ export function isForegroundDispatchMode(): boolean {
 export function isForegroundTagProtocolEnabled(): boolean {
   const raw = process.env.AGENT_FOREGROUND_TAG_PROTOCOL?.trim().toLowerCase();
   return raw === "1" || raw === "on" || raw === "true";
-}
-
-/** 前台自决模式的固定决策：plane=chat + 前台工具白名单（由 agent-core 注入）。 */
-export function foregroundSelfDispatchDecision(): RouteDecision {
-  return {
-    mode: "fast",
-    reasons: ["foreground_self_dispatch"],
-    segmentable: true,
-    plane: "chat",
-    capabilities: [],
-    budget: 0,
-    tier: "fast",
-  };
 }
 
 /* ────────────────────────────────────────────────────────────

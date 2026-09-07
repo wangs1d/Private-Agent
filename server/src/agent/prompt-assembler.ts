@@ -45,6 +45,7 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "agentCaps",
   "worldCaps",
   "userUnderstanding",
+  "userFacts",
   "userProfileSummary",
   "memoryInventory",
   "relationshipMemory",
@@ -160,6 +161,9 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 用户理解档案（理解档案 store）：agent 对用户理解的结构化沉淀，先于派生画像
   // 注入——块内自带使用指令（用户相关话题以此为准；玩笑/粉丝式称呼不当事实转述）。
   if (m.userUnderstanding) stablePrefix.push(m.userUnderstanding);
+  // 结构化事实库（事实档案 store）：用户档案字段的确定性记录，紧跟理解档案——
+  // 块内自带使用指令（对应字段提问直接引用当前值，确定性高于语义检索来源）。
+  if (m.userFacts) stablePrefix.push(m.userFacts);
   if (m.userProfileSummary) stablePrefix.push(`【用户长期画像】\n${m.userProfileSummary}`);
   if (m.memoryInventory) stablePrefix.push(`【记忆目录】\n${m.memoryInventory}`);
   // 记忆整理家族（5→1）：夜间整理的跨会话背景记忆。块内保留源标题作小节标签。

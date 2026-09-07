@@ -31,6 +31,8 @@ export type LlmAuditStage =
   | "rolling_summary"
   /** 用户画像深度合成 */
   | "user_profile_aggregate"
+  /** 用户画像每轮结构化抽取 */
+  | "user_profile_extract"
   /** 用户兴趣识别 / 监控 */
   | "interest_watch"
   /** 主动意图生成（ProactivityHub） */

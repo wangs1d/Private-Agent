@@ -34,6 +34,8 @@ import {
 import {
   resolveOpenAiApiKey,
   getAgenticMemoryLlmModel,
+  getLowSignalBufferMaxItems,
+  getLowSignalBufferMaxChars,
 } from "../agentic-memory/env.js";
 
 export type MemoryCandidate = {
@@ -155,6 +157,18 @@ export class MemoryConsolidationService {
     });
     void this.persistQueue();
 
+    // 消息数阈值触发：队列攒够（条数/字符数达阈值，env 迁移自原 ingest 内置缓冲）
+    // 立即整合，不等 30s 防抖——高频对话时降低记忆入库延迟。
+    const totalChars = this.queue.reduce((sum, c) => sum + c.text.length, 0);
+    if (this.queue.length >= getLowSignalBufferMaxItems() || totalChars >= getLowSignalBufferMaxChars()) {
+      if (this.flushTimer) {
+        clearTimeout(this.flushTimer);
+        this.flushTimer = null;
+      }
+      void this.flushAll().catch(() => {});
+      return;
+    }
+
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
         this.flushTimer = null;
@@ -180,6 +194,14 @@ export class MemoryConsolidationService {
 
   pendingCount(actorId?: string): number {
     return actorId ? this.queue.filter((c) => c.actorId === actorId).length : this.queue.length;
+  }
+
+  /** 立即整合单个 actor 的候选（会话结束/WS 断开触发，不等防抖）。 */
+  async flushForActor(actorId: string): Promise<void> {
+    if (this.pendingCount(actorId) === 0) return;
+    await this.flushActor(actorId).catch((err) => {
+      console.error("[memory-consolidation] flushForActor failed:", err);
+    });
   }
 
   private async flushActor(actorId: string): Promise<void> {
@@ -284,8 +306,8 @@ export class MemoryConsolidationService {
       }
     }
 
-    // unified 候选逐条直存（understandings/commitments/corrections 经钩子驱动下游）。
-    // reject 且无旁路数据（承诺/纠正/理解）的候选整体跳过；reject 但携带
+    // unified 候选逐条直存（understandings/commitments/corrections/facts 经钩子驱动下游）。
+    // reject 且无旁路数据（承诺/纠正/理解/事实）的候选整体跳过；reject 但携带
     // 旁路数据的仍要走 writeDecided——persistUnifiedExtraction 的 reject 分支
     // 只触发钩子、不落记忆（P0-2 解耦语义：被拒存的闲聊里的承诺/理解照样要抓）。
     for (const d of decided) {
@@ -293,7 +315,8 @@ export class MemoryConsolidationService {
       const hasSideData =
         d.unified.understandings.length > 0 ||
         d.unified.commitments.length > 0 ||
-        d.unified.corrections.length > 0;
+        d.unified.corrections.length > 0 ||
+        d.unified.facts.length > 0;
       if (d.decision.decision === "reject" && !hasSideData) continue;
       await this.deps.narrative!.writeDecided(
         actorId,
@@ -455,6 +478,10 @@ function unifiedDecisionResult(unified: UnifiedExtraction): MemoryDecisionResult
       (unified.semanticClass && UNIFIED_SEMANTIC_CLASS_MAP[unified.semanticClass]) ||
       (unified.decision === "decay" ? "temporary_context" : "stable_identity"),
     reasons: ["unified_extract"],
+    // LLM 直出的连续分；缺省按决策推导（remember 0.75 / decay 0.3 / reject 0.1）
+    importance:
+      unified.importance ??
+      (unified.decision === "remember" ? 0.75 : unified.decision === "decay" ? 0.3 : 0.1),
   };
 }
 

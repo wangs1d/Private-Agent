@@ -56,6 +56,10 @@ import { createProvenanceIfEnabled } from "../agentic-memory/provenance.js";
 import {
   createUserUnderstandingStoreIfEnabled,
 } from "../agentic-memory/user-understanding-store.js";
+import {
+  createStructuredFactStoreIfEnabled,
+} from "../agentic-memory/structured-fact-store.js";
+import { createMemoryFtsStoreIfEnabled } from "../agentic-memory/fts-store.js";
 import { getMemoryHealthSnapshot } from "../agentic-memory/health.js";
 import { registerCommitmentTools, MEMORY_INVALIDATION_CHAT_TOOLS } from "../tools/commitment-tools.js";
 import { registerTaskDispatchTool } from "../tools/task-dispatch-tool.js";
@@ -227,7 +231,6 @@ import { createCameraAdapterFactory } from "../device-bus/adapters/camera-adapte
 import { DevicePairingService } from "../services/device-pairing-service.js";
 import { AccessAuthService } from "../services/access-auth-service.js";
 import { registerAccessAuthHook } from "../routes/http/auth.js";
-import { registerAttentionRoutes } from "../routes/http/attention.js";
 import { ApprovalInboxService, isSpendConfirmation } from "../services/approval-inbox-service.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
@@ -1005,11 +1008,16 @@ export async function createAppServices(): Promise<AppServices> {
     ledger: agenticLedger,
   });
   const userUnderstandingStore = createUserUnderstandingStoreIfEnabled();
+  const structuredFactStore = createStructuredFactStoreIfEnabled();
+  // FTS 关键词第三路（混合检索 P0）：与四件套共用同一 SQLite 文件，
+  // 作为 bridge 融合召回的 BM25 rank 来源；关闭/初始化失败返回 null（无害降级）。
+  const memoryFtsStore = createMemoryFtsStoreIfEnabled();
   const memoryBridge = createMemoryBridgeIfEnabled({
     memory: agenticMemoryRuntime?.memory ?? null,
     graph: humanLikeMemory,
     ingest: agenticMemoryRuntime?.ingest ?? null,
     retrieval: agenticMemoryRuntime?.retrieval ?? null,
+    fts: memoryFtsStore,
   });
 
   // Mem0 落库钩子（方案 B/C/D 的统一取数口）：账本落 claim → 溯源登记 →
@@ -1017,8 +1025,22 @@ export async function createAppServices(): Promise<AppServices> {
   // P0-2：承诺捕获与记忆路由解耦——低信号/被拒存的文本也会带 commitments
   // 进来（results 为空的 orphan 事件），钩子门只看 context 不看 highSignal。
   agenticMemoryRuntime?.ingest.addWriteHook((event) => {
-    if (!agenticLedger && !provenance && !commitmentBoard && !userUnderstandingStore) return;
+    if (!agenticLedger && !provenance && !commitmentBoard && !userUnderstandingStore && !structuredFactStore && !memoryFtsStore) return;
     if (event.results.length > 0) {
+      // FTS 关键词索引（混合检索 P0）：与账本同源取数，同步 SQLite 写（μs 级），
+      // 失败不阻断账本/溯源主链路
+      try {
+        memoryFtsStore?.indexMemories(
+          event.actorId,
+          event.results.map((item) => ({
+            id: item.id,
+            memory: item.memory,
+            metadata: { ...(item.metadata ?? {}), context: event.context },
+          })),
+        );
+      } catch (err) {
+        console.warn("[agentic-memory] FTS 索引钩子失败（忽略）:", err);
+      }
       const records = agenticLedger
         ? agenticLedger.appendBatch(
             event.results.map((item) => ({
@@ -1115,17 +1137,53 @@ export async function createAppServices(): Promise<AppServices> {
         console.warn("[user-understanding] 理解入档失败（忽略）:", err);
       }
     }
+    // 结构化事实库：用户档案字段的实时更新通道（确定性高、字段固定，KV 式
+    // 精确寻址）。同字段新值生效即旧值入演变历史（latest-wins，不删除——
+    // 旧值可追溯）；更新类事实（搬家/换工作）由此天然覆盖，不自相矛盾。
+    for (const fact of event.facts ?? []) {
+      try {
+        const result = structuredFactStore?.applyFact({
+          actorId: event.actorId,
+          field: fact.field,
+          value: fact.value,
+          sourceRef: event.sourceId,
+          confidence: fact.confidence ?? null,
+        });
+        if (result?.changed) {
+          console.info(
+            `[structured-facts] 字段${result.previous.length > 0 ? "变更" : "新增"} ` +
+              `actor=${event.actorId} ${fact.field}=${fact.value}` +
+              (result.previous.length > 0 ? `（原值：${result.previous[0]!.value}）` : ""),
+          );
+        }
+      } catch (err) {
+        console.warn("[structured-facts] 事实入档失败（忽略）:", err);
+      }
+    }
   });
 
   // ─── P0-3/P2-15：lifecycle 删除调和 + 存量 linkage 回填 ───
-  // lifecycle 绕过 bridge 删 Mem0（TTL/去重）→ 通知 bridge 摘除 linkage；
-  // 启动后 30s 做一次存量回填（旧记忆没有 linkage，遗忘同步扫不到）。
-  agenticMemoryRuntime?.lifecycle.setDeletedNotifier((ids) => memoryBridge?.handleMem0Deleted(ids));
+  // lifecycle 绕过 bridge 删 Mem0（TTL/去重）→ 通知 bridge 摘除 linkage + FTS 摘除索引；
+  // 启动后 30s 做一次存量回填（旧记忆没有 linkage/词面索引，同步/召回都扫不到）。
+  agenticMemoryRuntime?.lifecycle.setDeletedNotifier((ids) => {
+    memoryBridge?.handleMem0Deleted(ids);
+    try {
+      memoryFtsStore?.remove(ids);
+    } catch {
+      /* FTS 摘除失败静默（残留行会被下次 upsert/清理回收） */
+    }
+  });
   if (memoryBridge && process.env.AGENT_MEMORY_BRIDGE_BACKFILL?.trim() !== "0") {
     const backfillTimer = setTimeout(() => {
       void memoryBridge.backfillLinks().catch(() => {});
     }, 30_000);
     backfillTimer.unref();
+  }
+  if (memoryFtsStore && process.env.AGENT_MEMORY_FTS_BACKFILL?.trim() !== "0") {
+    const ftsBackfillTimer = setTimeout(() => {
+      void memoryFtsStore.backfillFromMem0(agenticMemoryRuntime?.memory ?? null).catch(() => {});
+    }, 30_000);
+    ftsBackfillTimer.unref();
   }
 
   // 组件注册表：clear-service / prompt-context / health 快照从这里取实例
@@ -1135,6 +1193,8 @@ export async function createAppServices(): Promise<AppServices> {
     provenance,
     bridge: memoryBridge,
     understandingStore: userUnderstandingStore,
+    factStore: structuredFactStore,
+    fts: memoryFtsStore,
   });
 
   // 承诺板提醒/升级出口：proactivity 管道装配后接线（见下方 proactivePipeline
@@ -1171,6 +1231,7 @@ export async function createAppServices(): Promise<AppServices> {
       },
     }),
     createNarrativeHybridRetrievalDefault(),
+    Boolean(memoryBridge),
   );
 
   // ─── 统一记忆写入者（四路合一）：对话衍生的写入候选全部进整合队列，
@@ -3582,11 +3643,17 @@ export async function createAppServices(): Promise<AppServices> {
         );
 
         // ─── 记忆模块整体优化装配（P0/P1/P2）──────────────────────────
-        // P0-1 用户画像聚合器：USER_PROFILE.md 动态更新（强信号快速路径 +
-        //   每 12 轮 LLM 深度合成 + 巩固钩子反哺）。
+        // P0-1 用户画像聚合器：USER_PROFILE.md 动态更新（每轮 LLM 结构化抽取
+        //   ADD/UPDATE/DELETE 确定性落位 + 持久化轮次队列 + 每 12 轮深度合成 + 巩固钩子反哺）。
         const userProfileAggregator = createUserProfileAggregator();
         userProfileAggregator.registerOnlineLearning(onlineLearningCortex);
         brainCenter.registerUserProfileAggregator(userProfileAggregator);
+        // 画像事实写入单一所有权：聚合器 LLM 抽取可用时，UserPersonalizationService
+        // 不再走正则 patches（曾把「我叫什么？」的疑问词写成称呼）与周期性 LLM 整文件重写，
+        // 避免两条写路径互相覆盖。
+        userPersonalizationService.setProfileWritesDelegatedToAggregator(
+          userProfileAggregator.canExtract,
+        );
         // 巩固钩子：MemoryManager.consolidateNow（夜间 dreaming / 白天 idle）
         // 完成后触发深度画像合成，让记忆整理反哺画像。
         const memMgrForProfileHook = getMemoryManagerService();
@@ -4629,13 +4696,6 @@ export async function createAppServices(): Promise<AppServices> {
     activityStore: agentActivityStore,
     featureCatalog,
     reachRouter,
-  });
-
-  // 分级触达注意力路由（决策中心快照 + ack 归一 + 通用触达入口）
-  registerAttentionRoutes(app, {
-    attentionStore,
-    reachRouter,
-    activityStore: agentActivityStore,
   });
 
   // 设备自绑定鉴权周界（仅 ACCESS_AUTH_REQUIRED=1 时挂载 hook；未开启零行为变更）

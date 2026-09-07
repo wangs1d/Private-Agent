@@ -125,12 +125,32 @@ export function getHighSignalBoost(): number {
   return envPositiveFloat("AGENT_MEMORY_HIGH_SIGNAL_BOOST", 1.5);
 }
 
-/** 低信号缓冲最大条目数，达到后触发批量摘要写入 */
+/**
+ * 重要性连续分（importance 0-1）在检索排序中的加成倍率。
+ * 最终因子 = 1 + (importance - 0.5) * boost，即 importance=0.5 不增不减、
+ * 高分上浮、低分下压。0 = 关闭重要性加权（仅保留 highSignal 布尔加成）。
+ */
+export function getMemoryImportanceBoost(): number {
+  return envPositiveFloat("AGENT_MEMORY_IMPORTANCE_BOOST", 0.6);
+}
+
+/**
+ * 召回强化是否参与 TTL 豁免：开启后过期判据用 max(createdAt, last_access_at)，
+ * 经常被召回的记忆不再因"创建太久"被误删（use-it-or-lose-it）。
+ */
+export function isMemoryReinforcementEnabled(): boolean {
+  return envBool("AGENT_MEMORY_REINFORCEMENT_ENABLED", true);
+}
+
+/**
+ * 低信号批量整合触发阈值（条数）：memory-consolidation-service 攒够即提前 flush
+ * （原 ingest 内置缓冲已删除，阈值语义迁移到统一写入者）。
+ */
 export function getLowSignalBufferMaxItems(): number {
   return envPositiveInt("AGENT_MEMORY_LOW_SIGNAL_BUFFER_MAX_ITEMS", 10);
 }
 
-/** 低信号缓冲最大字符数，达到后触发批量摘要写入 */
+/** 低信号批量整合触发阈值（字符数） */
 export function getLowSignalBufferMaxChars(): number {
   return envPositiveInt("AGENT_MEMORY_LOW_SIGNAL_BUFFER_MAX_CHARS", 8000);
 }
@@ -153,6 +173,34 @@ export function getLifecycleIntervalMin(): number {
 /** 去重相似度阈值（0-1），高于此值视为重复记忆 */
 export function getDedupSimilarityThreshold(): number {
   return envPositiveFloat("AGENT_MEMORY_DEDUP_SIMILARITY_THRESHOLD", 0.92);
+}
+
+/**
+ * 语义去重每轮最多执行的向量检索次数（embedding API 限流阀）。
+ * 存量记忆多时首轮不会一次性全扫，按游标分批消化。
+ */
+export function getDedupMaxChecksPerCycle(): number {
+  return envPositiveInt("AGENT_MEMORY_DEDUP_MAX_CHECKS_PER_CYCLE", 50);
+}
+
+// ── 短期→长期植入评分闸门（unified-extractor 五维评分） ──
+
+/**
+ * 植入线：五维综合分 ≥ 此值的记忆才允许 remember（植入长期库）。
+ * 0.45 ≈ 「明天下午开会」级别的临时事项落在线下（decay）、长期事实在线上。
+ */
+export function getMemoryPromoteThreshold(): number {
+  return envPositiveFloat("AGENT_MEMORY_PROMOTE_THRESHOLD", 0.45);
+}
+
+/** 无用线：五维综合分 < 此值判为无用消息，一律 reject（不进任何持久层） */
+export function getMemoryUselessThreshold(): number {
+  return envPositiveFloat("AGENT_MEMORY_USELESS_THRESHOLD", 0.3);
+}
+
+/** remember 的持久性下限：转瞬即逝的内容（今天天气/今天心情）无论多强烈最多 decay */
+export function getMemoryPersistenceFloor(): number {
+  return envPositiveFloat("AGENT_MEMORY_PERSISTENCE_FLOOR", 0.4);
 }
 
 export function getSleepAgentEnabled(): boolean {
@@ -201,6 +249,14 @@ export function isUserUnderstandingEnabled(): boolean {
 }
 
 // ============================================================
+// 结构化事实库（Structured Fact Store）
+// ============================================================
+
+export function isStructuredFactsEnabled(): boolean {
+  return envBool("AGENT_STRUCTURED_FACTS_ENABLED", true);
+}
+
+// ============================================================
 // 方案 C：承诺草稿板（commitment board）
 // ============================================================
 
@@ -236,4 +292,73 @@ export function getCommitmentExtractScope(): "high" | "all" {
 
 export function isProvenanceEnabled(): boolean {
   return envBool("AGENT_MEMORY_PROVENANCE_ENABLED", true);
+}
+
+// ============================================================
+// FTS 关键词第三路（混合检索）：SQLite FTS5 全文索引，补齐
+// BM25 词面路——专名/技术栈/型号等低语义密度 query 上向量检索弱、
+// 词法匹配强。空索引/关闭时无结果，对召回链路无害。
+// ============================================================
+
+export function isMemoryFtsEnabled(): boolean {
+  return envBool("AGENT_MEMORY_FTS_ENABLED", true);
+}
+
+/** FTS 路进入 bridge RRF 的候选条数（rank 列表长度，与 mem0/graph 路可比即可） */
+export function getMemoryFtsTopK(): number {
+  return envPositiveInt("AGENT_MEMORY_FTS_TOP_K", 12);
+}
+
+// ============================================================
+// 召回精排（Cross-Encoder / LLM Reranker）：对融合后的候选做
+// query-memory 联合编码打分，取头部注入——粗排（向量+RRF）快但不准，
+// 精排补齐语义相关性。默认 off（灰度安全）；超时/失败一律透传原序。
+// ============================================================
+
+export type MemoryRerankerMode = "off" | "llm" | "api";
+
+/**
+ * 精排档位：
+ *   off = 关闭（默认，行为与旧版完全一致）；
+ *   llm = 复用对话 LLM 做 listwise 相关性打分（零基建，一次调用，~300-800ms）；
+ *   api = 专用 rerank 端点（bge-reranker 等，Jina/Cohere 风格 /rerank）。
+ */
+export function getMemoryRerankerMode(): MemoryRerankerMode {
+  const raw = process.env.AGENT_MEMORY_RERANKER?.trim().toLowerCase();
+  return raw === "llm" || raw === "api" ? raw : "off";
+}
+
+/** api 档端点（完整 URL，POST {model, query, documents}）；未配置时 api 档降级为 off */
+export function getMemoryRerankerEndpoint(): string | null {
+  return process.env.AGENT_MEMORY_RERANKER_ENDPOINT?.trim() || null;
+}
+
+export function getMemoryRerankerModel(): string {
+  return process.env.AGENT_MEMORY_RERANKER_MODEL?.trim() || "bge-reranker-v2-m3";
+}
+
+/** rerank 端点 Key：优先专用 Key，其次对话 Key */
+export function getMemoryRerankerApiKey(): string | null {
+  const key =
+    process.env.AGENT_MEMORY_RERANKER_API_KEY?.trim() ||
+    process.env.OPENAI_API_KEY?.trim() ||
+    null;
+  if (isPlaceholderApiKey(key)) return null;
+  return key;
+}
+
+/** 精排超时（毫秒）：超时/失败返回 null，调用方透传原序（降级零开销） */
+export function getMemoryRerankerTimeoutMs(): number {
+  return envPositiveInt("AGENT_MEMORY_RERANKER_TIMEOUT_MS", 800);
+}
+
+/** 进入精排的候选池上限（取融合排序头部；控制 LLM 档 token 成本与 api 档延迟） */
+export function getMemoryRerankerCandidates(): number {
+  return envPositiveInt("AGENT_MEMORY_RERANKER_CANDIDATES", 24);
+}
+
+/** relevance 低于此值的条目丢弃（精排档的「召回后验证」闸，0=不丢弃） */
+export function getMemoryRerankerMinScore(): number {
+  const v = Number.parseFloat(process.env.AGENT_MEMORY_RERANKER_MIN_SCORE ?? "");
+  return Number.isFinite(v) && v >= 0 && v < 1 ? v : 0.15;
 }

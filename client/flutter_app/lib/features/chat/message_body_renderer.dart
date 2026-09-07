@@ -52,6 +52,53 @@ Widget buildMessageBody(
     );
   }
 
+  // 回复信封块（reply blocks）：服务端已把 `[AGENT_RESULT_CARD_START]` 标记
+  // 确定性拆成 text/card 序列，这里按块直读渲染，不再对正文做标记正则。
+  // text 仍是事实源：历史消息无此字段（不持久化），走下方既有解析路径，
+  // blocks 与文本解析的产物同构（card 即同一份 AgentResultPayload JSON），
+  // 两端渲染等价；解析漂移与标记泄漏随「服务端单点拆分」一并消除。
+  final List<Map<String, dynamic>>? replyBlocks = message.replyBlocks;
+  if (replyBlocks != null && replyBlocks.isNotEmpty) {
+    final List<Widget> blockWidgets = <Widget>[];
+    final TextStyle bodyStyle = Theme.of(context).textTheme.bodyMedium!.copyWith(
+          color: cs.onSurface.withValues(alpha: 0.85),
+          height: AppTypography.bodyLineHeight,
+        );
+    for (final Map<String, dynamic> block in replyBlocks) {
+      final String type = block["type"]?.toString() ?? "text";
+      if (type == "card") {
+        final Map<String, dynamic> cardJson =
+            block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
+        final AgentResultData data = AgentResultData.fromJson(cardJson);
+        final int idx = blockWidgets.length;
+        blockWidgets.add(
+          Padding(
+            padding: EdgeInsets.only(top: idx == 0 ? 0 : 6),
+            child: data.actions.isNotEmpty
+                ? AgentActionChoiceCard(
+                    data: data,
+                    onAction: onUserAction == null
+                        ? null
+                        : (AgentResultAction a) => onUserAction(a, cardData: data),
+                  )
+                : AgentResultCard(data: data, onUserAction: onUserAction),
+          ),
+        );
+      } else {
+        final String text = block["text"]?.toString() ?? "";
+        if (text.trim().isEmpty) continue;
+        blockWidgets.add(buildInlineMarkdownText(text, bodyStyle, cs: cs));
+      }
+    }
+    if (blockWidgets.isNotEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: blockWidgets,
+      );
+    }
+  }
+
   // 智能体结果卡片（任务总结 / 工具调用结果）优先级最高，
   // 命中后剥离标记，剩余文本以小字附在卡片下方。
   //

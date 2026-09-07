@@ -19,6 +19,11 @@ export type MemoryDecisionResult = {
   confidence: number;
   semanticClass: MemorySemanticClass;
   reasons: string[];
+  /**
+   * 连续重要性分（0-1）：由 decision 基线 + confidence 微调推导，落库进
+   * metadata.importance，供检索加权与 TTL 豁免（补齐"只有布尔 highSignal"的缺口）。
+   */
+  importance: number;
 };
 
 export type MemoryDecisionContext = {
@@ -55,12 +60,29 @@ function buildResult(
   semanticClass: MemorySemanticClass,
   reasons: string[],
 ): MemoryDecisionResult {
+  const conf = Math.max(0, Math.min(1, confidence));
   return {
     decision,
-    confidence: Math.max(0, Math.min(1, confidence)),
+    confidence: conf,
     semanticClass,
     reasons: reasons.slice(0, 6),
+    importance: deriveImportance(decision, conf),
   };
+}
+
+/**
+ * decision 基线 + confidence 偏移 → 连续重要性分。
+ * 基线：remember=0.75 / overwrite=0.7 / decay=0.3 / reject=0.1；
+ * 高置信向上下各偏移最多 ±span（remember 0.98 → ≈0.95，低置信 remember 不顶格）。
+ */
+function deriveImportance(decision: MemoryDecision, confidence: number): number {
+  const base =
+    decision === "remember" ? 0.75
+    : decision === "overwrite" ? 0.7
+    : decision === "decay" ? 0.3
+    : 0.1;
+  const span = decision === "reject" ? 0.05 : 0.2;
+  return Math.max(0, Math.min(1, base + (confidence - 0.5) * span));
 }
 
 function classifyHeuristically(text: string, context: MemoryDecisionContext): MemoryDecisionResult {

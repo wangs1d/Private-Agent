@@ -108,6 +108,7 @@ class ChatMessage {
     this.streaming = false,
     this.mediaCards,
     this.renderBlocks,
+    this.replyBlocks,
     this.pendingMediaCards,
   });
 
@@ -170,6 +171,18 @@ class ChatMessage {
   ///
   /// 为空/缺失时前端回退到旧逻辑（mediaCards 图廊 + 正文）。
   final List<Map<String, dynamic>>? renderBlocks;
+
+  /// 回复信封块（reply blocks）。
+  ///
+  /// 来自服务端 `chat.assistant_done` 的 `blocks` 字段：服务端把 finalText 里的
+  /// `[AGENT_RESULT_CARD_START/END]` 标记确定性拆成的结构化序列——
+  ///   - { type: "text", text: "..." }
+  ///   - { type: "card", card: { 与文本标记内 JSON 同构 } }
+  ///
+  /// text 仍是唯一事实源（blocks 是派生视图）：本字段仅随 done 实时下发、
+  /// 不持久化——历史消息由正文标记解析路径重建，两端渲染等价。
+  /// 为空/缺失时回退到正文标记解析（旧服务端/旧消息兼容）。
+  final List<Map<String, dynamic>>? replyBlocks;
 
   /// 边说边出图的临时媒体卡片（瞬态，不持久化）。
   ///

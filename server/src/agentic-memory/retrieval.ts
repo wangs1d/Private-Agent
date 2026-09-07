@@ -4,7 +4,10 @@ import {
   getAgenticMemoryTopK,
   getAgenticMemorySearchTopK,
   getHighSignalBoost,
+  getMemoryImportanceBoost,
+  isMemoryReinforcementEnabled,
 } from "./env.js";
+import { getMemoryReinforcementStore } from "./memory-reinforcement.js";
 import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
 
 interface Mem0SearchItem {
@@ -69,6 +72,17 @@ function freshnessLabel(ageHours: number): string {
       : `${Math.round(ageHours / 24)}d前`;
 }
 
+/**
+ * 重要性连续分（0-1）的检索加权因子：1 + (importance - 0.5) × boost。
+ * importance=0.5（含缺失/旧数据）不增不减；高分上浮、低分下压。boost=0 关闭。
+ */
+function importanceFactor(item: Mem0SearchItem, boost: number): number {
+  if (boost <= 0) return 1;
+  const raw = Number(item.metadata?.importance);
+  const importance = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0.5;
+  return 1 + (importance - 0.5) * boost;
+}
+
 function buildSearchFilters(
   actorId: string,
   context: "main" | "notes" | "any",
@@ -83,6 +97,22 @@ function buildSearchFilters(
 
 export class AgenticMemoryRetrievalService {
   constructor(private readonly memory: Memory) {}
+
+  /**
+   * 召回命中强化（fire-and-forget 语义）：把最终注入上下文的记忆 id 写入
+   * 侧表（access_count+1、last_access_at 刷新），供 lifecycle TTL 豁免使用。
+   * 强化存储不可用/关闭时静默跳过。
+   */
+  private touchRecalled(actorId: string, items: Mem0SearchItem[]): void {
+    if (!isMemoryReinforcementEnabled() || items.length === 0) return;
+    const store = getMemoryReinforcementStore();
+    if (!store) return;
+    try {
+      store.touch(items.map((item) => item.id).filter(Boolean), actorId);
+    } catch (err) {
+      console.warn("[agentic-memory] recall touch 失败（忽略）:", err);
+    }
+  }
 
   /**
    * 主流程使用的召回。默认仅查询 context=main（不混入笔记上下文）。
@@ -115,16 +145,19 @@ export class AgenticMemoryRetrievalService {
 
     const now = Date.now();
     const highSignalBoost = getHighSignalBoost();
+    const importanceBoost = getMemoryImportanceBoost();
 
     const scored: ScoredItem[] = items
       .filter((item) => contextMatches(item.metadata?.context, opts.context))
       .map((item) => ({
         item,
-        rawScore: item.score ?? 0,
+        rawScore:
+          (item.score ?? 0) *
+          (item.metadata?.highSignal === true ? highSignalBoost : 1) *
+          importanceFactor(item, importanceBoost),
         ageHours: ageHoursOf(item, now),
         highSignal: item.metadata?.highSignal === true,
-      }))
-      .map((s) => ({ ...s, rawScore: s.rawScore * (s.highSignal ? highSignalBoost : 1) }));
+      }));
 
     if (!scored.length) return "";
 
@@ -133,6 +166,10 @@ export class AgenticMemoryRetrievalService {
     const finalTopK = getAgenticMemoryTopK();
     const deduped = this.dedupeScoredItems(scored);
     const topItems = deduped.slice(0, finalTopK);
+    this.touchRecalled(
+      actorId,
+      topItems.map((s) => s.item),
+    );
 
     const parts: string[] = [];
     for (let i = 0; i < topItems.length; i++) {
@@ -183,16 +220,24 @@ export class AgenticMemoryRetrievalService {
 
     const now = Date.now();
     const highSignalBoost = getHighSignalBoost();
+    const importanceBoost = getMemoryImportanceBoost();
 
     const scored: ScoredItem[] = items.map((item) => ({
       item,
-      rawScore: (item.score ?? 0) * (item.metadata?.highSignal === true ? highSignalBoost : 1),
+      rawScore:
+        (item.score ?? 0) *
+        (item.metadata?.highSignal === true ? highSignalBoost : 1) *
+        importanceFactor(item, importanceBoost),
       ageHours: ageHoursOf(item, now),
       highSignal: item.metadata?.highSignal === true,
     }));
     scored.sort((a, b) => b.rawScore - a.rawScore);
 
     const deduped = this.dedupeScoredItems(scored);
+    this.touchRecalled(
+      actorId,
+      deduped.map((s) => s.item),
+    );
     return deduped.map(({ item, rawScore }) => ({
       content: item.memory,
       score: rawScore,

@@ -2,11 +2,12 @@ import type { ChatCompletionContentPart, ChatCompletionMessageParam } from "open
 
 import { adoptLegacyMasterDelegateThread, adoptPrimaryThreadFromMasterThread } from "./chat-thread-adopt.js";
 import { masterChatSessionId } from "../agent/master-chat-session.js";
-import { AGENT_COMMITMENT_RE, MEMORY_EXPLICIT_RE } from "../agent/memory-signal.js";
+import { AGENT_COMMITMENT_RE, KEY_PIN_INSTRUCTION_RE, MEMORY_EXPLICIT_RE } from "../agent/memory-signal.js";
 import type { ChatThreadPersistence } from "./chat-thread-persist.js";
 import { getChatThreadPersistence } from "./chat-thread-persist.js";
 import type { ChatUserTurn } from "./types.js";
 import type { RecapSummarizer } from "../services/conversation-rolling-summarizer.js";
+import { mergeKeyPins, normalizeRecapSummaryResult } from "../services/conversation-rolling-summarizer.js";
 import {
   formatRecapStamp,
   layerRecapLinesByBudget,
@@ -63,7 +64,7 @@ const DEFAULT_SMART_TRIM_CONFIG = {
 const RECENT_WINDOW_MESSAGES = 12;
 /** 增量摘要批次：窗口外攒够一批才合并一次，摘要不随轮重写（保护 prefix cache）。 */
 const RECAP_BATCH_MESSAGES = 6;
-/** 摘要块整体 token 粗估（摘要区 30 行/2400 字符 + 待归纳区 24 行/2400 字符）。 */
+/** 摘要块整体 token 粗估（摘要区 30 行/2400 字符 + 关键钉区 10 行/1000 字符 + 待归纳区 24 行/2400 字符）。 */
 const RECAP_LINE_TOKEN_ESTIMATE = 55;
 
 function intEnv(raw: string | undefined, fallback: number): number {
@@ -96,6 +97,21 @@ const SESSION_SUMMARY_MAX_CHARS = intEnv(process.env.SESSION_SUMMARY_MAX_CHARS, 
  */
 const SESSION_PENDING_MAX_LINES = intEnv(process.env.SESSION_PENDING_MAX_LINES, 24);
 const SESSION_PENDING_MAX_CHARS = intEnv(process.env.SESSION_PENDING_MAX_CHARS, 2400);
+
+// ── 关键钉（key pins）预算（env 可调）：不可忘事实的逐字保留区 ──
+/**
+ * 关键钉区标记行：渲染在摘要区之后、[unsummarized] 之前，混合式上下文的中间层
+ * （[历史摘要] 全局脉络压缩 → [关键钉] 不可忘的事实 → 最近 K 轮原文 → 当前 Query）。
+ * 钉行逐字保留：不参与摘要的时间分层裁剪/重排，增量合并只增不改（超预算才淘汰最旧）。
+ */
+const SESSION_KEY_PINS_MARKER = "[关键钉]";
+const SESSION_KEY_PINS_HEADER = "[关键钉] 不可忘的事实（逐字保留，禁止改写或遗忘）：";
+const SESSION_KEY_PINS_MAX_LINES = intEnv(process.env.SESSION_KEY_PINS_MAX_LINES, 10);
+const SESSION_KEY_PINS_MAX_CHARS = intEnv(process.env.SESSION_KEY_PINS_MAX_CHARS, 1000);
+/** 确定性自动钉的行字符上限（与摘要行同量级；超长取首行截断）。 */
+const SESSION_KEY_PIN_AUTO_MAX_CHARS = intEnv(process.env.SESSION_KEY_PIN_AUTO_MAX_CHARS, 160);
+/** 单批确定性自动钉上限（用户显式「要求记住」指令轮，宁缺勿滥）。 */
+const SESSION_KEY_PIN_AUTO_MAX_PER_BATCH = 3;
 
 const TIME_FRAME_PREFIX = "[timeframe:";
 
@@ -419,7 +435,7 @@ function isSessionRecapMessage(msg: ChatCompletionMessageParam | undefined): boo
   return stripTimestampText(msg.content).startsWith(SESSION_RECAP_PREFIX);
 }
 
-/** 提取摘要区的行（[unsummarized] 标记之前，跳过标题行）。 */
+/** 提取摘要区的行（[关键钉] / [unsummarized] 标记之前，跳过标题行）。 */
 function extractSessionRecapLines(content: string | undefined): string[] {
   if (!content) return [];
   const text = stripTimestampText(content);
@@ -427,10 +443,27 @@ function extractSessionRecapLines(content: string | undefined): string[] {
   const lines: string[] = [];
   for (const raw of text.split("\n").slice(1)) {
     const line = raw.replace(/^-+\s*/, "").trim();
-    if (line === SESSION_UNSUMMARIZED_MARKER) break; // 待归纳区起点，归属 pending
+    if (line === SESSION_UNSUMMARIZED_MARKER || line.startsWith(SESSION_KEY_PINS_MARKER)) break;
     if (line && line !== SESSION_RECAP_TITLE) lines.push(line);
   }
   return lines;
+}
+
+/** 提取关键钉区（[关键钉] 标记之后、[unsummarized] 之前）的钉行。 */
+function extractSessionKeyPinLines(content: string | undefined): string[] {
+  if (!content) return [];
+  const text = stripTimestampText(content);
+  if (!text.startsWith(SESSION_RECAP_PREFIX)) return [];
+  const lines = text.split("\n");
+  const pinIdx = lines.findIndex((l) => l.trim().startsWith(SESSION_KEY_PINS_MARKER));
+  if (pinIdx < 0) return [];
+  const out: string[] = [];
+  for (const raw of lines.slice(pinIdx + 1)) {
+    const line = raw.replace(/^-+\s*/, "").trim();
+    if (line === SESSION_UNSUMMARIZED_MARKER) break;
+    if (line && line !== SESSION_RECAP_TITLE) out.push(line);
+  }
+  return out;
 }
 
 /** 提取待归纳区（[unsummarized] 标记之后）的原文占位行。 */
@@ -465,9 +498,10 @@ function pushRecapLinesUnique(base: string[], extra: string[]): string[] {
   return merged;
 }
 
-/** 把摘要行 + 待归纳行渲染为 recap 消息的 content（与 extract 双向兼容）。 */
+/** 把摘要行 + 关键钉行 + 待归纳行渲染为 recap 消息的 content（与 extract 双向兼容）。 */
 function buildSessionRecapContent(
   summaryLines: string[],
+  pinLines: string[],
   pendingLines: string[],
   now: Date = new Date(),
 ): string {
@@ -476,6 +510,11 @@ function buildSessionRecapContent(
   const plain = summaryLines.map((l) => l.replace(/^-+\s*/, "").trim()).filter(Boolean);
   const ordered = layerRecapLinesByBudget(plain, SESSION_SUMMARY_MAX_LINES, true, now);
   const parts = [SESSION_RECAP_PREFIX, SESSION_RECAP_TITLE, ...ordered.map((l) => `- ${l}`)];
+  // 关键钉区：不可忘事实逐字保留（调用方已按预算合并，此处原样渲染）——
+  // 不参与上方 layerRecapLinesByBudget 的时间分层压缩，跨轮折叠不漂移。
+  if (pinLines.length > 0) {
+    parts.push(SESSION_KEY_PINS_HEADER, ...pinLines.map((l) => `- ${l}`));
+  }
   // 待归纳区：原文占位行原样追加（有自己的行数/字符预算，不挤占摘要区）——
   // 在 LLM 增量摘要成功吸收前，这些行保证滑出窗口的内容始终在线程内可见。
   if (pendingLines.length > 0) {
@@ -540,23 +579,55 @@ function capPendingLines(lines: string[]): string[] {
   return out;
 }
 
+/**
+ * 确定性自动钉（零 LLM、高精度兜底）：用户显式「要求记住」的指令轮，在滑出窗口的
+ * 瞬间逐字钉入 [关键钉] 区。这类内容用户明说了"不可忘"，不能等 LLM 摘要成功
+ * （无 provider / 调用失败时不丢）；LLM 关键钉挑选负责更广的语义覆盖（承诺/约束/
+ * 偏好），两者互补。只动 user 消息、取首行、限条数防 bloat；去重由 mergeKeyPins 统一做。
+ */
+function autoKeyPinLinesFromDropped(droppedMessages: ChatCompletionMessageParam[]): string[] {
+  const out: string[] = [];
+  for (const msg of droppedMessages) {
+    if (out.length >= SESSION_KEY_PIN_AUTO_MAX_PER_BATCH) break;
+    if (msg.role !== "user" || typeof msg.content !== "string") continue;
+    const text = stripTimestampText(msg.content);
+    if (!text || text.startsWith(SESSION_RECAP_PREFIX)) continue;
+    if (!KEY_PIN_INSTRUCTION_RE.test(text)) continue;
+    const firstLine = text.split("\n").map((s) => s.trim()).find(Boolean) ?? "";
+    if (!firstLine) continue;
+    const ts = extractMessageTimestamp(msg) ?? new Date();
+    let pin = normalizeRecapLine(`[${formatRecapTimeLabel(ts)}] ${firstLine}`);
+    if (pin.length > SESSION_KEY_PIN_AUTO_MAX_CHARS) {
+      pin = `${pin.slice(0, SESSION_KEY_PIN_AUTO_MAX_CHARS - 3).trimEnd()}...`;
+    }
+    if (pin) out.push(pin);
+  }
+  return out;
+}
+
 function buildSessionRecapMessage(
   existingRecapLines: string[],
+  existingPinLines: string[],
   existingPendingLines: string[],
   droppedMessages: ChatCompletionMessageParam[],
   now: Date = new Date(),
 ): ChatCompletionMessageParam | null {
   // 增量摘要布局（滑动窗口 + 增量摘要，不做挤占式折叠）：
   // - 摘要区：LLM 增量合并的结果（无 LLM 时为空）
+  // - 关键钉区：已有钉 + 本次滑出消息中的显式「要求记住」轮自动钉（只增不改，逐字保留）
   // - 待归纳区：已有未归纳行 + 本次滑出窗口的原文占位行；LLM 合并成功后整体吸收清空
   // 旧的「合并后统一截断到 14 行/1600 字符」会静默挤掉更早的行（等价遗忘），已废弃。
   const mergedPending = pushRecapLinesUnique(existingPendingLines, minimalRecapLinesFromDropped(droppedMessages, now));
   const cappedPending = capPendingLines(mergedPending);
+  const mergedPins = mergeKeyPins(existingPinLines, autoKeyPinLinesFromDropped(droppedMessages), {
+    maxLines: SESSION_KEY_PINS_MAX_LINES,
+    maxChars: SESSION_KEY_PINS_MAX_CHARS,
+  });
 
   const summaryPlain = existingRecapLines
     .map((l) => l.replace(/^-+\s*/, "").trim())
     .filter(Boolean)
-    .filter((l) => !l.startsWith(SESSION_UNSUMMARIZED_MARKER));
+    .filter((l) => !l.startsWith(SESSION_UNSUMMARIZED_MARKER) && !l.startsWith(SESSION_KEY_PINS_MARKER));
   const summaryCharCapped: string[] = [];
   let totalChars = SESSION_RECAP_PREFIX.length + SESSION_RECAP_TITLE.length + 2;
   for (const line of summaryPlain) {
@@ -564,32 +635,35 @@ function buildSessionRecapMessage(
     summaryCharCapped.push(line);
     totalChars += line.length + 4;
   }
-  if (summaryCharCapped.length === 0 && cappedPending.length === 0) return null;
+  if (summaryCharCapped.length === 0 && cappedPending.length === 0 && mergedPins.length === 0) return null;
 
   return {
     role: "assistant",
-    content: buildSessionRecapContent(summaryCharCapped, cappedPending, now),
+    content: buildSessionRecapContent(summaryCharCapped, mergedPins, cappedPending, now),
   };
 }
 
 function separateRecapMessages(messages: ChatCompletionMessageParam[]): {
   body: ChatCompletionMessageParam[];
   recapLines: string[];
+  pinLines: string[];
   pendingLines: string[];
 } {
   const body: ChatCompletionMessageParam[] = [];
   const recapLines: string[] = [];
+  const pinLines: string[] = [];
   const pendingLines: string[] = [];
   for (const msg of messages) {
     if (isSessionRecapMessage(msg)) {
       const content = typeof msg.content === "string" ? msg.content : "";
       recapLines.push(...extractSessionRecapLines(content));
+      pinLines.push(...extractSessionKeyPinLines(content));
       pendingLines.push(...extractSessionPendingLines(content));
       continue;
     }
     body.push(msg);
   }
-  return { body, recapLines, pendingLines };
+  return { body, recapLines, pinLines, pendingLines };
 }
 
 function annotateMessageIfNeeded(
@@ -781,18 +855,22 @@ export class ChatThreadStore {
   /**
    * 把「滑出窗口的历史消息 + 待归纳原文行」异步交给 LLM 增量摘要合并。
    * - 不阻塞 trimThread 主链路（fire-and-forget）
-   * - 失败静默：线程内保留摘要区原状 + [unsummarized] 待归纳区原文，不静默丢内容
+   * - 失败静默：线程内保留摘要区/关键钉区原状 + [unsummarized] 待归纳区原文，不静默丢内容
    * - seq 守卫：期间若又有新 trim 触发增强，丢弃本次旧结果（其对应的待归纳行仍在区里，
    *   由下一次合并吸收）
    *
    * 增量合并契约（2026-09-05 漂移修复）：summarizer 只为「待归纳原文 + 新对话」产新行，
-   * 已有 recap 行在此原样保留、不经 LLM 重发（本地合并 + 精确去重）。此前 LLM 全量重发
+   * 已有 recap 行（含关键钉）在此原样保留、不经 LLM 重发（本地合并 + 精确去重）。此前 LLM 全量重发
    * recap，小模型改写会把事实逐步漂移（实测"七点提醒我开线上会议"在多次折叠重写后
    * 变成"七点半线上会议"，错误随每次折叠复利传播并注入后续上下文）。
+   *
+   * 关键钉（2026-09-07）：summarizer 可额外返回新钉（RecapSummaryResult.pins 或
+   * `[关键钉]` 节解析）；已有钉逐字保留，新钉经 mergeKeyPins 去重合并（超预算淘汰最旧）。
    */
   private async enhanceRecap(
     sessionId: string,
     existingLines: string[],
+    pinLines: string[],
     pendingLines: string[],
     droppedMessages: ChatCompletionMessageParam[],
   ): Promise<void> {
@@ -803,33 +881,41 @@ export class ChatThreadStore {
     const seq = (this.recapEnhanceSeq.get(sessionId) ?? 0) + 1;
     this.recapEnhanceSeq.set(sessionId, seq);
     try {
-      // 已有摘要行与待归纳原文行分字段传递：前者仅供去重参考（禁止 LLM 复述），
+      // 已有摘要行/关键钉与待归纳原文行分字段传递：前者仅供去重参考（禁止 LLM 复述），
       // 后者是必须被吸收的摘要素材（待归纳区在 apply 成功后会被清空）。
-      const lines = await summarizer({
+      const result = await summarizer({
         existingLines,
+        pinLines,
         pendingLines,
         droppedMessages,
       });
-      if (!lines || lines.length === 0) return;
+      const normalized = normalizeRecapSummaryResult(result);
+      if (!normalized || (normalized.lines.length === 0 && normalized.pins.length === 0)) return;
       // 期间又发生了 trim → 摘要已有更新版本，丢弃本次结果，避免覆盖
       if (this.recapEnhanceSeq.get(sessionId) !== seq) return;
       const merged = [...existingLines];
-      for (const line of lines) pushRecapLine(merged, line);
-      if (merged.length === existingLines.length) return; // 新行全部与已有行重复
-      this.applyEnhancedRecap(sessionId, merged);
+      for (const line of normalized.lines) pushRecapLine(merged, line);
+      const mergedPins = mergeKeyPins(pinLines, normalized.pins, {
+        maxLines: SESSION_KEY_PINS_MAX_LINES,
+        maxChars: SESSION_KEY_PINS_MAX_CHARS,
+      });
+      if (merged.length === existingLines.length && mergedPins.length === pinLines.length) {
+        return; // 新行/新钉全部与已有内容重复
+      }
+      this.applyEnhancedRecap(sessionId, merged, mergedPins);
     } catch {
-      // 静默失败：保留同步生成的已有摘要行与待归纳区
+      // 静默失败：保留同步生成的已有摘要行、关键钉与待归纳区
     }
   }
 
-  private applyEnhancedRecap(sessionId: string, lines: string[]): void {
+  private applyEnhancedRecap(sessionId: string, lines: string[], pins: string[]): void {
     const msgs = this.history.get(sessionId);
     if (!msgs) return;
-    // 合并成功：摘要区替换为精炼结果，待归纳区清空（其内容已被本次合并吸收）。
+    // 合并成功：摘要区替换为精炼结果（关键钉原样并入），待归纳区清空（其内容已被本次合并吸收）。
     // seq 守卫保证 apply 时线程内待归纳区与捕获时刻一致（期间有新 fold 会 bump seq 走丢弃分支）。
     const recapMsg: ChatCompletionMessageParam = {
       role: "assistant",
-      content: buildSessionRecapContent(lines, []),
+      content: buildSessionRecapContent(lines, pins, []),
     };
     const index = msgs.findIndex(isSessionRecapMessage);
     if (index >= 0) {
@@ -961,6 +1047,7 @@ export class ChatThreadStore {
     const trimResult = trimPreservingToolPairs(separated.body, config.maxMessages);
     const recap = buildSessionRecapMessage(
       separated.recapLines,
+      separated.pinLines,
       separated.pendingLines,
       trimResult.dropped,
     );
@@ -970,7 +1057,7 @@ export class ChatThreadStore {
     msgs.push(...trimResult.kept);
 
     // 溢出消息异步交给 LLM 增量摘要合并（不阻塞主链路）
-    this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pendingLines, trimResult.dropped).catch(() => {});
+    this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pinLines, separated.pendingLines, trimResult.dropped).catch(() => {});
 
     const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
     if (totalTokens > config.maxTokens) {
@@ -1009,7 +1096,8 @@ export class ChatThreadStore {
     if (body.length <= foldThreshold) {
       const totalTokens =
         estimateMessageTokens(sys) +
-        (separated.recapLines.length + separated.pendingLines.length) * RECAP_LINE_TOKEN_ESTIMATE +
+        (separated.recapLines.length + separated.pinLines.length + separated.pendingLines.length) *
+          RECAP_LINE_TOKEN_ESTIMATE +
         body.reduce((s, m) => s + estimateMessageTokens(m), 0);
       return totalTokens <= config.maxTokens;
     }
@@ -1022,13 +1110,14 @@ export class ChatThreadStore {
 
     const recap = buildSessionRecapMessage(
       separated.recapLines,
+      separated.pinLines,
       separated.pendingLines,
       foldedMessages,
     );
 
     // 滑出窗口的内容异步交给 LLM 增量摘要合并（不阻塞主链路）。
     // 失败/无摘要器时待归纳区原文行仍在线程内，不会静默丢失。
-    this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pendingLines, foldedMessages).catch(() => {});
+    this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pinLines, separated.pendingLines, foldedMessages).catch(() => {});
 
     // 重组后 token 检查：若近期窗口消息本身就超限，让上层走 smartTrimByTokens
     const sysTokens = estimateMessageTokens(sys);
@@ -1117,13 +1206,14 @@ export class ChatThreadStore {
     const droppedMessages = olderMessages.filter((msg) => !preservedOlder.includes(msg));
     const recap = buildSessionRecapMessage(
       separated.recapLines,
+      separated.pinLines,
       separated.pendingLines,
       droppedMessages,
     );
 
     // 溢出消息异步交给 LLM 增量摘要合并（不阻塞主链路；失败保留待归纳区原文）
     if (droppedMessages.length > 0 || separated.pendingLines.length > 0) {
-      this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pendingLines, droppedMessages).catch(() => {});
+      this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pinLines, separated.pendingLines, droppedMessages).catch(() => {});
     }
 
     msgs.length = 0;

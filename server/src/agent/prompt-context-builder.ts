@@ -778,6 +778,10 @@ export class PromptContextBuilder {
     // 门控）；userText 命中话题词的理解带"基于此回答"寻址标记。
     const userUnderstandingBlock = this.buildUserUnderstandingBlock(input.actorId, userText);
 
+    // 结构化事实块：用户档案字段的确定性记录（KV 式精确寻址，无条件注入）；
+    // userText 命中字段名的事实带"基于此回答"寻址标记（"我是做什么工作的"直达）。
+    const userFactsBlock = this.buildUserFactsBlock(input.actorId, userText);
+
     // 互斥：shortTermTaskContext 非空时跳过 taskContext，避免语义重叠字段同时以完整长度注入
     const effectiveTaskContext = shortTermTaskContext ? undefined : taskContext;
 
@@ -799,6 +803,7 @@ export class PromptContextBuilder {
         ? { toneGuidance }
         : {}),
       ...(userUnderstandingBlock ? { userUnderstanding: userUnderstandingBlock } : {}),
+      ...(userFactsBlock ? { userFacts: userFactsBlock } : {}),
       ...(userProfile
         ? { userProfile }
         : {}),
@@ -856,6 +861,7 @@ export class PromptContextBuilder {
     // 回声候选——注入回上下文的内容不再被提取为新记忆（OpenClaw 2.0 同款结构）。
     try {
       markInjectedMemory(input.actorId, promptMemory.userUnderstanding);
+      markInjectedMemory(input.actorId, promptMemory.userFacts);
       markInjectedMemory(input.actorId, promptMemory.narrativeRecall);
       markInjectedMemory(input.actorId, promptMemory.memorySummary);
       markInjectedMemory(input.actorId, promptMemory.memoryPreferences);
@@ -895,6 +901,25 @@ export class PromptContextBuilder {
       return store.renderForPrompt(actorId, grounded) ?? undefined;
     } catch (err) {
       console.log(`[PromptContextBuilder] 用户理解块构建失败（忽略）: ${err}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * 结构化事实块：用户档案字段的确定性记录（称呼/职业/居住地/技术栈…）。
+   * 无条件注入（当前档案，非历史召回）；userText 命中字段名的事实带
+   * "基于此回答"寻址标记——"我是做什么工作的"直达当前值，不依赖向量检索。
+   */
+  private buildUserFactsBlock(actorId: string, userText: string): string | undefined {
+    try {
+      const store = getMemoryComponents().factStore;
+      if (!store) return undefined;
+      const grounded = new Set(
+        store.matchFieldsInText(actorId, userText).map((f) => f.field.trim()),
+      );
+      return store.renderForPrompt(actorId, grounded) ?? undefined;
+    } catch (err) {
+      console.log(`[PromptContextBuilder] 结构化事实块构建失败（忽略）: ${err}`);
       return undefined;
     }
   }
@@ -974,6 +999,7 @@ export class PromptContextBuilder {
       ...ctx,
       memorySummary: redact(ctx.memorySummary),
       memoryFacts: redact(ctx.memoryFacts),
+      userFacts: redact(ctx.userFacts),
       memoryPreferences: redact(ctx.memoryPreferences),
       memoryCommitments: redact(ctx.memoryCommitments),
       memoryOpenLoops: redact(ctx.memoryOpenLoops),

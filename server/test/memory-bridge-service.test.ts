@@ -196,9 +196,9 @@ test("searchFused：双通道命中同一内容标记 both，RRF 排序生效", 
     // 双通道（两路 rank 都靠前）的融合分应高于单通道
     assert.ok(both!.fusedScore > mem0Only!.fusedScore, "双通道融合分应高于单通道");
 
-    // 文本渲染带来源标签
+    // 文本渲染带来源标签（多通道 = 多路 rank 一致命中；混合检索改造后通道含 FTS）
     const text = await bridge.buildFusedRecall("user-1", "周末爬山 用户工作");
-    assert.match(text, /双通道/);
+    assert.match(text, /多通道/);
     assert.match(text, /Mem0/);
 
     void graph;

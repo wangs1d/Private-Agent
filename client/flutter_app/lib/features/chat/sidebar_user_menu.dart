@@ -42,8 +42,6 @@ class SidebarUserMenu extends StatefulWidget {
     required this.onOpenSettings,
     required this.onOpenHelp,
     required this.onOpenDevices,
-    required this.onOpenCatalog,
-    required this.onOpenApprovals,
     required this.onLogout,
   });
 
@@ -76,12 +74,6 @@ class SidebarUserMenu extends StatefulWidget {
 
   /// 点击「我的设备」:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
-
-  /// 点击「能力面板」:打开 Feature Catalog 12 生活域能力总览
-  final VoidCallback onOpenCatalog;
-
-  /// 点击「待确认」:打开待确认收件箱(主动服务确认 / 习惯自动化提议)
-  final VoidCallback onOpenApprovals;
 
   /// 点击「退出登录」:后续接账号注销
   final VoidCallback onLogout;
@@ -141,14 +133,6 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
           onOpenDevices: () {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onOpenDevices();
-          },
-          onOpenCatalog: () {
-            Navigator.of(context, rootNavigator: true).pop();
-            widget.onOpenCatalog();
-          },
-          onOpenApprovals: () {
-            Navigator.of(context, rootNavigator: true).pop();
-            widget.onOpenApprovals();
           },
           onLogout: () {
             Navigator.of(context, rootNavigator: true).pop();
@@ -269,8 +253,6 @@ class _UserMenuOverlay extends StatefulWidget {
     required this.onOpenSettings,
     required this.onOpenHelp,
     required this.onOpenDevices,
-    required this.onOpenCatalog,
-    required this.onOpenApprovals,
     required this.onLogout,
   });
 
@@ -285,8 +267,6 @@ class _UserMenuOverlay extends StatefulWidget {
   final VoidCallback onOpenSettings;
   final VoidCallback onOpenHelp;
   final VoidCallback onOpenDevices;
-  final VoidCallback onOpenCatalog;
-  final VoidCallback onOpenApprovals;
   final VoidCallback onLogout;
 
   @override
@@ -389,7 +369,7 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
     final double screenHeight = MediaQuery.of(context).size.height;
     // 预估面板高度,用来在面板太高时夹一下避免溢出屏幕顶部
     // (header + 主题/设置/帮助/设备/站内信/退出 6 行 + 3 条分隔线)
-    const double estimatedPanelHeight = 330;
+    const double estimatedPanelHeight = 240;
     double bottom = screenHeight - widget.anchor.bottom + 8;
     final double maxBottom = screenHeight - 8 - estimatedPanelHeight;
     if (bottom > maxBottom) bottom = maxBottom;
@@ -471,20 +451,7 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                     onTap: widget.onOpenDevices,
                   ),
                   _Row(
-                    leading: const Icon(Icons.widgets_outlined, size: 18),
-                    title: "能力面板",
-                    trailing: const _TrailingValue(showChevron: true),
-                    onTap: widget.onOpenCatalog,
-                  ),
-                  _Row(
-                    leading: const Icon(Icons.fact_check_outlined, size: 18),
-                    title: "决策中心",
-                    trailing: const _TrailingValue(showChevron: true),
-                    onTap: widget.onOpenApprovals,
-                  ),
-                  _Row(
-                    leading:
-                        const Icon(Icons.notifications_outlined, size: 18),
+                    leading: const Icon(Icons.notifications_outlined, size: 18),
                     title: "站内信",
                     trailing: widget.totalUnread > 0
                         ? _UnreadBadge(count: widget.totalUnread)

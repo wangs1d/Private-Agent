@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   createLlmRollingRecapSummarizer,
   extractSummarizableText,
+  mergeKeyPins,
   parseRecapLinesFromLlmOutput,
+  parseRecapSummaryOutput,
 } from "../src/services/conversation-rolling-summarizer.js";
 import { ChatThreadStore, buildMessageTimestampPrefix } from "../src/external-model/chat-thread-store.js";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
@@ -41,6 +43,56 @@ test("parseRecapLinesFromLlmOutput: 跳过代码块围栏", () => {
 test("parseRecapLinesFromLlmOutput: 空输出返回空数组", () => {
   assert.deepEqual(parseRecapLinesFromLlmOutput(""), []);
   assert.deepEqual(parseRecapLinesFromLlmOutput("   \n  "), []);
+});
+
+// ── 关键钉（key pins）：LLM 输出解析 ─────────────────────────
+
+test("parseRecapSummaryOutput: [关键钉] 节拆分摘要行与钉行", () => {
+  const output = [
+    "- [2026/09/05 周五 09:00] 用户讨论了旅行计划",
+    "- [2026/09/05 周五 09:10] 用户下周去杭州出差",
+    "[关键钉]",
+    "- [2026/09/05 周五 09:00] 用户已确认：周六上午十点机场T3集合",
+    "- [2026/09/05 周五 09:02] 用户明确偏好：不吃香菜",
+  ].join("\n");
+  const { lines, pins } = parseRecapSummaryOutput(output);
+  assert.deepEqual(lines, [
+    "[2026/09/05 周五 09:00] 用户讨论了旅行计划",
+    "[2026/09/05 周五 09:10] 用户下周去杭州出差",
+  ]);
+  assert.deepEqual(pins, [
+    "[2026/09/05 周五 09:00] 用户已确认：周六上午十点机场T3集合",
+    "[2026/09/05 周五 09:02] 用户明确偏好：不吃香菜",
+  ]);
+});
+
+test("parseRecapSummaryOutput: 无标记行时全部为摘要行（优雅降级），兼容 [key-pins] 别名", () => {
+  assert.deepEqual(parseRecapSummaryOutput("- 摘要行1\n- 摘要行2"), {
+    lines: ["摘要行1", "摘要行2"],
+    pins: [],
+  });
+  const { lines, pins } = parseRecapSummaryOutput("- 摘要行\n[key-pins]\n- 钉行");
+  assert.deepEqual(lines, ["摘要行"]);
+  assert.deepEqual(pins, ["钉行"]);
+});
+
+test("parseRecapSummaryOutput: 钉行受每批上限约束", () => {
+  const output = ["[关键钉]", "- 钉1", "- 钉2", "- 钉3", "- 钉4"].join("\n");
+  const { pins } = parseRecapSummaryOutput(output, 30, 160, 3);
+  assert.equal(pins.length, 3);
+});
+
+test("mergeKeyPins: 去重追加，超预算淘汰最旧、保留最新", () => {
+  const existing = ["钉1", "钉2"];
+  const merged = mergeKeyPins(existing, ["钉2 ", "钉3"], { maxLines: 3, maxChars: 1000 });
+  assert.deepEqual(merged, ["钉1", "钉2", "钉3"], "新钉去重后追加在尾部");
+  const evicted = mergeKeyPins(["钉1", "钉2", "钉3"], ["钉4"], { maxLines: 3, maxChars: 1000 });
+  assert.deepEqual(evicted, ["钉2", "钉3", "钉4"], "超预算淘汰最旧的钉");
+  const charCapped = mergeKeyPins(["a".repeat(50)], ["b".repeat(50), "c".repeat(50)], {
+    maxLines: 10,
+    maxChars: 60,
+  });
+  assert.deepEqual(charCapped, ["c".repeat(50)], "字符预算超限时同样淘汰最旧");
 });
 
 // ── 文本提取 ─────────────────────────────────────────────────
@@ -284,4 +336,117 @@ test("ChatThreadStore: 无已有 recap 行时 LLM 增强完成后插入到 syste
     "增强后的 recap 应包含 LLM 摘要内容",
   );
   assert.equal(msgs.indexOf(after!), 1, "recap 应保持在 system 之后");
+});
+
+// ── 关键钉（key pins）：[关键钉] 区的写入与逐字保留 ──────────
+
+const KEY_PINS_HEADER = "[关键钉] 不可忘的事实（逐字保留，禁止改写或遗忘）：";
+
+test("ChatThreadStore: LLM 关键钉增量并入 [关键钉] 区，已有钉逐字保留（混合式布局）", async () => {
+  const store = new ChatThreadStore(null);
+  let capturedPins: string[] | undefined;
+  store.setRecapSummarizer(async (ctx) => {
+    capturedPins = [...(ctx.pinLines ?? [])];
+    return {
+      lines: ["[3天前] 用户前天计划爬山（LLM摘要）"],
+      pins: ["[2026/09/05 周五 09:00] 用户已确认：周六上午十点机场T3集合"],
+    };
+  });
+
+  const msgs = registeredThread(store, "session-pins");
+  msgs.splice(1, 0, {
+    role: "assistant",
+    content: [
+      "[session-recap]",
+      "Earlier conversation recap:",
+      "- [今天] 用户要求晚上七点提醒开线上会议",
+      KEY_PINS_HEADER,
+      "- [2026/09/04 周四 10:00] 用户明确偏好：素食",
+    ].join("\n"),
+  } as ChatCompletionMessageParam);
+
+  store.trimThread(msgs, undefined, "session-pins");
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.ok(
+    capturedPins?.some((l) => l.includes("素食")),
+    "summarizer 应收到已有关键钉（去重参考）",
+  );
+  const recap = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  assert.ok(recap && typeof recap.content === "string");
+  const content = recap.content;
+  assert.ok(content.includes("用户明确偏好：素食"), "已有钉应逐字保留，不被 LLM 重写");
+  assert.ok(content.includes("周六上午十点机场T3集合"), "LLM 新钉应增量并入");
+  assert.ok(!content.includes("[unsummarized]"), "合并成功后待归纳区应清空");
+  // 混合式布局：摘要区 → [关键钉] → 待归纳区（此处已清空）
+  const summaryIdx = content.indexOf("用户要求晚上七点提醒开线上会议");
+  const pinIdx = content.indexOf("[关键钉]");
+  const newPinIdx = content.indexOf("周六上午十点机场T3集合");
+  assert.ok(summaryIdx >= 0 && pinIdx > summaryIdx && newPinIdx > pinIdx, "布局应为 摘要 → [关键钉] 钉行");
+});
+
+test("ChatThreadStore: 用户显式「要求记住」轮折叠时确定性自动钉入，且跨折叠轮保留", () => {
+  const store = new ChatThreadStore(null);
+  const sessionId = "session-autopin";
+  const msgs = store.thread(sessionId, "system");
+  msgs.length = 0;
+  const base = Date.now() - 3 * 86_400_000;
+  const at = (i: number) => new Date(base + i * 60_000);
+  msgs.push({ role: "system", content: "sys" } as ChatCompletionMessageParam);
+  msgs.push(makeTsMsg("user", at(0), "请记住我的部署密钥是 PIN_TOKEN_XYZ"));
+  msgs.push(makeTsMsg("assistant", at(0), "好的，已记住。"));
+  for (let i = 1; i <= 12; i++) {
+    msgs.push(makeTsMsg("user", at(i), `普通消息${i}`));
+    msgs.push(makeTsMsg("assistant", at(i), `好的${i}`));
+  }
+  store.trimThread(msgs, undefined, sessionId);
+
+  const recap = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  assert.ok(recap && typeof recap.content === "string", "折叠触发应生成 recap");
+  const content = recap.content;
+  assert.ok(content.includes(KEY_PINS_HEADER), "应有关键钉区");
+  assert.ok(
+    content.includes("请记住我的部署密钥是 PIN_TOKEN_XYZ"),
+    "显式「要求记住」的轮次应逐字自动钉入（无 LLM 也不丢）",
+  );
+  const pinIdx = content.indexOf("[关键钉]");
+  const unsumIdx = content.indexOf("[unsummarized]");
+  assert.ok(pinIdx >= 0 && unsumIdx > pinIdx, "关键钉区应在摘要区之后、待归纳区之前");
+
+  // 再折叠一批：关键钉应从旧 recap 提取→重渲染 round-trip 保留
+  const older = new Date(Date.now() - 4 * 86_400_000);
+  for (let i = 0; i < 7; i++) {
+    msgs.push(makeTsMsg("user", older, `追加第${i}轮`));
+    msgs.push(makeTsMsg("assistant", older, `收到${i}`));
+  }
+  store.trimThread(msgs, undefined, sessionId);
+  const recap2 = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  assert.ok(recap2 && typeof recap2.content === "string");
+  assert.ok(
+    recap2.content.includes("请记住我的部署密钥是 PIN_TOKEN_XYZ"),
+    "关键钉应跨折叠轮保留",
+  );
+});
+
+test("ChatThreadStore: 回忆性「记得」不触发自动钉（避免噪声）", () => {
+  const store = new ChatThreadStore(null);
+  const sessionId = "session-autopin-negative";
+  const msgs = store.thread(sessionId, "system");
+  msgs.length = 0;
+  const base = Date.now() - 3 * 86_400_000;
+  const at = (i: number) => new Date(base + i * 60_000);
+  msgs.push({ role: "system", content: "sys" } as ChatCompletionMessageParam);
+  msgs.push(makeTsMsg("user", at(0), "我记得上周好像说过这个事"));
+  msgs.push(makeTsMsg("assistant", at(0), "嗯嗯。"));
+  for (let i = 1; i <= 12; i++) {
+    msgs.push(makeTsMsg("user", at(i), `闲聊${i}`));
+    msgs.push(makeTsMsg("assistant", at(i), `哦${i}`));
+  }
+  store.trimThread(msgs, undefined, sessionId);
+  const recap = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  assert.ok(recap && typeof recap.content === "string");
+  assert.ok(
+    !recap.content.includes(KEY_PINS_HEADER),
+    "回忆性「记得」不应钉入关键钉区",
+  );
 });

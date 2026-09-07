@@ -1,19 +1,17 @@
 /**
- * 双面路由（2026-09-05）黄金用例回归。
- *
- * 默认前台自决模式下 routeTurnByLlm 被整体跳过（前台带 task.dispatch 原语自决），
- * 本文件在 AGENT_FOREGROUND_DISPATCH=0 的遗留灰度模式下回归独立路由的黄金用例；
- * 前台自决模式本身在 llm-task-router-veto.test.ts 覆盖。
+ * 双面路由（2026-09-07 前置路由门）黄金用例回归。
+ * routeTurnByLlm 每轮必跑（旧「前台自决模式整体跳过」已退役），
+ * 本文件回归 L1 语义分类 + L2 路由表的平面/能力束/预算/档位契约。
  *
  * 根源化契约：
  *   - 路由层没有任何话题关键词（价格/天气/新闻词表已删除）；
- *   - 正确性由「L1 语义分类 + 出口诚实闸/TurnOutcomeGate 兜底」共同保证，不靠词表预判。
+ *   - plane=task 的派发触发由程序层确定性执行（agent-core），不靠模型自觉；
+ *   - 语义判定不可用时保守落任务面（错放任务面只是慢，错放对话面=静默失败）。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// 遗留灰度模式：独立路由 LLM 判定
-process.env.AGENT_FOREGROUND_DISPATCH = "0";
+delete process.env.AGENT_FOREGROUND_DISPATCH;
 
 const { routeTurnByLlm } = await import("../src/agent/llm-task-router.js");
 const { isHighPrecisionChatText } = await import("../src/agent/task-router.js");

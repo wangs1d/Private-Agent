@@ -23,8 +23,6 @@ class AppSidebar extends StatefulWidget {
     required this.onOpenUserMenuSettings,
     required this.onOpenUserMenuHelp,
     required this.onOpenDevices,
-    required this.onOpenCatalog,
-    required this.onOpenApprovals,
     required this.onLogout,
     required this.totalUnread,
   });
@@ -55,12 +53,6 @@ class AppSidebar extends StatefulWidget {
 
   /// 用户菜单「我的设备」行:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
-
-  /// 用户菜单「能力面板」行:打开 Feature Catalog 生活域能力总览
-  final VoidCallback onOpenCatalog;
-
-  /// 用户菜单「待确认」行:打开待确认收件箱
-  final VoidCallback onOpenApprovals;
 
   /// 用户菜单「退出登录」行
   final VoidCallback onLogout;
@@ -159,8 +151,6 @@ class _AppSidebarState extends State<AppSidebar> {
                     onOpenSettings: widget.onOpenUserMenuSettings,
                     onOpenHelp: widget.onOpenUserMenuHelp,
                     onOpenDevices: widget.onOpenDevices,
-                    onOpenCatalog: widget.onOpenCatalog,
-                    onOpenApprovals: widget.onOpenApprovals,
                     onLogout: widget.onLogout,
                   ),
                 ),

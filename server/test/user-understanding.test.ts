@@ -12,6 +12,7 @@
  *   3. 统一抽取：understandings 协议解析（kind 校验）
  *   4. ingest 钩子贯通：understandings → Mem0WriteEvent
  *   5. 统一写入者贯通：低信号候选 → extractUnified → writeDecided(unified)
+ *   6. 五维评分闸门贯通：无用消息（LLM 误标 remember）不落长期库
  *
  * 测试封闭：临时 SQLite / fake Mem0 / fake LLM 客户端，无外部依赖。
  */
@@ -271,6 +272,7 @@ test("persistUnifiedExtraction: memories infer:false 直存 + 钩子携带 under
             confidence: 0.97,
           },
         ],
+        facts: [],
       },
       "main",
       false,
@@ -306,6 +308,7 @@ test("persistUnifiedExtraction: reject 决策记忆不落库，understandings �
       commitments: [],
       corrections: [],
       understandings: [{ topic: "宠物", note: "用户提到想养金毛", kind: "other" }],
+      facts: [],
     },
     "main",
     false,
@@ -419,6 +422,94 @@ test("统一写入者: 低信号闲聊（'我老婆是刘浩存'）走统一抽�
     assert.equal(unified.understandings[0]!.kind, "fandom");
     // memories 也保留理解（粉丝式标注），不是字面断言
     assert.ok(unified.memories[0]!.includes("粉丝式"));
+  } finally {
+    resetMemoryConsolidationForTests();
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  }
+});
+
+// ============================================================
+// 6. 五维评分闸门贯通：无用消息（LLM 误标 remember）不落长期库
+// ============================================================
+
+test("统一写入者: 无用消息（天气寒暄，LLM 误标 remember）被评分闸门拦截", { timeout: 30_000 }, async () => {
+  resetMemoryConsolidationForTests();
+  resetMemoryEchoGuard();
+  const dir = await mkdtemp(join(tmpdir(), "consolidation-gate-"));
+  try {
+    const writeCalls: Array<unknown> = [];
+    const port: NarrativeMemoryPort = {
+      async ingest() {},
+      async writeDecided(...args: Array<unknown>) {
+        writeCalls.push(args);
+      },
+      async buildNarrativeRecall() {
+        return "";
+      },
+      async buildCrossContextRecall() {
+        return "";
+      },
+      async buildDetailedRecall() {
+        return "";
+      },
+      async buildSourceRecall() {
+        return "";
+      },
+      async runSleepConsolidation() {
+        return [];
+      },
+      async selfCheck() {
+        return { exists: false, domainId: null, confidence: 0 };
+      },
+      getTelemetrySnapshot() {
+        return {};
+      },
+    };
+    const service = new MemoryConsolidationService({
+      narrative: port,
+      kvSync: null,
+      memory: null,
+      filePath: join(dir, "candidates.json"),
+    });
+    // 模拟 LLM 手松：天气闲聊被误标 remember，但五维分暴露低持久+低影响
+    service.setUnifiedClient({
+      chat: {
+        completions: {
+          async create() {
+            return {
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      decision: "remember",
+                      semanticClass: "事件",
+                      memories: ["用户说今天天气很好"],
+                      commitments: [],
+                      corrections: [],
+                      understandings: [],
+                      scores: { persistence: 0.05, frequency: 0.1, emotion: 0.3, impact: 0.05, certainty: 0.8 },
+                    }),
+                  },
+                },
+              ],
+            };
+          },
+        },
+      },
+    });
+
+    service.submitCandidate({
+      actorId: "actor-x",
+      text: "今天天气真好啊",
+      source: "chat:turn_archive",
+      context: "main",
+      highSignal: false,
+      createdAt: new Date().toISOString(),
+    });
+    await service.flushAll();
+
+    // 综合分 ≈0.24 < 无用线 0.3 → reject：长期库出口零调用（不植入）
+    assert.equal(writeCalls.length, 0);
   } finally {
     resetMemoryConsolidationForTests();
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });

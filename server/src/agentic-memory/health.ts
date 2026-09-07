@@ -9,10 +9,11 @@
 import { getAgenticMemoryRuntime, getMemoryComponents } from "./index.js";
 import { getHumanLikeMemoryService } from "../services/human-like-memory-service.js";
 import { resolveHumanMemoryStoreMode } from "../services/graph-sqlite-store.js";
+import { getMemoryRerankerMode } from "./env.js";
 
 export function getMemoryHealthSnapshot(): Record<string, unknown> {
   const runtime = getAgenticMemoryRuntime();
-  const { ledger, commitmentBoard, provenance, bridge, understandingStore } =
+  const { ledger, commitmentBoard, provenance, bridge, understandingStore, factStore, fts } =
     getMemoryComponents();
   const humanLike = getHumanLikeMemoryService();
 
@@ -34,6 +35,10 @@ export function getMemoryHealthSnapshot(): Record<string, unknown> {
         }
       : null,
     userUnderstanding: understandingStore?.stats() ?? null,
+    structuredFacts: factStore?.stats() ?? null,
+    // 混合检索第三路 + 精排档位（P0/P1）：排查"召回为什么没走词面路/精排是否开启"
+    fts: fts?.stats() ?? null,
+    reranker: { mode: getMemoryRerankerMode() },
   };
 }
 

@@ -36,6 +36,7 @@ import {
 } from "./handlers/chat-user-message.js";
 import { handleAgentEmbodimentStateEvent } from "./handlers/agent-embodiment-state.js";
 import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.js";
+import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "../services/location-coordinator.js";
@@ -71,6 +72,7 @@ import { isAgentWorldSocialEnabled, isAccessAuthRequired } from "../config/env.j
 import { UnifiedErrorCode } from "../protocol-unified-errors.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { clearAllMemoryForActor } from "../services/memory-clear-service.js";
+import { getMemoryConsolidationService } from "../services/memory-consolidation-service.js";
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { UnifiedIdempotencyService } from "../services/unified-idempotency-service.js";
 import { aipDispatchWsSchema, walletRequestSchema } from "../schemas/api.js";
@@ -360,6 +362,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             getEmbodimentAutonomy()?.unregisterSession(boundActorId);
             morningBriefingScheduler?.unsubscribe(boundActorId);
             eveningDigestScheduler?.unsubscribe(boundActorId);
+            // 会话结束触发：立即整合该 actor 待处理记忆候选（不等 30s 防抖）。
+            // fire-and-forget——含 LLM 抽取，不阻塞断开清理路径。
+            void getMemoryConsolidationService()?.flushForActor(boundActorId);
             boundActorId = undefined;
           }
       });
@@ -767,6 +772,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
             wsConnectionRegistry.register(actorId, socket);
             getEmbodimentAutonomy()?.registerSession(actorId);
+            // 离线结果重放（2026-09-08 outbox）：用户离线期间完成的任务面结果
+            // 暂存于 TaskOutbox，重连时按 FIFO 原样重推，闭合「离线=结果丢失」缺口。
+            getTaskOutbox().replayFor(actorId, socket);
             // 早间简报：WS 连接建立时把 session 加入调度器，按用户偏好定时推送
             morningBriefingScheduler?.subscribe(actorId, getUserPreferences(actorId));
             // 晚间 digest（Task 15 生活节律）：连接建立时订阅，到点推送今日回顾+明日预告

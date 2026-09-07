@@ -397,3 +397,101 @@ export function shouldShortCircuitAgentic(
   const topScore = agenticItems[0]?.score ?? 0;
   return topScore >= opts.minTopScore;
 }
+
+// ============================================================
+// 子查询 rank 融合（P2-3）：多意图（subQuery）并行召回的跨列表 RRF
+// ============================================================
+
+export interface RankFusionEntry<T> {
+  /** 代表条目（各列表中原始分最高者，保留其完整元信息） */
+  item: T;
+  /** 去重键 */
+  key: string;
+  /** RRF 原始分 Σ 1/(K+rank_i)——跨列表一致性信号 */
+  rrf: number;
+  /** 命中的列表数 */
+  listsHit: number;
+  /** 各列表中的最高原始分（语义分，0-1 可比） */
+  bestRaw: number;
+  /**
+   * 共识融合分 = bestRaw × (1 + min(cap, consensus − 1))，
+   * consensus = rrf × (K + bestRank)：单列表命中恒等于 1（分数不变），
+   * 多列表一致命中 > 1（按共识比例上浮，cap 封顶防淹没语义分）。
+   */
+  consensusScore: number;
+}
+
+/**
+ * 跨列表 RRF 融合：同一记忆被多个子查询命中时，rank 共识应让它浮上来——
+ * 「被 2 个子意图各排第 5」优于「被 1 个子意图排第 1」，纯 max-score 合并
+ * 感知不到这种一致性。
+ *
+ * 设计取舍：不直接用 RRF 分数作为输出分（Σ1/(60+rank) 量级 ~0.03，会破坏
+ * 下游 0-1 分数语义——短路判断 minTopScore=0.6 与仲裁器 min-max 归一化的
+ * 输入都依赖可比的语义分），而是把 RRF 共识作为**乘性加成**作用在最高
+ * 原始分上，cap 默认 0.35：近似的分数差会被共识翻转，悬殊的语义差保留。
+ *
+ * @param lists 各子查询的召回结果（列表内已按分数降序；可为空列表）
+ * @param opts.k RRF 常数（默认 60，与 bridge 层 RRF_K 一致）
+ * @param opts.maxConsensusBoost 共识加成上限（比例，默认 0.35）
+ */
+export function fuseRankLists<T>(
+  lists: T[][],
+  opts?: {
+    k?: number;
+    keyOf?: (item: T) => string;
+    scoreOf?: (item: T) => number;
+    maxConsensusBoost?: number;
+  },
+): RankFusionEntry<T>[] {
+  const k = opts?.k ?? 60;
+  const cap = opts?.maxConsensusBoost ?? 0.35;
+  const keyOf =
+    opts?.keyOf ??
+    ((item: T) =>
+      typeof (item as { content?: unknown })?.content === "string"
+        ? ((item as { content: string }).content.trim().slice(0, 64))
+        : "");
+  const scoreOf =
+    opts?.scoreOf ??
+    ((item: T) => {
+      const s = (item as { score?: unknown })?.score;
+      return typeof s === "number" && Number.isFinite(s) ? s : 0;
+    });
+
+  const byKey = new Map<string, { entry: RankFusionEntry<T>; bestRank: number }>();
+  for (const list of lists) {
+    list.forEach((item, rank0) => {
+      const key = keyOf(item);
+      if (!key) return;
+      const rank = rank0 + 1;
+      const score = scoreOf(item);
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, {
+          entry: { item, key, rrf: 1 / (k + rank), listsHit: 1, bestRaw: score, consensusScore: 0 },
+          bestRank: rank,
+        });
+      } else {
+        existing.entry.rrf += 1 / (k + rank);
+        existing.entry.listsHit += 1;
+        if (score > existing.entry.bestRaw) {
+          existing.entry.bestRaw = score;
+          existing.entry.item = item;
+        }
+        existing.bestRank = Math.min(existing.bestRank, rank);
+      }
+    });
+  }
+
+  const out: RankFusionEntry<T>[] = [];
+  for (const { entry, bestRank } of byKey.values()) {
+    const consensus = entry.rrf * (k + bestRank);
+    entry.consensusScore = Math.min(
+      1,
+      entry.bestRaw * (1 + Math.min(cap, Math.max(0, consensus - 1))),
+    );
+    out.push(entry);
+  }
+  return out.sort((a, b) => b.consensusScore - a.consensusScore || b.rrf - a.rrf);
+}

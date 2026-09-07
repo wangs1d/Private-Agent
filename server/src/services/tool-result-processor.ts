@@ -12,6 +12,7 @@ import {
   formatSemanticResultForChat,
 } from "./agent-result-formatter.js";
 import { hasBlockquote } from "./display-effect-router.js";
+import { tryAttachToolResultCard } from "./tool-card-registry.js";
 import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
@@ -685,7 +686,13 @@ export class ToolResultProcessor {
 
   processAssistantText(
     text: string,
-    opts?: { plainTextMode?: boolean; userText?: string; toolName?: string },
+    opts?: {
+      plainTextMode?: boolean;
+      userText?: string;
+      toolName?: string;
+      /** 本轮工具结构化回执：注册工具（tool-card-registry）据此直出卡，不依赖 LLM 抄写列表 */
+      toolResult?: Record<string, unknown>;
+    },
   ): string {
     if (!this.options.enabled) {
       return humanizeAssistantText(text, { userText: opts?.userText });
@@ -721,6 +728,20 @@ export class ToolResultProcessor {
       trimmed.includes("[AGENT_RESULT_CARD_START]")
     ) {
       return workingText;
+    }
+
+// === 优先级 -2：注册工具的结构化结果直出卡（B 阶段，tool-card-registry） ===
+    // 工具回执有 schema，卡由代码确定性构建，LLM 口头回复只作前导正文——
+    // 不依赖 LLM 把结果抄写成 markdown 列表（那正是大多数工具轮次漏卡的根因）。
+    // 未注册工具 / builder 建卡失败 / plainTextMode → 返回 null，回退下方文本路由。
+    if (!opts?.plainTextMode && opts?.toolName && opts?.toolResult) {
+      const marked = tryAttachToolResultCard(workingText, opts.toolName, opts.toolResult);
+      if (marked) {
+        console.log(
+          `[ToolResultProcessor] tool_card registry: ${opts.toolName} → structured card`,
+        );
+        return marked;
+      }
     }
 
 // === 优先级 -1：LLM 把 tool result 原始 JSON 直接吐到回复里 → 转结构化卡片 ===
@@ -910,7 +931,12 @@ function injectItemUrls(marked: string): string {
   }
   payload.items = items;
 
-  return `${startTag}${JSON.stringify(payload, null, 2)}${endTag}`;
+  // 保留标记外的前导对话与结尾追问：formatAgentResultForChat 的三段输出
+  // 设计（[前导][卡片][追问]）在重建时不能被截掉，否则「好的，耳机已下单…」
+  // 「需要调整吗？」这类上下文在主链路上全部丢失。
+  const prefix = marked.slice(0, startIdx);
+  const suffix = marked.slice(endIdx + endTag.length);
+  return `${prefix}${startTag}${JSON.stringify(payload, null, 2)}${endTag}${suffix}`;
 }
 
 let _instance: ToolResultProcessor | null = null;

@@ -85,7 +85,8 @@ export class NarrativeHybridRetrievalService {
   private readonly vecTop: number;
   private readonly rrfK: number;
   private readonly fuseTop: number;
-  private readonly chunkChars: number;
+  /** 切块阈值：bridge 启用时短于该值的文本已由 Mem0×图×FTS 融合覆盖，无需再进向量索引 */
+  readonly chunkChars: number;
   private readonly chunkOverlap: number;
   private readonly embeddingModel: string;
   private readonly embeddingKey: string | null;
@@ -160,8 +161,20 @@ export class NarrativeHybridRetrievalService {
     await p;
   }
 
-  /** ingest 单行叙事（进化循环 observe、轨迹摘要等）；切块后向量索引批量写入。 */
-  async ingest(actorId: string, text: string, source: string): Promise<void> {
+  /**
+   * ingest 单行叙事（进化循环 observe、轨迹摘要等）；切块后向量索引批量写入。
+   *
+   * opts.skipVector：文本短于切块阈值且上游已有 bridge 融合召回（Mem0 向量 ×
+   * 认知图 × FTS）时，Qdrant 向量索引与 Mem0 collection 内容高度重复，跳过可
+   * 省掉一次 embedding API 与一份向量存储；BM25 仍照常增量写入，
+   * lexicalPreScreen 的覆盖范围不受影响。
+   */
+  async ingest(
+    actorId: string,
+    text: string,
+    source: string,
+    opts?: { skipVector?: boolean },
+  ): Promise<void> {
     const t = text.replace(/\s+/g, " ").trim();
     if (!t || t.length < 4) return;
     const baseId = `${actorId}:${source}:${Date.now().toString(36)}:${(this.seq++).toString(36)}`;
@@ -176,6 +189,7 @@ export class NarrativeHybridRetrievalService {
       this.bm(actorId).upsert(chunkIds[i]!, body);
     });
 
+    if (opts?.skipVector) return;
     if (!this.qdrant.isEnabled() || !this.embeddingKey) return;
 
     try {
@@ -209,10 +223,13 @@ export class NarrativeHybridRetrievalService {
     }
   }
 
-  /** 格式化融合结果，注入 system 叙事块 */
-  async buildNarrativeRecall(actorId: string, query: string): Promise<string> {
+  /**
+   * 混合召回的结构化输出（BM25+向量 RRF 融合后的 chunk 文本列表）。
+   * 供 NarrativeHybridAdapter 与 facade 融合文本做跨通道去重。
+   */
+  async recallChunks(actorId: string, query: string): Promise<string[]> {
     const q = query.trim().replace(/\s+/g, " ");
-    if (!q) return "";
+    if (!q) return [];
 
     await this.ensureBmRehydrated(actorId);
     const bmHits = this.bm(actorId).search(q, this.bmTop);
@@ -246,15 +263,17 @@ export class NarrativeHybridRetrievalService {
       this.fuseTop,
     );
 
-    const parts: string[] = [];
-    for (let i = 0; i < fused.length; i++) {
-      const txt = this.chunkTexts.get(fused[i]!.id);
-      if (txt) {
-        parts.push(`[${i + 1}] ${txt}`);
-      }
+    const texts: string[] = [];
+    for (const hit of fused) {
+      const txt = this.chunkTexts.get(hit.id);
+      if (txt) texts.push(txt);
     }
-    if (!parts.length) return "";
-    return `以下为与当前问题相关的「长期叙事 / 履历」摘录（BM25+Qdrant向量+RRF 融合）：\n${parts.join("\n\n")}`;
+    return texts;
+  }
+
+  /** 格式化融合结果，注入 system 叙事块 */
+  async buildNarrativeRecall(actorId: string, query: string): Promise<string> {
+    return formatHybridRecall(await this.recallChunks(actorId, query));
   }
 
   /**
@@ -268,6 +287,13 @@ export class NarrativeHybridRetrievalService {
     const top = this.bm(actorId).search(q, 1)[0]?.score ?? 0;
     return top > 0 ? top / (top + 3) : 0;
   }
+}
+
+/** 将融合后的 chunk 文本渲染为注入 Prompt 的叙事块（空列表返回空串）。 */
+export function formatHybridRecall(texts: string[]): string {
+  if (texts.length === 0) return "";
+  const parts = texts.map((txt, i) => `[${i + 1}] ${txt}`);
+  return `以下为与当前问题相关的「长期叙事 / 履历」摘录（BM25+Qdrant向量+RRF 融合）：\n${parts.join("\n\n")}`;
 }
 
 export function createNarrativeHybridRetrievalDefault(): NarrativeHybridRetrievalService | null {

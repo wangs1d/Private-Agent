@@ -1,24 +1,24 @@
 /**
- * L1 语义意图分类 + L2 路由决策（2026-09-05 前后台架构）行为测试。
+ * L1 语义意图分类 + L2 路由决策（2026-09-07 前置路由门）行为测试。
  *
  * 架构契约：
- *   默认前台自决模式（AGENT_FOREGROUND_DISPATCH 未设/非 0）：routeTurnByLlm
- *      整体跳过——「要不要办事」由前台模型带着 task.dispatch 原语自决，
- *      路由层零 LLM 调用；本文件在 AGENT_FOREGROUND_DISPATCH=0 的遗留
- *      灰度模式下验证独立路由行为。
+ *   前置路由门（默认，取代 2026-09-05/06 前台自决）：routeTurnByLlm **每轮必跑**
+ *      ——「要不要办事」由 L1 语义分类判定，plane=task 的派发触发由程序层
+ *      （agent-core）确定性执行，不再依赖前台模型自觉调 task.dispatch。
  *   L1 语义分类：provider 只输出 {"intent","confidence"} JSON——"需不需要工具"
  *      由语义理解判定，不做任何话题关键词枚举（价格/天气词表已删除）；
  *   L2 代码裁决：路由表映射 plane/capabilities/budget/tier；
  *   降级：provider 失败/输出不可解析 → 保守落任务面（高精度闲聊除外）。
  *
  * 已删除并验证不回归的旧机制：L0 闲聊短路、L0.5 写动作词法安全网、
- * 低置信 fail-safe（前台自决 + 出口诚实闸取代，见 commitment-gate.test.ts）。
+ * 低置信 fail-safe、前台自决模式（routeTurnByLlm 整体跳过）。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// 遗留灰度模式：独立路由 LLM 判定（本文件主体）
-process.env.AGENT_FOREGROUND_DISPATCH = "0";
+// 前置路由门：AGENT_FOREGROUND_DISPATCH 不再影响 routeTurnByLlm 是否分类
+// （旧「整体跳过」语义已退役），本文件在默认模式下验证每轮必跑的独立路由行为。
+delete process.env.AGENT_FOREGROUND_DISPATCH;
 
 const { routeTurnByLlm } = await import("../src/agent/llm-task-router.js");
 const { parseIntentJson, routePlanForIntent, INTENT_LABELS } = await import(
@@ -50,23 +50,21 @@ function brokenProvider() {
   return provider as never;
 }
 
-test("前台自决模式（默认）：路由调用整体跳过，零 LLM 成本", async () => {
-  process.env.AGENT_FOREGROUND_DISPATCH = "1";
-  try {
-    const { provider, calls } = fakeProvider("chat");
-    const decision = await routeTurnByLlm(provider, "sess-fore-1", "在吗");
-    assert.equal(decision.plane, "chat");
-    assert.equal(decision.mode, "fast");
-    assert.equal(decision.reasons[0], "foreground_self_dispatch");
-    assert.equal(calls.count, 0, "前台自决模式不得调用路由 LLM");
-  } finally {
-    process.env.AGENT_FOREGROUND_DISPATCH = "0";
-  }
+test("前置路由门：默认模式每轮必跑 L1 分类（旧「整体跳过」已退役）", async () => {
+  const { provider, calls } = fakeProvider("chat");
+  const decision = await routeTurnByLlm(provider, "sess-gate-1", "在吗");
+  assert.equal(decision.plane, "chat");
+  assert.equal(decision.mode, "fast");
+  assert.ok(
+    decision.reasons[0]?.startsWith("llm_intent:chat"),
+    `应产出真实语义分类理由，实际 ${decision.reasons.join(",")}`,
+  );
+  assert.equal(calls.count, 1, "前置门不得跳过路由 LLM——触发权威在程序层，前提是分类必跑");
 });
 
 test("L1：寒暄经语义分类直判 chat（L0 词法短路已删除，不再有零成本捷径）", async () => {
   const { provider, calls } = fakeProvider("chat");
-  const decision = await routeTurnByLlm(provider, "sess-l0-1", "在吗");
+  const decision = await routeTurnByLlm(provider, "sess-l0-1", "哈喽哈喽");
   assert.equal(decision.mode, "fast");
   assert.equal(decision.plane, "chat");
   assert.equal(decision.intent, "chat");

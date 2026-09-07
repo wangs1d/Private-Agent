@@ -1,20 +1,20 @@
 /**
  * L1 语义意图分类 + L2 路由决策（2026-09-05 前后台架构，根源化收敛）。
  *
- * 契约（classify-then-route）：
+ * 契约（classify-then-route，2026-09-07 前置路由门）：
  *   L1 结构化意图分类器（一次小模型调用）：只输出封闭标签集内的
  *      {"intent","confidence"} JSON，并顺带产出情绪/话题辅助分析
  *      （与 MoodInferenceService 的每轮独立分析调用合并，省一次调用）。
  *   L2 路由决策层（纯代码）：意图→执行计划查 intent-router 路由表。
+ *   本函数是**每轮必跑的前置门**：「要不要办事」由这里语义判定，plane=task 的
+ *   派发触发由程序层（agent-core）确定性执行——不再依赖前台模型自觉调
+ *   task.dispatch（2026-09-06 前台自决模式的失败模式：模型收到工具却推脱，
+ *   出口词表闸永远慢一步）。
  *
  * 已删除（2026-09-05 前后台架构收敛）：
  *   - L0 高精度闲聊短路 / L0.5 显式写动作词法安全网：词表是打地鼠的根源。
- *     默认走前台自决模式（isForegroundDispatchMode），前台自带 task.dispatch
- *     原语 + 出口诚实闸，「写动作被误判」从入口词法问题变成出口契约校验，
- *     两层词法网都没有存在的必要。本函数仅在 AGENT_FOREGROUND_DISPATCH=0
- *     的遗留灰度模式下被调用。
- *   - 低置信 fail-safe（confidence<0.55 强转任务面）：前台自决模式下不存在
- *     「错放对话面=静默失败」——前台可 dispatch 可快查，无需 conservatism。
+ *   - 低置信 fail-safe（confidence<0.55 强转任务面）：误判代价对称
+ *     （task 面误判=多派一次后台，chat 面误判=出口自检重跑），无需 conservatism。
  *
  * 工程约束：
  *   - 输出预算小（JSON 单对象，max_tokens=192），超时 LLM_ROUTE_TIMEOUT_MS（默认 3000ms）；
@@ -24,7 +24,6 @@
  */
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { isHighPrecisionChatText, type RouteDecision } from "./task-router.js";
-import { isForegroundDispatchMode, foregroundSelfDispatchDecision } from "./task-router.js";
 import {
   isIntentLabel,
   parseIntentJson,
@@ -69,8 +68,10 @@ function buildRoutePrompt(
       "",
     ];
   if (activeTasksSummary?.trim()) {
-    lines.push("当前正在后台执行的任务（若本消息是在过问/修正这些任务，按其话题判意图）：");
+    lines.push("当前正在后台执行的任务（若本消息是在修正/取消这些任务，按其话题判意图）：");
     lines.push(activeTasksSummary.trim());
+    lines.push("⚠️ 只是过问进度（「怎么样了/好了没/有结果了吗/还要多久」）→ 判 chat：");
+    lines.push("任务结果会由系统自动回到对话里，本轮口头应一声即可，绝不再派新任务。");
     lines.push("");
   }
   if (recentUserTurns.length > 0) {
@@ -118,9 +119,9 @@ function chatDecision(reason: string): RouteDecision {
   };
 }
 
-/* ── 保守降级（遗留灰度模式专用）──
+/* ── 保守降级 ──
  * 路由失败时的兜底：高精度闲聊外一律任务面（无话题词表——保守原则本身就是兜底）。
- * 前台自决模式不经过这里（路由调用被整体跳过）。
+ * 前置门语义下错放任务面只是慢一点，错放对话面=零工具静默失败，两者不对称。
  */
 function conservativeFallback(text: string, reason: string): RouteDecision {
   if (isHighPrecisionChatText(text)) {
@@ -181,12 +182,6 @@ export async function routeTurnByLlm(
   recentUserTurns: string[] = [],
   activeTasksSummary?: string,
 ): Promise<RouteDecision> {
-  // 前台自决模式（默认）：路由调用整体跳过——「要不要办事」由前台模型带着
-  // task.dispatch 原语在一个主回复调用里顺带决定，每轮对话恒 1 次 LLM。
-  if (isForegroundDispatchMode()) {
-    return foregroundSelfDispatchDecision();
-  }
-
   const trimmed = text.trim();
   if (!trimmed) {
     return {

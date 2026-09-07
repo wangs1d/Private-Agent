@@ -201,14 +201,16 @@ import { resolveUserLocationPrompt } from "../services/user-location-service.js"
 import type { ClientLocationWire } from "../types/client-location.js";
 import { type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
 import {
-  foregroundSelfDispatchDecision,
   isForegroundDispatchMode,
   isForegroundTagProtocolEnabled,
   TASK_TOOL_BRIDGE_NAMES,
 } from "../agent/task-router.js";
 import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
-import { hasCommitmentClaim, isDeflectionStyleFallback } from "../agent/commitment-gate.js";
+import {
+  hasCommitmentClaim,
+  isDeflectionStyleFallback,
+} from "../agent/commitment-gate.js";
 import { FRESH_FACT_RE } from "../agent/task-context.js";
 import { recordFastChannelOutcome } from "./task-plane-metrics.js";
 import {
@@ -236,6 +238,7 @@ import type { AgentTaskOrchestratorDeps, RunTaskOptions } from "./agent-task-orc
 import { getAgentTaskStore } from "./agent-task-store.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
+import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
 import { TurnFinalizer } from "../agent/execution/turn-finalizer.js";
 import { ToolPolicyResolver } from "../agent/execution/tool-policy-resolver.js";
@@ -706,22 +709,22 @@ export class AgentCore {
       // 允许传未决 Promise（WS 层不再串行等待路由）。
       // 路由 ∥ 记忆认知并行：cognize 不依赖路由结果（其内部 route 仅诊断用途），
       // 两者重叠执行，pre-LLM 延迟从 route+cognize 串行和降为 max(route, cognize)。
-      // 2026-09-05 前后台架构：默认前台自决模式——路由 LLM 调用整体跳过，
-      // 「要不要办事」由前台模型带着 task.dispatch 原语在主回复调用里顺带决定，
-      // 每轮对话恒 1 次 LLM。AGENT_FOREGROUND_DISPATCH=0 回退独立路由（遗留灰度）。
-      const foreDispatch = isForegroundDispatchMode();
+      // 2026-09-07 前置路由门（根源修复，取代 2026-09-05/06 前台自决模式）：
+      // 「要不要办事」由 L1 语义分类器在**主回复之前**判定，plane=task 的派发
+      // 由程序层确定性路由到任务执行器——不再赌前台模型自觉调 task.dispatch。
+      // 失败模式已被实证：前台收到工具 schema 却口头推脱（"这条路不通/翻不到"），
+      // 而出口词表闸永远慢一步。触发必须是程序层的确定动作，不是模型的概率选择。
+      // AGENT_FOREGROUND_DISPATCH=0 语义已并入默认路径（前台自决模式整体退役）。
       const recentUserTurns = this.getRecentUserTurnsForRouting(actorId, sessionId, text);
-      const routePromise = foreDispatch
-        ? Promise.resolve(foregroundSelfDispatchDecision())
-        : opts?.routeDecision
-          ? Promise.resolve(opts.routeDecision)
-          : routeTurnByLlm(
-              this.externalChat,
-              sessionId,
-              text,
-              recentUserTurns ?? [],
-              getTaskHub().activeSummary(actorId),
-            );
+      const routePromise = opts?.routeDecision
+        ? Promise.resolve(opts.routeDecision)
+        : routeTurnByLlm(
+            this.externalChat,
+            sessionId,
+            text,
+            recentUserTurns ?? [],
+            getTaskHub().activeSummary(actorId),
+          );
       const ambiguousFollowUp = isAmbiguousFollowUpMessage(text);
       const cognizePromise = this.brainCenter
         .cognize({
@@ -767,7 +770,9 @@ export class AgentCore {
       // LLM 路由是唯一权威。rule-router 仅保留为诊断日志，不再参与门控
       // （其关键词词表与 task-router 一样存在信号盲区，交给语义判定替代）。
       const light = this.brainCenter.routeLight(text);
-      const shouldGoTaskPlane = !foreDispatch && fastRoute.plane === "task";
+      // 前置路由门（2026-09-07）：plane=task 由程序层确定性路由到任务执行器，
+      // 不再经过「前台模型自觉派发」——触发是代码动作，不是模型概率选择。
+      const shouldGoTaskPlane = fastRoute.plane === "task";
 
       let brainCognition: import("../brain/types.js").CognitiveResult | null = null;
       // cognize 已与路由并行启动，此处仅等待结果
@@ -843,16 +848,14 @@ export class AgentCore {
           // 静默失败，不影响主流程
         });
       }
-      // 前台自决模式（默认）：不调用路由 LLM，固定前台决策（带 dispatch/快查白名单）
-      route = isForegroundDispatchMode()
-        ? foregroundSelfDispatchDecision()
-        : await routeTurnByLlm(
-            this.externalChat,
-            sessionId,
-            text,
-            this.getRecentUserTurnsForRouting(actorId, sessionId, text) ?? [],
-            getTaskHub().activeSummary(actorId),
-          );
+      // 前置路由门：降级路径同样必跑语义分类（plane=task → 任务执行器）
+      route = await routeTurnByLlm(
+        this.externalChat,
+        sessionId,
+        text,
+        this.getRecentUserTurnsForRouting(actorId, sessionId, text) ?? [],
+        getTaskHub().activeSummary(actorId),
+      );
       shortTermTurn = route.mode === "fast"
         ? this.buildFastShortTermTurnContext(sessionId, text)
         : this.buildShortTermTurnContext(sessionId, text);
@@ -2203,7 +2206,6 @@ if (this.isComplexMode(route.mode)) {
       // → 大概率空口承诺（或标签格式失败），自动补派后台任务把承诺变成真。
       if (
         this.isFastMode(mode) &&
-        isForegroundDispatchMode() &&
         !toolExecutedThisTurn &&
         dispatchedViaTag === 0 &&
         hasCommitmentClaim(full)
@@ -2217,14 +2219,13 @@ if (this.isComplexMode(route.mode)) {
         });
       }
 
-      // ── 出口闪避闸（2026-09-06 P0 修复，前台自决模式的「该调不调」兜底）──
+      // ── 出口闪避闸（2026-09-06 P0 修复，「该调不调」兜底）──
       // 实时类请求（天气/新闻/价格…）本轮既无工具动作也无派发，回复是
       // 「没实时数据/查不了/让系统去查」式闪避 → 转任务面重跑一次，让工具
       // 循环真正执行 search_web/task.dispatch 后再答。天然只触发一次：重跑走
       // complex 车道（isFastMode=false），不会再进本闸。
       if (
         this.isFastMode(mode) &&
-        isForegroundDispatchMode() &&
         !toolExecutedThisTurn &&
         dispatchedViaTag === 0 &&
         FRESH_FACT_RE.test(text) &&
@@ -2426,15 +2427,20 @@ if (this.isComplexMode(route.mode)) {
     };
     const pushDone = (finalText: string): void => {
       try {
-        registry?.trySend(
+        // 投递失败（用户离线：trySend false / registry 缺失）→ TaskOutbox 暂存，
+        // 客户端重连（session.init）时重放——离线完成的任务结果不再静默丢失。
+        const delivered = registry?.trySend(
           sessionId,
           JSON.stringify({
             type: ServerEventType.ChatAssistantDone,
             payload: { sessionId, messageId, finalText, toolCalls: [], source: "task_plane" },
           }),
         );
+        if (!delivered) {
+          getTaskOutbox().enqueue(sessionId, { messageId, finalText });
+        }
       } catch {
-        /* ignore */
+        getTaskOutbox().enqueue(sessionId, { messageId, finalText });
       }
     };
 
