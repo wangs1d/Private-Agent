@@ -11,6 +11,13 @@
 import fs from 'fs';
 import path from 'path';
 
+/** POI 缓存 TTL：过期条目仍可用（stale-while-revalidate），由服务层触发后台刷新。
+ *  可用环境变量 POI_CACHE_TTL_MS 覆盖（默认 7 天）。 */
+const POI_CACHE_TTL_MS =
+  Number(process.env.POI_CACHE_TTL_MS) > 0
+    ? Number(process.env.POI_CACHE_TTL_MS)
+    : 7 * 24 * 60 * 60 * 1000;
+
 /** 单个目的地的缓存条目 */
 export interface CacheEntry {
   /** 目的地名称 */
@@ -120,6 +127,16 @@ export class POICacheManager {
     const key = this.normalizeKey(destination);
     if (this.memoryCache.has(key)) return true;
     return fs.existsSync(this.getFilePath(key));
+  }
+
+  /**
+   * 是否已过 TTL（数据可能陈旧）。条目无有效时间戳时视为过期。
+   * 过期不等于不可用：调用方应「先用旧数据 + 触发后台刷新」。
+   */
+  isStale(entry: CacheEntry): boolean {
+    const ts = Date.parse(entry.createdAt || '');
+    if (!Number.isFinite(ts)) return true;
+    return Date.now() - ts > POI_CACHE_TTL_MS;
   }
 
   /**

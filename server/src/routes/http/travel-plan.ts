@@ -5,6 +5,7 @@ import {
   type StoredTravelPlan,
 } from "../../skills/travel-planning/travel-plan-store.js";
 import { travelShareStore } from "../../skills/travel-planning/travel-share-store.js";
+import { travelFavoritesStore } from "../../skills/travel-planning/travel-favorites-store.js";
 import {
   pricingService,
   formatQuotePriceInfo,
@@ -59,6 +60,11 @@ const indexParamsSchema = z.object({
   itemIndex: z.coerce.number().int().min(0),
 });
 
+const dayIndexParamsSchema = z.object({
+  planId: z.string().min(1).max(80),
+  dayIndex: z.coerce.number().int().min(0),
+});
+
 const planIdParamsSchema = z.object({
   planId: z.string().min(1).max(80),
 });
@@ -81,6 +87,13 @@ const commentSchema = z.object({
   comment: z.string().min(1).max(500),
 });
 
+/** 新增条目：type + name（名称或关键词，走 searchPois 定位）；startTime 显式指定时作为重排锚点 */
+const itemAddSchema = z.object({
+  type: z.enum(POI_TYPES),
+  name: z.string().min(1).max(120),
+  startTime: z.string().min(1).max(40).optional(),
+});
+
 const poiSearchQuerySchema = z.object({
   destination: z.string().min(1).max(80),
   type: z.enum(POI_TYPES),
@@ -97,6 +110,11 @@ const boundPlatformSchema = z.union([
   z.enum(PLATFORM_CODES),
 ]);
 
+/** 收藏全量同步 body（C5） */
+const favoritesSyncSchema = z.object({
+  favorites: z.array(z.string().min(1).max(120)).max(500),
+});
+
 const bookingSchema = z.object({
   memberTier: z.enum(MEMBER_TIERS).optional(),
   boundPlatforms: z.array(boundPlatformSchema).max(9).optional(),
@@ -107,8 +125,9 @@ const bookingSchema = z.object({
  * 服务端部分）。数据源为 travelPlanStore 落盘的完整行程（planId 由
  * travel.plan-itinerary 生成并随 travel_itinerary 卡下发前端）。
  *
- * - 编辑：PATCH/DELETE 按天/条目索引修改；comment 端点「提意见换一个」——
- *   按原条目类型与坐标经规划引擎找同类替代 POI 并用 PricingService 重新计价。
+ * - 编辑：PATCH/DELETE 按天/条目索引修改；POST 新增条目（searchPois 定位 + 局部重排）；
+ *   comment 端点「提意见换一个」——按原条目类型与坐标经规划引擎找同类替代 POI 并用
+ *   PricingService 重新计价；坐标变更（替换/PATCH/新增/删除）后均按新坐标局部重排当天时间轴。
  * - 搜索：GET /travel/poi-search 供单项编辑器搜索备选 POI。
  * - 预订：按酒店×晚数/门票×1/餐厅人均×1 逐项报价并汇总优惠。
  * - 分享：8 位分享码 ↔ planId 映射（travel-share-store 单文件持久化）。
@@ -154,6 +173,28 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
     return item;
   };
 
+  /**
+   * 乐观锁校验（A6）：请求携带 If-Match（或 x-plan-version）头时须与当前版本一致，
+   * 不一致返回 409——防止面板与聊天编辑、双开面板互相覆盖。版本由 store 每次保存自增。
+   */
+  const checkVersion = (reply: FastifyReply, plan: StoredTravelPlan, request: { headers: Record<string, unknown> }): boolean => {
+    const raw =
+      (request.headers["if-match"] as string | undefined) ??
+      (request.headers["x-plan-version"] as string | undefined);
+    if (raw == null || raw === "") return true;
+    const expected = Number(String(raw).replace(/^"|"$/g, ""));
+    if (!Number.isFinite(expected)) return true;
+    if ((plan.version ?? 0) !== expected) {
+      void reply.code(409).send({
+        ok: false,
+        error: `行程已被其他操作修改（当前版本 ${plan.version}，请求基于 ${expected}），请刷新后重试`,
+        currentVersion: plan.version,
+      });
+      return false;
+    }
+    return true;
+  };
+
   /** 用 PricingService 为条目报价（按类型选计价入口） */
   const quoteFor = (name: string, tags: string[], type: PoiType, ctx: PricingContext): PriceQuote => {
     if (type === "hotel") return pricingService.quoteHotel(name, tags, ctx);
@@ -187,11 +228,15 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
       "GET    /travel/plans/:planId                        完整行程（404 若不存在）",
       "PATCH  /travel/plans/:planId/days/:dayIndex/items/:itemIndex   {type?,name?,startTime?,latitude?,longitude?,address?,priceInfo?,description?,tips?,images?}",
       "DELETE /travel/plans/:planId/days/:dayIndex/items/:itemIndex   删除条目",
-      "POST   /travel/plans/:planId/days/:dayIndex/items/:itemIndex/comment   {comment} 提意见换一个",
+      "POST   /travel/plans/:planId/days/:dayIndex/items              {type,name,startTime?} 新增条目（searchPois 定位 + 局部重排）",
+      "POST   /travel/plans/:planId/days/:dayIndex/items/:itemIndex/comment   {comment} 提意见换一个（局部重排）",
       "GET    /travel/poi-search?destination=&type=&keyword=          单项编辑器备选搜索（≤8 条）",
       "POST   /travel/plans/:planId/booking                {memberTier?,boundPlatforms?} 预订报价",
       "POST   /travel/plans/:planId/share                  生成/复用 8 位分享码",
       "GET    /travel/share/:code                          按分享码读完整行程",
+      "GET    /travel/share/:code/page                     分享 H5 只读页（手机浏览器可直接打开）",
+      "GET    /travel/favorites                            收藏列表（type:name 键）",
+      "POST   /travel/favorites                            {favorites:[…]} 全量同步收藏",
     ],
     note: "planId 来自 travel_itinerary 卡 travelPlan.planId；分享码读取使用独立前缀 /travel/share/:code 避免与 :planId 参数段歧义",
   }));
@@ -225,9 +270,20 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
       }
       const plan = requirePlan(reply, params.data.planId);
       if (!plan) return;
+      if (!checkVersion(reply, plan, request)) return;
       const item = requireItem(reply, plan, params.data.dayIndex, params.data.itemIndex);
       if (!item) return;
+      // 坐标被改动时，该条目起的交通腿/时间已失真 → 局部重排（与 skill replace 同口径）
+      const coordChanged =
+        (patch.data.latitude != null && patch.data.latitude !== item.latitude) ||
+        (patch.data.longitude != null && patch.data.longitude !== item.longitude);
       plan.days[params.data.dayIndex]!.items[params.data.itemIndex] = { ...item, ...patch.data };
+      if (coordChanged) {
+        await deps.travelPlanningService!.retimeDayAfterEdit(
+          plan.days[params.data.dayIndex]!.items,
+          params.data.itemIndex,
+        );
+      }
       travelPlanStore.save(plan);
       return plan;
     },
@@ -244,9 +300,88 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
       }
       const plan = requirePlan(reply, params.data.planId);
       if (!plan) return;
+      if (!checkVersion(reply, plan, request)) return;
       const item = requireItem(reply, plan, params.data.dayIndex, params.data.itemIndex);
       if (!item) return;
       plan.days[params.data.dayIndex]!.items.splice(params.data.itemIndex, 1);
+      // 局部重排：删除点之后条目的交通腿/时间按新相邻关系重算
+      if (plan.days[params.data.dayIndex]!.items.length > params.data.itemIndex) {
+        await deps.travelPlanningService!.retimeDayAfterEdit(
+          plan.days[params.data.dayIndex]!.items,
+          params.data.itemIndex,
+        );
+      }
+      travelPlanStore.save(plan);
+      return plan;
+    },
+  );
+
+  /** 新增条目：type+name 经 searchPois 定位（精确名优先），追加到该天末尾并局部重排当天时间轴 */
+  app.post<{ Params: { planId: string; dayIndex: string } }>(
+    "/travel/plans/:planId/days/:dayIndex/items",
+    async (request, reply) => {
+      if (!requireService(reply)) return;
+      const service = deps.travelPlanningService!;
+      const params = dayIndexParamsSchema.safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ ok: false, error: params.error.flatten() });
+      }
+      const body = itemAddSchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send({ ok: false, error: body.error.flatten() });
+      }
+      const plan = requirePlan(reply, params.data.planId);
+      if (!plan) return;
+      if (!checkVersion(reply, plan, request)) return;
+      const day = plan.days[params.data.dayIndex];
+      if (!day) {
+        return reply.code(400).send({
+          ok: false,
+          error: `索引越界：dayIndex=${params.data.dayIndex}（共 ${plan.days.length} 天）`,
+        });
+      }
+      let candidates: Awaited<ReturnType<typeof service.searchPois>> = [];
+      try {
+        candidates = await service.searchPois(plan.destination, body.data.type, body.data.name, 5);
+      } catch (err) {
+        return reply.code(502).send({
+          ok: false,
+          error: `候选 POI 搜索失败：${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      if (candidates.length === 0) {
+        return reply.code(404).send({
+          ok: false,
+          error: `「${plan.destination}」未找到匹配地点（关键词：${body.data.name}），可改用 GET /travel/poi-search 浏览候选`,
+        });
+      }
+      const exact = candidates.find(
+        (c) => c.name.trim().toLowerCase() === body.data.name.trim().toLowerCase(),
+      );
+      const poi = exact ?? candidates[0]!;
+      const quote = quoteFor(poi.name, poi.tags || [], body.data.type, {
+        destination: plan.destination,
+        preferences: {},
+      });
+      const explicitStart = body.data.startTime?.trim();
+      day.items.push({
+        type: body.data.type,
+        name: poi.name,
+        // 占位时刻：局部重排会按新坐标与当天时钟重算（显式指定 startTime 时作为锚点保留）
+        startTime: explicitStart || "19:00",
+        latitude: poi.latitude,
+        longitude: poi.longitude,
+        address: poi.address || "",
+        priceInfo: formatQuotePriceInfo(quote),
+        description: service.describePoi(poi, body.data.type),
+        ...(poi.splatUrl ? { splatUrl: poi.splatUrl } : {}),
+        reviews: [],
+        videos: [],
+      });
+      // 局部重排（P0）：新条目起的当天时间轴按真实坐标重算
+      await service.retimeDayAfterEdit(day.items, day.items.length - 1, {
+        keepFirstStartTime: Boolean(explicitStart),
+      });
       travelPlanStore.save(plan);
       return plan;
     },
@@ -268,6 +403,7 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
       }
       const plan = requirePlan(reply, params.data.planId);
       if (!plan) return;
+      if (!checkVersion(reply, plan, request)) return;
       const item = requireItem(reply, plan, params.data.dayIndex, params.data.itemIndex);
       if (!item) return;
       if (!(POI_TYPES as readonly string[]).includes(item.type)) {
@@ -307,6 +443,11 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
         reviews: [],
         videos: [],
       };
+      // 局部重排（P0）：新坐标变了，被替换条目起的交通腿与时间全部按新位置重算
+      await service.retimeDayAfterEdit(
+        plan.days[params.data.dayIndex]!.items,
+        params.data.itemIndex,
+      );
       travelPlanStore.save(plan);
       return plan;
     },
@@ -411,6 +552,24 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
     };
   });
 
+  // ======================== 收藏同步（C5） ========================
+
+  /** 收藏列表（key 为「type:name」，与客户端本地收藏同键格式） */
+  app.get("/travel/favorites", async () => ({
+    ok: true,
+    favorites: travelFavoritesStore.list(),
+  }));
+
+  /** 全量同步收藏（客户端 toggle 后 fire-and-forget 调用） */
+  app.post("/travel/favorites", async (request, reply) => {
+    const body = favoritesSyncSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ ok: false, error: body.error.flatten() });
+    }
+    const favorites = travelFavoritesStore.replaceAll(body.data.favorites);
+    return { ok: true, favorites };
+  });
+
   // ======================== 分享 ========================
 
   /** 生成 8 位分享码（同一行程重复分享复用已有码） */
@@ -440,4 +599,82 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
     if (!plan) return;
     return { ok: true, plan };
   });
+
+  /**
+   * 分享 H5 只读页（B6）：分享码离开客户端后的传播载体。
+   * 自包含单文件 HTML（内联样式，无外部资源），手机浏览器直接打开即可阅读；
+   * 每个条目附高德/Google 地图跳转链接。数据与 /travel/share/:code 同源。
+   */
+  app.get<{ Params: { code: string } }>("/travel/share/:code/page", async (request, reply) => {
+    if (!requireService(reply)) return;
+    const code = request.params.code.trim();
+    if (!/^[A-Za-z0-9]{4,16}$/.test(code)) {
+      return reply.code(400).type("text/html; charset=utf-8").send("<h1>分享码格式非法</h1>");
+    }
+    const planId = travelShareStore.resolve(code);
+    const plan = planId ? travelPlanStore.get(planId) : null;
+    if (!plan) {
+      return reply.code(404).type("text/html; charset=utf-8").send(
+        renderSharePage(null, code),
+      );
+    }
+    return reply.type("text/html; charset=utf-8").send(renderSharePage(plan, code));
+  });
+}
+
+/** HTML 转义（分享页渲染用户生成内容用） */
+function esc(s: unknown): string {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+const SHARE_PAGE_TYPE_LABEL: Record<string, string> = {
+  attraction: "景点",
+  hotel: "酒店",
+  restaurant: "餐厅",
+};
+
+/** 渲染分享只读页（plan 为 null 时输出 404 文案） */
+function renderSharePage(
+  plan: StoredTravelPlan | null,
+  code: string,
+): string {
+  if (!plan) {
+    return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>分享码无效</title></head><body style="font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#101418;color:#e8eaed;display:flex;align-items:center;justify-content:center;min-height:100vh"><div style="text-align:center"><div style="font-size:40px">🧭</div><p>分享码无效或行程已被清理：${esc(code)}</p></div></body></html>`;
+  }
+  const daysHtml = plan.days
+    .map((day, di) => {
+      const rows = (day.items ?? [])
+        .map((it) => {
+          const maps = Number.isFinite(it.latitude) && Number.isFinite(it.longitude)
+            ? `https://uri.amap.com/marker?position=${it.longitude},${it.latitude}&name=${encodeURIComponent(it.name)}`
+            : null;
+          return `<li><div class="t">${esc(it.startTime ?? "")}<span class="tag">${esc(SHARE_PAGE_TYPE_LABEL[it.type] ?? it.type)}</span></div><div class="n">${esc(it.name)}</div>${it.priceInfo ? `<div class="p">${esc(it.priceInfo)}</div>` : ""}${it.address ? `<div class="a">${esc(it.address)}</div>` : ""}${maps ? `<a class="m" href="${esc(maps)}" target="_blank" rel="noopener">地图查看 →</a>` : ""}</li>`;
+        })
+        .join("");
+      return `<section class="day"><h2>Day ${di + 1} · ${esc(day.date ?? "")}</h2><ul>${rows || "<li class='empty'>当天暂无安排</li>"}</ul></section>`;
+    })
+    .join("");
+  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(plan.title || `${plan.destination}行程`)}</title><style>
+body{font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#101418;color:#e8eaed;margin:0;padding:24px 16px 48px}
+.wrap{max-width:560px;margin:0 auto}
+h1{font-size:20px;margin:0 0 4px}
+.sub{color:#9aa0a6;font-size:13px;margin-bottom:20px}
+.day{background:#1a2027;border-radius:14px;padding:16px;margin-bottom:14px}
+.day h2{font-size:15px;margin:0 0 10px;color:#8ab4f8}
+ul{list-style:none;margin:0;padding:0}
+li{padding:10px 0;border-bottom:1px solid #232a32}
+li:last-child{border-bottom:0}
+li.empty{color:#5f6368}
+.t{font-size:12px;color:#9aa0a6}
+.tag{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;font-size:11px;background:#23303d;color:#8ab4f8}
+.n{font-size:15px;font-weight:600;margin-top:2px}
+.p{font-size:13px;color:#81c995;margin-top:2px}
+.a{font-size:12px;color:#9aa0a6;margin-top:2px}
+.m{display:inline-block;margin-top:6px;font-size:12px;color:#8ab4f8;text-decoration:none}
+.foot{color:#5f6368;font-size:11px;text-align:center;margin-top:24px}
+</style></head><body><div class="wrap"><h1>${esc(plan.title || `${plan.destination}行程`)}</h1><div class="sub">${esc(plan.destination)} · ${esc(plan.startDate ?? "")} ~ ${esc(plan.endDate ?? "")}${plan.totalCost ? ` · 预算约 ¥${esc(Math.round(plan.totalCost))}` : ""}</div>${daysHtml}<div class="foot">由 Private-Agent 行程规划生成 · 分享码 ${esc(code)} · 价格为估算参考</div></div></body></html>`;
 }

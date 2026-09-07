@@ -15,6 +15,7 @@ import {
 } from "../../vision/sanitize-vision-frames.js";
 import { formatStatusForDisplay, stripSentencesAlreadySaid } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
+import { subscribeTravelProgress } from "../../skills/travel-planning/travel-progress-bus.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
 import {
@@ -764,6 +765,25 @@ async function processBatchedMessage(
   let turnSucceeded = false;
   let turnError: string | undefined;
 
+  // 旅游规划进度流式（B2）：规划引擎各阶段经 travel-progress-bus 发布，这里按 sessionId
+  // 订阅并转成 chat.agent_status 下发（phase=live，与工具心跳同一通道，前端无需新协议）。
+  const unsubscribeTravelProgress = subscribeTravelProgress((event) => {
+    if (event.sessionId !== msgActor || isStale()) return;
+    ctx.socket.send(
+      JSON.stringify({
+        type: ServerEventType.ChatAgentStatus,
+        payload: {
+          sessionId: msgActor,
+          messageId: assistantMessageId,
+          traceId: batched.originalMessageId,
+          phase: "live",
+          line: event.message,
+          toolName: "travel.plan-itinerary",
+        },
+      }),
+    );
+  });
+
   // 收集本轮实际执行的媒体搜索工具结果（search_images / search_videos）。
   // 原因：LLM 的最终回复 reply.toolName 时常为 undefined（模型在搜完图后仅输出
   // 正文，不再带工具声明），导致 extractMediaCards 拿不到 items，前端照片无法展示。
@@ -1318,6 +1338,7 @@ async function processBatchedMessage(
       messageBatchProcessor.markReplyStarted(msgActor);
     }
   } finally {
+    unsubscribeTravelProgress();
     releaseTurn();
     // 丢弃主回复分段器缓冲（异常路径防残留半截文本）
     streamSegmenter.discard();

@@ -191,6 +191,7 @@ abstract final class TravelWebPanelPayload {
       "fullscreen": fullscreen,
       "closable": closable,
       "destination": plan.destination,
+      "dataQuality": plan.dataQuality,
       "title": plan.title.isNotEmpty ? plan.title : "${plan.destination} 行程",
       if (plan.centerLatitude != null && plan.centerLongitude != null)
         "center": <String, double>{

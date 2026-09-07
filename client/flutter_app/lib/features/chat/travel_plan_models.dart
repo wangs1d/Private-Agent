@@ -220,6 +220,8 @@ class TravelPlanData {
     this.footer = "",
     this.rawItems = const <String>[],
     this.isStructured = false,
+    this.dataQuality = "real",
+    this.version,
   });
 
   final String title;
@@ -247,6 +249,13 @@ class TravelPlanData {
   /// 数据来源：true = 服务端结构化 travelPlan JSON（days 即真实天，空天也计入
   /// 天数口径）；false = 卡片文本行兜底解析（可能补「全程」空骨架天，空天不计）。
   final bool isStructured;
+
+  /// 数据可信度：real = 实时搜索数据；knowledge = 内置知识库真实 POI；
+  /// synthetic = 离线合成占位。非 real 时 UI 需向用户明示数据来源。
+  final String dataQuality;
+
+  /// 服务端乐观锁版本（A6）：编辑请求经 If-Match 回传，冲突时 409。
+  final int? version;
 
   bool get hasPlanId => planId.isNotEmpty;
 
@@ -304,6 +313,8 @@ class TravelPlanData {
       centerLongitude: (tp["center"]?["longitude"] as num?)?.toDouble(),
       intro: tp["intro"]?.toString() ?? "",
       isStructured: true,
+      dataQuality: tp["dataQuality"]?.toString() ?? "real",
+      version: (tp["version"] as num?)?.toInt(),
       packing: <String>[
         for (final dynamic p in (tp["packing"] as List<dynamic>? ?? const <dynamic>[]))
           if (p != null && p.toString().trim().isNotEmpty) p.toString().trim(),

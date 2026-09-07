@@ -14,11 +14,14 @@
  */
 
 import type { Coordinates, AgentTrace } from './types.js';
-import type { IPlanningAgent, AgentRequest } from './interfaces.js';
 import { poiCache, type CacheEntry, type RawPOI } from './poi-cache-manager.js';
 import { pricingService, formatQuotePriceInfo, type MemberTier, type PriceQuote, type BoundPlatform, type PricingContext } from './pricing-service.js';
 import { travelMediaStore } from './travel-media-store.js';
 import { WeatherService, type WeatherBrief } from '../../services/weather-service.js';
+import { knowledgeBase } from './knowledge-base.js';
+import { extractDays, extractDestination, extractPreferences } from './intent-parser.js';
+import { travelFavoritesStore } from './travel-favorites-store.js';
+import { emitTravelProgress } from './travel-progress-bus.js';
 
 /** 行程条目可挂载的本地媒体（来自 POI 媒体库） */
 interface PoiMediaMeta {
@@ -95,6 +98,8 @@ export interface PlanningRequest {
   memberTier?: MemberTier;
   /** 已绑定的外部平台账户（Booking/Agoda/携程/美团 等，OAuth 授权后传入） */
   boundPlatforms?: BoundPlatform[];
+  /** 会话 ID（可选）：传入时通过 travel-progress-bus 向聊天侧流式汇报规划进度 */
+  sessionId?: string;
 }
 
 /**
@@ -234,6 +239,8 @@ export interface PlanningResult {
     warnings: string[];
   };
   fromCache: boolean;
+  /** 数据可信度：real=实时API数据 / knowledge=知识库真实POI / synthetic=离线合成占位（前端需明示用户） */
+  dataQuality?: "real" | "knowledge" | "synthetic";
 }
 
 export interface POISummary {
@@ -253,6 +260,11 @@ export interface POISummary {
 // ======================== OpenStreetMap / 高德地图 配置 ========================
 
 const OSM_NOMINATIM_BASE = 'https://nominatim.openstreetmap.org/search';
+/** 备用地理编码（Photon，OSM 数据的免费检索服务），Nominatim 失败时切换而非直接抛错 */
+const PHOTON_GEOCODE_BASE = 'https://photon.komoot.io/api';
+/** 地理编码超时：冷启动主要延迟来源，从 20s 压到 8s（Overpass 6s / OSRM 5s 同量级） */
+const GEOCODE_REQUEST_TIMEOUT_MS = 8000;
+const PHOTON_REQUEST_TIMEOUT_MS = 6000;
 // 多个 Overpass 镜像并行尝试，使用首个成功响应（应对大陆网络对 overpass-api.de 的封锁/超时）
 const OSM_OVERPASS_BASES = [
   'https://overpass-api.de/api/interpreter',
@@ -277,18 +289,7 @@ const AMAP_REQUEST_TIMEOUT_MS = 8000;
  * 基于已知国内城市列表 + 省份关键词判断
  */
 function isDomesticDestination(destName: string): boolean {
-  const domesticKeywords = [
-    // 直辖市
-    '北京','上海','天津','重庆',
-    // 省份
-    '河北','山西','辽宁','吉林','黑龙江','江苏','浙江','安徽','福建','江西','山东','河南','湖北','湖南','广东','海南','四川','贵州','云南','陕西','甘肃','青海','台湾','内蒙古','广西','西藏','宁夏','新疆','香港','澳门',
-    // 热门城市
-    '大理','丽江','杭州','成都','西安','厦门','三亚','桂林','拉萨','青岛','南京','苏州','长沙','张家界','哈尔滨','武汉','广州','深圳','昆明','黄山','九寨沟','敦煌','乌镇','凤凰古城','平遥古城','周庄','西塘','千岛湖','普陀山','峨眉山','武夷山','泰山','华山','衡山','嵩山','恒山','五台山','长白山','天池','喀纳斯','吐鲁番','喀什','稻城亚丁','四姑娘山',
-    // 别名
-    '北平','沪','蓉','穗','深','杭','宁',
-  ];
-  const lower = destName.toLowerCase().trim();
-  return domesticKeywords.some(k => lower.includes(k.toLowerCase()) || destName.includes(k));
+  return knowledgeBase.isDomesticDestination(destName);
 }
 
 /**
@@ -303,6 +304,40 @@ const AMAP_POI_TYPES: Record<string, string> = {
   restaurant: '050000',
 };
 
+// ======================== 排序/评分权重配置 ========================
+
+/**
+ * 评分与排序权重集中配置（替代散落在排序函数里的魔法数字）。
+ * 调整排序手感只改这里；语义见各字段名与使用处注释。
+ */
+const SCORING = {
+  /** 收藏命中加权（「type:name」精确匹配） */
+  favoriteBoost: 3,
+  /** 酒店偏好加分 */
+  hotel: { seaside: 5, pool: 4, kids: 2, elderly: 2, luxuryTier: 3, budgetTier: 3 },
+  /** 餐厅偏好加分（目的地排序阶段） */
+  restaurant: { cuisineMatch: 4, seaside: 2 },
+  /** 景点偏好加分 + 天气×室内外修正 */
+  attraction: {
+    activities: 2, seaside: 3, kids: 2,
+    indoorRainy: 5, indoorHot: 3, outdoorRainy: -5, outdoorHot: -2,
+    nightView: 1.5, eveningOnly: 1,
+  },
+  /** 顺路餐厅选择：距离(distWeight) + 评分(ratingWeight) + 偏好加分 - 复用惩罚 */
+  routePick: {
+    distanceWeight: 0.6,
+    distanceBase: 100,
+    distanceScale: 1.5,
+    ratingWeight: 0.25,
+    ratingFallback: 4.0,
+    ratingScale: 5,
+    cuisineMatch: 15,
+    seasideMatch: 8,
+    budgetMatch: 5,
+    reusePenalty: 10,
+  },
+} as const;
+
 // ======================== 主服务类 ========================
 
 export class PlanningService {
@@ -315,6 +350,9 @@ export class PlanningService {
 
   /** OSRM 熔断：不可用时 10 分钟内直接走本地估算，避免编排被外网超时拖住 */
   private osrmDisabledUntil = 0;
+
+  /** 同目的地并发搜索去重：key → in-flight Promise（防缓存击穿打出 N 份外网请求） */
+  private inFlightSearches = new Map<string, Promise<CacheEntry>>();
 
   /**
    * @param weatherService 可选天气服务（未注入则跳过天气感知，按中性天气排程）
@@ -367,15 +405,53 @@ export class PlanningService {
   /**
    * 主入口：根据用户输入生成完整行程
    */
+  /** 规划进度上报（sessionId 缺省时为 no-op） */
+  private reportProgress(sessionId: string | undefined, stage: string, message: string): void {
+    emitTravelProgress(sessionId, stage, message);
+  }
+
+  /** 用户收藏键集合（C5 收藏加权，「type:name」精确匹配；读取失败为空集） */
+  private get favoriteKeys(): Set<string> {
+    try {
+      return travelFavoritesStore.favoriteKeys();
+    } catch {
+      return new Set();
+    }
+  }
+
+  /**
+   * POI 缓存过期后台刷新（stale-while-revalidate）：
+   * 命中缓存但已过 TTL 时先用旧数据服务当前请求，同时异步重搜并写缓存。
+   * in-flight 去重保证并发触发只打一份外网请求；失败静默（旧数据仍可用）。
+   */
+  private refreshStaleCacheInBackground(destName: string, entry: CacheEntry): void {
+    if (!poiCache.isStale(entry)) return;
+    const normalizedKey = entry.queryKey || destName.toLowerCase().trim();
+    console.log(`[PlanningService] POI 缓存已过期(${destName})，后台刷新中（本次请求继续用旧数据）`);
+    void this.searchAndCache(destName, normalizedKey).catch((err: unknown) => {
+      console.warn(`[PlanningService] 后台刷新失败(${destName}):`, err instanceof Error ? err.message : String(err));
+    });
+  }
+
+  /** 由 POI raw.source 推导数据可信度（缓存命中同样适用：raw 随缓存落盘） */
+  private deriveDataQuality(data: CacheEntry['data']): 'real' | 'knowledge' | 'synthetic' {
+    const all = [...data.attractions, ...data.hotels, ...data.restaurants];
+    if (all.some((p) => p.raw?.source === 'fallback')) return 'synthetic';
+    if (all.some((p) => p.raw?.source === 'known-poi-db')) return 'knowledge';
+    return 'real';
+  }
+
   async generateItinerary(request: PlanningRequest): Promise<PlanningResult> {
     const t0 = Date.now();
     console.log(`[PlanningService] 开始规划: "${request.input}"`);
 
     // 1. 解析用户输入
-    const destName = this.extractDestination(request.input, request.destination);
-    const dayCount = request.days || this.extractDays(request.input) || 3;
-    const preferences = this.extractPreferences(request.input, request.preferences, destName);
+    const destName = extractDestination(request.input, request.destination);
+    const dayCount = request.days || extractDays(request.input) || 3;
+    const preferences = extractPreferences(request.input, request.preferences, destName);
     const normalizedDest = destName.toLowerCase().trim();
+
+    this.reportProgress(request.sessionId, "resolve", `正在规划「${destName}」${dayCount}天行程，解析偏好中…`);
 
     console.log(
       `[PlanningService] 目的地: ${destName}, 天数: ${dayCount}, 偏好: ` +
@@ -392,10 +468,20 @@ export class PlanningService {
     if (!cacheEntry) {
       // 3. 缓存未命中 → 实时搜索
       console.log(`[PlanningService] 缓存未命中，开始实时搜索...`);
+      this.reportProgress(request.sessionId, "search", `正在搜索「${destName}」的景点/酒店/餐厅（实时数据）…`);
       cacheEntry = await this.searchAndCache(destName, normalizedDest);
       fromCache = false;
     } else {
       console.log(`[PlanningService] 缓存命中! (已访问${cacheEntry.accessCount}次)`);
+      this.reportProgress(request.sessionId, "search", `已命中「${destName}」本地缓存，正在编排行程…`);
+      // 过期不阻塞：本次先用旧数据出结果，后台刷新（set 会更新 createdAt，
+      // 行程级二级缓存随之自然失效，下次请求拿到新数据）
+      this.refreshStaleCacheInBackground(destName, cacheEntry);
+    }
+
+    // 真实数据保证（防御）：历史遗留缓存若混有合成占位 POI，拒绝编排并提示重新搜索
+    if (this.deriveDataQuality(cacheEntry.data) === "synthetic") {
+      throw new Error(`「${destName}」的本地缓存含占位数据，已拒绝生成估算行程；POI 缓存将自动刷新，请稍后重试`);
     }
 
     // 3.5 天气感知：目的地实时/预报天气（失败降级为中性天气，不阻塞规划）
@@ -408,11 +494,17 @@ export class PlanningService {
 
     // 4. 行程级二级缓存：同 目的地+天数+偏好+天气 且 POI 数据未刷新时整体复用
     //    （省去重排序+编排+图片匹配，二次规划毫秒级返回；天气签名变化自动重算）
+    //    key 只取结构化字段：preferences.raw 是用户原文标签（换个说法就变），
+    //    放进 key 会导致缓存永不命中；sources 仅是标签来源审计，同理排除。
     const weatherSig = weatherCtx
       ? `${weatherCtx.morning.rainy ? 1 : 0}${weatherCtx.afternoon.rainy ? 1 : 0}${weatherCtx.evening.rainy ? 1 : 0}${weatherCtx.isHotDay ? 1 : 0}`
       : 'N';
+    const prefSig = JSON.stringify([
+      preferences.seaside, preferences.pool, preferences.activities, preferences.kids, preferences.elderly,
+      preferences.pace, preferences.activityMix, preferences.budget ?? '', preferences.cuisine ?? '', preferences.hotelTier ?? '',
+    ]);
     const itinKey =
-      `itin|${normalizedDest}|${dayCount}|${JSON.stringify(preferences)}|${weatherSig}`;
+      `itin|${normalizedDest}|${dayCount}|${prefSig}|${weatherSig}`;
     const cachedItin = itineraryCache.get(itinKey);
     if (
       cachedItin &&
@@ -420,7 +512,8 @@ export class PlanningService {
       Date.now() - cachedItin.ts < ITINERARY_CACHE_TTL_MS
     ) {
       console.log(`[PlanningService] 【行程缓存命中】直接返回 ${destName} ${dayCount}天行程（免重算+免抓图）`);
-      return cachedItin.result;
+      // 深拷贝返回：调用方（编辑链路/序列化）一旦 mutate 不得污染缓存内对象
+      return structuredClone(cachedItin.result);
     }
 
     // 5. 生成日期范围
@@ -451,6 +544,7 @@ export class PlanningService {
     };
 
     // === 阶段1：构建行程数据（聚类+交通腿+排时，交通腿走 OSRM 缓存）===
+    this.reportProgress(request.sessionId, "schedule", "正在按天气与偏好编排每日行程…");
     console.log(`[PlanningService] 阶段1：构建行程数据...`);
     const tBuild0 = Date.now();
     const { days: daysRaw, pois } = await this.buildDaysFast(
@@ -462,6 +556,7 @@ export class PlanningService {
     const tBuild = Date.now() - tBuild0;
 
     // === 阶段2：媒体装配（纯本地读：媒体库/POI 缓存直图，网络抓取已移出请求路径）===
+    this.reportProgress(request.sessionId, "media", "正在装配图片与点评…");
     const tMedia0 = Date.now();
     const { imageMap, mediaMeta, missing } = this.collectMediaForDays(daysRaw, cacheEntry);
     const days = this.enrichDaysWithMedia(daysRaw, imageMap, mediaMeta);
@@ -490,13 +585,15 @@ export class PlanningService {
       travelInfo,
       pricingSummary,
       fromCache,
+      dataQuality: this.deriveDataQuality(cacheEntry.data),
     };
 
-    // 9. 写入行程级二级缓存（POI 数据刷新时由 createdAt 差异自然失效）
+    // 9. 写入行程级二级缓存（POI 数据刷新时由 createdAt 差异自然失效）。
+    //    缓存内存深拷贝：调用方持有的是原始对象，mutate 不影响缓存。
     cacheItinerary(itinKey, {
       ts: Date.now(),
       poiUpdatedAt: cacheEntry.createdAt,
-      result,
+      result: structuredClone(result),
     });
 
     console.log(
@@ -508,59 +605,8 @@ export class PlanningService {
   }
 
   /**
-   * Agent 集成入口：通过注入的 IPlanningAgent 生成行程
-   *
-   * 设计要点：
-   *   - PlanningService 不持有 PlanningAgent 引用（避免循环依赖），通过参数注入
-   *   - agent 返回的 itinerary 若已是 PlanningResult 格式则直接用；否则包装为 PlanningResult
-   *   - agent 返回空 itinerary 或转换失败时，降级到 this.generateItinerary 并标记 degraded
-   *   - 不修改 generateItinerary 主方法的现有逻辑
-   */
-  async generateItineraryViaAgent(
-    request: PlanningRequest,
-    agent: IPlanningAgent,
-  ): Promise<PlanningResult & { agentTrace: AgentTrace; planningMode: string }> {
-    const agentRequest: AgentRequest = {
-      input: request.input,
-      destination: request.destination,
-      days: request.days,
-      preferences: request.preferences,
-    };
-
-    const agentResult = await agent.generateItinerary(agentRequest);
-    const agentTrace: AgentTrace = agentResult.agentTrace;
-
-    // 尝试将 agent 返回的 itinerary 转换为 PlanningResult
-    const planningResult = this.toPlanningResult(agentResult.itinerary, request);
-
-    if (planningResult) {
-      return {
-        ...planningResult,
-        agentTrace,
-        planningMode: agentTrace.planningMode,
-      };
-    }
-
-    // 降级到规则引擎
-    const fallbackResult = await this.generateItinerary(request);
-    const degradedTrace: AgentTrace = {
-      ...agentTrace,
-      planningMode: 'fallback-rule',
-      degraded: true,
-      degradeReason:
-        agentTrace.degradeReason ||
-        'Agent returned empty or invalid itinerary, fell back to rule engine',
-    };
-    return {
-      ...fallbackResult,
-      agentTrace: degradedTrace,
-      planningMode: 'fallback-rule',
-    };
-  }
-
-  /**
    * Skill 只读入口：搜索目的地 POI（景点/酒店/餐厅）。
-   * 走缓存优先 → 网络实时搜索 → 内置知识库/合成兜底，返回扁平 POI 摘要列表。
+   * 走缓存优先 → 网络实时搜索 → 内置知识库真实POI兜底（无合成占位），返回扁平 POI 摘要列表。
    */
   async searchDestination(destName: string, type?: 'attraction' | 'hotel' | 'restaurant'): Promise<{
     destination: string;
@@ -578,10 +624,18 @@ export class PlanningService {
       fromCache = !!cacheEntry;
       if (!cacheEntry) {
         cacheEntry = await this.searchAndCache(destName, normalizedDest);
+      } else {
+        // 过期后台刷新：当前请求继续用旧数据，不阻塞
+        this.refreshStaleCacheInBackground(destName, cacheEntry);
       }
     } catch {
-      // 网络/地理编码失败时降级到内置知识库
+      // 网络/地理编码失败时降级到内置知识库（真实地点）；
+      // 知识库也未命中 → 抛错诚实失败，绝不编造 0,0 占位中心
       const known = this.findKnownPOIs(destName);
+      const knownCenter = this.findKnownCoordinates(destName)?.center;
+      if (!known && !knownCenter) {
+        throw new Error(`目的地「${destName}」实时搜索失败且无本地知识库数据，请稍后重试`);
+      }
       cacheEntry = {
         destination: destName,
         queryKey: normalizedDest,
@@ -590,7 +644,7 @@ export class PlanningService {
           hotels: known?.hotels ?? [],
           restaurants: known?.restaurants ?? [],
         },
-        center: this.findKnownCoordinates(destName)?.center ?? { latitude: 0, longitude: 0 },
+        center: knownCenter ?? { latitude: 0, longitude: 0 },
         createdAt: new Date().toISOString(),
         lastAccessedAt: new Date().toISOString(),
         accessCount: 0,
@@ -608,9 +662,125 @@ export class PlanningService {
 
   /**
    * 公开入口：为 POI 生成行程条目描述文本（替代条目替换时复用规划引擎的文案口径）。
+   * 只依赖 name/tags，searchPois 候选（无 id）与完整 RawPOI 均可传入。
    */
-  describePoi(poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): string {
+  describePoi(
+    poi: Pick<RawPOI, 'name'> & Partial<Pick<RawPOI, 'tags' | 'rating' | 'address'>>,
+    type: 'attraction' | 'hotel' | 'restaurant',
+  ): string {
     return this.generateDescription(poi, type);
+  }
+
+  /**
+   * 公开入口：编辑后对该天局部重排（替换/新增/删除条目后时间轴修复）。
+   *
+   * 从 fromItemIndex 起按条目新坐标重算交通腿（复用 transportLeg：OSRM 优先 + 24h
+   * 缓存，未涉及编辑点的腿全部缓存命中）并顺序重排 startTime，修掉「替换后坐标变了
+   * 但时间还是旧的」的错位；重排复用编排期的口径——餐厅按午/晚餐时段锚定，景点受
+   * 当天预算（DAY_END_MIN）口径约束：编辑路径不丢弃条目，只保证时间轴自洽，
+   * 超预算信息通过返回值 dayEndMin 透出，由调用方决定是否提示用户。
+   *
+   * keepFirstStartTime=true 时保留 fromItemIndex 条目的原 startTime 作为锚点
+   * （HTTP 面板新增条目显式指定时间时使用），其余场景一律按新坐标顺推。
+   */
+  async retimeDayAfterEdit<
+    T extends {
+      type: string;
+      startTime: string;
+      latitude: number;
+      longitude: number;
+      visitDuration?: number;
+      transportFromPrev?: { mode: string; durationMin: number; distanceKm?: number; note?: string };
+    },
+  >(
+    items: T[],
+    fromItemIndex: number,
+    opts?: { keepFirstStartTime?: boolean },
+  ): Promise<{ dayEndMin: number }> {
+    const parseMin = (hhmm: string): number => {
+      // 兼容 "HH:MM" 与 "YYYY-MM-DD HH:MM"（取其中的时刻部分）
+      const m = /(\d{1,2}):(\d{2})/.exec(hhmm ?? '');
+      if (!m) return 9 * 60;
+      return Math.min(23 * 60 + 59, Number(m[1]) * 60 + Number(m[2]));
+    };
+    const formatTime = (min: number) =>
+      `${String(Math.floor(min / 60) % 24).padStart(2, '0')}:${String(Math.round(min % 60)).padStart(2, '0')}`;
+    const defaultPrefs: TripPreferences = {
+      raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false,
+      pace: 'balanced', activityMix: 'mixed',
+      sources: {
+        seaside: 'default', pool: 'default', activities: 'default', kids: 'default',
+        elderly: 'default', pace: 'default', activityMix: 'default',
+        budget: 'default', cuisine: 'default', hotelTier: 'default',
+      },
+    };
+    const visitOf = (it: T): number =>
+      it.type === 'restaurant' ? 75 : it.visitDuration ?? this.inferVisitDuration('attraction', defaultPrefs);
+    const setLeg = (it: T, leg: TransportLeg | undefined): void => {
+      if (!leg) return;
+      it.transportFromPrev = {
+        mode: leg.mode,
+        durationMin: leg.durationMin,
+        ...(leg.distanceKm != null ? { distanceKm: leg.distanceKm } : {}),
+        ...(leg.note ? { note: leg.note } : {}),
+      };
+    };
+
+    let clock = 9 * 60;
+    let prevPoint: { lat: number; lon: number } | null = null;
+
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]!;
+
+      // 未触及前缀：只推进时钟与位置基点
+      if (i < fromItemIndex) {
+        clock = Math.max(clock, parseMin(it.startTime) + (it.type === 'hotel' ? 60 : visitOf(it)));
+        prevPoint = { lat: it.latitude, lon: it.longitude };
+        continue;
+      }
+
+      // 酒店条目：保留原时刻（编排期只把酒店放在 08:00 锚点），只重算入腿
+      if (it.type === 'hotel') {
+        if (prevPoint) {
+          setLeg(it, await this.transportLeg(prevPoint.lat, prevPoint.lon, it.latitude, it.longitude));
+        }
+        clock = Math.max(clock, parseMin(it.startTime) + 60);
+        prevPoint = { lat: it.latitude, lon: it.longitude };
+        continue;
+      }
+
+      const leg = prevPoint
+        ? await this.transportLeg(prevPoint.lat, prevPoint.lon, it.latitude, it.longitude)
+        : undefined;
+
+      // 显式锚点：保留该条目原 startTime，只重算其交通腿，之后按此时钟顺推
+      if (opts?.keepFirstStartTime && i === fromItemIndex) {
+        it.startTime = it.startTime || formatTime(clock);
+        setLeg(it, leg);
+        clock = parseMin(it.startTime) + visitOf(it);
+        prevPoint = { lat: it.latitude, lon: it.longitude };
+        continue;
+      }
+
+      if (it.type === 'restaurant') {
+        // 午/晚餐锚定（与编排期一致）：原 startTime 在 15 点前视为午餐
+        const lunch = parseMin(it.startTime) < 15 * 60;
+        const mealTime = lunch
+          ? Math.max(11 * 60, Math.min(13 * 60, clock))
+          : Math.max(17.5 * 60, clock + 30);
+        it.startTime = formatTime(mealTime);
+        setLeg(it, leg);
+        clock = mealTime + 75;
+      } else {
+        const arrival = clock + (leg?.durationMin ?? 0);
+        it.startTime = formatTime(arrival);
+        setLeg(it, leg);
+        clock = arrival + visitOf(it);
+      }
+      prevPoint = { lat: it.latitude, lon: it.longitude };
+    }
+
+    return { dayEndMin: clock };
   }
 
   /**
@@ -815,7 +985,7 @@ export class PlanningService {
 
     // LLM 输出格式 { days: [...] } → 包装
     if ('days' in obj && Array.isArray(obj.days)) {
-      const destName = request.destination || this.extractDestination(request.input, request.destination);
+      const destName = request.destination || extractDestination(request.input, request.destination);
       const today = new Date();
       const startDate = today.toISOString().split('T')[0] ?? '';
       return {
@@ -828,7 +998,7 @@ export class PlanningService {
         center: { latitude: 0, longitude: 0 },
         days: obj.days as PlannedDay[],
         pois: [],
-        preferences: this.extractPreferences(request.input, request.preferences, destName),
+        preferences: extractPreferences(request.input, request.preferences, destName),
         travelInfo: this.extractTravelInfo(destName),
         fromCache: false,
       };
@@ -906,315 +1076,6 @@ export class PlanningService {
     };
   }
 
-  // ======================== 目的地解析 ========================
-
-  /**
-   * 从用户输入中提取目的地名称
-   * 支持丰富的中文表达模式，优先匹配已知热门目的地
-   */
-  private extractDestination(input: string, explicitDest?: string): string {
-    if (explicitDest && explicitDest.trim()) return explicitDest.trim();
-
-    const text = input.trim();
-
-    // ===== 策略0: 清理异常字符（emoji/乱码/控制字符）=====
-    // 防止 destination 变成 "??????" 或 "未去莫干山民宿假放松为"
-    const cleanedText = text
-      .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ') // emoji
-      .replace(/[\uFFFD\uFFFC\uFF1F\uFF1A]/g, ' ')               // 替换字符/全角问号
-      .replace(/[?？！!。，,]/g, ' ')                              // 标点
-      .replace(/\s+/g, ' ')
-      .trim();
-    const workText = cleanedText || text;
-
-    // ===== 策略1: 已知热门目的地优先匹配（最高优先级）=====
-    const knownDestinations = [
-      // 国内
-      '云南大理','大理','云南丽江','丽江','北京','上海','杭州','成都','西安','厦门','三亚',
-      '桂林','拉萨','青岛','重庆','南京','苏州','长沙','张家界','哈尔滨','武汉','广州',
-      '深圳','香港','澳门','台北','昆明','黄山','九寨沟','张家界','敦煌','乌镇','凤凰古城',
-      '平遥古城','周庄','西塘','千岛湖','普陀山','峨眉山','武夷山','泰山','华山','衡山',
-      '嵩山','恒山','五台山','长白山','天池','喀纳斯','吐鲁番','喀什','稻城亚丁','四姑娘山',
-      '莫干山','安吉','千岛湖','普陀山','雁荡山','天台山',
-      // 国外
-      '东京','大阪','京都','奈良','北海道','富士山','曼谷','清迈','普吉岛','苏梅岛',
-      '巴厘岛','新加坡','吉隆坡','马六甲','首尔','釜山','济州岛','巴黎','罗马','伦敦',
-      '纽约','悉尼','迪拜','伊斯坦布尔','开罗','马尔代夫','塞班岛','长滩岛','岘港',
-      '芽庄','富国岛','暹粒','斯里兰卡','马尔代夫','斐济','大溪地','塞舌尔','毛里求斯',
-      '布拉格','阿姆斯特丹','巴塞罗那','雅典','圣托里尼','威尼斯','佛罗伦萨',
-    ];
-
-    const lowerText = workText.toLowerCase();
-    // 按关键词长度倒序，优先匹配最长的（比如"云南大理"优先于"大理"）
-    const sortedKnown = [...knownDestinations].sort((a, b) => b.length - a.length);
-    for (const dest of sortedKnown) {
-      if (lowerText.includes(dest.toLowerCase()) || workText.includes(dest)) {
-        console.log(`[PlanningService] 目的地命中已知列表: ${dest}`);
-        return dest;
-      }
-    }
-
-    // ===== 策略2: 正则模式匹配 =====
-    const patterns = [
-      // "我想去XXX玩/旅游/旅行"  - 限制目的地在 "去" 和 "玩/游" 之间的关键短语
-      /(?:我想?去|前往|想去|计划去|准备去|要去)\s*([^\s,，。！？!?]{2,8}?)(?:\s*(?:玩|旅游|旅行|游玩|度假|逛|转|看看|考察))/,
-      // "去XXX玩/游"
-      /^(?:想)?(?:去|游览|参观|游玩|到)\s*([^\s,，。！？!?]{2,8})$/,
-      // "XXX N天/日游/之旅" - 限制2-6个汉字，避免匹配整段
-      /([^\s,，。！？!?]{2,6})(?:\s*\d+\s*[天日周]\s*(?:之)?游|之旅|旅游)/,
-      // "XXX + 数字天" (如 "大理5天")
-      /([^\s,，。！？!?]{2,6})\s+(\d+)\s*[天日]/,
-    ];
-
-    for (const p of patterns) {
-      const m = workText.match(p);
-      if (m && m[1]) {
-        const dest = m[1].trim();
-        if (dest.length >= 2 && dest.length <= 8) {
-          console.log(`[PlanningService] 正则匹配目的地: ${dest}`);
-          return dest;
-        }
-      }
-    }
-
-    // ===== 策略3: 提取前几个有意义的词作为目的地兜底 =====
-    // 过滤掉动词和无关词
-    const cleaned = workText
-      .replace(/(?:我想?去|前往|想去|计划去|准备去|要去|到|玩|旅游|旅行|游玩|度|逛|转|看看|喜欢|希望|想要|需要|大概|大约|左右|预算|费用|花费|多少钱|放松|度假|为主|为主酒店|主酒店|主美食|主景点|未去|没去|不去|即将去)/g, '')
-      .replace(/[天日个周月]/g, '')
-      .replace(/\d+/g, '')
-      .trim();
-
-    const words = cleaned.split(/[\s,，、]+/).filter(w => w.length >= 2 && w.length <= 6);
-    if (words.length > 0) {
-      // 优先取第一个看起来像地名的词（含有"山/岛/城/湖/海/镇/村"等地理关键词）
-      const geoWord = words.find(w => /[山川岛城湖海镇村寨古城]/.test(w));
-      const dest = geoWord || words[0];
-      if (dest && dest.length >= 2 && dest.length <= 8) {
-        console.log(`[PlanningService] 兜底提取目的地: ${dest} (原文: ${input})`);
-        return dest;
-      }
-    }
-
-    // 真正的兜底：取前4个汉字（不再延长，避免出现"未去莫干山..."）
-    const safe = workText.replace(/\s/g, '').slice(0, 4);
-    console.warn(`[PlanningService] 无法提取目的地，使用前4字: ${safe} (原文: ${input})`);
-    return safe || '未指定';
-  }
-
-  /**
-   * 提取行程天数，支持丰富中文表达
-   *  - "3天 / 三日 / 5天"
-   *  - "一周 / 一个星期 / 两个星期 / 3周 / 两周半"
-   *  - "半个月 / 10天"
-   */
-  private extractDays(input: string): number | null {
-    // 数字+天/日
-    const m = input.match(/(\d+)\s*[天日]/);
-    if (m && m[1]) return Math.min(30, Math.max(1, parseInt(m[1])));
-
-    // X周 / X星期（支持中文数字 + 任意个"个"等量词）
-    const weekMatch = input.match(/([一二三四五六七八九十\d]+)\s*(?:个)?\s*(?:周|星期)/);
-    if (weekMatch && weekMatch[1]) {
-      const cnNum: Record<string, number> = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
-      const w = weekMatch[1];
-      const n = cnNum[w] ?? parseInt(w) ?? 1;
-      return Math.min(30, n * 7);
-    }
-
-    // 半个月
-    if (/半\s*个?[月]/.test(input)) return 15;
-
-    return null;
-  }
-
-  // ======================== 偏好解析 ========================
-
-  /**
-   * 从自然语言 + 自由文本标签 + 目的地常识中抽取结构化偏好
-   * 优先级：用户原文 > 目的地常识 > 系统默认
-   */
-  private extractPreferences(input: string, rawPrefs?: string[], destName?: string): TripPreferences {
-    const text = `${input || ''} ${(rawPrefs || []).join(' ')}`.toLowerCase();
-    const has = (kw: string | RegExp) => (kw instanceof RegExp ? kw.test(text) : text.includes(kw));
-
-    const prefs: TripPreferences = {
-      raw: rawPrefs ? [...rawPrefs] : [],
-      seaside: false,
-      pool: false,
-      activities: false,
-      kids: false,
-      elderly: false,
-      pace: 'balanced',
-      activityMix: 'mixed',
-      sources: {
-        seaside: 'default',
-        pool: 'default',
-        activities: 'default',
-        kids: 'default',
-        elderly: 'default',
-        pace: 'default',
-        activityMix: 'default',
-        budget: 'default',
-        cuisine: 'default',
-        hotelTier: 'default',
-      },
-    };
-
-    // —— 用户原文层 ——
-    // 海边 / 海景 / 滨海岸
-    if (has(/海[边滨景]?/) || has(/海[滨岸]/) || has(/靠海/) || has(/沙滩/) || has(/海岛/) || has(/beach|seaside|ocean/)) {
-      prefs.seaside = true; prefs.sources.seaside = 'user';
-    }
-
-    // 泳池
-    if (has(/泳池/) || has(/游泳池/) || has(/pool|swimming/)) {
-      prefs.pool = true; prefs.sources.pool = 'user';
-    }
-
-    // 游玩项目 / 活动 / 玩什么
-    if (
-      has(/有什么好玩的/) || has(/好玩的项目/) || has(/玩什么/) || has(/有什么项目/) ||
-      has(/游玩项目/) || has(/娱乐项目/) || has(/活动/) || has(/体验/) || has(/activities|tour|sightseeing/)
-    ) {
-      prefs.activities = true; prefs.sources.activities = 'user';
-    }
-
-    // 同行人
-    if (has(/带[小孩宝宝孩子]/) || has(/亲子/) || has(/全家/) || has(/一家人/)) {
-      prefs.kids = true; prefs.sources.kids = 'user';
-    }
-    if (has(/带[老人父母长辈]/) || has(/父母/) || has(/老人/)) {
-      prefs.elderly = true; prefs.sources.elderly = 'user';
-    }
-
-    // 节奏
-    if (has(/休闲/) || has(/慢游/) || has(/度假/) || has(/放松/) || has(/悠闲/) || has(/懒/)) {
-      prefs.pace = 'relaxed'; prefs.sources.pace = 'user';
-    } else if (has(/紧凑/) || has(/高效/) || has(/深度游/) || has(/打卡/) || has(/多去/)) {
-      prefs.pace = 'intensive'; prefs.sources.pace = 'user';
-    }
-
-    // 活动类型偏好
-    if (has(/文化/) || has(/古迹/) || has(/历史/) || has(/博物馆/) || has(/寺庙/)) {
-      prefs.activityMix = 'culture'; prefs.sources.activityMix = 'user';
-    } else if (has(/自然/) || has(/山水/) || has(/徒步/) || has(/国家公园/) || has(/风景/)) {
-      prefs.activityMix = 'nature'; prefs.sources.activityMix = 'user';
-    } else if (has(/娱乐/) || has(/乐园/) || has(/购物/) || has(/夜生活/)) {
-      prefs.activityMix = 'entertainment'; prefs.sources.activityMix = 'user';
-    }
-
-    // 预算档
-    if (has(/省[钱一点]?/) || has(/便宜/) || has(/经济/) || has(/穷游/) || has(/预算[不紧]?[太多高]/)) {
-      prefs.budget = 'low'; prefs.sources.budget = 'user';
-    } else if (has(/豪华/) || has(/高端/) || has(/奢/) || has(/奢华/) || has(/五星/)) {
-      prefs.budget = 'high'; prefs.sources.budget = 'user';
-    } else if (has(/舒适/) || has(/中端/) || has(/四星/)) {
-      prefs.budget = 'mid'; prefs.sources.budget = 'user';
-    }
-
-    // 住宿档次（仅影响酒店排序）
-    if (has(/豪华酒店/) || has(/五星/) || has(/高端住宿/) || has(/奢华/)) {
-      prefs.hotelTier = 'luxury'; prefs.sources.hotelTier = 'user';
-    } else if (has(/经济/) || has(/青旅/) || has(/民宿/) || has(/客栈/)) {
-      prefs.hotelTier = 'budget'; prefs.sources.hotelTier = 'user';
-    } else if (has(/舒适/) || has(/精品/) || has(/四星/)) {
-      prefs.hotelTier = 'mid'; prefs.sources.hotelTier = 'user';
-    }
-
-    // 菜系
-    const cuisineMap: Array<[RegExp, string]> = [
-      [/海鲜/, '海鲜'],
-      [/中餐|中国菜|中厨/, '中餐'],
-      [/日料|日本菜|寿司|刺身/, '日料'],
-      [/韩餐|韩国|烤肉|韩式/, '韩餐'],
-      [/西餐|法国|意面|意大利|牛排/, '西餐'],
-      [/泰餐|泰国|冬阴功/, '泰餐'],
-      [/火锅|麻辣/, '火锅'],
-      [/烧烤|撸串/, '烧烤'],
-      [/甜品|咖啡|下午茶/, '甜品'],
-      [/当地|本地|特色/, '当地特色'],
-    ];
-    for (const [re, name] of cuisineMap) {
-      if (re.test(text)) {
-        prefs.cuisine = name; prefs.sources.cuisine = 'user';
-        break;
-      }
-    }
-
-    // —— 目的地常识层（用户没说就补） ——
-    if (destName) this.applyDestinationDefaults(destName, prefs);
-
-    // —— 系统默认层 ——
-    if (!prefs.hotelTier) {
-      prefs.hotelTier = 'mid'; prefs.sources.hotelTier = 'default';
-    }
-    if (!prefs.budget) {
-      prefs.budget = 'mid'; prefs.sources.budget = 'default';
-    }
-
-    return prefs;
-  }
-
-  /**
-   * 根据目的地常识补全偏好（用户没说时启用，但来源标为 destination）
-   */
-  private applyDestinationDefaults(destName: string, prefs: TripPreferences): void {
-    const n = destName.toLowerCase();
-
-    // 海岛/海滨 → 默认 seaside + pool
-    const islandKw = ['巴厘岛','bali','马尔代夫','maldives','普吉','phuket','三亚','沙巴','sabah',
-                     '长滩','boracay','沙美','苏梅','koh samui','岘港','danang','芽庄','nha trang',
-                     '宿务','cebu','长崎','冲绳','okinawa','济州','jeju','关岛','guam',
-                     '斐济','fiji','塞班','saipan','帕劳','palau','印尼','印度尼西亚','indonesia'];
-    if (islandKw.some(k => n.includes(k)) && prefs.sources.seaside === 'default') {
-      prefs.seaside = true; prefs.sources.seaside = 'destination';
-      if (prefs.sources.pool === 'default') { prefs.pool = true; prefs.sources.pool = 'destination'; }
-      if (prefs.sources.activityMix === 'default') { prefs.activityMix = 'mixed'; }
-    }
-
-    // 日本 → 美食/温泉/文化
-    if (/日本|japan|东京|大阪|京都|奈良|北海道|富士山/.test(n)) {
-      if (!prefs.cuisine) { prefs.cuisine = '日料'; prefs.sources.cuisine = 'destination'; }
-      if (prefs.sources.activityMix === 'default') { prefs.activityMix = 'culture'; prefs.sources.activityMix = 'destination'; }
-    }
-    // 韩国
-    if (/韩国|korea|首尔|釜山|济州/.test(n)) {
-      if (!prefs.cuisine) { prefs.cuisine = '韩餐'; prefs.sources.cuisine = 'destination'; }
-    }
-    // 泰国
-    if (/泰国|thailand|曼谷|清迈|普吉|苏梅/.test(n)) {
-      if (!prefs.cuisine) { prefs.cuisine = '泰餐'; prefs.sources.cuisine = 'destination'; }
-    }
-    // 东南亚综合
-    if (/越南|新加坡|马来西亚|印尼|菲律宾|柬埔寨/.test(n)) {
-      if (prefs.sources.activities === 'default') { prefs.activities = true; prefs.sources.activities = 'destination'; }
-    }
-
-    // 欧洲
-    if (/法国|巴黎|意大利|罗马|英国|伦敦|西班牙|巴塞罗那|德国|瑞士|荷兰|希腊|葡萄牙/.test(n)) {
-      if (prefs.sources.activityMix === 'default') { prefs.activityMix = 'culture'; prefs.sources.activityMix = 'destination'; }
-      if (prefs.sources.pace === 'default') { prefs.pace = 'balanced'; } // 步行多
-    }
-
-    // 阿联酋/迪拜 → 豪华
-    if (/迪拜|阿联酋|dubai|uae/.test(n) && prefs.sources.hotelTier === 'default') {
-      prefs.hotelTier = 'luxury'; prefs.sources.hotelTier = 'destination';
-    }
-
-    // 印度/尼泊尔/高原 → 节奏放松
-    if (/印度|尼泊尔|不丹|拉萨|西藏|秘鲁|玻利维亚|肯尼亚/.test(n)) {
-      if (prefs.sources.pace === 'default') { prefs.pace = 'relaxed'; prefs.sources.pace = 'destination'; }
-    }
-
-    // 带孩子常见目的地 → 默认亲子
-    if (/日本|东京|disney|迪士尼|新加坡|环球影城/.test(n) && prefs.sources.kids === 'default') {
-      // 仅当目的地含迪士尼/环球影城等亲子关键词
-      if (/迪士尼|环球影城|legoland|乐高/.test(n)) {
-        prefs.kids = true; prefs.sources.kids = 'destination';
-      }
-    }
-  }
 
   // ======================== 行程附加实用信息 ========================
 
@@ -1243,129 +1104,30 @@ export class PlanningService {
   }
 
   private findKnownTravelInfo(destName: string): TravelInfo | null {
-    const q = destName.toLowerCase();
-    const all: TravelInfo[] = [
-      // 印度尼西亚 / 巴厘岛
-      {
-        destination: '印度尼西亚',
-        intro: '千岛之国，火山与海洋交织，海滩、火山日出与多元岛屿文化并存',
-        packing: ['防晒霜 SPF50+', '泳衣/速干衣', '防蚊液', '欧标转换插头', '常用药品'],
-        visa: { required: true, type: '落地签', notes: '中国公民可免签入境印尼（30天内），但建议行前确认最新政策' },
-        currency: { name: '印尼盾', code: 'IDR', symbol: 'Rp', rateToCNY: 2200 },
-        timezone: { name: '印尼中部/西部/东部时间', offset: 'UTC+7 / +8 / +9' },
-        language: ['印尼语', '巴厘语（巴厘岛）', '英语（景区通用）'],
-        voltage: '230V / 50Hz',
-        socket: '欧标双圆孔（建议带转换头）',
-        bestSeason: { months: ['4月','5月','6月','9月','10月'], description: '干季（4-10月）最佳，避开11-3月雨季' },
-        emergency: { police: '110', ambulance: '118', touristHotline: '+62-21-576-3074', chinaEmbassy: '+62-21-576-1037' },
-        customs: ['进入寺庙需穿过膝长裤/长裙','不要用左手递东西','头被视为神圣不可触摸','不要随意拍摄当地宗教仪式'],
-        tips: ['小费习惯：餐厅可给1万Rp，服务类1-2万Rp','包车/水疗/按摩务必提前谈价','Spa、租车可砍价5折起','携带防蚊液与防晒霜','巴厘岛Scooter驾照检查较严，谨慎租摩托'],
-      },
-      {
-        destination: '巴厘岛',
-        intro: '印尼唯一以印度教为主的岛屿，海滩/梯田/寺庙与SPA度假胜地',
-        packing: ['防晒霜 SPF50+', '泳衣/速干衣', '防蚊液', '欧标转换插头', '常用药品'],
-        visa: { required: true, type: '落地签', notes: '中国公民可免签入境印尼30天' },
-        currency: { name: '印尼盾', code: 'IDR', symbol: 'Rp', rateToCNY: 2200 },
-        timezone: { name: '印尼中部时间', offset: 'UTC+8' },
-        language: ['印尼语', '巴厘语', '英语（旅游区）'],
-        voltage: '230V / 50Hz',
-        socket: '欧标双圆孔',
-        bestSeason: { months: ['4月','5月','6月','9月','10月'], description: '干季最佳' },
-        emergency: { police: '110', ambulance: '118', chinaEmbassy: '+62-21-576-1037' },
-        customs: ['寺庙着装需覆盖肩膀与膝盖','勿踩当地祭祀用的小花篮(canang)','头不可触摸'],
-        tips: ['推荐包车1天约60-80万Rp','Spa+按摩可砍价','准备防蚊液','Scooter谨慎'],
-      },
-      // 日本
-      {
-        destination: '日本',
-        intro: '传统与现代交织：古都寺庙、樱花红叶、温泉街町与美食盛宴',
-        packing: ['日元现金', '西瓜卡/SUICA 交通卡', '日标转换插头（双扁脚）', '常用药', '舒适的运动鞋'],
-        visa: { required: true, type: '需签证', notes: '需提前办日本签证，多地可办' },
-        currency: { name: '日元', code: 'JPY', symbol: '¥', rateToCNY: 21 },
-        timezone: { name: '日本标准时间', offset: 'UTC+9' },
-        language: ['日语', '部分景区有中文/英文'],
-        voltage: '100V / 50-60Hz（与中国不同，电器需注意）',
-        socket: '双扁脚（日标）',
-        bestSeason: { months: ['3月','4月','5月','10月','11月'], description: '春秋最佳，樱花季3-4月，红叶10-11月' },
-        emergency: { police: '110', ambulance: '119', touristHotline: '050-3816-2787', chinaEmbassy: '+81-3-3403-3388' },
-        customs: ['电车/巴士内请勿大声喧哗','优先席让座','不边走边吃','温泉需先冲洗身体再入池','垃圾分类严格'],
-        tips: ['必备西瓜卡/SUICA','便利店/自动贩卖机覆盖广','拉面/寿司地区差异大，多尝','温泉为常见体验','餐厅多不收小费'],
-      },
-      // 泰国
-      {
-        destination: '泰国',
-        intro: '佛庙金辉与海岛碧波并存，街头美食与夜市文化之都',
-        packing: ['防晒霜', '泳装', '防蚊液', '泰铢现金', '薄外套（商场/车内冷气足）'],
-        visa: { required: true, type: '免签', notes: '中国公民互免签证（2024起），停留不超过30日' },
-        currency: { name: '泰铢', code: 'THB', symbol: '฿', rateToCNY: 5 },
-        timezone: { name: '印度支那时间', offset: 'UTC+7' },
-        language: ['泰语', '英语（旅游区）', '中文（华人区）'],
-        voltage: '220V / 50Hz',
-        socket: '双扁/双圆混合（建议带万能头）',
-        bestSeason: { months: ['11月','12月','1月','2月'], description: '凉季最佳，3-5月热，6-10月雨季' },
-        emergency: { police: '191', ambulance: '1669', touristHotline: '1155', chinaEmbassy: '+66-2-245-7044' },
-        customs: ['进入寺庙需脱鞋','勿用脚指人/物','头不可触摸','皇室相关需尊重'],
-        tips: ['Grab/Bolt打车方便','按摩/Spa价格谈判空间大','夜市美食众多','小费20-50泰铢常见'],
-      },
-      // 三亚
-      {
-        destination: '三亚',
-        intro: '热带海滨度假城市，亚龙湾/海棠湾海滩、离岛潜水与免税购物',
-        packing: ['防晒霜 SPF50+', '泳装', '遮阳帽/墨镜', '驱蚊液', '身份证'],
-        visa: { required: false, type: '免签', notes: '国内旅行无需签证' },
-        currency: { name: '人民币', code: 'CNY', symbol: '¥' },
-        timezone: { name: '北京时间', offset: 'UTC+8' },
-        language: ['普通话', '海南话', '英语（旅游区）'],
-        voltage: '220V / 50Hz',
-        socket: '国标双扁/三孔',
-        bestSeason: { months: ['10月','11月','12月','1月','2月','3月'], description: '秋冬季最佳，避开台风季(7-9月)' },
-        emergency: { police: '110', ambulance: '120', touristHotline: '12345' },
-        customs: ['海滩文明游玩','勿捕捞受保护海洋生物'],
-        tips: ['景区消费偏高建议提前买好水果零食','海鲜加工店注意明码实价','防晒SPF50+必备','租车/电瓶车注意安全'],
-      },
-      // 马尔代夫
-      {
-        destination: '马尔代夫',
-        intro: '印度洋上的珊瑚岛国，一岛一酒店，以水上屋、浮潜与纯净泻湖闻名',
-        packing: ['护照（有效期6个月+）与酒店订单', '防晒霜 SPF50+', '泳装与浮潜装备', '英标转换插头', '美元小额现金（小费）'],
-        visa: { required: true, type: '免签', notes: '中国公民可免签30天，需带有效期6个月以上护照与酒店订单' },
-        currency: { name: '美元', code: 'USD', symbol: '$', rateToCNY: 7.2 },
-        timezone: { name: '马尔代夫时间', offset: 'UTC+5' },
-        language: ['迪维希语', '英语（通用）'],
-        voltage: '220V / 50Hz',
-        socket: '英标三方脚（需带转换头）',
-        bestSeason: { months: ['11月','12月','1月','2月','3月','4月'], description: '干季最佳，雨季多阵雨但仍可出行' },
-        emergency: { police: '119', ambulance: '102', chinaEmbassy: '+960-301-0915' },
-        customs: ['禁酒岛外携带','尊重伊斯兰文化','勿赤足进入居民岛'],
-        tips: ['水飞/快艇上岛需提前预约','一价全包较划算','浮潜装备可自带','酒店有给小费习惯（1-2美元）'],
-      },
-    ];
-
-    // 关键词匹配：返回第一个命中的
-    for (const info of all) {
-      const keywords = [info.destination.toLowerCase()];
-      // 加入额外的别名匹配
-      if (info.destination === '印度尼西亚') keywords.push('印尼','indonesia');
-      if (info.destination === '巴厘岛') keywords.push('bali');
-      if (info.destination === '日本') keywords.push('japan','东京','大阪','京都');
-      if (info.destination === '泰国') keywords.push('thailand','曼谷','清迈','普吉');
-      if (info.destination === '马尔代夫') keywords.push('maldives');
-      if (info.destination === '三亚') keywords.push('海南','sanya');
-
-      if (keywords.some(k => q.includes(k))) return info;
-    }
-    return null;
+    // KnownTravelInfo 为结构类型（visa.type 未收窄为字面量联合），数据文件即 schema 来源
+    return knowledgeBase.findKnownTravelInfo(destName) as TravelInfo | null;
   }
 
   // ======================== 实时搜索 + 缓存写入 ========================
 
   /**
-   * 调用POI搜索API并存入缓存
-   * 国内目的地 → 高德地图（真实数据、稳定）
-   * 国外目的地 → OpenStreetMap Overpass（免费全球覆盖）
+   * 调用POI搜索API并存入缓存（同 key 并发共享同一个 Promise，防缓存击穿：
+   * Nominatim 有 1 req/s 使用政策，并发重复请求容易触发限流拉长所有请求）。
    */
   private async searchAndCache(destName: string, normalizedKey: string): Promise<CacheEntry> {
+    const inFlight = this.inFlightSearches.get(normalizedKey);
+    if (inFlight) {
+      console.log(`[PlanningService] 并发去重: 复用「${destName}」进行中的搜索请求`);
+      return inFlight;
+    }
+    const task = this.doSearchAndCache(destName, normalizedKey).finally(() => {
+      this.inFlightSearches.delete(normalizedKey);
+    });
+    this.inFlightSearches.set(normalizedKey, task);
+    return task;
+  }
+
+  private async doSearchAndCache(destName: string, normalizedKey: string): Promise<CacheEntry> {
     console.log(`[PlanningService] 正在搜索: ${destName} ...`);
 
     // Step 1: 地理编码 → 获取中心坐标
@@ -1428,22 +1190,29 @@ export class PlanningService {
       }
     }
 
-    // Step 3: 如果所有API都返回空结果，生成改进的合成数据
-    let syntheticFallback = false;
+    // Step 3: 所有 API 都返回空结果时，只回退到知识库真实地点；
+    // 知识库也未命中 → 抛错诚实失败，绝不生成合成占位行程。
+    let knowledgeFallback = false;
     if (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0) {
-      console.warn(`[PlanningService] 所有API均无结果，使用知名景点降级方案`);
-      const synthetic = this.generateSyntheticPOIs(center, destName);
-      attractions = synthetic.attractions;
-      hotels = synthetic.hotels;
-      restaurants = synthetic.restaurants;
-      syntheticFallback = true;
+      console.warn(`[PlanningService] 所有API均无结果，尝试知识库真实POI兜底`);
+      const known = this.knownPoiFallback(destName);
+      if (known) {
+        attractions = known.attractions;
+        hotels = known.hotels;
+        restaurants = known.restaurants;
+        knowledgeFallback = true;
+      } else {
+        throw new Error(
+          `目的地「${destName}」的实时数据暂不可用（POI 搜索无结果且无本地知识库），已拒绝生成估算行程；请稍后重试或换个目的地表达`,
+        );
+      }
     }
 
     // Step 4: 写入缓存（内存+文件持久化，全局共享）。
-    // 全空结果与合成降级结果都不落缓存：否则一次网络故障会把空/占位 POI
-    // 永久污染该目的地（缓存命中后直接编排出 0 项行程，且 TTL 内无法自愈）。
-    if (syntheticFallback || (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0)) {
-      console.warn(`[PlanningService] 跳过 POI 缓存写入（${syntheticFallback ? "合成降级" : "空结果"} 不缓存）`);
+    // 知识库兜底与空结果都不落缓存：一次网络故障降级的数据不应在 TTL 内
+    // 阻止后续重试拿到实时数据。
+    if (knowledgeFallback || (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0)) {
+      console.warn(`[PlanningService] 跳过 POI 缓存写入（${knowledgeFallback ? "知识库兜底" : "空结果"} 不缓存）`);
       return {
         destination: destName,
         queryKey: normalizedKey,
@@ -1476,54 +1245,22 @@ export class PlanningService {
   }
 
   /**
-   * 降级方案：使用知名真实景点/酒店/餐厅数据
-   * 当所有API都不可用时，返回该目的地的知名真实POI（可在地图上搜到）
+   * 真实数据兜底：仅回退到知识库中的真实地点（名称/坐标可在高德/Google Maps 查到）。
+   * 历史版本在此处用 Math.random 生成「当地中心景区」等合成占位 POI——那是在向用户
+   * 提供编造数据，已彻底移除。知识库未命中时返回 null，由调用方诚实失败（不落缓存、
+   * 不生成行程），用户会收到明确的重试提示而不是一份假行程。
    */
-  private generateSyntheticPOIs(center: Coordinates, destName: string): {
+  private knownPoiFallback(destName: string): {
     attractions: RawPOI[];
     hotels: RawPOI[];
     restaurants: RawPOI[];
-  } {
-    // 尝试从已知POI数据库匹配
+  } | null {
     const known = this.findKnownPOIs(destName);
     if (known) {
-      console.log(`[PlanningService] 使用${destName}的知名真实POI数据`);
+      console.log(`[PlanningService] 使用${destName}的知识库真实POI数据（非实时，已标注 dataQuality=knowledge）`);
       return known;
     }
-
-    // 完全未知的目的地：生成通用模板（但至少标注为估算位置）
-    // 注意：不再拼接 destName 到 POI 名中，避免 destName 异常时污染所有POI名称
-    const lat = center.latitude;
-    const lon = center.longitude;
-    const spread = (maxKm: number) => (Math.random() - 0.5) * maxKm / 111;
-
-    const makePOI = (name: string, type: string, offsetLat: number, offsetLon: number): RawPOI => ({
-      id: `fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name,
-      latitude: lat + offsetLat,
-      longitude: lon + offsetLon,
-      address: `该地点附近`,
-      type,
-      rating: 4.0 + Math.random() * 0.8,
-      tags: [type],
-      raw: { source: 'fallback', note: 'API不可用，使用估算位置' },
-    });
-
-    return {
-      attractions: [
-        makePOI('当地中心景区', 'attraction', spread(5), spread(5)),
-        makePOI('当地历史文化景点', 'attraction', spread(-4), spread(-4)),
-        makePOI('当地自然风光区', 'attraction', spread(3), spread(-3)),
-      ],
-      hotels: [
-        makePOI('当地精选酒店', 'hotel', spread(2), spread(2)),
-        makePOI('当地民宿', 'hotel', spread(-2), spread(-2)),
-      ],
-      restaurants: [
-        makePOI('当地特色餐厅', 'restaurant', spread(-2), spread(3)),
-        makePOI('当地小吃店', 'restaurant', spread(3), spread(-2)),
-      ],
-    };
+    return null;
   }
 
   /**
@@ -1536,340 +1273,7 @@ export class PlanningService {
     hotels: RawPOI[];
     restaurants: RawPOI[];
   } | null {
-    const q = destName.toLowerCase().replace(/\s+/g, '');
-    const db: Array<{
-      keywords: string[];
-      data: {
-        attractions: Array<{ name: string; lat: number; lon: number; tags: string[] }>;
-        hotels: Array<{ name: string; lat: number; lon: number; tags: string[] }>;
-        restaurants: Array<{ name: string; lat: number; lon: number; tags: string[] }>;
-      };
-    }> = [
-      {
-        keywords: ['大理','dali','云南大理'],
-        data: {
-          attractions: [
-            { name: '大理古城', lat: 25.6541, lon: 100.1696, tags: ['古城','历史文化'] },
-            { name: '洱海公园', lat: 25.7000, lon: 100.1900, tags: ['湖泊','自然风光'] },
-            { name: '崇圣寺三塔', lat: 25.7047, lon: 100.1472, tags: ['寺庙','古迹'] },
-            { name: '苍山景区', lat: 25.6600, lon: 100.1500, tags: ['山脉','自然'] },
-            { name: '双廊古镇', lat: 25.9069, lon: 100.1894, tags: ['古镇','海景'] },
-            { name: '喜洲古镇', lat: 25.8514, lon: 100.1294, tags: ['古镇','白族文化'] },
-            { name: '蝴蝶泉', lat: 25.8231, lon: 100.1531, tags: ['景点','自然'] },
-          ],
-          hotels: [
-            { name: '大理古城博爱路精品客栈', lat: 25.6550, lon: 100.1700, tags: ['民宿','古城内'] },
-            { name: '大理洱海天域英迪格酒店', lat: 25.7200, lon: 100.2300, tags: ['五星','海景'] },
-            { name: '大理希尔顿酒店', lat: 25.6000, lon: 100.2200, tags: ['五星','国际连锁'] },
-          ],
-          restaurants: [
-            { name: '段公子·大理古国主题店', lat: 25.6550, lon: 100.1680, tags: ['滇菜','网红'] },
-            { name: '再回首凉鸡米线', lat: 25.6520, lon: 100.1710, tags: ['小吃','本地特色'] },
-            { name: '大理古城人民路烧烤', lat: 25.6500, lon: 100.1670, tags: ['烧烤','夜宵'] },
-          ],
-        },
-      },
-      {
-        keywords: ['莫干山','mogan','mogan山'],
-        data: {
-          attractions: [
-            { name: '莫干山风景名胜区', lat: 30.6050, lon: 119.8950, tags: ['山岳','避暑胜地','竹海'] },
-            { name: '莫干山剑池', lat: 30.6012, lon: 119.8920, tags: ['山泉','古迹'] },
-            { name: '莫干山瀑布群', lat: 30.6080, lon: 119.8980, tags: ['瀑布','自然'] },
-            { name: '裸心谷', lat: 30.5810, lon: 119.8820, tags: ['度假村','生态'] },
-            { name: '德清下渚湖湿地', lat: 30.5420, lon: 119.9650, tags: ['湿地','自然'] },
-            { name: '莫干山毛泽东旧居', lat: 30.6040, lon: 119.8930, tags: ['历史','名人故居'] },
-          ],
-          hotels: [
-            { name: '莫干山郡安里度假酒店', lat: 30.5880, lon: 119.8890, tags: ['度假村','山景'] },
-            { name: '大乐之野·莫干山', lat: 30.6020, lon: 119.8950, tags: ['精品民宿','网红'] },
-            { name: '莫干山民宿·西坡', lat: 30.6100, lon: 119.8900, tags: ['民宿','山景'] },
-            { name: '莫干山裸心堡', lat: 30.5830, lon: 119.8780, tags: ['奢华','度假'] },
-          ],
-          restaurants: [
-            { name: '莫干山石颐山房', lat: 30.6040, lon: 119.8930, tags: ['本帮菜','山野风味'] },
-            { name: '大乐之野·山中餐厅', lat: 30.6020, lon: 119.8950, tags: ['西餐','民宿餐厅'] },
-            { name: '莫干山农家菜·竹园', lat: 30.6080, lon: 119.8980, tags: ['农家菜','土菜'] },
-          ],
-        },
-      },
-      {
-        keywords: ['丽江','lijiang','云南丽江'],
-        data: {
-          attractions: [
-            { name: '丽江古城', lat: 26.8720, lon: 100.2360, tags: ['古城','世界遗产'] },
-            { name: '玉龙雪山', lat: 27.1000, lon: 100.1700, tags: ['雪山','自然'] },
-            { name: '蓝月谷', lat: 27.0800, lon: 100.1750, tags: ['湖泊','峡谷'] },
-            { name: '束河古镇', lat: 26.9100, lon: 100.2000, tags: ['古镇','纳西文化'] },
-            { name: '黑龙潭公园', lat: 26.8700, lon: 100.2350, tags: ['公园','湖泊'] },
-            { name: '泸沽湖', lat: 27.7300, lon: 100.7500, tags: ['湖泊','摩梭文化'] },
-          ],
-          hotels: [
-            { name: '丽江古城五一街文治巷民宿', lat: 26.8730, lon: 100.2370, tags: ['民宿','古城'] },
-            { name: '丽江和府洲际度假酒店', lat: 26.8680, lon: 100.2320, tags: ['五星','度假'] },
-            { name: '丽江金茂凯悦臻选酒店', lat: 26.8650, lon: 100.2280, tags: ['五星','雪山景'] },
-          ],
-          restaurants: [
-            { name: '阿婆腊排骨火锅', lat: 26.8700, lon: 100.2400, tags: ['火锅','纳西风味'] },
-            { name: '丽江古城七一街小吃', lat: 26.8710, lon: 100.2340, tags: ['小吃','古城'] },
-            { name: '滇西王子·云南菜', lat: 26.8690, lon: 100.2360, tags: ['滇菜','精致餐饮'] },
-          ],
-        },
-      },
-      {
-        keywords: ['三亚','sanya'],
-        data: {
-          attractions: [
-            { name: '天涯海角', lat: 18.2960, lon: 109.3450, tags: ['海滨','标志性'] },
-            { name: '亚龙湾', lat: 18.2150, lon: 109.6200, tags: ['海滩','度假'] },
-            { name: '蜈支洲岛', lat: 18.3130, lon: 109.7620, tags: ['海岛','潜水'] },
-            { name: '南山文化旅游区', lat: 18.2880, lon: 109.1980, tags: ['佛教','文化'] },
-            { name: '大小洞天', lat: 18.3000, lon: 109.1720, tags: ['海滨','道教'] },
-            { name: '鹿回头风景区', lat: 18.2120, lon: 109.4780, tags: ['山顶','观景'] },
-          ],
-          hotels: [
-            { name: '三亚亚特兰蒂斯酒店', lat: 18.2450, lon: 109.6740, tags: ['七星','水世界'] },
-            { name: '三亚海棠湾仁恒皇冠假日', lat: 18.2300, lon: 109.7000, tags: ['五星','海棠湾'] },
-            { name: '三亚大东海酒店', lat: 18.2200, lon: 109.4800, tags: ['四星','大东海'] },
-          ],
-          restaurants: [
-            { name: '椰梦长廊海鲜广场', lat: 18.2500, lon: 109.5000, tags: ['海鲜','本地人推荐'] },
-            { name: '第一市场海鲜加工', lat: 18.2420, lon: 109.5080, tags: ['海鲜','平价'] },
-            { name: '琼乡阁海南菜餐厅', lat: 18.2480, lon: 109.5120, tags: ['琼菜','海南风味'] },
-          ],
-        },
-      },
-      {
-        keywords: ['成都','chengdu'],
-        data: {
-          attractions: [
-            { name: '大熊猫繁育研究基地', lat: 30.7380, lon: 104.1450, tags: ['动物','国宝'] },
-            { name: '宽窄巷子', lat: 30.6700, lon: 104.0550, tags: ['街区','历史文化'] },
-            { name: '锦里古街', lat: 30.6450, lon: 104.0500, tags: ['古街','三国文化'] },
-            { name: '武侯祠', lat: 30.6450, lon: 104.0550, tags: ['祠堂','三国'] },
-            { name: '杜甫草堂', lat: 30.6600, lon: 104.0300, tags: ['博物馆','诗歌'] },
-            { name: '青城山', lat: 30.9000, lon: 103.5700, tags: ['道教名山','自然'] },
-          ],
-          hotels: [
-            { name: '成都春熙路亚朵酒店', lat: 30.6580, lon: 104.0800, tags: ['中高端','商圈'] },
-            { name: '成都世纪城天堂洲际', lat: 30.5700, lon: 104.0700, tags: ['五星','会展'] },
-            { name: '成都宽窄巷子民宿', lat: 30.6680, lon: 104.0580, tags: ['民宿','景区旁'] },
-          ],
-          restaurants: [
-            { name: '陈麻婆豆腐(骡马市店)', lat: 30.6600, lon: 104.0650, tags: ['川菜','老字号'] },
-            { name: '小龙坎老火锅(春熙店)', lat: 30.6550, lon: 104.0780, tags: ['火锅','网红'] },
-            { name: '钟水饺(人民公园店)', lat: 30.6550, lon: 104.0600, tags: ['小吃','传统'] },
-          ],
-        },
-      },
-      {
-        keywords: ['杭州','hangzhou'],
-        data: {
-          attractions: [
-            { name: '西湖风景名胜区', lat: 30.2590, lon: 120.1490, tags: ['湖泊','世界遗产'] },
-            { name: '灵隐寺', lat: 30.2400, lon: 120.1020, tags: ['寺庙','佛教'] },
-            { name: '西溪湿地', lat: 30.2700, lon: 120.0700, tags: ['湿地','生态'] },
-            { name: '雷峰塔', lat: 30.2300, lon: 120.1480, tags: ['古塔','传说'] },
-            { name: '宋城景区', lat: 30.2000, lon: 120.1400, tags: ['主题乐园','演出'] },
-          ],
-          hotels: [
-            { name: '杭州西湖国宾馆', lat: 30.2500, lon: 120.1380, tags: ['国宾','西湖边'] },
-            { name: '杭州君悦酒店', lat: 30.2480, lon: 120.1620, tags: ['国际五星','湖滨'] },
-            { name: '杭州河坊街民宿', lat: 30.2450, lon: 120.1680, tags: ['民宿','历史街区'] },
-          ],
-          restaurants: [
-            { name: '楼外楼(孤山路店)', lat: 30.2500, lon: 120.1440, tags: ['杭帮菜','百年老店'] },
-            { name: '外婆家(西湖银泰店)', lat: 30.2550, lon: 120.1600, tags: ['杭帮菜','连锁'] },
-            { name: '知味观(总店)', lat: 30.2520, lon: 120.1650, tags: ['小吃','老字号'] },
-          ],
-        },
-      },
-      {
-        keywords: ['西安','xian'],
-        data: {
-          attractions: [
-            { name: '秦始皇兵马俑博物馆', lat: 34.3840, lon: 109.2780, tags: ['博物馆','世界遗产'] },
-            { name: '大雁塔·大慈恩寺', lat: 34.2200, lon: 108.9640, tags: ['古塔','佛教'] },
-            { name: '西安城墙', lat: 34.2520, lon: 108.9470, tags: ['城墙','明代'] },
-            { name: '华清宫', lat: 34.3600, lon: 109.2120, tags: ['宫殿','温泉'] },
-            { name: '陕西历史博物馆', lat: 34.2300, lon: 108.9550, tags: ['博物馆','文物'] },
-            { name: '回民街', lat: 34.2620, lon: 108.9430, tags: ['美食街','历史文化'] },
-          ],
-          hotels: [
-            { name: '西安威斯汀大酒店', lat: 34.2180, lon: 108.9620, tags: ['五星','大雁塔'] },
-            { name: '西安钟楼饭店', lat: 34.2600, lon: 108.9470, tags: ['四星','钟楼'] },
-            { name: '西安回民街民宿', lat: 34.2600, lon: 108.9400, tags: ['民宿','回民街'] },
-          ],
-          restaurants: [
-            { name: '德发长饺子馆(钟楼店)', lat: 34.2590, lon: 108.9480, tags: ['饺子','中华老字号'] },
-            { name: '老孙家羊肉泡馍', lat: 34.2610, lon: 108.9400, tags: ['泡馍','回民'] },
-            { name: '长安大排档(赛格店)', lat: 34.2230, lon: 108.9650, tags: ['陕菜','网红'] },
-          ],
-        },
-      },
-      {
-        keywords: ['北京','beijing'],
-        data: {
-          attractions: [
-            { name: '故宫博物院', lat: 39.9160, lon: 116.3970, tags: ['宫殿','世界遗产'] },
-            { name: '长城-八达岭', lat: 40.3580, lon: 116.0200, tags: ['长城','世界遗产'] },
-            { name: '天坛公园', lat: 39.8830, lon: 116.4100, tags: ['祭坛','世界遗产'] },
-            { name: '颐和园', lat: 39.9980, lon: 116.2750, tags: ['皇家园林','世界遗产'] },
-            { name: '南锣鼓巷', lat: 39.9380, lon: 116.4030, tags: ['胡同','历史文化'] },
-            { name: '天安门广场', lat: 39.9050, lon: 116.3980, tags: ['广场','地标'] },
-          ],
-          hotels: [
-            { name: '北京王府井希尔顿酒店', lat: 39.9120, lon: 116.4100, tags: ['五星','王府井'] },
-            { name: '北京王府井漫心酒店', lat: 39.9140, lon: 116.4080, tags: ['中端','王府井'] },
-            { name: '北京南锣鼓巷胡同民宿', lat: 39.9370, lon: 116.4000, tags: ['民宿','胡同'] },
-          ],
-          restaurants: [
-            { name: '全聚德烤鸭店(前门店)', lat: 39.8980, lon: 116.3970, tags: ['烤鸭','中华老字号'] },
-            { name: '东来顺饭庄(王府井店)', lat: 39.9140, lon: 116.4100, tags: ['涮肉','清真'] },
-            { name: '护国寺小吃店', lat: 39.9280, lon: 116.3800, tags: ['小吃','京味'] },
-          ],
-        },
-      },
-      {
-        keywords: ['上海','shanghai'],
-        data: {
-          attractions: [
-            { name: '上海迪士尼乐园', lat: 31.1430, lon: 121.6580, tags: ['主题乐园','亲子'] },
-            { name: '外滩', lat: 31.2400, lon: 121.4900, tags: ['滨江','地标'] },
-            { name: '东方明珠', lat: 31.2390, lon: 121.5000, tags: ['电视塔','地标'] },
-            { name: '豫园', lat: 31.2280, lon: 121.4920, tags: ['园林','古典'] },
-            { name: '南京路步行街', lat: 31.2350, lon: 121.4760, tags: ['商业街','购物'] },
-          ],
-          hotels: [
-            { name: '上海和平饭店', lat: 31.2370, lon: 121.4880, tags: ['传奇','外滩'] },
-            { name: '上海浦东丽思卡尔顿', lat: 31.2380, lon: 121.5000, tags: ['奢华','陆家嘴'] },
-            { name: '上海南京路亚朵S酒店', lat: 31.2330, lon: 121.4750, tags: ['中高端','南京路'] },
-          ],
-          restaurants: [
-            { name: '上海老饭店(豫园店)', lat: 31.2270, lon: 121.4900, tags: ['本帮菜','老字号'] },
-            { name: '小南国(日月光店)', lat: 31.2100, lon: 121.4750, tags: ['本帮菜','精致'] },
-            { name: '鼎泰丰(兴业太古汇店)', lat: 31.2250, lon: 121.4680, tags: ['小笼包','台式'] },
-          ],
-        },
-      },
-      {
-        keywords: ['巴厘岛','bali','印尼'],
-        data: {
-          attractions: [
-            { name: '乌布皇宫(Puri Saren)', lat: -8.5069, lon: 115.2614, tags: ['皇宫','历史文化'] },
-            { name: '海神庙(Tanah Lot)', lat: -8.6210, lon: 115.0870, tags: ['海上寺庙','日落'] },
-            { name: '德格拉朗梯田', lat: -8.5030, lon: 115.2800, tags: ['梯田','田园'] },
-            { name: '京打马尼火山', lat: -8.2900, lon: 115.3800, tags: ['火山','日出'] },
-            { name: '库塔海滩(Kuta Beach)', lat: -8.7180, lon: 115.1690, tags: ['海滩','冲浪'] },
-            { name: '圣泉寺(Tirta Empul)', lat: -8.4200, lon: 115.3100, tags: ['寺庙','净化仪式'] },
-          ],
-          hotels: [
-            { name: '乌布 Hanging Gardens', lat: -8.4500, lon: 115.2700, tags: ['豪华','丛林泳池'] },
-            { name: '库塔 The Ritz-Carlton', lat: -8.7800, lon: 115.1660, tags: ['奢华','海滩'] },
-            { name: '水明漾 W Resort & Spa', lat: -8.7200, lon: 115.1400, tags: ['设计酒店','时尚'] },
-          ],
-          restaurants: [
-            { name: 'Bebek Bengil Dirty Duck', lat: -8.5060, lon: 115.2640, tags: ['脏鸭餐','乌布必吃'] },
-            { name: 'Ibu Oka Babi Guling', lat: -8.5070, lon: 115.2620, tags: ['烤乳猪','巴厘传统'] },
-            { name: 'La Lucciola', lat: -8.7170, lon: 115.1550, tags: ['意大利','海景'] },
-          ],
-        },
-      },
-      {
-        keywords: ['东京','tokyo','日本东京'],
-        data: {
-          attractions: [
-            { name: '浅草寺(Senso-ji)', lat: 35.7148, lon: 139.7967, tags: ['寺庙','东京最古老'] },
-            { name: '东京塔(Tokyo Tower)', lat: 35.6586, lon: 139.7454, tags: ['地标','夜景'] },
-            { name: '明治神宫(Meiji Jingu)', lat: 35.6764, lon: 139.6993, tags: ['神社','森林'] },
-            { name: '皇居(Kokyo)', lat: 35.6852, lon: 139.7528, tags: ['皇宫','日式庭园'] },
-            { name: '涩谷十字路口', lat: 35.6595, lon: 139.7004, tags: ['地标','购物'] },
-            { name: '东京迪士尼乐园', lat: 35.6329, lon: 139.8804, tags: ['主题乐园','亲子'] },
-          ],
-          hotels: [
-            { name: '东京帝国酒店', lat: 35.6750, lon: 139.7580, tags: ['传奇','银座'] },
-            { name: '东京安缦(Aman Tokyo)', lat: 35.6770, lon: 139.7580, tags: ['奢华','大手町'] },
-            { name: '新宿格兰贝尔酒店', lat: 35.6920, lon: 139.7050, tags: ['中端','交通便利'] },
-          ],
-          restaurants: [
-            { name: '数寄屋桥次郎寿司', lat: 35.6720, lon: 139.7660, tags: ['寿司','米其林三星'] },
-            { name: '一风堂拉面(新宿店)', lat: 35.6900, lon: 139.7020, tags: ['拉面','博多风味'] },
-            { name: '筑地场外市场', lat: 35.6650, lon: 139.7700, tags: ['海鲜','新鲜刺身'] },
-          ],
-        },
-      },
-      {
-        keywords: ['曼谷','bangkok','泰国曼谷'],
-        data: {
-          attractions: [
-            { name: '大皇宫(Grand Palace)', lat: 13.7500, lon: 100.4910, tags: ['皇宫','佛教'] },
-            { name: '卧佛寺(Wat Pho)', lat: 13.7460, lon: 100.4930, tags: ['寺庙','卧佛'] },
-            { name: '郑王庙(Wat Arun)', lat: 13.7430, lon: 100.4890, tags: ['寺庙','黎明寺'] },
-            { name: '乍都乍周末市场', lat: 13.8000, lon: 100.5500, tags: ['集市','购物'] },
-            { name: '湄南河游船', lat: 13.7500, lon: 100.4900, tags: ['河流','观光'] },
-          ],
-          hotels: [
-            { name: '曼谷半岛酒店', lat: 13.7420, lon: 100.5020, tags: ['奢华','湄南河畔'] },
-            { name: '曼谷文华东方', lat: 13.7440, lon: 100.5040, tags: ['传奇','河景'] },
-            { name: '素坤逸55号Grande Centre Point', lat: 13.7300, lon: 100.5700, tags: ['中高端','商务区'] },
-          ],
-          restaurants: [
-            { name: '建兴酒坊(Somboon Seafood)', lat: 13.7150, lon: 100.5570, tags: ['咖喱蟹','米其林'] },
-            { name: 'Thipsamai Pad Thai', lat: 13.6570, lon: 100.5020, tags: ['泰式炒粉','老字号'] },
-            { name: 'Jeh O Chula Mom\'s Noodle', lat: 13.7320, lon: 100.5330, tags: ['船面','深夜食堂'] },
-          ],
-        },
-      },
-      {
-        keywords: ['巴黎','paris','法国巴黎'],
-        data: {
-          attractions: [
-            { name: '埃菲尔铁塔(Tour Eiffel)', lat: 48.8584, lon: 2.2945, tags: ['地标','铁塔'] },
-            { name: '卢浮宫(Musée du Louvre)', lat: 48.8606, lon: 2.3376, tags: ['博物馆','艺术'] },
-            { name: '巴黎圣母院(Cathédrale Notre-Dame)', lat: 48.8530, lon: 2.3499, tags: ['教堂','哥特式'] },
-            { name: '凯旋门(Arc de Triomphe)', lat: 48.8738, lon: 2.2950, tags: ['纪念碑','拿破仑'] },
-            { name: '蒙马特高地(Sacré-Cœur)', lat: 48.8867, lon: 2.3431, tags: ['教堂','艺术区'] },
-          ],
-          hotels: [
-            { name: '巴黎丽兹酒店(Ritz Paris)', lat: 48.8660, lon: 2.3230, tags: ['传奇','旺多姆'] },
-            { name: '巴黎Le Bristol', lat: 48.8680, lon: 2.3150, tags: [' palace','奥赛'] },
-            { name: '蒙马特艺术家公寓', lat: 48.8850, lon: 2.3400, tags: ['民宿','艺术区'] },
-          ],
-          restaurants: [
-            { name: 'Le Comptoir du Panthéon', lat: 48.8460, lon: 2.3450, tags: ['法餐','经典小酒馆'] },
-            { name: 'L\'As du Fallafel', lat: 48.8560, lon: 2.3650, tags: ['中东','玛莱区'] },
-            { name: 'Café de Flore', lat: 48.8530, lon: 2.3330, tags: ['咖啡馆','左岸文化'] },
-          ],
-        },
-      },
-    ];
-
-    for (const entry of db) {
-      if (entry.keywords.some(k => q.includes(k.toLowerCase()))) {
-        const makePOI = (
-          item: { name: string; lat: number; lon: number; tags: string[] },
-          type: string
-        ): RawPOI => ({
-          id: `known-${item.name}-${Date.now()}`,
-          name: item.name,
-          latitude: item.lat,
-          longitude: item.lon,
-          address: `${destName} · ${item.tags[0] || ''}`,
-          type,
-          rating: 4.3 + Math.random() * 0.6,
-          tags: item.tags,
-          raw: { source: 'known-poi-db', destination: destName },
-        });
-
-        return {
-          attractions: entry.data.attractions.map(a => makePOI(a, 'attraction')),
-          hotels: entry.data.hotels.map(h => makePOI(h, 'hotel')),
-          restaurants: entry.data.restaurants.map(r => makePOI(r, 'restaurant')),
-        };
-      }
-    }
-
-    return null; // 未找到匹配
+    return knowledgeBase.findKnownPOIs(destName);
   }
 
   // ======================== OpenStreetMap API 调用 ========================
@@ -1895,7 +1299,7 @@ export class PlanningService {
     try {
       const res = await fetch(url, {
         headers: { 'User-Agent': USER_AGENT },
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(GEOCODE_REQUEST_TIMEOUT_MS),
       });
 
       const data = await res.json() as Array<Record<string, unknown>>;
@@ -1917,14 +1321,48 @@ export class PlanningService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[OSM] 地理编码失败(${query}):`, msg);
-      // 优先从已知目的地坐标表查找（本地未命中过，此处作最终兜底）
+      // 备用 geocoder：Nominatim 超时/限流时切 Photon 重试，而不是直接抛错走知识库
+      const photon = await this.geocodeByPhoton(query);
+      if (photon) {
+        console.log(`[OSM] Photon 备用命中: ${photon.displayName} [${photon.center.longitude}, ${photon.center.latitude}]`);
+        return photon;
+      }
+      // 知识库坐标兜底（真实地点坐标，可在地图上查到）
       const known = this.findKnownCoordinates(query);
       if (known) {
         console.log(`[OSM] 使用已知坐标: ${known.name} [${known.center.longitude}, ${known.center.latitude}]`);
         return { center: known.center, displayName: known.name };
       }
-      // 最终兜底：中国中心
-      return { center: { latitude: 30.584, longitude: 104.067 }, displayName: query };
+      // 诚实失败：绝不返回猜测坐标。历史版本兜底到「中国中心」——那会让整个行程
+      // 建在错误的坐标上（假数据），现已改为向上抛错由调用方明确告知用户。
+      throw new Error(`无法定位目的地「${query}」（地理编码服务不可用或地名无法识别）`);
+    }
+  }
+
+  /**
+   * Photon 备用地理编码（photon.komoot.io，免费、无需 Key）。
+   * 失败返回 null 由调用方继续降级，绝不抛错。
+   */
+  private async geocodeByPhoton(query: string): Promise<{ center: Coordinates; displayName: string } | null> {
+    try {
+      const url = `${PHOTON_GEOCODE_BASE}?q=${encodeURIComponent(query)}&limit=1`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: AbortSignal.timeout(PHOTON_REQUEST_TIMEOUT_MS),
+      });
+      const json = await res.json() as {
+        features?: Array<{
+          geometry?: { coordinates?: [number, number] };
+          properties?: Record<string, unknown>;
+        }>;
+      };
+      const coords = json.features?.[0]?.geometry?.coordinates;
+      if (!coords || !Number.isFinite(coords[0]) || !Number.isFinite(coords[1])) return null;
+      const p = json.features?.[0]?.properties ?? {};
+      const displayName = [p.name, p.city, p.country].filter((v) => typeof v === 'string' && v).join(', ') || query;
+      return { center: { latitude: coords[1]!, longitude: coords[0]! }, displayName };
+    } catch {
+      return null;
     }
   }
 
@@ -1933,62 +1371,7 @@ export class PlanningService {
    * 覆盖国内外热门旅游目的地
    */
   private findKnownCoordinates(query: string): { name: string; center: Coordinates } | null {
-    const q = query.toLowerCase().replace(/\s+/g, '');
-    const destinations: Array<{ name: string; keywords: string[]; center: Coordinates }> = [
-      // 国内热门
-      { name: '云南大理', keywords: ['大理','云南大理','dali'], center: { latitude: 25.6904, longitude: 100.1595 } },
-      { name: '云南丽江', keywords: ['丽江','云南丽江','lijiang'], center: { latitude: 26.872, longitude: 100.236 } },
-      { name: '北京', keywords: ['北京','beijing','北平'], center: { latitude: 39.916, longitude: 116.397 } },
-      { name: '上海', keywords: ['上海','shanghai','沪'], center: { latitude: 31.230, longitude: 121.473 } },
-      { name: '杭州', keywords: ['杭州','hangzhou'], center: { latitude: 30.274, longitude: 120.155 } },
-      { name: '成都', keywords: ['成都','chengdu'], center: { latitude: 30.658, longitude: 104.065 } },
-      { name: '西安', keywords: ['西安','xian','长安'], center: { latitude: 34.261, longitude: 108.940 } },
-      { name: '厦门', keywords: ['厦门','xiamen','鹭岛'], center: { latitude: 24.479, longitude: 118.089 } },
-      { name: '三亚', keywords: ['三亚','sanya','海南'], center: { latitude: 18.252, longitude: 109.518 } },
-      { name: '桂林', keywords: ['桂林','guilin'], center: { latitude: 25.274, longitude: 110.299 } },
-      { name: '拉萨', keywords: ['拉萨','lhasa','西藏'], center: { latitude: 29.650, longitude: 91.132 } },
-      { name: '青岛', keywords: ['青岛','qingdao'], center: { latitude: 36.067, longitude: 120.382 } },
-      { name: '重庆', keywords: ['重庆','chongqing'], center: { latitude: 29.563, longitude: 106.551 } },
-      { name: '南京', keywords: ['南京','nanjing'], center: { latitude: 32.058, longitude: 118.797 } },
-      { name: '苏州', keywords: ['苏州','suzhou'], center: { latitude: 31.298, longitude: 120.585 } },
-      { name: '长沙', keywords: ['长沙','changsha'], center: { latitude: 28.195, longitude: 112.970 } },
-      { name: '张家界', keywords: ['张家界','zhangjiajie'], center: { latitude: 29.117, longitude: 110.485 } },
-      { name: '哈尔滨', keywords: ['哈尔滨','harbin'], center: { latitude: 45.804, longitude: 126.536 } },
-      { name: '武汉', keywords: ['武汉','wuhan'], center: { latitude: 30.584, longitude: 114.299 } },
-      { name: '广州', keywords: ['广州','guangzhou'], center: { latitude: 23.129, longitude: 113.264 } },
-      { name: '深圳', keywords: ['深圳','shenzhen'], center: { latitude: 22.543, longitude: 114.058 } },
-      { name: '香港', keywords: ['香港','hongkong','hk'], center: { latitude: 22.278, longitude: 114.169 } },
-      { name: '澳门', keywords: ['澳门','macau'], center: { latitude: 22.198, longitude: 113.543 } },
-      { name: '台北', keywords: ['台北','taipei','台湾'], center: { latitude: 25.033, longitude: 121.565 } },
-      { name: '昆明', keywords: ['昆明','kunming'], center: { latitude: 25.041, longitude: 102.712 } },
-      // 国外热门
-      { name: '日本东京', keywords: ['东京','tokyo','日本东京'], center: { latitude: 35.689, longitude: 139.692 } },
-      { name: '日本大阪', keywords: ['大阪','osaka','日本大阪'], center: { latitude: 34.694, longitude: 135.502 } },
-      { name: '日本京都', keywords: ['京都','kyoto','日本京都'], center: { latitude: 35.011, longitude: 135.768 } },
-      { name: '泰国曼谷', keywords: ['曼谷','bangkok','泰国曼谷'], center: { latitude: 13.756, longitude: 100.502 } },
-      { name: '泰国普吉岛', keywords: ['普吉岛','phuket','泰国普吉'], center: { latitude: 7.881, longitude: 98.392 } },
-      { name: '韩国首尔', keywords: ['首尔','seoul','韩国首尔'], center: { latitude: 37.566, longitude: 126.978 } },
-      { name: '新加坡', keywords: ['新加坡','singapore','狮城'], center: { latitude: 1.352, longitude: 103.819 } },
-      { name: '马来西亚吉隆坡', keywords: ['吉隆坡','kl','kualalumpur'], center: { latitude: 3.139, longitude: 101.687 } },
-      { name: '越南岘港', keywords: ['岘港','danang','越南岘港'], center: { latitude: 16.054, longitude: 108.220 } },
-      { name: '印尼巴厘岛', keywords: ['巴厘岛','bali','印尼巴厘岛','印尼'], center: { latitude: -8.409, longitude: 115.188 } },
-      { name: '马尔代夫', keywords: ['马尔代夫','maldives'], center: { latitude: 4.175, longitude: 73.510 } },
-      { name: '法国巴黎', keywords: ['巴黎','paris','法国巴黎'], center: { latitude: 48.856, longitude: 2.352 } },
-      { name: '意大利罗马', keywords: ['罗马','rome','意大利罗马'], center: { latitude: 41.903, longitude: 12.496 } },
-      { name: '英国伦敦', keywords: ['伦敦','london','英国伦敦'], center: { latitude: 51.507, longitude: -0.128 } },
-      { name: '美国纽约', keywords: ['纽约','newyork','ny'], center: { latitude: 40.713, longitude: -74.006 } },
-      { name: '澳大利亚悉尼', keywords: ['悉尼','sydney','澳洲悉尼'], center: { latitude: -33.869, longitude: 151.209 } },
-      { name: '阿联酋迪拜', keywords: ['迪拜','dubai'], center: { latitude: 25.204, longitude: 55.270 } },
-      { name: '土耳其伊斯坦布尔', keywords: ['伊斯坦布尔','istanbul','土耳其'], center: { latitude: 41.008, longitude: 28.978 } },
-      { name: '埃及开罗', keywords: ['开罗','cairo','埃及'], center: { latitude: 30.044, longitude: 31.235 } },
-    ];
-
-    for (const d of destinations) {
-      if (d.keywords.some(k => q.includes(k))) {
-        return { name: d.name, center: d.center };
-      }
-    }
-    return null;
+    return knowledgeBase.findKnownCoordinates(query);
   }
 
   /**
@@ -2087,38 +1470,40 @@ export class PlanningService {
       return json.elements || [];
     };
 
-    // 并行请求所有镜像，使用首个成功（HTTP 200 + JSON + 有 elements）
-    const attempts = OSM_OVERPASS_BASES.map(async (base) => {
-      try {
+    // 并行请求所有镜像，首个成功（HTTP 200 + JSON + 有 elements）即胜出并 abort
+    // 其余在途请求——避免落败镜像继续跑满整个超时窗口占用连接与重试预算。
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OVERPASS_REQUEST_TIMEOUT_MS);
+    try {
+      const attempts = OSM_OVERPASS_BASES.map(async (base) => {
         const res = await fetch(base, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': USER_AGENT },
           body: `data=${encodeURIComponent(overpassQL)}`,
-          signal: AbortSignal.timeout(OVERPASS_REQUEST_TIMEOUT_MS),
+          signal: controller.signal,
         });
         if (!res.ok) {
-          console.warn(`[Overpass] ${new URL(base).host} HTTP ${res.status}`);
-          return null;
+          throw new Error(`${new URL(base).host} HTTP ${res.status}`);
         }
         const elements = await tryParseElements(res);
-        if (elements && elements.length > 0) {
-          return { base, elements };
+        if (!elements || elements.length === 0) {
+          throw new Error(`${new URL(base).host} 空结果`);
         }
-        return null;
+        return { base, elements };
+      });
+
+      let winner: { base: string; elements: Array<Record<string, unknown>> };
+      try {
+        winner = await Promise.any(attempts);
       } catch {
-        // 单个镜像失败静默忽略（已通过超时/连接错误竞争胜出的其他镜像会接管）
-        return null;
+        // AggregateError：所有镜像均失败（含被 abort 的在途请求）
+        console.warn('[Overpass] 所有镜像均不可用，触发合成数据降级');
+        return [];
       }
-    });
+      // 首个成功者已产生：取消其余镜像的在途请求
+      controller.abort();
 
-    const results = await Promise.all(attempts);
-    const winner = results.find(r => r && r.elements && r.elements.length > 0);
-    if (!winner) {
-      console.warn('[Overpass] 所有镜像均不可用，触发合成数据降级');
-      return [];
-    }
-
-    return winner.elements
+      return winner.elements
       .filter(el => {
         if (el.lat !== undefined && el.lon !== undefined) return true;
         // way/relation 元素：out center 输出的是 center.{lat,lon}
@@ -2149,6 +1534,9 @@ export class PlanningService {
         };
       })
       .filter(poi => !isNaN(poi.latitude) && !isNaN(poi.longitude));
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // ======================== 高德地图 API 调用 ========================
@@ -2408,36 +1796,38 @@ export class PlanningService {
     const score = (poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): number => {
       const hay = `${poi.name} ${(poi.tags || []).join(' ')}`.toLowerCase();
       let s = this.effectiveRating(poi, type); // 本地评论聚合分混合（媒体库优先）
+      // C5 收藏加权：用户收藏过的地点（type:name 精确匹配，餐厅与景点同名互不污染）
+      if (this.favoriteKeys.has(`${type}:${poi.name}`)) s += SCORING.favoriteBoost;
       if (type === 'hotel') {
-        if (prefs.seaside && /(海|滩|湾|beach|bay|coast|seaside|ocean)/i.test(hay)) s += 5;
-        if (prefs.pool && /(泳池|游泳池|pool|swimming)/i.test(hay)) s += 4;
-        if (prefs.kids && /(亲子|家庭|儿童|kid|family)/i.test(hay)) s += 2;
-        if (prefs.elderly && /(无障碍|电梯|安静|elevator|accessible)/i.test(hay)) s += 2;
-        if (prefs.hotelTier === 'luxury' && /(豪华|五星|resort|residence)/i.test(hay)) s += 3;
-        if (prefs.hotelTier === 'budget' && /(青旅|民宿|客栈|经济|hostel)/i.test(hay)) s += 3;
+        if (prefs.seaside && /(海|滩|湾|beach|bay|coast|seaside|ocean)/i.test(hay)) s += SCORING.hotel.seaside;
+        if (prefs.pool && /(泳池|游泳池|pool|swimming)/i.test(hay)) s += SCORING.hotel.pool;
+        if (prefs.kids && /(亲子|家庭|儿童|kid|family)/i.test(hay)) s += SCORING.hotel.kids;
+        if (prefs.elderly && /(无障碍|电梯|安静|elevator|accessible)/i.test(hay)) s += SCORING.hotel.elderly;
+        if (prefs.hotelTier === 'luxury' && /(豪华|五星|resort|residence)/i.test(hay)) s += SCORING.hotel.luxuryTier;
+        if (prefs.hotelTier === 'budget' && /(青旅|民宿|客栈|经济|hostel)/i.test(hay)) s += SCORING.hotel.budgetTier;
       } else if (type === 'restaurant') {
         if (prefs.cuisine) {
           const re = new RegExp(prefs.cuisine, 'i');
-          if (re.test(hay)) s += 4;
+          if (re.test(hay)) s += SCORING.restaurant.cuisineMatch;
         }
-        if (prefs.seaside && /(海|海景|beach|seafood|海鲜)/i.test(hay)) s += 2;
+        if (prefs.seaside && /(海|海景|beach|seafood|海鲜)/i.test(hay)) s += SCORING.restaurant.seaside;
       } else if (type === 'attraction') {
-        if (prefs.activities) s += 2; // 想看"有什么好玩的" → 把景点都前置
-        if (prefs.seaside && /(海|滩|湾|岛|beach|coast|reef|dive|潜水|冲浪)/i.test(hay)) s += 3;
-        if (prefs.kids && /(乐园|动物园|主题|family|amusement|zoo)/i.test(hay)) s += 2;
+        if (prefs.activities) s += SCORING.attraction.activities; // 想看"有什么好玩的" → 把景点都前置
+        if (prefs.seaside && /(海|滩|湾|岛|beach|coast|reef|dive|潜水|冲浪)/i.test(hay)) s += SCORING.attraction.seaside;
+        if (prefs.kids && /(乐园|动物园|主题|family|amusement|zoo)/i.test(hay)) s += SCORING.attraction.kids;
         if (weather) {
           const t = poi.tags || [];
           if (t.includes('indoor')) {
             // 雨天/高温 → 室内景点优先
-            if (weather.isRainyDay) s += 5;
-            if (weather.isHotDay) s += 3;
+            if (weather.isRainyDay) s += SCORING.attraction.indoorRainy;
+            if (weather.isHotDay) s += SCORING.attraction.indoorHot;
           } else if (t.includes('outdoor')) {
-            if (weather.isRainyDay) s -= 5;
-            if (weather.isHotDay) s -= 2;
+            if (weather.isRainyDay) s += SCORING.attraction.outdoorRainy;
+            if (weather.isHotDay) s += SCORING.attraction.outdoorHot;
           }
           // 夜景/夜间专属：整体小幅前置（晚间分槽时进一步放大）
-          if (t.includes('nightview')) s += 1.5;
-          if (t.includes('eveningOnly')) s += 1;
+          if (t.includes('nightview')) s += SCORING.attraction.nightView;
+          if (t.includes('eveningOnly')) s += SCORING.attraction.eveningOnly;
         }
       }
       return s;
@@ -2897,22 +2287,23 @@ export class PlanningService {
     let bestScore = -Infinity;
     for (const r of candidates) {
       const dist = this.haversineKm(refLat, refLon, r.latitude, r.longitude);
-      const distScore = Math.max(0, 100 - dist * 1.5);
-      // 评分采用本地评论聚合分混合（无本地评论时退回默认 4.0 口径）
+      const distScore = Math.max(0, SCORING.routePick.distanceBase - dist * SCORING.routePick.distanceScale);
+      // 评分采用本地评论聚合分混合（无本地评论时退回默认口径）
       const blended = this.effectiveRating(r, 'restaurant');
-      const ratingScore = (blended > 0 ? blended : 4.0) * 5;
+      const ratingScore = (blended > 0 ? blended : SCORING.routePick.ratingFallback) * SCORING.routePick.ratingScale;
       let prefScore = 0;
       const hay = `${r.name} ${(r.tags || []).join(' ')}`.toLowerCase();
       if (prefs.cuisine) {
         const re = new RegExp(prefs.cuisine, 'i');
-        if (re.test(hay)) prefScore += 15;
+        if (re.test(hay)) prefScore += SCORING.routePick.cuisineMatch;
       }
-      if (prefs.seaside && /(海|海景|beach|seafood|海鲜)/i.test(hay)) prefScore += 8;
-      if (prefs.budget === 'low' && /(小吃|快餐|平价|local|经济)/i.test(hay)) prefScore += 5;
-      if (prefs.budget === 'high' && /(精致|高档|fine|dining|luxury)/i.test(hay)) prefScore += 5;
+      if (prefs.seaside && /(海|海景|beach|seafood|海鲜)/i.test(hay)) prefScore += SCORING.routePick.seasideMatch;
+      if (prefs.budget === 'low' && /(小吃|快餐|平价|local|经济)/i.test(hay)) prefScore += SCORING.routePick.budgetMatch;
+      if (prefs.budget === 'high' && /(精致|高档|fine|dining|luxury)/i.test(hay)) prefScore += SCORING.routePick.budgetMatch;
 
-      const usePenalty = (usageCount?.get(r.id) || 0) * 10;
-      const totalScore = distScore * 0.6 + ratingScore * 0.25 + prefScore - usePenalty;
+      const usePenalty = (usageCount?.get(r.id) || 0) * SCORING.routePick.reusePenalty;
+      const totalScore =
+        distScore * SCORING.routePick.distanceWeight + ratingScore * SCORING.routePick.ratingWeight + prefScore - usePenalty;
       if (totalScore > bestScore) {
         bestScore = totalScore;
         best = r;
@@ -3720,7 +3111,7 @@ export class PlanningService {
     return imageUrls;
   }
 
-  private generateDescription(poi: RawPOI, type: string, prefs: TripPreferences = { raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false, pace: 'balanced', activityMix: 'mixed', sources: { seaside: 'default', pool: 'default', activities: 'default', kids: 'default', elderly: 'default', pace: 'default', activityMix: 'default', budget: 'default', cuisine: 'default', hotelTier: 'default' } }): string {
+  private generateDescription(poi: Pick<RawPOI, 'name'> & Partial<Pick<RawPOI, 'tags' | 'rating' | 'address'>>, type: string, prefs: TripPreferences = { raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false, pace: 'balanced', activityMix: 'mixed', sources: { seaside: 'default', pool: 'default', activities: 'default', kids: 'default', elderly: 'default', pace: 'default', activityMix: 'default', budget: 'default', cuisine: 'default', hotelTier: 'default' } }): string {
     const tags = poi.tags || [];
     const tagStr = tags.slice(0, 3).join('、');
 

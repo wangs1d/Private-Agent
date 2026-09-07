@@ -13,6 +13,7 @@ import {
 } from "./agent-result-formatter.js";
 import { hasBlockquote } from "./display-effect-router.js";
 import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
+import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
 
 /** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：400） */
@@ -484,9 +485,17 @@ function buildTravelItineraryCardFromPlan(
   const items = buildTravelDaySummaryItems(plan).map((text) => ({ type: "num", text }));
   const footer = buildTravelItineraryFooter(plan);
 
-  const snap = travelItineraryStore.findForText(`${title} ${destination} ${leadText}`);
-  const travelPlan =
-    snap && snap.days.length > 0 ? snap : snapshotFromRawPlan(plan, title, destination);
+  // A4 数据源优先级：① planId 直读冷层（权威、含编辑后数据与 version）
+  // → ② 文本匹配内存快照（2 分钟时效）→ ③ 原始 plan 就地转换。
+  const coldPlan = strField(plan.planId) ? travelPlanStore.get(strField(plan.planId)) : null;
+  const snap = coldPlan
+    ? null
+    : travelItineraryStore.findForText(`${title} ${destination} ${leadText}`);
+  const travelPlan = coldPlan
+    ? coldPlan
+    : snap && snap.days.length > 0
+      ? snap
+      : snapshotFromRawPlan(plan, title, destination);
 
   const payload = {
     avatar: "NB",
@@ -626,6 +635,19 @@ export function attachTravelItineraryCard(
   toolResult: Record<string, unknown> | undefined,
 ): string {
   if (toolName !== "travel.plan-itinerary" || !toolResult) return text;
+  // A4 主路径：工具回执携带 planId（id 字段）→ 直读冷层权威数据建卡。
+  // 不再依赖 2 分钟时效的内存快照与目的地名文本匹配（历史串卡根因）。
+  const planId = strField(toolResult.id);
+  if (planId) {
+    const cold = travelPlanStore.get(planId);
+    if (cold && cold.days.length > 0) {
+      if (containsTravelItineraryCard(text)) return text;
+      return buildTravelItineraryCardFromPlan(
+        { ...cold, title: strField(toolResult.title) || cold.title },
+        text.trim(),
+      );
+    }
+  }
   const days = toolResult.days;
   if (!Array.isArray(days) || days.length === 0) return text;
   if (containsTravelItineraryCard(text)) return text;

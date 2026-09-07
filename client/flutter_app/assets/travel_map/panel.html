@@ -610,6 +610,22 @@
   #splat-loading .loading-spinner { border-color: rgba(148, 163, 184, 0.25); border-top-color: #94a3b8; }
 </style>
 </head>
+<style>
+  .gt-quality-badge {
+    position: absolute; top: 14px; left: 66px; z-index: 60;
+    display: none; align-items: center; gap: 6px;
+    padding: 5px 12px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+    color: #ffd8a8; background: rgba(66, 32, 6, 0.82);
+    border: 1px solid rgba(255, 176, 66, 0.45);
+    backdrop-filter: blur(8px);
+    pointer-events: none;
+  }
+  body[data-theme="light"] .gt-quality-badge {
+    color: #7a4d0b; background: rgba(255, 243, 205, 0.92);
+    border-color: rgba(214, 158, 46, 0.5);
+  }
+</style>
 <body>
 <main class="gt-app">
   <!-- 顶部导航栏 -->
@@ -662,6 +678,7 @@
         <div class="gt-map-container">
           <div id="map"></div>
           <div id="fallback-map" style="display:none"></div>
+          <div class="gt-quality-badge" id="qualityBadge"></div>
 
           <!-- 左上角控制栏（图层/定位） -->
           <div class="gt-map-controls">
@@ -1695,6 +1712,15 @@
     // 顶栏（设计稿顶栏无标题区，目的地/标题仅写入页面标题）
     var title = state.data.title || ((state.data.destination || '行程规划') + ' 行程');
     document.title = state.data.destination ? title : '行程规划';
+
+    // 数据可信度角标：非实时数据时明示来源（A3 数据诚实化）
+    var qBadge = document.getElementById('qualityBadge');
+    if (qBadge) {
+      var q = state.data.dataQuality || 'real';
+      if (q === 'synthetic') { qBadge.textContent = '⚠ 离线估算数据 · 建议联网重新规划'; qBadge.style.display = 'flex'; }
+      else if (q === 'knowledge') { qBadge.textContent = '📖 内置知识库数据 · 非实时搜索'; qBadge.style.display = 'flex'; }
+      else { qBadge.style.display = 'none'; }
+    }
     $('btn-fullscreen').style.display = payload.fullscreen ? 'none' : '';
     $('btn-close').style.display = payload.closable ? '' : 'none';
 
