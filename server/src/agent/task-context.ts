@@ -8,7 +8,8 @@ export type TaskContextProfile = {
   likelyCodeOrProjectWork: boolean;
 };
 
-const FRESH_FACT_RE =
+// 导出供出口自检复用（agent-core 对话面闪避兜底：实时类请求 + 闪避话术 → 转任务面）。
+export const FRESH_FACT_RE =
   /latest|recent|today|tomorrow|yesterday|current|now|news|price|weather|schedule|score|version|release|202[0-9]|最新|最近|今天|明天|昨天|现在|当前|新闻|价格|天气|日程|赛程|版本|发布|查一下|搜索|联网|浏览/i;
 
 const PERSISTENT_ACTION_RE =

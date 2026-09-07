@@ -46,6 +46,11 @@ type PersistedTaskState = {
   episodic?: Record<string, PersistedSessionEpisodic>;
   /** 跨会话单调递增的轮次计数（用于召回排序与先后判定） */
   episodicIdx?: number;
+  /**
+   * openLoops/agentCommitments 首次入栈时间台账（sessionId → 条目原文 → epoch ms）。
+   * TTL 清理与结清判定的时间源；条目文本为 key（入栈时已去重规范化）。
+   */
+  loopFirstSeen?: Record<string, Record<string, number>>;
 };
 
 type SessionConversationMemory = {
@@ -56,6 +61,8 @@ type SessionConversationMemory = {
   facts: string[];
   openLoops: string[];
   agentCommitments: string[];
+  /** 连续 topic_switch 轮数（P2：连续切换 K 轮后旧 currentMission 失效置空） */
+  topicSwitchStreak?: number;
   lastUpdated: string;
 };
 
@@ -89,8 +96,36 @@ const EPISODIC_MAX_FACTS = 240;
 const EPISODIC_SEARCH_K = 4;
 /** 会话内即时检索返回的命中原文总字符预算（控制 token 消耗） */
 const EPISODIC_SEARCH_CHAR_BUDGET = 900;
+/**
+ * 助手承诺话术（2026-09-06 P2 收紧）。
+ *
+ * 旧版 /我会|我将|我先|稍后|接下来|我去|我帮你/i 过松：子串误伤（"被我将了一军"）
+ * + 把过去时闲聊当承诺，导致 agentCommitments 堆满普通聊天句并随每轮注入。
+ * 新版要求第一人称**未来动作 + 具体动作类型**；且判定对象改为**入栈的首句**
+ * （此前对全文匹配、只存首句，承诺证据与存储内容脱节）。
+ */
 const ASSISTANT_COMMITMENT_RE =
-  /我会|我将|已经帮你|已为你|我先|稍后|接下来|我去|我帮你|i will|i'll|i can/i;
+  /(?:(?:我|这就|马上|回头|稍后|待会|今晚|明天|下午|晚上|一小时后|半小时后|\d+分钟(?:后|内)|等(?:我|一下))[^。！？\n]{0,8}(?:查|搜|办|做|弄|安排|订|买|发|送|整理|回复|回你|跟进|处理|通知|拿给你|给你)|i (?:will|'ll)|let me (?:check|search|find|handle))/i;
+
+/** 疑问/请示语境不是承诺（"明天发你好吗"是请示不是承诺）。 */
+const ASSISTANT_COMMITMENT_EXCLUDE_RE =
+  /行不[?？]|好吗[?？]|好不好|要不要|怎么样[?？]|如何[?？]|可不可以|能不能|还是/;
+
+/** P2：挂起栈容量上限（此前 MEMORY_LIST_LIMIT=6 且只进不出，跨天堆积）。 */
+const OPEN_LOOPS_LIMIT = 5;
+const AGENT_COMMITMENTS_LIMIT = 3;
+/** P2：连续 topic_switch 达该轮数且无活动任务 → currentMission 置空。 */
+const TOPIC_SWITCH_MISSION_RESET_STREAK = 2;
+/** P2：结清判定阈值（条目与本轮助手回复的字符二元组重合度，实测完成场景 ≈0.36-0.6）。 */
+const LOOP_SETTLE_OVERLAP = 0.45;
+
+function resolveLoopTtlMs(): number {
+  const raw = process.env.AGENT_STM_LOOP_TTL_MS?.trim();
+  if (!raw) return 6 * 60 * 60 * 1000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 6 * 60 * 60 * 1000;
+}
+
 const USER_PREFERENCE_RE = /喜欢|讨厌|偏好|习惯|不要|别|禁忌|生日|纪念日|remember|prefer/i;
 const USER_FACT_RE = /我是|我在做|我最近在|我的项目|我正在|我计划|我住在|我需要/i;
 const REQUEST_RE = /请|帮我|需要|想要|分析|总结|提醒|安排|继续|修复|优化|看看|做一个/i;
@@ -203,6 +238,50 @@ function pushUnique(target: string[], value: string, limit = MEMORY_LIST_LIMIT):
   const deduped = target.filter((item) => normalizeInput(item) !== normalized);
   deduped.unshift(normalized);
   target.splice(0, target.length, ...deduped.slice(0, limit));
+}
+
+/**
+ * 字符二元组重合度（P2 结清判定）：中文无空格分词，token 级 overlapScore 对
+ * "帮我规划去马尔代夫" vs "马尔代夫行程搞定了"几乎必然为 0；bigram 重合度
+ * 才能感知"同一事项被本轮对话正面处理"。
+ */
+function charBigrams(text: string): Set<string> {
+  const t = normalizeInput(text).toLowerCase().replace(/[\s，。！？!?.,:：;；]/g, "");
+  const set = new Set<string>();
+  for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2));
+  return set;
+}
+
+function bigramOverlapScore(a: string, b: string): number {
+  const A = charBigrams(a);
+  const B = charBigrams(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let hits = 0;
+  for (const gram of A) if (B.has(gram)) hits += 1;
+  return hits / Math.min(A.size, B.size);
+}
+
+/**
+ * 承诺判定：对**入栈首句**（而非全文）做承诺匹配 + 疑问排除。旧实现对全文匹配、
+ * 只存首句，导致承诺栈里堆满"哎哟，被我将了一军"这类首句与承诺无关的闲聊。
+ */
+function looksLikeAssistantCommitment(sentence: string): boolean {
+  if (!sentence) return false;
+  if (ASSISTANT_COMMITMENT_EXCLUDE_RE.test(sentence)) return false;
+  return ASSISTANT_COMMITMENT_RE.test(sentence);
+}
+
+/**
+ * 短 ping（P2 防带跑）：称呼/寒暄式超短消息（"小弟"/"在吗"/"哈哈"）。
+ * 结构上不携带任何新指令，是"答旧话题还魂"的高发输入。
+ */
+function isShortPingTurn(text: string | undefined): boolean {
+  const t = normalizeInput(text ?? "");
+  if (!t || t.length > 4) return false;
+  if (/[?？!！。，,]/.test(t)) return false;
+  if (isContinuityTurn(t)) return false;
+  if (REQUEST_RE.test(t)) return false;
+  return true;
 }
 
 function createEmptyConversationMemory(): SessionConversationMemory {
@@ -418,8 +497,19 @@ export class ShortTermMemoryGatewayService {
     const completed = state.tasks.filter((task) => task.status === "completed").slice(0, 2);
     const lines: string[] = [];
     const memory = state.conversationMemory;
+    // P2：读取路径 TTL 清理——陈年 openLoops/agentCommitments 到期即不再注入。
+    if (memory) this.pruneLoopEntries(sessionId, memory);
     const focus = this.resolveTurnFocus(currentInput, active, memory);
     const includeTaskScopedMemory = focus.includeTaskScopedMemory;
+
+    // P2 短 ping 防带跑：无活动任务时，称呼/寒暄式超短消息（"小弟"/"在吗"）
+    // 结构上不携带新指令，显式告知 LLM 只回应这一声本身——"小弟"被拿去回答
+    // 悬空天气问题的根源修补。
+    if (!active && isShortPingTurn(currentInput)) {
+      lines.push(
+        "本条无新指令：对方只是称呼/寒暄，必须只回应这一声本身；不要延续任何旧话题、旧任务或未回答的问题。",
+      );
+    }
 
     if (active && includeTaskScopedMemory) {
       lines.push(`current-focus: ${active.title}`);
@@ -554,6 +644,17 @@ export class ShortTermMemoryGatewayService {
 
     memory.activeTopic =
       effectiveActive?.title || this.inferTopicFromUserText(userText) || memory.activeTopic || null;
+
+    // P2：话题连续切换计数 + 陈年使命失效。旧契约 currentMission 无限期沿用
+    // （"马尔代夫行程"跨天存活、每轮注入），是带跑新话题的串台燃料。
+    if (focus.kind === "topic_switch" && !effectiveActive) {
+      memory.topicSwitchStreak = (memory.topicSwitchStreak ?? 0) + 1;
+      if ((memory.topicSwitchStreak ?? 0) >= TOPIC_SWITCH_MISSION_RESET_STREAK) {
+        memory.currentMission = null;
+      }
+    } else {
+      memory.topicSwitchStreak = 0;
+    }
     memory.currentMission = this.inferMissionFromTurn(userText, assistantText, effectiveActive, memory.currentMission);
 
     if (USER_PREFERENCE_RE.test(userText)) {
@@ -569,17 +670,23 @@ export class ShortTermMemoryGatewayService {
       pushUnique(memory.carryForward, `user: ${userSentence}`, 4);
     }
 
-    if (ASSISTANT_COMMITMENT_RE.test(assistantText)) {
-      pushUnique(memory.agentCommitments, assistantSentence);
+    // P2 结清：先按本轮对话清掉已被正面处理的挂起项（完成/否决/接续），再做
+    // 本轮入栈——旧契约只在任务 disposition=complete 时清理，闲聊轮 action 恒为
+    // "none"，栈只进不出、跨天堆积。重新产生承诺/请求时下方 push 重新补入。
+    this.settleLoopEntries(memory, userText, assistantText);
+
+    // P2：承诺判定改用入栈首句（证据与存储内容一致），容量上限 3。
+    if (assistantSentence && looksLikeAssistantCommitment(assistantSentence)) {
+      pushUnique(memory.agentCommitments, assistantSentence, AGENT_COMMITMENTS_LIMIT);
       if (disposition.action !== "complete") {
-        pushUnique(memory.openLoops, assistantSentence);
+        pushUnique(memory.openLoops, assistantSentence, OPEN_LOOPS_LIMIT);
       }
     }
 
     if (effectiveActive && disposition.action !== "complete") {
-      pushUnique(memory.openLoops, `${effectiveActive.title} | ${effectiveActive.contextSummary}`);
+      pushUnique(memory.openLoops, `${effectiveActive.title} | ${effectiveActive.contextSummary}`, OPEN_LOOPS_LIMIT);
     } else if (!effectiveActive && REQUEST_RE.test(userText) && disposition.action === "none") {
-      pushUnique(memory.openLoops, userSentence);
+      pushUnique(memory.openLoops, userSentence, OPEN_LOOPS_LIMIT);
     }
 
     if (disposition.action === "complete") {
@@ -588,8 +695,12 @@ export class ShortTermMemoryGatewayService {
     }
 
     if (disposition.action === "pause" && effectiveActive) {
-      pushUnique(memory.openLoops, `${effectiveActive.title} | ${effectiveActive.contextSummary}`);
+      pushUnique(memory.openLoops, `${effectiveActive.title} | ${effectiveActive.contextSummary}`, OPEN_LOOPS_LIMIT);
     }
+
+    // P2：TTL 清理 + 首见时间台账维护（新条目记为 now，已移除条目的 key 回收）。
+    this.pruneLoopEntries(sessionId, memory);
+    this.stampLoopEntries(sessionId, memory);
 
     memory.lastUpdated = nowIso();
     this.recordEpisodicTurn(sessionId, userText, assistantText);
@@ -1078,11 +1189,79 @@ export class ShortTermMemoryGatewayService {
     }
 
     const assistantSentence = firstSentence(assistantText, 180);
-    if (ASSISTANT_COMMITMENT_RE.test(assistantText) && assistantSentence) {
+    if (looksLikeAssistantCommitment(assistantSentence)) {
       return assistantSentence;
     }
 
     return previousMission;
+  }
+
+  private loopLedger(sessionId: string): Record<string, number> {
+    if (!this.data.loopFirstSeen) this.data.loopFirstSeen = {};
+    if (!this.data.loopFirstSeen[sessionId]) this.data.loopFirstSeen[sessionId] = {};
+    return this.data.loopFirstSeen[sessionId]!;
+  }
+
+  /**
+   * P2：openLoops/agentCommitments TTL 清理（读取与写入路径都调用）。
+   * 旧契约只在任务 complete 时移除，闲聊轮 action 恒为 "none"——栈只进不出，
+   * "四分钟后提醒我参加会议"这类早已过期的条目跨天堆积并被周期性注入。
+   */
+  private pruneLoopEntries(sessionId: string, memory: SessionConversationMemory): void {
+    const ttl = resolveLoopTtlMs();
+    if (ttl <= 0) return;
+    const ledger = this.data.loopFirstSeen?.[sessionId];
+    if (!ledger) return;
+    const now = Date.now();
+    const prune = (list: string[]): string[] => {
+      if (list.length === 0) return list;
+      const kept = list.filter((text) => {
+        const seen = ledger[text];
+        // 无台账记录的存量条目：宽限到下轮 observe 补记后再计时，不在读取路径误删
+        return typeof seen !== "number" || now - seen <= ttl;
+      });
+      for (const text of list) {
+        if (!kept.includes(text)) delete ledger[text];
+      }
+      return kept;
+    };
+    memory.openLoops = prune(memory.openLoops);
+    memory.agentCommitments = prune(memory.agentCommitments);
+  }
+
+  /**
+   * P2 结清：本轮助手回复与某条挂起事项高度重合（bigram ≥ 0.45）→ 该事项已被
+   * 本轮正面处理（完成/否决/接续），从挂起栈移除。只看助手侧（用户重问不算
+   * 结清——那恰是事项仍活跃的信号）；入栈在结清之后执行，本轮新产生的
+   * 承诺/请求不受影响。
+   */
+  private settleLoopEntries(
+    memory: SessionConversationMemory,
+    _userText: string,
+    assistantText: string,
+  ): void {
+    if (memory.openLoops.length === 0 && memory.agentCommitments.length === 0) return;
+    const settle = (target: string[]): void => {
+      const kept = target.filter(
+        (entry) => bigramOverlapScore(entry, assistantText) < LOOP_SETTLE_OVERLAP,
+      );
+      target.splice(0, target.length, ...kept);
+    };
+    settle(memory.openLoops);
+    settle(memory.agentCommitments);
+  }
+
+  /** P2：首见时间台账维护——新条目记为 now，已不在栈内的条目 key 回收。 */
+  private stampLoopEntries(sessionId: string, memory: SessionConversationMemory): void {
+    const ledger = this.loopLedger(sessionId);
+    const now = Date.now();
+    const valid = new Set([...memory.openLoops, ...memory.agentCommitments]);
+    for (const key of Object.keys(ledger)) {
+      if (!valid.has(key)) delete ledger[key];
+    }
+    for (const text of valid) {
+      if (typeof ledger[text] !== "number") ledger[text] = now;
+    }
   }
 
   private removeMatching(target: string[], ...candidates: Array<string | null | undefined>): void {

@@ -2,8 +2,19 @@ import type { WorldService } from "@private-ai-agent/agent-world";
 import type { SkillManager } from "../skills/index.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { CapabilityCortex } from "../brain/capability-cortex.js";
+import type { FeatureCatalog } from "../catalog/index.js";
 
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
+
+/**
+ * Feature Catalog（能力分类层）实例——由 bootstrap 装配后注入。
+ * 用于在能力 prompt 末尾追加「生活 12 域总览」（自动生成，不手写不漂移）。
+ */
+let featureCatalogInstance: FeatureCatalog | null = null;
+
+export function setFeatureCatalog(catalog: FeatureCatalog | null): void {
+  featureCatalogInstance = catalog;
+}
 
 export const CAPABILITY_DOMAINS = [
   "wallet",
@@ -653,8 +664,13 @@ export function buildAgentCapabilityPromptSection(
     return lines.join("\n");
   }
   // fallback：未注入 cortex 时走原逻辑（直接读 CAPABILITY_DOMAINS 派生的完整清单）
-  return [
+  const sections = [
     buildAgentCoreCapabilityPromptSection(skillManager, virtualPhoneService, actorId),
     buildAgentWorldPromptSection(actorId, world, skillManager),
-  ].join("\n\n");
+  ];
+  // 追加生活 12 域总览（Feature Catalog 自动生成；未装配时跳过）
+  if (featureCatalogInstance) {
+    sections.push(featureCatalogInstance.toPromptLines().join("\n"));
+  }
+  return sections.join("\n\n");
 }

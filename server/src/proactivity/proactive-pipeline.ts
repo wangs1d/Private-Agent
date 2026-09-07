@@ -51,6 +51,8 @@ export type ProactivePipelineDeps = {
   confirmations?: PendingConfirmationStore;
   /** 提案级确认的批准动作（装配层定义：如承诺代催的落地行为 + 助手动态留痕） */
   onProposalApproved?: (p: ProactiveProposal) => void;
+  /** 分级触达钩子：提案级 ask_first 登记后回调（装配层经 ReachRouter 投递+升级） */
+  onPendingConfirmation?: (entry: PendingConfirmation) => void;
   /**
    * critical 提案升级钩子（接线 intelligent-reminder 的 popup→tts_alarm→phone_call
    * 三级升级链）：送达 ≠ 被看到——critical 直投成功后调此钩子挂起「未确认即升级」
@@ -221,6 +223,8 @@ export class ProactivePipeline {
       proposal: p,
     });
     console.log(`[ProactivePipeline] 提案级待确认已登记 kind=${p.kind} label=${p.confirmAction.label}`);
+    const registered = this.deps.confirmations.list(p.actorId).slice(-1)[0];
+    if (registered) this.deps.onPendingConfirmation?.(registered);
   }
 
   /**

@@ -139,6 +139,17 @@ export interface ProactivityHubDeps {
    * 未注入时 hub 内建内存态。
    */
   pendingConfirmations?: PendingConfirmationStore;
+  /**
+   * 分级触达钩子（ReachRouter 装配）：ask_first 登记挂起确认后回调 —— 由装配层
+   * 决定投递通道与升级（ Router 侧负责 chat/popup/voice 阶梯与 ack 归一）。
+   */
+  onPendingConfirmation?: (entry: PendingActionConfirmation) => void;
+  /** 确认解析后回调（approved/executed 供触达记录同步闭合，ack 归一的一环） */
+  onConfirmationResolved?: (
+    entry: PendingActionConfirmation,
+    approved: boolean,
+    executed: boolean,
+  ) => void;
 }
 
 /** 兼容别名：ask_first 挂起的确认条目（hub 行动级 + 管道提案级） */
@@ -851,6 +862,7 @@ export class ProactivityHub {
         origin: "hub",
       });
       // 暂停执行，确认请求即本次主动消息；回复「可以」走 resolveConfirmation 推进
+      this.deps.onPendingConfirmation?.(pending);
       this.emitSpeakSignal({
         actorId: input.actorId,
         kind: input.kind,
@@ -914,15 +926,20 @@ export class ProactivityHub {
     if (!entry) return { ok: false, executed: false, error: "没有待确认的行动计划" };
     this.confirmations.take(entry.confirmId);
 
-    if (!approved) return { ok: true, executed: false, confirmId: entry.confirmId };
+    if (!approved) {
+      this.deps.onConfirmationResolved?.(entry, false, false);
+      return { ok: true, executed: false, confirmId: entry.confirmId };
+    }
 
     if (entry.origin === "pipeline") {
       const result = await this.pipelineConfirmationResolver?.(entry, true);
+      this.deps.onConfirmationResolved?.(entry, true, result?.executed ?? false);
       return { ok: true, executed: result?.executed ?? false, confirmId: entry.confirmId };
     }
 
     const results = await this.executeActs(actorId, entry.steps);
     this.emitConfirmationFeedback(actorId, entry, results);
+    this.deps.onConfirmationResolved?.(entry, true, results.some((r) => r.ok));
     return { ok: true, executed: results.some((r) => r.ok), confirmId: entry.confirmId };
   }
 

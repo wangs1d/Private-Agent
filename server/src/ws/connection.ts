@@ -67,7 +67,7 @@ import {
   unifiedMemoryPatchSchema,
   unifiedQuotaAdjustSchema,
 } from "@private-ai-agent/agent-world";
-import { isAgentWorldSocialEnabled } from "../config/env.js";
+import { isAgentWorldSocialEnabled, isAccessAuthRequired } from "../config/env.js";
 import { UnifiedErrorCode } from "../protocol-unified-errors.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { clearAllMemoryForActor } from "../services/memory-clear-service.js";
@@ -82,6 +82,7 @@ import {
 } from "../device-bus/ws-device-handler.js";
 import type { DeviceRegistry } from "../device-bus/device-registry.js";
 import type { DevicePairingService } from "../services/device-pairing-service.js";
+import { AccessAuthService } from "../services/access-auth-service.js";
 import type { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
 import type { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
 import { getUserPreferences } from "../routes/http/user-preferences.js";
@@ -191,6 +192,8 @@ export type WsRouteDeps = {
   morningBriefingScheduler?: MorningBriefingScheduler;
   /** 晚间 digest 调度器（Task 15 生活节律）：WS 连接建立时 subscribe，断开时 unsubscribe */
   eveningDigestScheduler?: EveningDigestScheduler;
+  /** 设备自绑定鉴权服务（ACCESS_AUTH_REQUIRED=1 时 session.init 须持有效 token） */
+  accessAuthService?: AccessAuthService;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -221,6 +224,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     voiceMessageService,
     morningBriefingScheduler,
     eveningDigestScheduler,
+    accessAuthService,
   } = deps;
 
   // device-bus 处理器依赖（device.* 事件路由）
@@ -256,6 +260,41 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
       let initAsDesktopBridge = false;
       let initAsPhoneBridge = false;
       const clientIp = getClientIp(request);
+      // ─── 设备自绑定鉴权（ACCESS_AUTH_REQUIRED=1 时）：upgrade query token 预检 ───
+      // 有效 → 预钉身份（session.init 时强制覆盖 userId）；无效 → 立即拒连；
+      // 缺失 → 放行连接，等 session.init payload.token 兜底校验。
+      // desktopBridge / phoneBridge 通道走各自桥接 token 流程，不受此门影响。
+      const accessAuthServiceImpl = accessAuthService;
+      const accessAuthActive = isAccessAuthRequired() && accessAuthServiceImpl != null;
+      let accessAuthUserId: string | undefined;
+      if (accessAuthActive && accessAuthServiceImpl) {
+        const upgradeToken = AccessAuthService.extractToken({
+          authorization: request.headers.authorization,
+          queryToken: (request.query as { token?: string } | undefined)?.token,
+        });
+        if (upgradeToken) {
+          const verified = accessAuthServiceImpl.verifyToken(upgradeToken);
+          if (!verified) {
+            safeSocketSend(
+              ws,
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: {
+                  code: "AUTH_INVALID",
+                  message: "访问 token 无效或已吊销（经 /api/auth/bind 获取）",
+                },
+              }),
+            );
+            try {
+              ws.close(1008, "auth_invalid");
+            } catch {
+              // Ignore close failures on broken sockets.
+            }
+            return;
+          }
+          accessAuthUserId = verified.userId;
+        }
+      }
       ws.isAlive = true;
       let heartbeatMissedAt = 0;
       const heartbeatTimer = setInterval(() => {
@@ -608,7 +647,44 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const payload = event.payload as Record<string, unknown>;
           const sessionIdRaw = String(payload.sessionId ?? "").trim();
           const userIdRaw = payload.userId != null ? String(payload.userId).trim() : "";
-          const actorId = userIdRaw || sessionIdRaw;
+          const isDesktopBridgeChannel = payload.desktopBridge === true;
+          const isPhoneBridgeChannel = payload.phoneBridge === true;
+          // ─── 设备自绑定鉴权门（ACCESS_AUTH_REQUIRED=1 且未在 upgrade query 预验时）───
+          // 非桥接通道须在 payload.token 携带有效 access token；desktopBridge /
+          // phoneBridge 通道豁免（继续走各自 PHONE_BRIDGE_TOKEN / DESKTOP_BRIDGE_TOKEN
+          // 注册流程）。缺失/无效 → error.frame + 关闭连接。
+          if (
+            accessAuthActive &&
+            accessAuthServiceImpl &&
+            !accessAuthUserId &&
+            !isDesktopBridgeChannel &&
+            !isPhoneBridgeChannel
+          ) {
+            const initToken = typeof payload.token === "string" ? payload.token.trim() : "";
+            const verified = initToken ? accessAuthServiceImpl.verifyToken(initToken) : null;
+            if (!verified) {
+              safeSocketSend(
+                ws,
+                JSON.stringify({
+                  type: ServerEventType.ErrorEvent,
+                  payload: {
+                    code: "AUTH_REQUIRED",
+                    message:
+                      "服务已开启访问鉴权：请在 WS 连接 query 或 session.init payload 携带有效 token（POST /api/auth/bind 获取）",
+                  },
+                }),
+              );
+              try {
+                ws.close(1008, "auth_required");
+              } catch {
+                // Ignore close failures on broken sockets.
+              }
+              return;
+            }
+            accessAuthUserId = verified.userId;
+          }
+          // 身份钉死：token 归属优先，忽略 payload 里客户端声明的 userId/sessionId
+          const actorId = accessAuthUserId ?? (userIdRaw || sessionIdRaw);
           if (!actorId) {
             socket.send(
               JSON.stringify({
@@ -618,8 +694,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
             return;
           }
-          const isDesktopBridgeChannel = payload.desktopBridge === true;
-          const isPhoneBridgeChannel = payload.phoneBridge === true;
           if (isDesktopBridgeChannel) {
             if (!userIdRaw) {
               socket.send(

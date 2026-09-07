@@ -40,6 +40,7 @@ import "core/services/window_bounds_preference.dart";
 import "core/services/ws_chat_service.dart";
 import "core/services/schedule_floating_launcher.dart";
 import "core/utils/play_url_utils.dart";
+import "features/catalog/catalog_page.dart";
 import "features/gallery/gallery_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
@@ -71,6 +72,11 @@ import "core/services/outgoing_call_launcher.dart";
 import "core/services/tts_player.dart";
 import "core/services/windows_titlebar_theme.dart";
 import "features/devices/devices_page.dart";
+import "features/settings/settings_page.dart";
+import "features/approvals/approvals_panel.dart";
+import "features/chat/voice_duplex_sheet.dart";
+import "core/services/access_auth_api.dart";
+import "core/services/attention_api.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
 import "features/schedule/schedule_page.dart";
@@ -84,6 +90,8 @@ void main() async {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
     _writeCrashLog("[START]", "app booting", StackTrace.current);
+    // 预加载本机访问凭据（token），确保首次 session.init 就能带上
+    await AccessCredentialStore.instance.load();
     unawaited(bootstrapWindowsWebView());
     if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
       await windowManager.ensureInitialized();
@@ -191,6 +199,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   final WorldApiClient _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
   final ScheduleApiClient _scheduleApi =
       ScheduleApiClient(baseUrl: ApiConfig.httpBase);
+  final CatalogApiClient _catalogApi =
+      CatalogApiClient(baseUrl: ApiConfig.httpBase);
   final MultiAgentApiClient _multiAgentApi =
       MultiAgentApiClient(baseUrl: ApiConfig.httpBase);
   final UserPreferencesApi _preferencesApi =
@@ -1718,11 +1728,24 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final bool showConfirm = payload["showConfirmButton"] == true;
           final String confirmText =
               payload["confirmText"]?.toString() ?? "我知道了";
+          final String attentionId =
+              payload["attentionId"]?.toString() ?? "";
 
           final BuildContext? navCtx = _rootNavigatorKey.currentContext;
           if (navCtx != null && navCtx.mounted) {
-            _showReminderPopupDialog(
-                navCtx, title, message, priority, showConfirm, confirmText);
+            // 分级触达 ack 归一：用户点掉弹窗 = 已知晓，服务端升级链即停
+            unawaited(() async {
+              try {
+                await _showReminderPopupDialog(
+                  navCtx, title, message, priority, showConfirm, confirmText,
+                );
+                if (attentionId.isNotEmpty) {
+                  await AttentionApi().ack(attentionId, via: "popup");
+                }
+              } catch (_) {
+                // ack 失败不影响本地弹窗（升级链会随截止时间自然收敛）
+              }
+            }());
           }
         }
 
@@ -2504,12 +2527,21 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       "sessionId": ApiConfig.sessionId,
       "deviceId": "local-device",
       "userAlias": "owner",
+      // 访问鉴权（ACCESS_AUTH_REQUIRED）开启时服务端校验此 token；
+      // 未绑定/未开启时为 null，服务端行为不变。
+      if (AccessCredentialStore.instance.token != null)
+        "token": AccessCredentialStore.instance.token,
     };
     final String uid = ApiConfig.userId.trim();
     if (uid.isNotEmpty) {
       sessionInit["userId"] = uid;
     }
     _ws.sendEvent("session.init", sessionInit);
+  }
+
+  /// 设置页绑定/解绑设备后重连会话，让新凭据随 session.init 生效。
+  void _onAccessCredentialsChanged() {
+    _ws.retryConnect();
   }
 
   Future<void> _sendMessage({String? text, bool isRetry = false}) async {
@@ -3928,6 +3960,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   ///
   /// 环境变量 PAI_WS_URL / PAI_HTTP_BASE / PAI_SESSION_ID / PAI_ACTOR_ID
   /// 会传递给 voice-orb-py，使其复用当前 session 与后端通信。
+  /// 打开 App 内实时语音（全双工 duplex）会话页。
+  ///
+  /// 与 [_invokeVoiceOrb]（外挂 PySide6 悬浮球）互补：本入口完全在
+  /// Flutter 进程内工作，依赖服务端 voice-duplex 管线，不依赖外部进程。
+  Future<void> _openVoiceDuplex() async {
+    await VoiceDuplexSheet.show(context);
+  }
+
   Future<void> _invokeVoiceOrb() async {
     if (!Platform.isWindows) {
       // 非桌面平台：保留原入口但不执行（后续可扩展 macOS/Linux）
@@ -4419,6 +4459,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                           onOpenUserMenuSettings: _openUserMenuSettings,
                           onOpenUserMenuHelp: _openUserMenuHelp,
                           onOpenDevices: _openDevicesPage,
+                          onOpenCatalog: _openCatalogPage,
+                          onOpenApprovals: _openApprovalsPanel,
                           onLogout: _logout,
                           totalUnread: _unreadByPlatform.values
                               .fold(0, (int a, int b) => a + b),
@@ -4577,14 +4619,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 用户菜单「设置」:暂未实现,先弹个 SnackBar 留位
+  /// 用户菜单「设置」:右侧面板展示设置页（简报 / 设备绑定 / 关于）
   void _openUserMenuSettings() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("设置:暂未开放"),
-        duration: Duration(seconds: 2),
-      ),
-    );
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.settings;
+      _previousSplitRatio = _splitRatio;
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.settings.defaultSplitRatio;
+    });
+  }
+
+  /// 用户菜单「待确认」:右侧面板展示待确认收件箱
+  void _openApprovalsPanel() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.approvals;
+      _previousSplitRatio = _splitRatio;
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.approvals.defaultSplitRatio;
+    });
   }
 
   /// 用户菜单「帮助与反馈」:暂未实现,先弹个 SnackBar 留位
@@ -4595,6 +4649,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         duration: Duration(seconds: 2),
       ),
     );
+  }
+
+  /// 用户菜单「能力面板」:右侧面板展示 Feature Catalog 生活域能力总览
+  void _openCatalogPage() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.catalog;
+      _previousSplitRatio = _splitRatio;
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.catalog.defaultSplitRatio;
+    });
   }
 
   /// 用户菜单「我的设备」:与对话框构成双面板分栏
@@ -5122,6 +5187,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       case RightPanelKind.gallery:
         // 嵌入模式：面板顶栏已有"图库"标题，图库页不再渲染自带 AppBar
         return const GalleryPage(embedded: true);
+      case RightPanelKind.catalog:
+        // 能力面板：CatalogPage 自带 AppBar（页面自治，不依赖面板顶栏标题）
+        return CatalogPage(apiClient: _catalogApi);
+      case RightPanelKind.approvals:
+        return const ApprovalsPanel();
+      case RightPanelKind.settings:
+        return SettingsPage(onCredentialsChanged: _onAccessCredentialsChanged);
       case null:
         return const SizedBox.shrink();
     }
@@ -5172,6 +5244,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       isActive: _tabIndex == 0,
       // 语音对话模式入口（输入框右下 mic 按钮）—— 召唤屏幕右下角 VoiceOrb 悬浮球
       onEnterVoiceMode: _invokeVoiceOrb,
+      onOpenVoiceDuplex: _openVoiceDuplex,
       onOpenPhoneDialer: () {
         _callMyAgentViaPhone(null);
       },

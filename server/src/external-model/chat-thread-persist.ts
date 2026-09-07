@@ -4,7 +4,6 @@ import { join } from "node:path";
 
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
-import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { MASTER_CHAT_SESSION_PREFIX, NOTES_CHAT_SESSION_PREFIX } from "../agent/master-chat-session.js";
 import { mergeActorThreadIntoMasterThread } from "./chat-thread-merge.js";
 import { compactValidChatMessages, repairKimiAssistantToolCallReasoning, sanitizeToolCallMessageChain } from "./chat-thread-sanitize.js";
@@ -41,6 +40,12 @@ export function getChatThreadPersistMaxMessages(): number {
  *
  * Notes 线程（`notes:{actorId}`）同样持久化，但走独立的 `chat-threads-notes.json` 文件，
  * 保证与主会话物理隔离。
+ *
+ * 2026-09-06 P3 修复：删除「masterDelegation 开启时裸 actorId 线程不落盘」的旧过滤。
+ * 该过滤属于 2026-08-29 之前的契约（主线程还叫 `master:{actorId}`）；同日重构后
+ * {@link resolvePrimaryChatSessionId} 已统一返回裸 actorId，本过滤却把**唯一的主会话
+ * 线程**判为不持久化——chat-threads.json 的 sessions 长期为空、重启即丢全部对话
+ * 历史（串台放大器：模型失去近期上下文后更依赖陈年记忆）。
  */
 export function shouldPersistChatThread(sessionId: string): boolean {
   if (!isChatThreadPersistenceEnabled()) return false;
@@ -49,16 +54,8 @@ export function shouldPersistChatThread(sessionId: string): boolean {
   if (id.startsWith("subagent-")) return false;
   if (id.includes(PE_SESSION_MARKER)) return false;
   if (id.startsWith("master-delegate:")) return false;
-  // 笔记/学习线程走独立文件
+  // 笔记/学习线程走独立文件（仍在主文件 handler 上游分流）
   if (id.startsWith(NOTES_CHAT_SESSION_PREFIX)) return true;
-  // 主 Agent 模式下裸 actorId 线程已废弃，避免与 master:{actorId} 分裂
-  if (
-    getAgentRuntimeConfig().masterDelegation.enabled &&
-    !id.startsWith(MASTER_CHAT_SESSION_PREFIX) &&
-    !id.includes(":")
-  ) {
-    return false;
-  }
   return true;
 }
 
@@ -268,7 +265,14 @@ export class ChatThreadPersistence {
       this.debounceTimers.delete(sessionId);
       const sanitized = sanitizeToolCallMessageChain(nonSystem, "[chat-thread-persist-save]");
       const snapshot = tailMessages(sanitized, getChatThreadPersistMaxMessages());
-      this.persistChain = this.persistChain.then(() => this.writeSession(sessionId, snapshot));
+      // P3 修复：写盘失败必须打日志并保持链条存活。此前 rejection 存进
+      // persistChain 无人消费——一次磁盘错误既静默丢弃本次保存，又让链上
+      // 后续所有保存被 .then 跳过（持久化永久瘫痪且无任何日志）。
+      this.persistChain = this.persistChain
+        .then(() => this.writeSession(sessionId, snapshot))
+        .catch((err) =>
+          console.error(`[chat-thread-persist] 线程落盘失败（${this.filePath}）:`, err),
+        );
     }, this.debounceMs);
     this.debounceTimers.set(sessionId, timer);
   }
@@ -279,7 +283,11 @@ export class ChatThreadPersistence {
     const prev = this.debounceTimers.get(sessionId);
     if (prev) clearTimeout(prev);
     this.debounceTimers.delete(sessionId);
-    this.persistChain = this.persistChain.then(() => this.flushToDisk());
+    this.persistChain = this.persistChain
+      .then(() => this.flushToDisk())
+      .catch((err) =>
+        console.error(`[chat-thread-persist] 删除会话落盘失败（${this.filePath}）:`, err),
+      );
   }
 
   private async writeSession(

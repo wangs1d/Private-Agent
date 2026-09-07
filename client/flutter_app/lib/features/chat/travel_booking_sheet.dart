@@ -237,6 +237,26 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                 ),
               ),
               _buildDiscountBar(cs),
+              // 价格来源诚实标识：本地价格库估价，非平台实时报价
+              Container(
+                width: double.infinity,
+                color: cs.surfaceContainerHigh,
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.info_outline,
+                        size: 13, color: cs.onSurfaceVariant),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        "以下为本地参考估价，非平台实时报价；支付前请以实际出票价格为准",
+                        style: TextStyle(
+                            fontSize: 11, color: cs.onSurfaceVariant),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
               const Divider(height: 1),
               Expanded(
                 child: _loading

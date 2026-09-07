@@ -45,6 +45,7 @@ class ChatPage extends StatefulWidget {
     this.onPickGalleryImage,
     this.onClearGalleryImages,
     this.onEnterVoiceMode,
+    this.onOpenVoiceDuplex,
     this.isAgentProcessing = false,
     this.agentStatusLine,
     this.agentStatusPercent,
@@ -104,6 +105,9 @@ class ChatPage extends StatefulWidget {
 
   /// 进入语音模式的回调
   final VoidCallback? onEnterVoiceMode;
+
+  /// 打开 App 内实时语音（全双工 duplex）会话页的回调
+  final VoidCallback? onOpenVoiceDuplex;
 
   /// Agent是否正在处理中（流式输出）
   final bool isAgentProcessing;
@@ -1378,6 +1382,17 @@ class _ChatPageState extends State<ChatPage>
                                           size: 18,
                                         ),
                                       const Spacer(),
+                                      // 右下：实时语音（App 内全双工 duplex 会话）
+                                      if (widget.onOpenVoiceDuplex != null)
+                                        _buildInputIconButton(
+                                          icon: Icons.graphic_eq_rounded,
+                                          tooltip: "实时语音",
+                                          onTap: widget.onOpenVoiceDuplex,
+                                          cs: cs,
+                                          size: 20,
+                                          tone: InputIconTone.primary,
+                                        ),
+                                      const SizedBox(width: 4),
                                       // 右下：语音对话模式 —— 召唤屏幕右下角悬浮球
                                       if (widget.onEnterVoiceMode != null)
                                         _buildInputIconButton(

@@ -27,7 +27,11 @@ const ctx = { sessionId: ACTOR } as never;
 function daysAgo(n: number, hour = 8): string {
   const d = new Date();
   d.setDate(d.getDate() - n);
-  d.setHours(hour, 0, 0, 0);
+  // 防未来时间戳：n=0 时固定 hour=8 会在午夜~08:00 运行时构造出"未来"记录，
+  // 被 getSummary 窗口上界（now）滤掉导致 days 聚合少一天——夹到当前小时
+  const safeHour = n === 0 ? Math.min(hour, new Date().getHours()) : hour;
+  d.setHours(safeHour, 0, 0, 0);
+  if (d.getTime() > Date.now()) d.setTime(Date.now() - 60_000);
   return d.toISOString();
 }
 

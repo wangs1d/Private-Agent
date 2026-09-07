@@ -54,25 +54,26 @@ const COMPLEX_MODE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"
 /**
  * 前台职责人格（2026-09-05 前后台架构，替代 FAST_MODE_ROLE_GUIDANCE）。
  *
- * 契约：前台是纯对话平面，上下文零工具 schema；唯一动作是回复文本里内嵌
- * [dispatch:...] 标签——ack 与标签同体输出，1 次 LLM 调用完成回复 + 派发。
- * 查实时信息/找照片/看位置这类快查也走后台快速通道（tool router 召回执行）。
+ * 契约（2026-09-06 P0 修复）：前台挂原生 function calling 小工具集
+ * （task.dispatch 派后台 + search_web 快查，schema 恒可见），要办事/要查证
+ * 由前台模型在同一轮里直接发起工具调用；派发立即返回不阻塞对话，后台完成后
+ * 结果以独立消息回灌。此前一版的 [dispatch:...] 文本标签协议依赖模型自觉
+ * 遵守自创格式，模型不写标签即静默零工具（"调不到工具"的根因），已退役为
+ * AGENT_FOREGROUND_TAG_PROTOCOL=1 灰度回退项。
  *
  * 2026-09-06 风格重构：
  * - 风格基准行（平调/短句/语感镜像/不客服腔）统一由【回复指南】承担，本块不重复；
- * - 追加「说话的样子」few-shot：具体对话覆盖应答/接梗/分享/吐槽/疲惫/立场/评价/收尾
+ * - 「说话的样子」few-shot 覆盖应答/接梗/分享/吐槽/疲惫/立场/评价/收尾
  *   八类闲聊场景 + 两个极性反例（客服腔 / 瞎热情）。示例全部停在闲聊平面、零任务
- *   语义——带真实派发标签的示范会被模型当行为模板照抄，触发幻影后台任务；
- * - 派发协议示例改占位符形式，同理不给可被逐字复用的真实场景。
+ *   语义——带真实工具调用的示范会被模型当行为模板照抄，触发幻影后台任务。
  */
-export const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。前台只负责聊天；一切要"办"的事都通过派发标签交给后台。
+export const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。你手里有两个动作：task.dispatch（把要真正「办」的事派给后台：找照片视频、看位置/周边、创建或修改日程提醒、发消息、下单支付、操作软件/设备、多步任务等，立即返回不阻塞对话，办完后结果会自动回到对话里）和 search_web（必须立刻知道答案的快查：新闻/价格/天气/比分等时效信息，查到真实结果再答）。
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。
-- 需要办事时（查实时信息如新闻/价格/天气/比分、找照片视频、看位置/周边、创建或修改日程提醒、发消息、下单支付、操作软件/设备、多步任务），先自然应一声（像"好嘞，在办了"这种分量），再把标签附在回复末尾，格式严格为：
-[dispatch:{"goal":"〈一句完整、自包含的话，说清要办成什么〉","note":"〈补充细节，可选〉"}]
-意图明确、当下就能办的请求（带时间点的提醒、找图、查价、看位置）直接派发，不要反问也不要等确认；只有真缺关键信息（比如提醒内容本身没说）才问一句。
-标签会被系统剥除，用户看不到；标签之外正常写你要对用户说的话。任务完成时结果会自动回到对话里，那时你再自然地接着说。
-- 凭常识或已有上下文就能答的（寒暄、情绪交流、观点、知识问答）直接答，不要加标签；一条回复最多 3 个标签。
-- 诚实底线：没写派发标签，绝不说"已设置/已订好/已经查到"；把不准的事就如实说，或先问一句再办。
+- 要办的事用 task.dispatch 派出去：派发前先自然应一声（像"好嘞，在办了"这种分量），goal 用一句完整、自包含的话说清要办成什么。意图明确、当下就能办的请求（带时间点的提醒、找图、查价、看位置）直接派发，不要反问也不要等确认；只有真缺关键信息（比如提醒内容本身没说）才问一句。
+- 要查实时信息就先调 search_web 搜真实结果再答，绝不凭训练记忆编造"最新"数据。
+- 工具失败别含糊收场：换个说法或换 search_web 再试一次；所有途径都试过仍办不成，才如实向对方说明卡点。
+- 凭常识或已有上下文就能答的（寒暄、情绪交流、观点、知识问答）直接答，不要调工具。
+- 诚实底线：本轮没真正调过工具，绝不说"已设置/已订好/已经查到"；把不准的事就如实说，或先问一句再办。
 - 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统。用户对面是一个人，不是一套系统。
 - 说话的样子（学语感，不抄内容；示例里的 \\n 表示分成两条发）：平调、直接、有事说事；一两小条，每条一句。
   对方：在吗 → 你：在，说
@@ -90,6 +91,28 @@ export const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人�
 function isTaskToolPlannerEnabled(): boolean {
   const raw = process.env.AGENT_TASK_TOOL_PLANNER?.trim().toLowerCase();
   return raw !== "0" && raw !== "off" && raw !== "false";
+}
+
+/**
+ * 前台小工具集白名单（2026-09-06 P0 修复，原生 function calling）。
+ *
+ * 契约：前台可见工具恒为 task.dispatch（派后台）+ search_web（快查）两个，
+ * 以 explicit profile 注入（chatToolsBuiltin 即最终可见集，无延迟目录、无
+ * contextual 筛选）。schema 常驻 ≈500 token，换来"派发/查证走 API 结构化
+ * tool_calls 通道"——替代依赖模型自觉遵守的 [dispatch:...] 文本协议。
+ * 注册表侧 task.dispatch 的 launch 回调由 bootstrap 晚绑定（create-app-services）。
+ */
+let _foregroundToolWhitelist: ChatCompletionTool[] | null = null;
+function getForegroundChatToolWhitelist(): ChatCompletionTool[] {
+  if (_foregroundToolWhitelist) return _foregroundToolWhitelist;
+  const searchWeb = getBuiltinAgentChatTools().find(
+    (tool) => tool.type === "function" && tool.function?.name === "search_web",
+  );
+  _foregroundToolWhitelist = [
+    TASK_DISPATCH_TOOL_DEFINITION,
+    ...(searchWeb ? [searchWeb] : []),
+  ];
+  return _foregroundToolWhitelist;
 }
 
 /** 解析规划器输出的 {"tools":["a","b"]}（容错：剥前缀/截取 JSON 对象）。 */
@@ -180,10 +203,13 @@ import { type LlmExecutionMode, type RouteDecision } from "../agent/task-router.
 import {
   foregroundSelfDispatchDecision,
   isForegroundDispatchMode,
+  isForegroundTagProtocolEnabled,
   TASK_TOOL_BRIDGE_NAMES,
 } from "../agent/task-router.js";
+import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
-import { hasCommitmentClaim } from "../agent/commitment-gate.js";
+import { hasCommitmentClaim, isDeflectionStyleFallback } from "../agent/commitment-gate.js";
+import { FRESH_FACT_RE } from "../agent/task-context.js";
 import { recordFastChannelOutcome } from "./task-plane-metrics.js";
 import {
   DispatchTagStreamFilter,
@@ -1847,10 +1873,13 @@ if (this.isComplexMode(route.mode)) {
     const onBatchWithEvolution = ctx.orchestrateToolCtx?.onToolLoopAfterBatch;
     const toolExposureProfile = this.toolPolicyResolver.resolveExposureProfile(mode);
     const toolRankingHint = this.toolPolicyResolver.resolveRankingHint(actorId);
-    // 2026-09-05 前后台架构：前台上下文零工具 schema——派发走回复文本内嵌的
-    // [dispatch:...] 结构化标签（同体输出 ack，1 次调用完成回复 + 派发）；
-    // AGENT_FOREGROUND_DISPATCH=0 时回退旧的零工具直答契约（行为一致，仅无标签协议）。
-    const foregroundTagMode = this.isFastMode(mode) && isForegroundDispatchMode();
+    // 2026-09-06 P0 修复：前台回归原生 function calling——task.dispatch + search_web
+    // 小工具集常驻（explicit 白名单），派发/查证走 API 结构化 tool_calls 通道，
+    // 由模型训练对齐保证格式，runtime 直接执行。旧 [dispatch:...] 文本标签协议
+    // 依赖模型自觉遵守自创格式，"模型不写标签 = 静默零工具"（调不到工具的根因），
+    // 退役为 AGENT_FOREGROUND_TAG_PROTOCOL=1 灰度回退项。
+    const foregroundTagMode =
+      this.isFastMode(mode) && isForegroundDispatchMode() && isForegroundTagProtocolEnabled();
     const dispatchFilter = foregroundTagMode ? new DispatchTagStreamFilter() : null;
     const baseStreamOpts = this.isFastMode(mode)
       ? ({
@@ -1874,9 +1903,18 @@ if (this.isComplexMode(route.mode)) {
             semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
             recallGateTriggered: ctx.orchestrateToolCtx?.recallGateTriggered,
           }) ?? {}),
-          // 零工具：前台上下文不含任何工具 schema（省 token + 提速）；派发走
-          // [dispatch:...] 标签协议，工具执行全部在后台经 tool router 召回。
-          toolExposureProfile: "none" as const,
+          // 前台小工具集（原生 function calling，2026-09-06 P0 修复）：
+          // task.dispatch + search_web 以 explicit 白名单常驻可见，toolLoop 给 2 波
+          // 预算（发起调用 → 拿到结果后产出确认文本）；explicit 无延迟目录，
+          // disableToolSearch 省掉目录构建。tagProtocol 灰度回退时保持零工具。
+          ...(foregroundTagMode
+            ? { toolExposureProfile: "none" as const }
+            : {
+                toolExposureProfile: "explicit" as const,
+                chatToolsBuiltin: getForegroundChatToolWhitelist(),
+                disableToolSearch: true,
+                toolLoop: { maxRounds: 2 },
+              }),
           maxOutputTokens: fastMaxOutputTokens(),
           toolRankingHint,
         } satisfies AgentStreamOptions)
@@ -2129,7 +2167,7 @@ if (this.isComplexMode(route.mode)) {
             }
           : undefined;
 
-      // 前台（fast）：零工具直答，派发走 [dispatch:...] 标签（流式出口逐块剥离）。
+      // 前台（fast）：小工具集直答/派发（原生 tool_calls；tagProtocol 灰度时零工具 + 标签）。
       // 任务面（complex，one-shot 引擎）：工具循环 + 出口自检续波。
       full = await provider.streamCompletion(
         chatSessionId,
@@ -2176,6 +2214,26 @@ if (this.isComplexMode(route.mode)) {
           chatUserMessageId: opts?.chatUserMessageId,
           goal: text,
           source: "commitment_gate",
+        });
+      }
+
+      // ── 出口闪避闸（2026-09-06 P0 修复，前台自决模式的「该调不调」兜底）──
+      // 实时类请求（天气/新闻/价格…）本轮既无工具动作也无派发，回复是
+      // 「没实时数据/查不了/让系统去查」式闪避 → 转任务面重跑一次，让工具
+      // 循环真正执行 search_web/task.dispatch 后再答。天然只触发一次：重跑走
+      // complex 车道（isFastMode=false），不会再进本闸。
+      if (
+        this.isFastMode(mode) &&
+        isForegroundDispatchMode() &&
+        !toolExecutedThisTurn &&
+        dispatchedViaTag === 0 &&
+        FRESH_FACT_RE.test(text) &&
+        isDeflectionStyleFallback(full)
+      ) {
+        console.info(`[AgentCore] 对话面闪避转任务面：${text.slice(0, 48)}`);
+        return this.runStandardLlmPath(actorId, text, "complex", opts, {
+          ...ctx,
+          turnPlan: { budget: 2, capabilities: ["full"], tier: "fast" },
         });
       }
 

@@ -125,6 +125,14 @@ export type HttpRouteDeps = {
   devicePairingService?: DevicePairingService;
   /** 终端互连平台：设备注册表 */
   deviceRegistry?: DeviceRegistry;
+  /** 设备自绑定鉴权服务（/api/* 周界鉴权凭证的签发与校验；未注入时鉴权路由不挂载） */
+  accessAuthService?: import("../../services/access-auth-service.js").AccessAuthService;
+  /** 待确认收件箱外观（proactivity + habit 待确认条目统一 list/resolve；未注入时收件箱路由不挂载） */
+  approvalInboxService?: import("../../services/approval-inbox-service.js").ApprovalInboxService;
+  /** 注意力台账（分级触达的投递/ack 记录；未注入时 /api/attention 不挂载） */
+  attentionStore?: import("../../proactivity/attention-store.js").AttentionStore;
+  /** 分级触达路由（矩阵路由 + 升级计时；未注入时 /api/attention 不挂载） */
+  reachRouter?: import("../../proactivity/reach-router.js").ReachRouter;
   /** Agent Brain Center —— 大脑中心外观（BRAIN_CENTER_ENABLED=0 时为 null） */
   brainCenter?: BrainCenter | null;
   /** Agent Body Center —— 身体中心外观（未启用时为 null） */
@@ -133,4 +141,6 @@ export type HttpRouteDeps = {
   reflexArc?: ReflexArc | null;
   /** 旅游规划服务：媒体库手动回填接口依赖（未装配时回填端点返回 503） */
   travelPlanningService?: import("../../skills/travel-planning/travel-planning-service.js").PlanningService;
+  /** Feature Catalog 能力分类目录（未装配时 /api/catalog/* 端点返回 503） */
+  featureCatalog?: import("../../catalog/index.js").FeatureCatalog;
 };

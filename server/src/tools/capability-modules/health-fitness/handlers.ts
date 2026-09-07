@@ -160,8 +160,13 @@ export function createHealthQueryHandler(
       metrics = metrics.filter((m) => (m.note ?? "").toLowerCase().includes(kw));
     }
 
-    // 确定性聚合（零 LLM）
-    const days = new Set(metrics.map((m) => m.timestamp.slice(0, 10)));
+    // 确定性聚合（零 LLM）。「有几天」按用户本地日历日计——直接切 ISO 串
+    // 得到的是 UTC 日，国内时区凌晨 0-8 点会把本地「今天」算进「昨天」
+    const dayKey = (iso: string): string => {
+      const local = new Date(Date.parse(iso) - new Date(iso).getTimezoneOffset() * 60_000);
+      return local.toISOString().slice(0, 10);
+    };
+    const days = new Set(metrics.map((m) => dayKey(m.timestamp)));
     const sum = metrics.reduce((acc, m) => acc + m.value, 0);
     let value = 0;
     let label = "";

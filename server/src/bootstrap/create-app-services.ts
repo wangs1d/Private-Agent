@@ -104,6 +104,16 @@ import { KnowledgeGapExecutor } from "../services/knowledge-gap-executor.js";
 import { KnowledgeVerificationService } from "../services/knowledge-verification-service.js";
 import { ProactiveAgentCenter } from "../services/proactive-agent-center.js";
 import { ProactiveOutboundMessageService, type ProactiveOutboundChannel } from "../services/proactive-outbound-message-service.js";
+import {
+  ArrivalMonitorService,
+  JuheTrainProvider,
+  ManualScheduleProvider,
+  VariflightFlightProvider,
+} from "../services/arrival-concierge/index.js";
+import { HabitLoopService } from "../services/habit-loop/index.js";
+import { VoiceDuplexService } from "../services/voice-duplex/index.js";
+import { registerVoiceDuplexWsRoute } from "../ws/voice-duplex-route.js";
+import type { TravelTicketProvider } from "../services/booking/providers/travel-ticket-provider.js";
 import { LifeSignalHubService } from "../services/life-signal-hub-service.js";
 import { AnticipationEngineService } from "../services/anticipation-engine-service.js";
 import { ProactiveLifeRuntimeService } from "../services/proactive-life-runtime-service.js";
@@ -161,6 +171,10 @@ import { registerVirtualPhoneBuiltinSkills } from "../skills/builtin/virtual-pho
 import { registerAlipayPaymentBuiltinSkills } from "../skills/builtin/alipay-payment-skills.js";
 import { registerMerchantOrderBuiltinSkills } from "../skills/builtin/merchant-order-skills.js";
 import { registerFinanceIngestBuiltinSkills } from "../skills/builtin/finance-ingest-skills.js";
+import { registerBookingTravelBuiltinSkills } from "../skills/builtin/booking-travel-skills.js";
+import { registerArrivalConciergeBuiltinSkills } from "../skills/builtin/arrival-concierge-skills.js";
+import { registerHabitLoopBuiltinSkills } from "../skills/builtin/habit-loop-skills.js";
+import { registerPictureBuiltinSkills } from "../skills/builtin/picture-skills.js";
 import { registerTravelPlanningBuiltinSkills } from "../skills/travel-planning/travel-planning-skills.js";
 import { registerTravelCommuteBuiltinSkills } from "../skills/travel-planning/travel-commute-skills.js";
 import { PlanningService as TravelPlanningService } from "../skills/travel-planning/travel-planning-service.js";
@@ -181,6 +195,12 @@ import {
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
 import { setExtraIntentRules } from "../tools/tool-search/intent-metadata.js";
+import {
+  FeatureCatalog,
+  buildCatalogIntentRules,
+  classifyFeatureByName,
+} from "../catalog/index.js";
+import { setFeatureCatalog } from "../agent/agent-capabilities.js";
 import { setCapabilityModuleDeps, getBuiltinAgentChatTools, setDynamicFastLaneSkillTools, invalidateBuiltinToolsCache, selectRelevantTools } from "../external-model/openai-compatible-tool-loop.js";
 import { registerDynamicFastLaneName } from "../gateway/index.js";
 import { skillManifestToChatTool } from "../skills/skill-openai-bridge.js";
@@ -205,6 +225,10 @@ import { createTabletAdapterFactory } from "../device-bus/adapters/tablet-adapte
 import { createGlassesAdapterFactory } from "../device-bus/adapters/glasses-adapter.js";
 import { createCameraAdapterFactory } from "../device-bus/adapters/camera-adapter.js";
 import { DevicePairingService } from "../services/device-pairing-service.js";
+import { AccessAuthService } from "../services/access-auth-service.js";
+import { registerAccessAuthHook } from "../routes/http/auth.js";
+import { registerAttentionRoutes } from "../routes/http/attention.js";
+import { ApprovalInboxService, isSpendConfirmation } from "../services/approval-inbox-service.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
 import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
@@ -279,6 +303,7 @@ import {
   getHttpRateLimitRuntime,
   isAgentWorldSocialEnabled,
   isBrainEvolutionEnabled,
+  isAccessAuthRequired,
 } from "../config/env.js";
 import { registerHttpRateLimit } from "../http-rate-limit/http-rate-limit.js";
 import type { AppServices } from "./types.js";
@@ -398,6 +423,8 @@ import { FrequencyGovernor } from "../proactivity/frequency-governor.js";
 import { PresenceService } from "../proactivity/presence-service.js";
 import { ProactiveDeliveryService } from "../proactivity/delivery-service.js";
 import { AgentActivityStore } from "../proactivity/activity-store.js";
+import { AttentionStore } from "../proactivity/attention-store.js";
+import { ReachRouter, type ReachChannelDeps } from "../proactivity/reach-router.js";
 import { OutcomeStore } from "../proactivity/outcome-store.js";
 import { UpcomingScheduleWatcher } from "../proactivity/upcoming-schedule-watcher.js";
 import { MessageWatchTrigger } from "../proactivity/triggers/message-watch-trigger.js";
@@ -664,9 +691,10 @@ export async function createAppServices(): Promise<AppServices> {
   // 承诺板在下方 agentic-memory 装配段构造后经 setCommitmentBoard 注入。
   const bookingConfig = getBookingConfig();
   const bookingProviders = buildDefaultBookingProviders(bookingConfig);
+  const bookingOrderStore = new BookingOrderStore(join(process.cwd(), "data", "booking", "orders.json"));
   const bookingService = new BookingService({
     providers: bookingProviders,
-    store: new BookingOrderStore(join(process.cwd(), "data", "booking", "orders.json")),
+    store: bookingOrderStore,
     audit: auditService,
     config: bookingConfig,
   });
@@ -867,7 +895,11 @@ export async function createAppServices(): Promise<AppServices> {
     bookingService,
   };
   setCapabilityModuleDeps(capabilityModuleDeps);
-  setExtraIntentRules(getAllCapabilityModuleIntentRules(capabilityModuleDeps));
+  // 意图规则 = 能力模块静态规则 + Feature Catalog 生活域检索词（12 域 aliases）
+  setExtraIntentRules([
+    ...getAllCapabilityModuleIntentRules(capabilityModuleDeps),
+    ...buildCatalogIntentRules(),
+  ]);
   registerAllCapabilityModules(toolRegistry, capabilityModuleDeps);
   registerAipTools(toolRegistry, aipService);
   registerProtocolUnifiedTools(toolRegistry, {
@@ -947,7 +979,11 @@ export async function createAppServices(): Promise<AppServices> {
     console.log("[skip] AgentWorld social domain disabled by ENV");
   }
   toolRegistry.setWorldService(worldService);
-  registerCapabilityQueryTools(toolRegistry, { skillManager, worldService, virtualPhoneService });
+  // Feature Catalog：能力分类统一层（分类视图，不注册能力）。
+  // build() 在全部注册完成后调用（hookBus 段首次 + onReady 二次刷新，
+  // MCP 工具异步加载，onReady 时已就绪）。
+  const featureCatalog = new FeatureCatalog(toolRegistry, skillManager, mcpClientService);
+  registerCapabilityQueryTools(toolRegistry, { skillManager, worldService, virtualPhoneService, featureCatalog });
 
   const agenticMemoryRuntime = getAgenticMemoryRuntime();
   // 两个内存服务初始化相互独立（narrative 装配只依赖 humanLikeMemory），并行加载。
@@ -1537,6 +1573,22 @@ export async function createAppServices(): Promise<AppServices> {
   // 设备配对服务：用户生成配对码 → 设备端提交配对码完成绑定
   const devicePairingService = new DevicePairingService();
   await devicePairingService.load();
+  // 设备自绑定鉴权服务（ACCESS_AUTH_REQUIRED=1 时 /api/* 周界强制）：token 仅落
+  // sha256 哈希（data/access-tokens.json，原子写），绑定码内存态 10 分钟一次性。
+  // 未开启时零行为变更。
+  const accessAuthService = new AccessAuthService();
+  await accessAuthService.load();
+  if (isAccessAuthRequired() && !accessAuthService.hasAnyTokens()) {
+    // bootstrap：鉴权已开但一台设备都没绑过 → 控制台打印一枚引导绑定码，
+    // 让首台设备免凭证完成绑定（此后 /api/auth/pairing-code 须持有效 token）。
+    const bootstrapUserId = process.env.ACCESS_BOOTSTRAP_USER_ID?.trim() || "owner";
+    const bootstrapCode = accessAuthService.issueBindingCode(bootstrapUserId);
+    console.log(
+      `[access-auth] 引导模式：尚无绑定设备。首台设备绑定码 ${bootstrapCode}` +
+        `（userId=${bootstrapUserId}，10 分钟有效，一次性）。` +
+        `新设备提交 POST /api/auth/bind {"code":"${bootstrapCode}","deviceId":"..."} 完成绑定。`,
+    );
+  }
   // 设备上下线广播：订阅 DeviceRegistry，推送给 ownerUserId 的 WS session
   deviceRegistry.subscribe((event) => {
     let ownerUserId: string | undefined;
@@ -2447,6 +2499,22 @@ export async function createAppServices(): Promise<AppServices> {
   const hookBus = new HookBus();
   setHookBus(hookBus); // 替换单例，便于无 DI 上下文的代码也能 emit
 
+  // ── Feature Catalog：首次构建（覆盖至此已注册的工具/技能）并注入消费方 ──
+  featureCatalog.build();
+  setFeatureCatalog(featureCatalog);
+  // CATALOG_WRITE_DOCS=1 时把能力地图落盘到仓库 docs/（自动生成，勿手改）
+  if (process.env.CATALOG_WRITE_DOCS === "1") {
+    try {
+      const { writeFile, mkdir } = await import("node:fs/promises");
+      const docsDir = join(process.cwd(), "..", "docs");
+      await mkdir(docsDir, { recursive: true });
+      await writeFile(join(docsDir, "CAPABILITY_MAP.md"), featureCatalog.toMarkdown(), "utf8");
+      app.log.info("[FeatureCatalog] 能力地图已写入 docs/CAPABILITY_MAP.md");
+    } catch (err) {
+      app.log.warn(`[FeatureCatalog] 能力地图写盘失败（忽略）: ${err}`);
+    }
+  }
+
   const webhookService = new WebhookService(hookBus);
   webhookService.start();
 
@@ -2456,11 +2524,113 @@ export async function createAppServices(): Promise<AppServices> {
   marketSignalService.bindHookBus(hookBus);
   lifeSignalHubService.bindHookBus(hookBus);
 
+  // ── 习惯学习 → 自动执行闭环 ──
+  // 观察源：①工具执行事件（下方 notifier 全量喂入）②位置历史（惰性闭包，
+  // locationHistoryService 在本函数稍后构造，tick 触发时必已就绪）。
+  // 执行出口：toolExecutor 走 toolRegistry（保留可用性/沙箱/两阶段等全部门禁）。
+  const habitLoopService = new HabitLoopService({
+    outbound: proactiveOutbound,
+    storeFile: join(process.cwd(), "data", "habit-loop", "rules.json"),
+    observationsFile: join(process.cwd(), "data", "habit-loop", "observations.json"),
+    toolExecutor: async (tool, input, actorId, mode) => {
+      // 分类层护栏：自动执行路径禁止 spend（花钱）/outbound（外发第三方）工具；
+      // 用户已确认（confirmed）路径不拦（金融类仍有 AgentTaskSafety/两阶段确认兜底）
+      if (mode === "auto") {
+        const cls = classifyFeatureByName(tool);
+        if (cls.risk === "spend" || cls.risk === "outbound") {
+          return {
+            ok: false,
+            result: {
+              error: `习惯自动执行已拦截：${tool} 属于 ${cls.risk === "spend" ? "花钱" : "外发第三方"}类工具，自动模式不允许。请改用每次确认模式，或换用低风险动作`,
+            },
+          };
+        }
+      }
+      try {
+        return await toolRegistry.execute(tool, input, {
+          sessionId: `habit-loop-${actorId}`,
+          userId: actorId,
+        });
+      } catch (err) {
+        return { ok: false, result: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+    locationLister: async (actorId, sinceMs) => {
+      if (!locationHistoryService) return [];
+      const samples = locationHistoryService.query(actorId, new Date(sinceMs));
+      return samples.map((s) => ({
+        at: Date.parse(s.recordedAt) || 0,
+        latitude: s.latitude,
+        longitude: s.longitude,
+        label: s.label ?? undefined,
+      }));
+    },
+  });
+  habitLoopService.start();
+  registerHabitLoopBuiltinSkills((skill) => skillManager.register(skill), { habitLoop: habitLoopService });
+
+  // ── 图片能力套件 skill 化（PictureKit 在上方 data/pictures 根目录创建）──
+  // picture.gallery / picture.beautify 与 capability-module 工具同名接管执行；
+  // 注册后经工具目录导出以 resource_type="skill" 同步进 tool-router skill 库。
+  registerPictureBuiltinSkills((skill) => skillManager.register(skill), { pictureKit });
+
+  // ── 到站管家（接站 / 接机 / 到站打车）──
+  // 状态 provider 链：航旅纵横（航班实时）→ 聚合数据（车次时刻表）→
+  // 票面兜底；缺 key 自动降级，实时性由设备定位兜底。
+  const arrivalMonitorService = new ArrivalMonitorService({
+    outbound: proactiveOutbound,
+    providers: [new VariflightFlightProvider(), new JuheTrainProvider(), new ManualScheduleProvider()],
+    emailSms: emailSmsService,
+    platformGateway: messagePlatformGateway,
+    // 定位兜底：无实时动态 API 时按设备最新定位判定「已到站」。
+    // locationHistoryService 在本函数稍后构造，引用必须整体包在闭包内惰性求值。
+    getLocation: (actorId) => {
+      if (!locationHistoryService) return null;
+      const sample = locationHistoryService.latest(actorId);
+      return sample
+        ? { latitude: sample.latitude, longitude: sample.longitude, label: sample.label ?? undefined }
+        : null;
+    },
+    defaultActorId: process.env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim() || undefined,
+  });
+  arrivalMonitorService.start();
+  registerArrivalConciergeBuiltinSkills((skill) => skillManager.register(skill), {
+    arrivalMonitor: arrivalMonitorService,
+    bookingService,
+  });
+
+  // ── 旅行票务预订闭环（travel 域结算/出票技能）──
+  const travelTicketProvider =
+    (bookingService.providersForDomain("travel")[0] as TravelTicketProvider | undefined) ?? null;
+  if (travelTicketProvider) {
+    registerBookingTravelBuiltinSkills((skill) => skillManager.register(skill), {
+      alipayBotService,
+      bookingOrderStore,
+      travelTicketProvider,
+      audit: auditService,
+    });
+  } else {
+    app.log.warn("[BookingTravel] travel 域 provider 未注册，跳过结算技能装配");
+  }
+
+  // ── 全双工实时语音（WS /ws/voice-duplex）──
+  const voiceDuplexService = new VoiceDuplexService({
+    voiceDialogueService,
+    systemPrompt: process.env.VOICE_DUPLEX_SYSTEM_PROMPT?.trim() || undefined,
+    maxSessions: 16,
+  });
+  registerVoiceDuplexWsRoute(app, voiceDuplexService);
+  app.log.info(
+    `[VoiceDuplex] 全双工语音已启用（/ws/voice-duplex，ASR=${process.env.FUNASR_BASE_URL ? "FunASR流式" : "回退整句"}）`,
+  );
+
   // ── Task 16 消费管家：工具执行成功事件（tool.executed）发布 ──
   // 工具执行统一出口（ToolRegistry.execute 成功路径）→ 通知器 → 仅消费类
   // 工具（支付/钱包/跑腿/下单）成功后 emit（副作用工具仅成功时发布；
   // 摘要化 payload：长字符串截断防二维码 dataURL 撑爆事件历史）。
   toolRegistry.setToolExecutedNotifier((info) => {
+    // 习惯闭环观察源：全量工具执行（消费过滤只影响 hookBus 发布）
+    habitLoopService.recordToolEvent(info.actorId, info.tool);
     if (!isConsumptionTool(info.tool)) return;
     hookBus.emit(
       "tool.executed",
@@ -3647,10 +3817,73 @@ export async function createAppServices(): Promise<AppServices> {
   const proactivityConfirmations = new PendingConfirmationStore(
     join(process.cwd(), "data", "proactivity", "confirmations.json"),
   );
+  // ─── 分级触达（ReachRouter）：「多急 × 要不要拍板」决定通道，ack 归一 ───
+  // 通道阶梯 chat→popup→voice→phone（phone 仅 interrupt 白名单），
+  // 静默事件只进台账。通道适配在此装配；push/台账在下方创建后补齐（闭包晚绑定）。
+  const attentionStore = new AttentionStore(
+    join(process.cwd(), "data", "proactivity", "attention.json"),
+  );
+  const reachChannels: ReachChannelDeps = {
+    // L2 对话气泡：synapseBus（WS + MessageHub 离线降级）→ wsRegistry 直推兜底
+    sendChat: async (actorId, payload) => {
+      if (synapseBus) {
+        await synapseBus.sendToUser(actorId, payload);
+        return true;
+      }
+      return wsConnectionRegistry.trySend(actorId, JSON.stringify(payload));
+    },
+    // L3 弹窗卡（reminder_popup：客户端弹需点掉的对话框）
+    sendPopup: (actorId, payload) =>
+      Promise.resolve(wsConnectionRegistry.trySend(actorId, JSON.stringify(payload))),
+    // L4 语音播报（VoiceCapabilityService 合成 + WS 一站式）
+    sendVoice: (actorId, text) =>
+      Promise.resolve(voiceCapabilityService.pushProactiveVoice(actorId, "提醒", text))
+        .then((ok) => ok === true)
+        .catch(() => false),
+    // L5 虚拟来电（reminder 风格振铃；仅 interrupt 事件会到达此级）
+    placeCall: (actorId, text) =>
+      virtualPhoneService
+        .callUserWithRinging({
+          fromActorId: actorId,
+          toUserId: actorId,
+          transcript: text,
+          ringStyle: "reminder",
+        })
+        .then((r) => r.ok === true)
+        .catch(() => false),
+  };
+  const reachRouter = new ReachRouter(attentionStore, reachChannels);
+  reachRouter.start();
+
   const proactivityHub = new ProactivityHub({
     frequencyGovernor: proactivityGovernor,
     silenceLog: proactivitySilenceLog,
     pendingConfirmations: proactivityConfirmations,
+    // 分级触达：ask_first 挂起确认 → Router 投递+升级（hub 的 speak 信号已投
+    // chat，这里 assumeDelivered 避免双发；未响应时步进升 popup/voice）
+    onPendingConfirmation: (entry) => {
+      const spend = isSpendConfirmation(entry, featureCatalog);
+      void reachRouter
+        .route({
+          actorId: entry.actorId,
+          kind: entry.kind,
+          title: `${spend ? "需要确认" : "主动行动"}：${entry.rationale.slice(0, 60)}`,
+          summary: entry.rationale,
+          urgency: "alert",
+          decision: "confirm",
+          spend,
+          deadlineAt: entry.expiresAt,
+          confirmId: entry.confirmId,
+          assumeDelivered: "chat",
+        })
+        .catch(() => {});
+    },
+    onConfirmationResolved: (entry, approved, executed) => {
+      reachRouter.resolveByConfirmId(
+        entry.confirmId,
+        approved ? (executed ? "已确认执行" : "已确认未执行") : "已拒绝",
+      );
+    },
     publishSignal: (signal) => {
       lifeSignalHubService.publish({
         id: `proactivity:${signal.kind}:${signal.actorId}:${Date.now()}`,
@@ -4078,6 +4311,19 @@ export async function createAppServices(): Promise<AppServices> {
   const agentActivityStore = new AgentActivityStore(
     join(process.cwd(), "data", "proactivity", "activities.json"),
   );
+  // 分级触达通道补齐：离线推送（push 服务刚创建）+ 静默执行台账（晚绑定闭包）
+  reachChannels.sendPush = (input) =>
+    Promise.resolve(proactivePushService.push(input))
+      .then((r) => r?.ok === true)
+      .catch(() => false);
+  reachChannels.recordActivity = (input) => {
+    agentActivityStore.record({
+      actorId: input.actorId,
+      kind: input.kind,
+      title: input.title,
+      summary: input.summary,
+    });
+  };
   const proactivePipeline = new ProactivePipeline({
     dataPath: join(process.cwd(), "data", "proactivity"),
     governor: proactivityGovernor,
@@ -4085,6 +4331,23 @@ export async function createAppServices(): Promise<AppServices> {
     presence: proactivityPresence,
     silenceLog: proactivitySilenceLog,
     confirmations: proactivityConfirmations,
+    // 分级触达：提案级确认（承诺代催等）→ Router 挂升级（确认文案已由管道投递）
+    onPendingConfirmation: (entry) => {
+      void reachRouter
+        .route({
+          actorId: entry.actorId,
+          kind: entry.kind,
+          title: `需要确认：${entry.rationale.slice(0, 60)}`,
+          summary: entry.rationale,
+          urgency: "alert",
+          decision: "confirm",
+          deadlineAt: entry.expiresAt,
+          confirmId: entry.confirmId,
+          assumeDelivered: "chat",
+          meta: { origin: "pipeline" },
+        })
+        .catch(() => {});
+    },
     // 提案级确认批准动作：承诺代催 → 真实外发（MessagePlatformGateway → 微信/QQ/飞书 bridge）；
     // 其余提案 → 助手动态留痕。外发结果（已送达/排队/失败）经 speak 回执告知用户。
     onProposalApproved: (p) => {
@@ -4257,6 +4520,24 @@ export async function createAppServices(): Promise<AppServices> {
   const upcomingScheduleWatcher = new UpcomingScheduleWatcher({
     listTasks: () => scheduleTaskService.listAllTasks(),
     submit: (p) => {
+      // 分级触达：临近日程（T-15min chat 已由管道投递）挂注意力记录，
+      // T-10min 未读升级语音播报；popup 跳过（chat 已覆盖）、phone 仅 interrupt 不触发
+      if (p.kind === "schedule_upcoming") {
+        void reachRouter
+          .route({
+            actorId: p.actorId,
+            kind: p.kind,
+            title: p.title,
+            summary: p.summary,
+            urgency: "alert",
+            decision: "fyi",
+            deadlineAt: p.expiresAt ?? null,
+            assumeDelivered: "chat",
+            skipChannels: ["popup"],
+            meta: { dedupKey: p.dedupKey },
+          })
+          .catch(() => {});
+      }
       proactivePipeline.submitProposal(p);
     },
   });
@@ -4341,10 +4622,30 @@ export async function createAppServices(): Promise<AppServices> {
   // ─── P2-16：记忆系统健康快照（调试用）───
   app.get("/api/memory/health", async () => getMemoryHealthSnapshot());
 
+  // 待确认收件箱外观：花钱类主动确认（需点确认）+ 主动动作台账（只读），
+  // 统一 list/resolve（/api/approvals）。spend 判定用能力目录 risk=spend。
+  const approvalInboxService = new ApprovalInboxService({
+    proactivityHub,
+    activityStore: agentActivityStore,
+    featureCatalog,
+    reachRouter,
+  });
+
+  // 分级触达注意力路由（决策中心快照 + ack 归一 + 通用触达入口）
+  registerAttentionRoutes(app, {
+    attentionStore,
+    reachRouter,
+    activityStore: agentActivityStore,
+  });
+
+  // 设备自绑定鉴权周界（仅 ACCESS_AUTH_REQUIRED=1 时挂载 hook；未开启零行为变更）
+  registerAccessAuthHook(app, accessAuthService);
+
   registerHttpRoutes(app, {
     pictureKit,
     toolRegistry,
     skillManager,
+    featureCatalog,
     travelPlanningService,
     skillMetadataValidator,
     realFundsWallet,
@@ -4396,6 +4697,10 @@ export async function createAppServices(): Promise<AppServices> {
     moodInferenceService,
     devicePairingService,
     deviceRegistry,
+    accessAuthService,
+    approvalInboxService,
+    attentionStore,
+    reachRouter,
     // /agent/voice/transcribe 端点依赖（ASR 专用走 voiceCapabilityService）
     voiceCapabilityService,
     brainCenter,
@@ -4430,6 +4735,12 @@ export async function createAppServices(): Promise<AppServices> {
     voiceMessageService,
     morningBriefingScheduler,
     eveningDigestScheduler,
+    accessAuthService,
+  });
+
+  // MCP 工具异步加载，onReady 时已就绪：二次刷新目录（幂等）
+  app.addHook("onReady", async () => {
+    featureCatalog.build();
   });
 
   app.addHook("onClose", async () => {
@@ -4440,6 +4751,10 @@ export async function createAppServices(): Promise<AppServices> {
     consumptionLedgerListener.stop();
     subscriptionAuditService.stop();
     eveningDigestScheduler.stop();
+    // 新增子系统：习惯闭环 / 到站监控 / 全双工语音
+    habitLoopService.stop();
+    arrivalMonitorService.stop();
+    voiceDuplexService.stopAll();
     // 位置子系统：停围栏判定 + 关本地 SQLite（WAL 落盘）
     locationGeofenceService.close();
     locationHistoryService?.close();
@@ -4495,6 +4810,11 @@ export async function createAppServices(): Promise<AppServices> {
     messagePlatformGateway,
     messageBridgeService,
     voiceDialogueService,
+    habitLoopService,
+    arrivalMonitorService,
+    voiceDuplexService,
+    bookingOrderStore,
+    featureCatalog,
     intelligentReminderService: intelligentReminder.reminderService,
     reminderResponsePersistence: intelligentReminder.userResponsePersistence,
     mcpClientService,
@@ -4509,6 +4829,10 @@ export async function createAppServices(): Promise<AppServices> {
     morningBriefingScheduler,
     deviceRegistry,
     devicePairingService,
+    accessAuthService,
+    approvalInboxService,
+    attentionStore,
+    reachRouter,
     brainCenter,
     bodyCenter,
     reflexArc,

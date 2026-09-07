@@ -33,3 +33,19 @@ export function hasCommitmentClaim(text: string): boolean {
   if (COMMITMENT_EXCLUDE_RE.test(t)) return false;
   return COMMITMENT_CLAIM_RE.test(t);
 }
+
+/**
+ * 闪避式兜底话术（2026-09-06 P0 修复）——与承诺话术相对的另一类出口失守：
+ * 前台对实时类请求既不调工具也不派发，改口「没实时数据/查不了/让系统去查」
+ * 把球踢回给用户。这类回复既非承诺也非道歉式空串，旧兜底链全部接不住，
+ * 工具调用静默归零。闸法与承诺闸同构：话题判定在入口（调用方以实时类意图
+ * 门控），出口只锚定「推脱/转移」话术本身。
+ */
+const DEFLECTION_FALLBACK_RE =
+  /没(?:有)?实时数据|手(?:头|上)(?:没|没有)(?:实时)?数据|没法(?:瞎报|查|知道|获取|回答)|查不了|查不到|搜不到|刷不到|无法获取|获取不到|没有联网|不能联网|联网查不了|让系统(?:去|帮忙|来)?(?:查|搜|看)|下个?(?:能)?查.{0,8}工具|没有(?:接入|搜索能力|查询能力)|真编不出来/;
+
+export function isDeflectionStyleFallback(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t || t.length > 2000) return false;
+  return DEFLECTION_FALLBACK_RE.test(t);
+}

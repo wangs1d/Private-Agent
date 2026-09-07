@@ -41,6 +41,11 @@ import type { FinanceDeepService } from "../services/finance-deep-service.js";
 import type { SocialOutreachService } from "../services/social-outreach-service.js";
 import type { CodeSandboxService } from "../services/code-sandbox-service.js";
 import type { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
+import type { HabitLoopService } from "../services/habit-loop/index.js";
+import type { ArrivalMonitorService } from "../services/arrival-concierge/index.js";
+import type { VoiceDuplexService } from "../services/voice-duplex/index.js";
+import type { BookingOrderStore } from "../services/booking/index.js";
+import type { FeatureCatalog } from "../catalog/index.js";
 import type { IntelligentReminderService } from "../services/intelligent-reminder/intelligent-reminder-service.js";
 import type { UserResponsePersistenceService } from "../services/intelligent-reminder/user-response-persistence.js";
 import type { McpClientService } from "../services/mcp-client-service.js";
@@ -118,6 +123,16 @@ export type AppServices = {
   messagePlatformGateway: MessagePlatformGateway;
   messageBridgeService: MessageBridgeService;
   voiceDialogueService: VoiceDialogueService;
+  /** 习惯学习 → 自动执行闭环（挖掘/规则/授权分级/自动执行） */
+  habitLoopService: HabitLoopService;
+  /** 到站管家（航班/高铁到站监控 + 接站通知 + 到站约车提案） */
+  arrivalMonitorService: ArrivalMonitorService;
+  /** 全双工实时语音（WS /ws/voice-duplex 会话管理） */
+  voiceDuplexService: VoiceDuplexService;
+  /** 统一预订层本地订单存储（travel 域结算技能共用） */
+  bookingOrderStore: BookingOrderStore;
+  /** Feature Catalog 能力分类目录（12 生活域；HTTP /api/catalog/* 数据源） */
+  featureCatalog: FeatureCatalog;
   intelligentReminderService: IntelligentReminderService;
   reminderResponsePersistence: UserResponsePersistenceService;
   mcpClientService: McpClientService;
@@ -135,6 +150,14 @@ export type AppServices = {
   deviceRegistry: DeviceRegistry;
   /** 终端互连平台 —— 设备配对服务（生成配对码 + 持久化 owner↔device 绑定） */
   devicePairingService: DevicePairingService;
+  /** 设备自绑定鉴权服务（/api/* 周界鉴权凭证的签发与校验；ACCESS_AUTH_REQUIRED 开启时强制） */
+  accessAuthService: import("../services/access-auth-service.js").AccessAuthService;
+  /** 待确认收件箱外观（proactivity + habit 待确认条目统一 list/resolve） */
+  approvalInboxService: import("../services/approval-inbox-service.js").ApprovalInboxService;
+  /** 注意力台账（分级触达的投递记录 + ack 归一） */
+  attentionStore: import("../proactivity/attention-store.js").AttentionStore;
+  /** 分级触达路由（矩阵路由 + 升级计时 + 专注降级） */
+  reachRouter: import("../proactivity/reach-router.js").ReachRouter;
   /** Agent Brain Center —— 大脑中心外观（BRAIN_CENTER_ENABLED=0 时为 null） */
   brainCenter: BrainCenter | null;
   /** Agent Body Center —— 身体中心外观（BODY_CENTER_ENABLED=0 时为 null） */

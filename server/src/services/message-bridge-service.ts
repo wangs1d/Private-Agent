@@ -1,6 +1,10 @@
 import type { FastifyRequest } from "fastify";
 
 import { resolveActorId } from "../agent/actor-id.js";
+import {
+  isChannelSessionIsolationEnabled,
+  resolveChannelScopedSessionId,
+} from "../agent/master-chat-session.js";
 import { runChatTurnForActor } from "./chat-turn-runner.js";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { MessageHubPlatform, MessageHubService } from "./message-hub-service.js";
@@ -67,10 +71,19 @@ export class MessageBridgeService {
     const text = body.text.trim();
     if (!text) return { ok: false, message: "message text is empty" };
 
-    const actorId = resolveActorId({
+    // P1 渠道隔离（2026-09-06）：入站无显式 userId/sessionId 绑定时，不再默认
+    // 挤进主线程会话（session-mvp-001）——按来源平台派生 `actorId@平台` 独立会话，
+    // 线程/短期记忆按渠道隔离；显式绑定（userId 或 sessionId）保持原样。
+    // AGENT_CHANNEL_SESSION_ISOLATION=0 回退旧行为。
+    const baseActorId = resolveActorId({
       userId: body.userId,
       sessionId: body.sessionId?.trim() || this.env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim() || "session-mvp-001",
     });
+    const hasExplicitBinding = Boolean(body.userId?.trim() || body.sessionId?.trim());
+    const actorId =
+      hasExplicitBinding || !isChannelSessionIsolationEnabled()
+        ? baseActorId
+        : resolveChannelScopedSessionId(baseActorId, body.platform);
     const channelId = body.channelId?.trim() || body.senderId?.trim() || body.accountId?.trim() || `${body.platform}-default`;
     const ingested = await this.hub.ingestInbound({
       actorId,

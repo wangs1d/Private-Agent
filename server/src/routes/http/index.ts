@@ -5,6 +5,7 @@ import { registerFinanceIngestRoutes } from "./finance-ingest.js";
 import { registerAgentCollaborationRoutes } from "./agent.js";
 import { registerBodyRoutes } from "./body.js";
 import { registerBrainRoutes } from "./brain.js";
+import { registerCatalogRoutes } from "./catalog.js";
 import { registerChatRoutes } from "./chat.js";
 import { registerFriendRoutes } from "./friends.js";
 import { registerInfoRoutes } from "./info.js";
@@ -47,6 +48,9 @@ import { registerGatewayAdminRoutes } from "./gateway-admin.js";
 import { registerToolRegistryRoutes } from "./tool-registry-routes.js";
 import { registerNotesRoutes } from "./notes.js";
 import { registerDeviceRoutes } from "./device.js";
+import { registerAuthRoutes } from "./auth.js";
+import { registerApprovalRoutes } from "./approvals.js";
+import { registerAttentionRoutes } from "./attention.js";
 import { registerVoiceMessageRoutes } from "./voice-messages.js";
 import { registerImageFileRoutes } from "./image-files.js";
 import { registerPictureRoutes } from "./picture.js";
@@ -160,8 +164,26 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       deviceRegistry: deps.deviceRegistry,
     });
   }
+  // 设备自绑定鉴权路由（accessAuthService 未注入时不挂载）
+  if (deps.accessAuthService) {
+    registerAuthRoutes(app, { accessAuthService: deps.accessAuthService });
+  }
+  // 待确认收件箱路由（approvalInboxService 未注入时不挂载）
+  if (deps.approvalInboxService) {
+    registerApprovalRoutes(app, { approvalInboxService: deps.approvalInboxService });
+  }
+  // 分级触达注意力路由（attentionStore + reachRouter 未注入时不挂载）
+  if (deps.attentionStore && deps.reachRouter) {
+    registerAttentionRoutes(app, {
+      attentionStore: deps.attentionStore,
+      reachRouter: deps.reachRouter,
+      activityStore: deps.agentActivityStore ?? null,
+    });
+  }
   // Brain Center 路由（brainCenter 为 null 时端点返回 503 not enabled）
   registerBrainRoutes(app, deps);
   // Body Center 路由（bodyCenter 为 null 时端点返回 503 not enabled）
   registerBodyRoutes(app, deps);
+  // Feature Catalog 能力分类路由（featureCatalog 为 null 时端点返回 503）
+  registerCatalogRoutes(app, deps);
 }

@@ -170,3 +170,17 @@ export function isBrainEvolutionEnabled(): boolean {
 export function isAgentWorldSocialEnabled(): boolean {
   return envFlagEnabled("AGENT_WORLD_SOCIAL_ENABLED");
 }
+
+/**
+ * ACCESS_AUTH_REQUIRED：设备自绑定鉴权（/api/* 周界鉴权）总开关。
+ *
+ * 默认**关闭**（零行为变更）：身份仍由 userId/sessionId 客户端声明（resolveActorId）。
+ * 设 `ACCESS_AUTH_REQUIRED=1|true|on` 开启后：
+ *   - /api/* 请求须携带有效设备 token（Bearer 头或 ?token=），无效/缺失 → 401；
+ *   - WS 连接须在 upgrade query 或 session.init payload 携带有效 token；
+ *   - 首台设备引导（bootstrap）：token 库为空时，/api/auth/pairing-code 免鉴权，
+ *     启动时会在控制台打印一枚引导配对码。
+ */
+export function isAccessAuthRequired(): boolean {
+  return envFlagEnabled("ACCESS_AUTH_REQUIRED");
+}

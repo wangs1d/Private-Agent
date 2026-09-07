@@ -1,5 +1,5 @@
-import { randomInt, randomUUID } from "crypto";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { randomBytes, randomInt, randomUUID } from "crypto";
+import { mkdir, readFile, rename, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { ServerEventType } from "../protocol.js";
 import type { TtsService } from "./tts-service.js";
@@ -90,10 +90,16 @@ const USER_CALL_AGENT_TIMEOUT_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 25_000;
 })();
 
+/**
+ * 按持久化路径串行化的全局写队列（同进程所有 VirtualPhoneService 实例共享）。
+ * 同一文件多实例并发落盘时：Windows 上并发 rename 同一目标会 EPERM，
+ * 串行化后写入永远原子且有序。
+ */
+const persistQueues = new Map<string, Promise<void>>();
+
 export class VirtualPhoneService {
   private readonly byActor = new Map<string, string>();
   private readonly byPhone = new Map<string, string>();
-  private persistChain: Promise<void> = Promise.resolve();
   private incomingCoordinator: VirtualPhoneIncomingCoordinator | null = null;
   /** 通话回复总线：提醒电话等场景等待用户在通话中输入（phone.call_reply 喂入） */
   private readonly replyWaiters = new Map<string, ReplyWaiter[]>();
@@ -312,7 +318,16 @@ export class VirtualPhoneService {
   }
 
   private schedulePersist(): void {
-    this.persistChain = this.persistChain.then(() => this.persistNow());
+    const path = this.persistPath;
+    // 按路径的全局写队列：同进程多实例（测试/多会话）写同一文件时串行化，
+    // 避免并发 rename 在 Windows 上 EPERM；失败吞掉（warn），链不断
+    const prev = persistQueues.get(path) ?? Promise.resolve();
+    const next = prev
+      .then(() => this.persistNow())
+      .catch((err: unknown) => {
+        console.warn("[VirtualPhoneService] persist failed:", err);
+      });
+    persistQueues.set(path, next);
   }
 
   private async persistNow(): Promise<void> {
@@ -320,7 +335,11 @@ export class VirtualPhoneService {
     await mkdir(dir, { recursive: true });
     const byActor: Record<string, string> = {};
     for (const [k, v] of this.byActor) byActor[k] = v;
-    await writeFile(this.persistPath, JSON.stringify({ byActor }, null, 2), "utf8");
+    // 原子写（tmp + rename）：多个实例/进程写同一路径时读方永远看到完整 JSON，
+    // 不会出现并发 writeFile 交错出的截断/拼接损坏（同 booking-order-store 策略）
+    const tmp = `${this.persistPath}.${randomBytes(4).toString("hex")}.tmp`;
+    await writeFile(tmp, JSON.stringify({ byActor }, null, 2), "utf8");
+    await rename(tmp, this.persistPath);
   }
 
   getPhoneForActor(actorId: string): string | undefined {

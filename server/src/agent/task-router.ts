@@ -75,6 +75,19 @@ export function isForegroundDispatchMode(): boolean {
   return raw !== "0" && raw !== "off" && raw !== "false";
 }
 
+/**
+ * 遗留灰度：前台文本标签协议（[dispatch:...]，默认关闭）。
+ *
+ * 2026-09-06 P0 修复：前台默认回归原生 function calling（task.dispatch +
+ * search_web 小工具集常驻，API 结构化 tool_calls 通道）。文本协议的失败模式
+ * 是"模型不写标签 = 静默零工具"，无法在协议内修复，故退役为灰度回退项。
+ * 设 AGENT_FOREGROUND_TAG_PROTOCOL=1 可回退旧行为（前台零工具 + 标签协议）。
+ */
+export function isForegroundTagProtocolEnabled(): boolean {
+  const raw = process.env.AGENT_FOREGROUND_TAG_PROTOCOL?.trim().toLowerCase();
+  return raw === "1" || raw === "on" || raw === "true";
+}
+
 /** 前台自决模式的固定决策：plane=chat + 前台工具白名单（由 agent-core 注入）。 */
 export function foregroundSelfDispatchDecision(): RouteDecision {
   return {

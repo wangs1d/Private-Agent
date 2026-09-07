@@ -102,7 +102,6 @@ import {
   registerRestaurantBookingTools,
 } from "./restaurant-booking/index.js";
 import {
-  PICTURE_CHAT_TOOLS,
   PICTURE_INTENT_RULES,
   registerPictureModuleTools,
 } from "./picture/index.js";
@@ -338,7 +337,10 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
     {
       domain: "picture",
       label: "图片图库与人像美颜批图",
-      chatTools: PICTURE_CHAT_TOOLS,
+      // 2026-09-06：LLM 工具 schema 已由 builtin skill picture.*（skills/builtin/picture-skills.ts）
+      // 接管——同名 schema 会在 chatToolsExtra 合并时与 skill 冲突，故这里置空；
+      // intentRules（BM25 调权按名字命中 skill 名）与 ToolRegistry 兜底执行器保留。
+      chatTools: [],
       intentRules: PICTURE_INTENT_RULES,
       register: (registry) => registerPictureModuleTools(registry, { pictureKit: deps.pictureKit }),
       category: {

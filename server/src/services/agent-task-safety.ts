@@ -11,6 +11,7 @@
 
 import type { SafetyCheckResult } from "./agent-task-types.js";
 import { AuditService } from "./audit-service.js";
+import { classifyFeatureByName } from "../catalog/class-map.js";
 
 // --------------------------------------------------------------------------- //
 // 正则规则集合
@@ -168,9 +169,14 @@ const HIGH_RISK_TOOL_PATTERNS: HighRiskRule[] = [
 /**
  * 判断工具名是否属于高风险金融/购物类（下单/支付/转账/钱包）。
  * 迁移自原 RuntimeKernel.checkToolAction，集中到 AgentTaskSafety 统一管理。
+ *
+ * 2026-09 分类层纳管：静态名单之外的工具由 FeatureCatalog 分类补充判定 ——
+ * risk=spend（支付/下单/转账）或 risk=outbound（短信/邮件/社交外发/代打电话）
+ * 的工具在自主任务通道一律要求人工审批。新工具落地只要分类正确即自动纳管，
+ * 不再依赖逐个补本名单。
  */
 function isHighRiskFinancialTool(toolName: string): boolean {
-  return (
+  if (
     toolName === "shopping.order.place" ||
     // 统一预订层（方案 A）：所有真实/模拟下单工具一律人工审批
     toolName === "ride_hailing.book" ||
@@ -179,7 +185,11 @@ function isHighRiskFinancialTool(toolName: string): boolean {
     toolName.includes("payment") ||
     toolName.includes("transfer") ||
     toolName.includes("wallet")
-  );
+  ) {
+    return true;
+  }
+  const cls = classifyFeatureByName(toolName);
+  return cls.risk === "spend" || cls.risk === "outbound";
 }
 
 /**

@@ -7,10 +7,8 @@
 import type { ToolRegistry } from "../../tool-registry.js";
 import type { PictureKit } from "@private-ai-agent/picture";
 
-import { PICTURE_CHAT_TOOLS } from "./chat-tools.js";
 import { createPictureBeautifyHandler, createPictureGalleryHandler } from "./handlers.js";
 
-export { PICTURE_CHAT_TOOLS } from "./chat-tools.js";
 export { PICTURE_INTENT_RULES } from "./intent.js";
 
 /** 注册 picture 工具到 ToolRegistry(调用方:create-app-services.ts 启动阶段) */

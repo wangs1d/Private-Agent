@@ -12,6 +12,33 @@
 import fs from "node:fs";
 import path from "node:path";
 
+/** 到站接站人（到站监控触发「通知来接」时使用）。 */
+export interface TicketPickupContact {
+  /** 联系人姓名（消息称呼用） */
+  name: string;
+  /** 手机号（短信通道） */
+  phone?: string;
+  /** 微信/飞书/QQ 会话 id（对应平台桥发送；wechat 平台需微信 Claw 或桥接已配） */
+  channel?: "sms" | "wechat" | "qq" | "feishu";
+  /** 平台桥的会话/接收 id（channel 为 wechat/qq/feishu 时必填） */
+  channelTarget?: string;
+  /** 到站时是否免确认直接发送（false = 每次先给用户过目草稿） */
+  autoSend: boolean;
+}
+
+/** 到站监控运行时状态（arrival-monitor-service 维护，落盘防重启丢状态）。 */
+export interface TicketArrivalMonitoring {
+  enabled: boolean;
+  /** 使用的状态 provider（缺省自动选择） */
+  provider?: string;
+  /** 最近快照（provider 返回原文节选） */
+  lastStage?: string;
+  lastStatusText?: string;
+  lastCheckedAt?: string;
+  /** 已触发过的阶段（approaching / landed 通知各只发一次） */
+  notifiedStages?: string[];
+}
+
 /** 票务类型 */
 export type TicketType = "flight" | "train" | "hotel";
 
@@ -57,10 +84,16 @@ export interface StoredTravelTicket {
   rawText?: string;
   /** 落盘时间（毫秒） */
   createdAt: number;
+  /** 归属用户（到站监控/主动通知路由用；旧票缺省时由工具补记） */
+  actorId?: string;
   /** 到站约车：用户已 opt-in，到站前希望 agent 提醒并协助约车 */
   arrivalRideOptIn: boolean;
   /** 到站约车提醒是否已创建（避免重复建日程） */
   arrivalRideReminderCreated?: boolean;
+  /** 接站人（到站时通知谁来接；由 travel.pickup-set / 出票时录入） */
+  pickupContact?: TicketPickupContact;
+  /** 到站监控状态（航班/高铁动态跟踪） */
+  arrivalMonitoring?: TicketArrivalMonitoring;
 }
 
 const MAX_TICKETS = 100;
@@ -154,6 +187,34 @@ class TravelTicketStore {
         return Number.isNaN(expire) ? true : expire > now;
       })
       .sort((a, b) => (a.ts ?? a.t.createdAt) - (b.ts ?? b.t.createdAt))
+      .slice(0, Math.max(1, limit))
+      .map(({ t }) => t);
+  }
+
+  /**
+   * 在途 / 即将出行程（仅 flight|train，到站监控用）。
+   *
+   * 与 listUpcoming 的「未过期」语义不同：已出发、未到达的票恰是监控主体
+   * （起飞后 listUpcoming 会把它当过期滤掉），所以这里按监控窗口筛：
+   *   到达时间存在，且 到达 ≥ now-2h（落地后 2h 内仍可见），且
+   *   出发时间（如有）≤ now+3h（3 小时内会出发/已出发）。
+   */
+  listActiveTrips(now = Date.now(), limit = 20): StoredTravelTicket[] {
+    const parseTs = (raw?: string): number | null => {
+      if (!raw) return null;
+      const ts = Date.parse(raw.replace(" ", "T"));
+      return Number.isNaN(ts) ? null : ts;
+    };
+    return this.listAll()
+      .filter((t) => t.type !== "hotel")
+      .map((t) => ({ t, departTs: parseTs(t.departTime), arriveTs: parseTs(t.arriveTime) }))
+      .filter(({ departTs, arriveTs }) => {
+        if (arriveTs == null) return false;
+        if (arriveTs < now - 2 * 3_600_000) return false;
+        if (departTs != null && departTs > now + 3 * 3_600_000) return false;
+        return true;
+      })
+      .sort((a, b) => (a.arriveTs ?? 0) - (b.arriveTs ?? 0))
       .slice(0, Math.max(1, limit))
       .map(({ t }) => t);
   }
