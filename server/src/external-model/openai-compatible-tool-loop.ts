@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import { recordLlmUsageByChars } from "../services/llm-token-audit.js";
+import { recordLlmUsageByChars, type LlmAuditStage } from "../services/llm-token-audit.js";
 import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
@@ -160,6 +160,18 @@ const META_TOOL_NAMES = new Set<string>([
 
 function getToolResultBudget(toolName: string): number | undefined {
   return TOOL_RESULT_PRESET_MAX_CHARS[toolName];
+}
+
+/**
+ * 任务面工具结果预算缩放（B4，2026-09-08）：后台任务的最终产物是一段总结性回复，
+ * 检索类结果不需要前台快查那么高的保真度——task_plane 阶段统一按比例收缩每工具
+ * 字符预算（默认 ×0.6：search_web 7000→4200、deep_search 6000→3600），前台对话面
+ * 不受影响。AGENT_TASK_TOOL_BUDGET_SCALE 可调（0-1]。
+ */
+function resolveToolBudgetScale(stage?: string): number {
+  if (!stage || !stage.startsWith("task_plane")) return 1;
+  const n = Number.parseFloat(process.env.AGENT_TASK_TOOL_BUDGET_SCALE ?? "");
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.6;
 }
 
 function getToolResultStripKeys(toolName: string): string[] | undefined {
@@ -2271,12 +2283,18 @@ function assistantToolCallNames(m: ChatCompletionMessageParam): string {
 
 /**
  * replan 历史瘦身：把「早于当前波次」的已完成工具链（assistant tool_calls + 其 tool
- * 回复）折叠为一条确定性摘要 user 消息，仅保留最近一个波次的完整链。replan 规划只需
+ * 回复）折叠为确定性摘要 user 消息，仅保留最近一个波次的完整链。replan 规划只需
  * 「上一步拿到了什么」，不必重发全部细节。折叠是确定性截断（保留工具名 + 结果要点），
  * 不经过 LLM，杜绝幻觉；最终汇总（runSchemaLessSummary）对旧波用更长的摘要预算
  * （SUMMARY_FOLD_DIGEST_CHARS）作答，尽量保住跨波取数需要的关键数据。
+ *
+ * B2 前缀稳定（2026-09-08）：每条旧链各自折叠为**独立的一条消息**（而非合并成一条
+ * 每次重写的汇总）。折叠文本只依赖本链内容 → 一旦生成即逐字节冻结，后续波次
+ * 重入时已折叠消息不变（append-only），replan 请求的前缀缓存可命中到「上一波
+ * 边界」，不再被合并重写打碎在更早位置。摘要预算跟随 digestChars 参数（summary
+ * 传 400，replan 默认 160）。
  */
-function foldOldWaveToolChains(
+export function foldOldWaveToolChains(
   msgs: ChatCompletionMessageParam[],
   digestChars: number = REPLAN_FOLD_DIGEST_CHARS,
 ): ChatCompletionMessageParam[] {
@@ -2289,16 +2307,6 @@ function foldOldWaveToolChains(
   const keepFrom = chainStarts[chainStarts.length - 1];
 
   const out: ChatCompletionMessageParam[] = [];
-  let foldedLines: string[] = [];
-  const flushFolded = () => {
-    if (foldedLines.length === 0) return;
-    out.push({
-      role: "user",
-      content: "【历史工具结果摘要（早于当前规划轮，供参考）】\n" + foldedLines.join(""),
-    });
-    foldedLines = [];
-  };
-
   let i = 0;
   while (i < msgs.length) {
     const m = msgs[i];
@@ -2315,21 +2323,23 @@ function foldOldWaveToolChains(
       j += 1;
     }
     if (i >= keepFrom) {
-      // 当前波次链：先把已折叠的旧块落盘，再原样保留本链
-      flushFolded();
+      // 当前波次链：原样保留
       out.push(...chain);
     } else {
-      // 旧波次链：折叠为确定性摘要（URL 安全截断，防止规划拿半截 URL 脑补）
+      // 旧波次链：折叠为独立、内容冻结的确定性摘要（URL 安全截断，防止规划拿半截 URL 脑补）
       const names = assistantToolCallNames(m);
+      const lines: string[] = [];
       for (const tm of chain.slice(1)) {
         const raw = typeof tm.content === "string" ? tm.content : JSON.stringify(tm.content ?? "");
-        const digest = safeTruncateDigest(raw, REPLAN_FOLD_DIGEST_CHARS);
-        foldedLines.push(`- ${names}[结果]: ${digest}`);
+        lines.push(`- ${names}[结果]: ${safeTruncateDigest(raw, digestChars)}`);
       }
+      out.push({
+        role: "user",
+        content: "【历史工具结果摘要（早于当前规划轮，供参考）】\n" + lines.join(""),
+      });
     }
     i = j;
   }
-  flushFolded();
   return out;
 }
 
@@ -2403,10 +2413,16 @@ export async function streamCompletionWithTools(
      */
     signal?: AbortSignal;
     /** Token 用量审计打点信息（可选，内部自动记录每轮输入/输出） */
-    audit?: { sessionId?: string; stage?: "main_chat" };
+    audit?: { sessionId?: string; stage?: LlmAuditStage };
   },
 ): Promise<string> {
   const userText = extractUserTextFromMessages(messages) || "";
+  // B4 任务面预算缩放：task_plane 阶段按比例收缩每工具结果预算（前台对话面=1 不变）
+  const toolBudgetScale = resolveToolBudgetScale(options?.audit?.stage);
+  const budgetForTool = (toolName: string): number | undefined => {
+    const preset = getToolResultBudget(toolName);
+    return preset === undefined ? undefined : Math.round(preset * toolBudgetScale);
+  };
   // 2026-08-01 性能优化：从 extraBody 推断 Fast 模式，传递给 resolveForcedToolChoice 跳过强制 tool_choice。
   // Fast 模式 = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
   // 强制工具调用会多 1 次 round trip，徒增延迟。
@@ -2709,17 +2725,23 @@ export async function streamCompletionWithTools(
     accumulatePrefixCacheUsage(streamUsage);
 
     // Token 用量审计：记录本轮实际 LLM 调用（工具循环内每次 round 一条），
-    // 附带 API 真实返回的 prefix cache 命中/未命中 token（若流末尾带 usage）
+    // 附带 API 真实返回的 usage（prompt/completion tokens）与 prefix cache 命中/未命中 token
     try {
       if (options?.audit && auditInputChars > 0) {
         recordLlmUsageByChars({
-          stage: options.audit.stage ?? "main_chat",
+          stage: options.audit.stage ?? "main_chat_tools",
           sessionId: options.audit.sessionId,
           inputChars: auditInputChars,
           outputChars: (fullText?.length ?? 0) + (fullReasoning?.length ?? 0),
           model,
           promptCacheHitTokens: streamUsage?.promptCacheHitTokens,
           promptCacheMissTokens: streamUsage?.promptCacheMissTokens,
+          ...(typeof streamUsage?.inputTokens === "number"
+            ? { apiPromptTokens: streamUsage.inputTokens }
+            : {}),
+          ...(typeof streamUsage?.outputTokens === "number"
+            ? { apiCompletionTokens: streamUsage.outputTokens }
+            : {}),
         });
       }
     } catch {
@@ -2938,7 +2960,7 @@ export async function streamCompletionWithTools(
               toolName: item.registryToolName,
               ok: bridge.ok,
               result: bridge.result,
-              preferredMaxChars: getToolResultBudget(item.registryToolName),
+              preferredMaxChars: budgetForTool(item.registryToolName),
               stripKeys: getToolResultStripKeys(item.registryToolName),
             });
             return {
@@ -2955,7 +2977,7 @@ export async function streamCompletionWithTools(
                 toolName: item.registryToolName,
                 ok: false,
                 result: bridge.result,
-                preferredMaxChars: getToolResultBudget(item.registryToolName),
+                preferredMaxChars: budgetForTool(item.registryToolName),
                 stripKeys: getToolResultStripKeys(item.registryToolName),
               });
               return {
@@ -3093,7 +3115,7 @@ export async function streamCompletionWithTools(
           toolName: targetToolName,
           ok: exec.ok,
           result: exec.ok ? resultForWire : { error: exec.result.error ?? exec.result },
-          preferredMaxChars: getToolResultBudget(targetToolName),
+          preferredMaxChars: budgetForTool(targetToolName),
           stripKeys: getToolResultStripKeys(targetToolName),
         });
         return {
@@ -3409,15 +3431,22 @@ export async function streamCompletionWithTools(
         pendingHead = "";
       }
       summaryText = summaryText.trim();
-      // Token 用量审计：summary/探测调用统一并入 main_chat 环节，与规划轮次同一把尺子。
+      // Token 用量审计：summary/探测轮跟随调用方 stage（任务面 task_plane_* /
+      // 前台 main_chat_tools），与规划轮次同一把尺子。
       // needMore 的探测也是一次真实 LLM 调用，必须计入（否则低估 token 消耗）。
       try {
         recordLlmUsageByChars({
-          stage: "main_chat",
+          stage: options?.audit?.stage ?? "main_chat_tools",
           sessionId: options?.audit?.sessionId,
           inputChars: JSON.stringify(summaryMessages).length,
           outputChars: summaryText.length,
           model,
+          ...(typeof summaryConsumeResult.usage?.inputTokens === "number"
+            ? { apiPromptTokens: summaryConsumeResult.usage.inputTokens }
+            : {}),
+          ...(typeof summaryConsumeResult.usage?.outputTokens === "number"
+            ? { apiCompletionTokens: summaryConsumeResult.usage.outputTokens }
+            : {}),
         });
       } catch {
         /* 审计失败静默 */

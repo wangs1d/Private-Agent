@@ -6,7 +6,7 @@ import "../../core/config/api_config.dart";
 const double kImagePreviewSidebarWidth = 56.0;
 
 /// 右侧双栏的「图片预览」面板：
-/// 在右侧分栏中展示单张网络图片原图，并展示标题/来源。
+/// 在右侧分栏中展示单张网络图片原图（多图时底部保留页码计数）。
 ///
 /// [urls] 为同一绿泡内的全部照片，切换按钮居中叠加在图片两侧，
 /// 末张点击「下一张」会回到第一张（循环）；若只有单张则不显示按钮。
@@ -16,7 +16,6 @@ class ImagePreviewPanel extends StatefulWidget {
     super.key,
     required this.urls,
     required this.index,
-    required this.title,
     this.source,
   });
 
@@ -26,7 +25,6 @@ class ImagePreviewPanel extends StatefulWidget {
   /// 当前要展示的照片位次。
   final int index;
 
-  final String title;
   final String? source;
 
   @override
@@ -176,65 +174,52 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
                   ],
                 ),
               ),
-              // 底部信息条：标题 + 来源 + 计数
-              Container(
-                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-                decoration: BoxDecoration(
-                  color: cs.surface,
-                  border: Border(
-                    top: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+              // 底部信息条：不再展示标题文案，仅保留多图页码计数与来源
+              if (_count > 1 ||
+                  (widget.source != null &&
+                      widget.source!.trim().isNotEmpty))
+                Container(
+                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                  decoration: BoxDecoration(
+                    color: cs.surface,
+                    border: Border(
+                      top:
+                          BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+                    ),
                   ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Row(
-                      children: <Widget>[
-                        Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      if (_count > 1)
+                        Text(
+                          "${_index + 1} / $_count",
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontFeatures: const <FontFeature>[
+                              FontFeature.tabularFigures()
+                            ],
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ),
+                      if (widget.source != null &&
+                          widget.source!.trim().isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
                           child: Text(
-                            widget.title,
+                            widget.source!,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
-                              color: cs.onSurface,
-                              height: 1.4,
-                            ),
-                          ),
-                        ),
-                        if (_count > 1)
-                          Text(
-                            "${_index + 1} / $_count",
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontFeatures: const <FontFeature>[
-                                FontFeature.tabularFigures()
-                              ],
+                              fontSize: 12,
                               color: cs.onSurfaceVariant,
+                              height: 1.3,
                             ),
                           ),
-                      ],
-                    ),
-                    if (widget.source != null &&
-                        widget.source!.trim().isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          widget.source!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: cs.onSurfaceVariant,
-                            height: 1.3,
-                          ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
             ],
           ),
         ),

@@ -153,6 +153,18 @@ export const globalTurnLimiter = new Semaphore(MAX_CONCURRENT_TURNS, "global-tur
 export const TURN_QUEUE_TIMEOUT = TURN_QUEUE_TIMEOUT_MS;
 
 /**
+ * 后台任务面全局并发闸（A3，2026-09-08）：dispatchBackgroundTask 派发的任务
+ * 全部经此信号量——多个后台任务天然并行（无锁），但没有上限会同时打满 LLM
+ * provider 限流并让重型工具互相排队。默认 4，AGENT_BG_TASK_MAX_PARALLEL 可调。
+ * 桌面/浏览器等具身域的互斥由 getToolLimiter 的分域单飞闸负责（域内=1），
+ * 这里的全局闸只管"同时执行的任务数"。
+ */
+export const backgroundTaskLimiter = new Semaphore(
+  envPosInt("AGENT_BG_TASK_MAX_PARALLEL", 4),
+  "bg-task",
+);
+
+/**
  * 自适应并发控制：定期根据 AIMD 算法调整 globalTurnLimiter 的 max。
  * - 成功且快：+1（直到 ADAPTIVE_CONCURRENCY_MAX）
  * - 成功但慢：×0.7
@@ -195,10 +207,22 @@ export function recordTurnOutcome(success: boolean, durationMs: number, errorMes
  * 按工具名获取对应的并发限制器。
  * 重型工具单独限流，防止资源耗尽；其他工具不限流。
  */
-const toolLimiters = new Map<string, Semaphore>();
+const toolLimiters = new Map<string, Semaphore | null>();
+
+/** 分域单飞闸（A3，2026-09-08）：这些工具域操作同一物理/虚拟环境（同一台电脑、
+ * 同一部手机、同一个浏览器实例），并行必然互踩——无论多少后台任务并行，
+ * 同域工具全局同一时刻只允许一个在执行。 */
+const DOMAIN_SINGLE_FLIGHT_PREFIXES = [
+  "desktop.",
+  "agent_browser.",
+  "browser.",
+  "phone.",
+  "embodiment.",
+] as const;
 
 function getToolLimiter(toolName: string): Semaphore | null {
-  if (toolLimiters.has(toolName)) return toolLimiters.get(toolName)!;
+  const cached = toolLimiters.get(toolName);
+  if (cached !== undefined) return cached;
 
   // 重型工具的并发上限配置
   const limits: Record<string, number> = {
@@ -212,12 +236,29 @@ function getToolLimiter(toolName: string): Semaphore | null {
     "voice.transcribe": envPosInt("MAX_CONCURRENT_VOICE", 3),
   };
 
-  const max = limits[toolName];
-  if (!max) return null;
+  const exactMax = limits[toolName];
+  if (exactMax) {
+    const exactLimiter = new Semaphore(exactMax, `tool:${toolName}`);
+    toolLimiters.set(toolName, exactLimiter);
+    return exactLimiter;
+  }
 
-  const limiter = new Semaphore(max, `tool:${toolName}`);
-  toolLimiters.set(toolName, limiter);
-  return limiter;
+  const domain = DOMAIN_SINGLE_FLIGHT_PREFIXES.find((p) => toolName.startsWith(p));
+  if (domain) {
+    // 同域共享一个单飞信号量：desktop.open 与 desktop.visual.run_task 互斥，
+    // 否则多后台任务各自调不同 desktop.* 工具仍会互踩同一台机器。
+    const domainKey = `domain:${domain}`;
+    let domainLimiter = toolLimiters.get(domainKey);
+    if (!domainLimiter) {
+      domainLimiter = new Semaphore(1, domainKey);
+      toolLimiters.set(domainKey, domainLimiter);
+    }
+    toolLimiters.set(toolName, domainLimiter);
+    return domainLimiter;
+  }
+
+  toolLimiters.set(toolName, null);
+  return null;
 }
 
 /**
@@ -237,6 +278,7 @@ export async function executeWithToolLimit<T>(
 export function getConcurrencyStats() {
   const tools: Record<string, { active: number; queued: number; max: number }> = {};
   for (const [name, limiter] of toolLimiters) {
+    if (!limiter) continue;
     tools[name] = {
       active: limiter.activeCount,
       queued: limiter.queuedCount,
@@ -263,6 +305,11 @@ export function getConcurrencyStats() {
       active: globalTurnLimiter.activeCount,
       queued: globalTurnLimiter.queuedCount,
       max: globalTurnLimiter.max,
+    },
+    backgroundTask: {
+      active: backgroundTaskLimiter.activeCount,
+      queued: backgroundTaskLimiter.queuedCount,
+      max: backgroundTaskLimiter.max,
     },
     adaptive,
     workers,

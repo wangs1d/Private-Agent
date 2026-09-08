@@ -1363,6 +1363,21 @@ async function processBatchedMessage(
     if (activeTurnAborters.get(msgActor) === turnAbortController) {
       activeTurnAborters.delete(msgActor);
     }
+    // 中断/异常轮次兜底记账（2026-09-08）：轮次未正常收尾但已有部分回复流式
+    // 送达用户时，以部分文本完成 STM 挂起项结清 / WAL / 日志记账。否则用户
+    // 亲眼看到的「安排好了…11:30 提醒」不进任何账本——挂起栈里的原始请求
+    // （默认 TTL 6 小时）每轮注入 open-loops，agent 会反复重问已办成的事。
+    // finish 只做记账不触发 LLM（文本非空不会走 regenerate），幂等可重入。
+    if (!turnSucceeded && streamedText.trim()) {
+      try {
+        deps.runtime.settleInterruptedTurn?.(msgActor, batched.text, streamedText, {
+          sessionId: typeof batched.sessionId === "string" ? batched.sessionId : undefined,
+          messageId: batched.originalMessageId,
+        });
+      } catch {
+        /* 兜底记账失败不影响主流程 */
+      }
+    }
     // Phase 2：记录 turn 结果供自适应并发调整（AIMD）
     const turnDuration = Date.now() - turnStartedAt;
     recordTurnOutcome(turnSucceeded, turnDuration, turnError);

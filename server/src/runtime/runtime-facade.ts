@@ -50,6 +50,25 @@ export interface RuntimeFacade {
    * 契约上允许异步：跨进程实现（WsRuntimeClient）经链路 RPC 完成。
    */
   resumeAutonomousTasks(): Promise<number>;
+
+  /**
+   * 中断/异常轮次的最小化兜底记账（2026-09-08）：以已流式送达用户的部分回复
+   * 完成 STM 挂起项结清、WAL/日志记账。可选契约——跨进程实现可暂缓；
+   * WS 层以可选调用兜底（文本为空时实现侧为无操作）。
+   */
+  settleInterruptedTurn?(
+    actorId: string,
+    userText: string,
+    partialAssistantText: string,
+    meta?: { sessionId?: string; messageId?: string },
+  ): void;
+
+  /**
+   * 取消一个后台任务（TaskHub 记录标记 cancelled 并停止结果投递）。
+   * 可选契约——同进程实现直接委托 AgentCore；跨进程实现经链路转发。
+   * @returns 任务存在、会话相符且原本非终态时 true。
+   */
+  cancelBackgroundTask?(actorId: string, taskId: string): boolean;
 }
 
 /**
@@ -81,5 +100,18 @@ export class DirectRuntimeAdapter implements RuntimeFacade {
 
   async resumeAutonomousTasks(): Promise<number> {
     return this.core.resumeAutonomousTasks();
+  }
+
+  settleInterruptedTurn(
+    actorId: string,
+    userText: string,
+    partialAssistantText: string,
+    meta?: { sessionId?: string; messageId?: string },
+  ): void {
+    this.core.settleInterruptedTurn(actorId, userText, partialAssistantText, meta);
+  }
+
+  cancelBackgroundTask(actorId: string, taskId: string): boolean {
+    return this.core.cancelBackgroundTask(actorId, taskId);
   }
 }

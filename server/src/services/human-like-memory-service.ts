@@ -232,6 +232,8 @@ export type HumanLikeMemorySleepReport = {
   estimatedRecallPrecision: number;
   plannedActions: number;
   executedActions: number;
+  /** 本轮物理清除的 hard_deleted 终态节点数（此前只打标不删，store 膨胀） */
+  purgedHardDeleted?: number;
   stageReports: Array<{
     stage: SleepAgentStage;
     changed: number;
@@ -1697,6 +1699,43 @@ export class HumanLikeMemoryService {
     ].join("\n");
   }
 
+  /**
+   * LLM planner 节点轮转窗口：此前固定 slice(0,40)（插入序=最老的 40 条），
+   * 每晚审查同一批节点、其余永远轮不到。现按 actor 维护游标，每轮前进一个
+   * 窗口，循环覆盖全量节点。
+   */
+  private readonly llmPlannerCursor = new Map<string, number>();
+  private static readonly LLM_PLANNER_WINDOW = 40;
+
+  private llmPlannerWindow(actorId: string, nodes: MemoryNodeRecord[]): MemoryNodeRecord[] {
+    const window = HumanLikeMemoryService.LLM_PLANNER_WINDOW;
+    if (nodes.length <= window) return nodes;
+    const start = (this.llmPlannerCursor.get(actorId) ?? 0) % nodes.length;
+    this.llmPlannerCursor.set(actorId, (start + window) % nodes.length);
+    const out: MemoryNodeRecord[] = [];
+    for (let i = 0; i < window; i++) out.push(nodes[(start + i) % nodes.length]!);
+    return out;
+  }
+
+  /**
+   * 物理清除 hard_deleted 终态节点及其关联边：deletionStage 已是终态且所有
+   * 读路径都过滤掉，此前只打标不删导致 store（JSON/SQLite）无限膨胀。
+   * 社区/版本记录中的悬挂引用由既有可选链兜底，不影响召回。
+   */
+  private purgeHardDeletedNodes(actorId: string): number {
+    const ids = Object.values(this.store.nodes)
+      .filter((node) => node.actorId === actorId && node.deletionStage === "hard_deleted")
+      .map((node) => node.id);
+    if (ids.length === 0) return 0;
+    const idSet = new Set(ids);
+    for (const id of ids) delete this.store.nodes[id];
+    for (const [edgeId, edge] of Object.entries(this.store.edges)) {
+      if (idSet.has(edge.from) || idSet.has(edge.to)) delete this.store.edges[edgeId];
+    }
+    this.schedulePersist();
+    return ids.length;
+  }
+
   private async runSleepCycle(actorId: string): Promise<HumanLikeMemorySleepReport> {
     const nodes = Object.values(this.store.nodes)
       .filter((node) => node.actorId === actorId && node.deletionStage !== "hard_deleted")
@@ -1808,7 +1847,7 @@ export class HumanLikeMemoryService {
       }
     }
 
-    const llmActions = await llmPlanSleepActions(actorId, nodes, this.policy);
+    const llmActions = await llmPlanSleepActions(actorId, this.llmPlannerWindow(actorId, nodes), this.policy);
     if (llmActions) actions.push(...llmActions);
 
     report.plannedActions = Math.min(actions.length, this.policy.sleepAgent.maxActionsPerRun);
@@ -1819,6 +1858,8 @@ export class HumanLikeMemoryService {
         report.executedActions += 1;
       }
     }
+
+    report.purgedHardDeleted = this.purgeHardDeletedNodes(actorId);
 
     const afterActive = Object.values(this.store.nodes).filter(
       (node) => node.actorId === actorId && node.deletionStage === "active",
@@ -1846,6 +1887,19 @@ export class HumanLikeMemoryService {
     const hasNodeIds = Array.isArray(nodeIds);
     if (!hasNodeId && !hasNodeIds) return false;
     if (hasNodeIds && nodeIds.length === 0) return false;
+    // 动作类型白名单：未知 type 此前会 fallthrough 到 bumpStageReport+return true，
+    // 没执行任何操作却计入 executedActions（报告失真），现直接拒绝不计入。
+    const nodeIdActionTypes: readonly string[] = [
+      "downrank",
+      "cold",
+      "soft_delete",
+      "hard_delete",
+      "decay_weight",
+      "mark_error",
+    ];
+    const nodeIdsActionTypes: readonly string[] = ["mark_conflict", "merge", "promote_knowledge"];
+    if (hasNodeId && !nodeIdActionTypes.includes(action.type)) return false;
+    if (hasNodeIds && !nodeIdsActionTypes.includes(action.type)) return false;
     if ("nodeId" in action) {
       const node = this.store.nodes[action.nodeId];
       if (!node) return false;

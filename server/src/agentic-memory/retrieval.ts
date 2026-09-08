@@ -115,6 +115,23 @@ export class AgenticMemoryRetrievalService {
   }
 
   /**
+   * 过滤已归档记忆（两阶段遗忘）：向量库记录尚存、侧表已标 archived_at 的
+   * 不再召回。bridge 融合召回也经由本服务的 searchStructured，此处过滤即全覆盖。
+   */
+  private filterArchived(items: Mem0SearchItem[]): Mem0SearchItem[] {
+    if (!isMemoryReinforcementEnabled() || items.length === 0) return items;
+    const store = getMemoryReinforcementStore();
+    if (!store) return items;
+    try {
+      const archived = store.getArchivedIds(items.map((item) => item.id).filter(Boolean));
+      if (archived.size === 0) return items;
+      return items.filter((item) => !archived.has(item.id));
+    } catch {
+      return items;
+    }
+  }
+
+  /**
    * 主流程使用的召回。默认仅查询 context=main（不混入笔记上下文）。
    * 跨上下文查询走 {@link buildCrossContextRecall}。
    *
@@ -140,7 +157,7 @@ export class AgenticMemoryRetrievalService {
       topK: searchTopK,
     })) as unknown as Mem0SearchResult;
 
-    const items = result.results ?? [];
+    const items = this.filterArchived(result.results ?? []);
     if (!items.length) return "";
 
     const now = Date.now();
@@ -213,7 +230,7 @@ export class AgenticMemoryRetrievalService {
       topK: searchTopK,
     })) as unknown as Mem0SearchResult;
 
-    const items = (result.results ?? []).filter((item) =>
+    const items = this.filterArchived(result.results ?? []).filter((item) =>
       contextMatches(item.metadata?.context, context),
     );
     if (!items.length) return [];

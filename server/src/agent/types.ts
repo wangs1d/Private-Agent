@@ -11,4 +11,9 @@ export type AgentReply = {
     question: string;
     options?: string[];
   };
+  /**
+   * 本轮实际发起过的工具调用摘要（toolName(参数要点)，onToolExecuteStart 采集，上限 12 条）。
+   * 后台任务升级段用它延续快通道的执行轨迹，避免整轮从零重跑（A2）。
+   */
+  attemptedToolCalls?: string[];
 };

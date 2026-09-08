@@ -35,8 +35,8 @@ class ScheduleFloatingWindow {
     COLORREF text_dim;        // dimTitle 完成标题
     COLORREF text_strike;     // dimStrike 完成删除线
     COLORREF time_dim;        // dimTime 完成时间
-    COLORREF accent;          // accent（深色皮肤为纯黑，见 _SchedSkin._dark）
-    COLORREF accent_soft;     // accentSoft「接下来·倒计时」/ NOW 文字 / done 计数
+    COLORREF accent;          // accent（深色皮肤对齐 titleText 浅白，见 _SchedSkin._dark）
+    COLORREF accent_soft;     // accentSoft「接下来·倒计时」/ done 计数
     COLORREF focus_border;    // focusBorder 混合后实色
     COLORREF focus_time;      // focusTime 焦点时间
     COLORREF focus_note;      // focusNote 焦点备注
@@ -58,7 +58,6 @@ class ScheduleFloatingWindow {
     COLORREF needle;          // now 游标
     COLORREF needle_glow;     // now 游标光晕
     COLORREF tick_label;      // tickLabel 刻度标签
-    COLORREF now_tag_bg;      // NOW 标签底 = accent 12% 混入卡底
     COLORREF all_done_fill;   // 完成横幅底 = dotGreen 8% 混入卡底
     COLORREF all_done_border; // 完成横幅描边 = dotGreen 25% 混入卡底
     COLORREF all_done_text;   // 完成横幅文字 = dotGreen

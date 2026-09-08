@@ -16,7 +16,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { hasCommitmentClaim, isDeflectionStyleFallback } = await import(
+const { isDeflectionStyleFallback } = await import(
   "../src/agent/commitment-gate.js"
 );
 const {
@@ -57,13 +57,14 @@ test("P0 闪避闸：正常闲聊与直答不命中（不误伤）", () => {
   }
 });
 
-test("P0 闪避闸与承诺闸互补：同一回复不同时命中两类", () => {
+test("P0 闪避闸独立生效：闪避命中、完成承诺话术不误伤", () => {
   const deflection = "我手上没实时数据，没法瞎报，让系统去查一下吧";
   const commitment = "已经帮你设置好了提醒";
   assert.equal(isDeflectionStyleFallback(deflection), true);
-  assert.equal(hasCommitmentClaim(deflection), false);
-  assert.equal(hasCommitmentClaim(commitment), true);
   assert.equal(isDeflectionStyleFallback(commitment), false);
+  // 2026-09-08：原「承诺闸」hasCommitmentClaim 及出口自动补派已删除
+  // （闲聊记忆话术「记下了」被误判空口承诺，把「刘浩存才是真主 未来的老婆」
+  // 派成了说媒任务）。承诺诚实由提示词约束 + 中断轮次兜底记账承担。
 });
 
 /* ── P1：渠道会话隔离 ───────────────────────────────────────────── */

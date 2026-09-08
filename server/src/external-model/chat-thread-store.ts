@@ -484,15 +484,75 @@ function normalizeRecapLine(line: string): string {
   return line.replace(/\s+/g, " ").trim();
 }
 
+/** 行首项目符号与时间标签（"- [2026/09/08 周二 14:32] " / "[早期]"），事件级去重时剥离。 */
+const RECAP_LINE_PREFIX_RE = /^\s*(?:[-*•]\s*)?(?:\[[^\]]*\]\s*)?/;
+
+/** 剥掉项目符号与行首时间标签后的内容键（同一事件换时间戳/换措辞仍可对上）。 */
+function recapContentKey(line: string): string {
+  return normalizeRecapLine(line.replace(RECAP_LINE_PREFIX_RE, ""));
+}
+
+/**
+ * 事件级去重阈值（2026-09-08，用当晚事故实录标定）：
+ * 同一事件被 LLM 改写/重盖时间戳后再产出（「用户请求12点会议提醒」→
+ * 「用户重复请求…被打断未完成」）实测覆盖率 0.79-0.97、重合度 0.59-0.95；
+ * 真实不同事件（景甜 vs 刘浩存、睡觉 vs 会议）实测覆盖率 ≤0.73、重合度 ≤0.39。
+ * 双条件同时过线才判重复，两个方向都留有余量。
+ */
+const RECAP_DUP_MIN_COVERAGE = 0.75;
+const RECAP_DUP_MIN_DICE = 0.5;
+/** 短行不参与模糊去重（避免误并两条本来就不同的短事实）。 */
+const RECAP_LINE_DUP_MIN_CHARS = 12;
+
+function recapCharGrams(text: string): Set<string> {
+  const out = new Set<string>();
+  for (let i = 0; i < text.length - 1; i++) out.add(text.slice(i, i + 2));
+  return out;
+}
+
+function recapGramStats(a: string, b: string): { coverage: number; dice: number } {
+  const ga = recapCharGrams(a);
+  const gb = recapCharGrams(b);
+  if (ga.size === 0 || gb.size === 0) return { coverage: 0, dice: 0 };
+  let shared = 0;
+  for (const g of ga) if (gb.has(g)) shared++;
+  const minSize = Math.min(ga.size, gb.size);
+  return {
+    coverage: shared / minSize,
+    dice: (2 * shared) / (ga.size + gb.size),
+  };
+}
+
+/**
+ * 追加一行摘要/待归纳行，事件级去重（2026-09-08）：
+ * - 精确：剥掉行首时间标签 + 空白归一后完全一致；
+ * - 模糊：内容键（剥时间标签）之间的字符覆盖率与重合度双超标（同一事件被
+ *   LLM 换措辞/重盖当前时间戳后再次产出——实测「用户请求12点会议提醒」在
+ *   00:29/00:30/00:31 被以「重复请求/再次重复请求…」三度入区，诱使 agent
+ *   反复重问已办成的事）。
+ * 重复时丢弃新行、保留先入行（先入行已在线程内被后续轮次引用过，更稳定）。
+ */
 function pushRecapLine(target: string[], line: string): void {
   const normalized = normalizeRecapLine(line);
   if (!normalized) return;
-  if (target.includes(normalized)) return;
+  const key = recapContentKey(normalized);
+  if (!key) return;
+  if (key.length >= RECAP_LINE_DUP_MIN_CHARS) {
+    for (const existing of target) {
+      const existingKey = recapContentKey(existing);
+      if (!existingKey || existingKey.length < RECAP_LINE_DUP_MIN_CHARS) continue;
+      if (existingKey === key) return;
+      const { coverage, dice } = recapGramStats(existingKey, key);
+      if (coverage >= RECAP_DUP_MIN_COVERAGE && dice >= RECAP_DUP_MIN_DICE) return;
+    }
+  } else {
+    if (target.some((existing) => recapContentKey(existing) === key)) return;
+  }
   target.push(normalized);
 }
 
-/** 去重合并两列 recap 行，返回新数组（保持顺序：前者在前）。 */
-function pushRecapLinesUnique(base: string[], extra: string[]): string[] {
+/** 去重合并两列 recap 行，返回新数组（保持顺序：前者在前）。导出供回归测试锁定事件级去重契约。 */
+export function pushRecapLinesUnique(base: string[], extra: string[]): string[] {
   const merged = [...base];
   for (const line of extra) pushRecapLine(merged, line);
   return merged;
@@ -720,6 +780,49 @@ function hasToolCalls(msg: ChatCompletionMessageParam): boolean {
 }
 
 /**
+ * 未完成工具链的事实化占位文本（2026-09-08）：列出该链已调用的工具与结果摘要，
+ * 并显式约束后续模型不得把本轮当作用户重复请求或悬空未办事项。
+ */
+function buildInterruptedToolChainNotice(
+  msgs: ChatCompletionMessageParam[],
+  start: number,
+  end: number,
+): string {
+  const toolNames: string[] = [];
+  const resultSnippets: string[] = [];
+  for (let k = start; k < end && k < msgs.length; k++) {
+    const m = msgs[k];
+    if (!m) continue;
+    if (m.role === "assistant" && hasToolCalls(m)) {
+      for (const tc of (m as { tool_calls?: Array<{ function?: { name?: string } }> }).tool_calls ?? []) {
+        const name = tc?.function?.name?.trim();
+        if (name) toolNames.push(name);
+      }
+    } else if (m.role === "tool") {
+      const raw = typeof m.content === "string" ? m.content.trim() : "";
+      if (raw) {
+        const firstLine = raw.split("\n")[0]?.replace(/\s+/g, " ").trim() ?? "";
+        if (firstLine) resultSnippets.push(firstLine.slice(0, 80));
+      }
+    }
+  }
+  const parts: string[] = ["[上一轮回复中断：最终回复未生成完整。"];
+  if (toolNames.length > 0) {
+    parts.push(`期间已调用工具 ${toolNames.join("、")}（共 ${toolNames.length} 次）`);
+    if (resultSnippets.length > 0) {
+      parts.push(`，收到结果：${resultSnippets.join("；")}。`);
+    } else {
+      parts.push("（结果未回传）。");
+    }
+    parts.push("这些动作可能已实际生效——引用本事项前先查证实际状态，");
+  } else {
+    parts.push("未产生任何工具动作。");
+  }
+  parts.push("不要把它当作用户重复请求或未处理的悬空事项重新提起。]");
+  return parts.join("");
+}
+
+/**
  * 移除会话中间（index > 0）的 transient system 消息，只保留 msgs[0] 的主 system prompt。
  * tool loop 会把「工具调用原则」等临时指令 push 进 messages（即 thread 数组），
  * 若不清理会逐轮累积，污染后续轮次的对话历史，导致 LLM 丢失对前文的感知。
@@ -787,10 +890,13 @@ export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boo
       }
 
       // 未完成的 tool_call 链：assistant(tool_calls) → tool*（无后续 assistant content）
+      // 2026-09-08：占位符必须携带已执行的工具事实——空话式「未生成完整回复」会
+      // 被 recap 记成「用户重复请求…未完成」，诱导 agent 反复重问已办成的事
+      // （实测：两条提醒已创建成功，agent 却在后续轮次反复追问「要提前多久叫你」）。
       result.push({
         role: "assistant",
         content: annotateTimeframe(
-          "[上一轮工具调用尚未完成即被新消息打断，未生成完整回复]",
+          buildInterruptedToolChainNotice(msgs, i, j),
           new Date(),
           new Date(),
         ),
@@ -1260,6 +1366,28 @@ export class ChatThreadStore {
       msgs.push(userMsg);
     }
     msgs.push({ role: "assistant", content: annotateTimeframe(trimmed, assistantAt, now) });
+    this.trimThread(msgs, maxThreadMessages, sessionId);
+    this.persistence?.scheduleSave(sessionId, msgs);
+  }
+
+  /**
+   * 后台任务的单条事实记录（2026-09-08）：assistant 角色、带时间戳帧。
+   * 单条消息而非 user/assistant 对——见 AbstractChatProvider.appendTaskRecord 注释。
+   */
+  appendTaskRecord(
+    sessionId: string,
+    defaultSystemPrompt: string,
+    goal: string,
+    resultText: string,
+    maxThreadMessages?: number,
+  ): void {
+    const trimmedResult = resultText.trim();
+    if (!trimmedResult && !goal.trim()) return;
+    const msgs = this.thread(sessionId, defaultSystemPrompt);
+    const now = new Date();
+    const goalLine = goal.replace(/\s+/g, " ").trim().slice(0, 200);
+    const content = `[后台任务记录] 目标：${goalLine || "未命名任务"}\n结果：${trimmedResult || "（无结果）"}`;
+    msgs.push({ role: "assistant", content: annotateTimeframe(content, now, now) });
     this.trimThread(msgs, maxThreadMessages, sessionId);
     this.persistence?.scheduleSave(sessionId, msgs);
   }

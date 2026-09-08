@@ -12,57 +12,56 @@ namespace {
 // 双主题调色板：逐字段对齐 right_side_panel.dart 的 _SchedSkin._dark /
 // _SchedSkin._warm（docs/design/today-schedule-redesign）。
 // Flutter 侧的半透明色（ARGB）按「alpha 混入对应底层」预计算为 GDI 实色：
-//   深色底 = surfaceContainer #1C1C1C 上叠 cardFill(白3%) → #222222
+//   深色底 = surfaceContainer #1C1C1C 上叠 cardFill(白10%) → #333333
 //   浅色底 = surfaceContainer #F6F8FC 上叠 cardFill(纯白) → #FFFFFF
 // 这样悬浮窗整体渲染色与 in-app 卡片逐层叠加后的最终效果一致。
 // ═══════════════════════════════════════════════════════════════════
 
 const ScheduleFloatingWindow::Palette kDarkPalette = {
-    /*.surface_bg       =*/ RGB(34, 34, 34),      // cardFill 白3% over #1C1C1C
-    /*.border           =*/ RGB(50, 50, 50),      // cardBorder 白7% over 卡底
+    /*.surface_bg       =*/ RGB(51, 51, 51),      // cardFill 白10% over #1C1C1C
+    /*.border           =*/ RGB(65, 65, 65),      // cardBorder 白7% over 卡底
     /*.text_primary     =*/ RGB(232, 232, 232),   // titleText #E8E8E8
     /*.text_body        =*/ RGB(222, 222, 222),   // bodyText #DEDEDE
     /*.text_secondary   =*/ RGB(152, 152, 152),   // mutedText #989898
     /*.text_dim         =*/ RGB(92, 96, 102),     // dimTitle #5C6066
-    /*.text_strike      =*/ RGB(83, 83, 83),      // dimStrike 白22% over 卡底
+    /*.text_strike      =*/ RGB(96, 96, 96),      // dimStrike 白22% over 卡底
     /*.time_dim         =*/ RGB(78, 81, 87),      // dimTime #4E5157
-    /*.accent           =*/ RGB(0, 0, 0),         // accent #000000
-    /*.accent_soft      =*/ RGB(0, 0, 0),         // accentSoft #000000
-    /*.focus_border     =*/ RGB(24, 24, 24),      // focusBorder 黑30% over 卡底
+    /*.accent           =*/ RGB(232, 232, 232),   // accent #E8E8E8（深色皮肤对齐 titleText 浅白）
+    /*.accent_soft      =*/ RGB(232, 232, 232),   // accentSoft #E8E8E8
+    /*.focus_border     =*/ RGB(92, 92, 92),      // focusBorder 白20% over 卡底
     /*.focus_time       =*/ RGB(234, 253, 255),   // focusTime #EAFDFF
     /*.focus_note       =*/ RGB(143, 166, 173),   // focusNote #8FA6AD
-    /*.dot_blue         =*/ RGB(0, 0, 0),         // dotBlue #000000
+    /*.dot_blue         =*/ RGB(91, 141, 239),    // dotBlue #5B8DEF
     /*.dot_amber        =*/ RGB(242, 185, 75),    // dotAmber #F2B94B
-    /*.dot_green        =*/ RGB(0, 0, 0),         // dotGreen #000000
+    /*.dot_green        =*/ RGB(47, 174, 132),    // dotGreen #2FAE84
     /*.dot_gray         =*/ RGB(138, 143, 150),   // dotGray #8A8F96
-    /*.glow_blue        =*/ RGB(28, 28, 28),      // dotBlue 18% over 卡底
-    /*.glow_amber       =*/ RGB(71, 61, 41),      // dotAmber 18% over 卡底
-    /*.glow_green       =*/ RGB(28, 28, 28),      // dotGreen 18% over 卡底
-    /*.glow_gray        =*/ RGB(53, 54, 55),      // dotGray 18% over 卡底
-    /*.glow_accent      =*/ RGB(22, 22, 22),      // accent 35% over 卡底
+    /*.glow_blue        =*/ RGB(58, 67, 85),      // dotBlue 18% over 卡底
+    /*.glow_amber       =*/ RGB(85, 75, 55),      // dotAmber 18% over 卡底
+    /*.glow_green       =*/ RGB(50, 73, 66),      // dotGreen 18% over 卡底
+    /*.glow_gray        =*/ RGB(67, 68, 69),      // dotGray 18% over 卡底
+    /*.glow_accent      =*/ RGB(114, 114, 114),   // accent 35% over 卡底
     /*.dot_done_fill    =*/ RGB(58, 61, 66),      // doneDotFill #3A3D42
     /*.dot_done_ring    =*/ RGB(107, 112, 118),   // doneDotRing #6B7076
-    /*.timeline_line    =*/ RGB(54, 54, 54),      // line 白9% over 卡底
-    /*.track            =*/ RGB(50, 50, 50),      // 轨道 白7% over 卡底
-    /*.elapsed_start    =*/ RGB(57, 57, 57),      // 已流逝段 白10% over 卡底
-    /*.elapsed_end      =*/ RGB(79, 79, 79),      // 已流逝段 #A3A3A3 35% over 卡底
+    /*.timeline_line    =*/ RGB(69, 69, 69),      // line 白9% over 卡底
+    /*.track            =*/ RGB(65, 65, 65),      // 轨道 白7% over 卡底
+    /*.elapsed_start    =*/ RGB(71, 71, 71),      // 已流逝段 白10% over 卡底
+    /*.elapsed_end      =*/ RGB(90, 90, 90),      // 已流逝段 #A3A3A3 35% over 卡底
     /*.needle           =*/ RGB(242, 245, 249),   // now 游标 #F2F5F9
-    /*.needle_glow      =*/ RGB(3, 3, 3),         // 游标光晕 黑90% over 卡底
+    /*.needle_glow      =*/ RGB(5, 5, 5),         // 游标光晕 黑90% over 卡底
     /*.tick_label       =*/ RGB(85, 89, 95),      // tickLabel #55595F
-    /*.now_tag_bg       =*/ RGB(30, 30, 30),      // NOW 底 accent 12% over 卡底
-    /*.all_done_fill    =*/ RGB(31, 31, 31),      // 完成横幅底 dotGreen 8% over 卡底
-    /*.all_done_border  =*/ RGB(26, 26, 26),      // 完成横幅描边 dotGreen 25% over 卡底
-    /*.all_done_text    =*/ RGB(0, 0, 0),         // 完成横幅文字 dotGreen
-    /*.btn_bg           =*/ RGB(38, 38, 40),      // 顶栏按钮底（in-app 无对应）
-    /*.btn_border       =*/ RGB(58, 58, 62),      // 顶栏按钮描边
+    /*.all_done_fill    =*/ RGB(51, 61, 57),      // 完成横幅底 dotGreen 8% over 卡底
+    /*.all_done_border  =*/ RGB(50, 82, 71),      // 完成横幅描边 dotGreen 25% over 卡底
+    /*.all_done_text    =*/ RGB(47, 174, 132),    // 完成横幅文字 dotGreen
+    /*.btn_bg           =*/ RGB(55, 55, 57),      // 顶栏按钮底（in-app 无对应，随卡底提亮）
+    /*.btn_border       =*/ RGB(75, 75, 79),      // 顶栏按钮描边
     /*.btn_text         =*/ RGB(222, 222, 222),   // 顶栏按钮文字
-    /*.chip_grad_top    =*/ RGB(62, 62, 62),      // chipGradient[0] 灰22% over 卡底
-    /*.chip_grad_bottom =*/ RGB(57, 57, 57),      // chipGradient[1] 灰18% over 卡底
-    /*.focus_grad_top    =*/ RGB(30, 30, 30),     // focusGradient[0] 黑13% over 卡底
-    /*.focus_grad_bottom =*/ RGB(32, 32, 32),     // focusGradient[1] 黑7% over 卡底
-    /*.empty_icon_border =*/ RGB(27, 27, 27),     // accent 22% over 卡底
-    /*.empty_bar         =*/ RGB(19, 19, 19),     // accent 45% over 卡底
-    /*.empty_cell        =*/ RGB(74, 74, 74),     // emptyCell 白18% over 卡底
+    /*.chip_grad_top    =*/ RGB(76, 76, 76),      // chipGradient[0] 灰22% over 卡底
+    /*.chip_grad_bottom =*/ RGB(69, 69, 69),      // chipGradient[1] 灰18% over 卡底
+    /*.focus_grad_top    =*/ RGB(67, 67, 67),     // focusGradient[0] 白8% over 卡底
+    /*.focus_grad_bottom =*/ RGB(59, 59, 59),     // focusGradient[1] 白4% over 卡底
+    /*.empty_icon_border =*/ RGB(91, 91, 91),     // accent 22% over 卡底
+    /*.empty_bar         =*/ RGB(132, 132, 132),  // accent 45% over 卡底
+    /*.empty_cell        =*/ RGB(88, 88, 88),     // emptyCell 白18% over 卡底
 };
 
 const ScheduleFloatingWindow::Palette kLightPalette = {
@@ -97,7 +96,6 @@ const ScheduleFloatingWindow::Palette kLightPalette = {
     /*.needle           =*/ RGB(35, 40, 51),      // now 游标 #232833
     /*.needle_glow      =*/ RGB(199, 162, 105),   // 游标光晕 #B98B43 80% over 白
     /*.tick_label       =*/ RGB(152, 162, 179),   // tickLabel #98A2B3
-    /*.now_tag_bg       =*/ RGB(247, 241, 232),   // NOW 底 accent 12% over 白
     /*.all_done_fill    =*/ RGB(238, 248, 245),   // 完成横幅底 dotGreen 8% over 白
     /*.all_done_border  =*/ RGB(203, 235, 224),   // 完成横幅描边 dotGreen 25% over 白
     /*.all_done_text    =*/ RGB(47, 174, 132),    // 完成横幅文字 dotGreen #2FAE84
@@ -117,8 +115,6 @@ const ScheduleFloatingWindow::Palette kLightPalette = {
 constexpr int kStripBarTop = 5;    // 日程带轨道在区块内的纵向偏移（逻辑 px）
 constexpr int kStripBarHeight = 4;
 constexpr int kNeedleHeight = 12;  // now 游标高（高出轨道两侧）
-constexpr int kNowTagWidth = 32;   // NOW 标签宽
-constexpr int kNowTagHeight = 14;  // NOW 标签高
 constexpr int kButtonZoneWidth = 58;  // 顶栏右侧按钮占位（22+6+22+8）
 constexpr int kEmptyBlockHeight = 124;  // 空态区块高（插画+文案）
 
@@ -855,25 +851,15 @@ void ScheduleFloatingWindow::DrawTimeline(HDC hdc, int y, int width,
       DrawCircle(hdc, line_x, center_y, Sd(3.5), c);
     }
 
-    // 标题（完成态划线变淡；下一事项加粗高亮 + NOW 标签）
-    int title_right = right;
-    if (is_next) title_right = right - S(kNowTagWidth + 6);
+    // 标题（完成态划线变淡；下一事项加粗高亮）
     RECT title_rc = {line_x + S(kNodeColWidth) / 2 + 1, row_y + S(3),
-                     title_right, row_y + S(3) + S(17)};
+                     right, row_y + S(3) + S(17)};
     DrawUiText(hdc, title_rc, Utf8ToWide(item.title),
                item.completed ? font_strike_
                               : (is_next ? font_time_ : font_ui_),
                item.completed ? pal().text_dim
                               : (is_next ? pal().text_primary : pal().text_body),
                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-
-    if (is_next) {
-      RECT tag = {right - S(kNowTagWidth), center_y - S(kNowTagHeight) / 2,
-                  right, center_y + S(kNowTagHeight) / 2};
-      DrawRoundedRect(hdc, tag, S(4), pal().now_tag_bg, 0);
-      DrawUiText(hdc, tag, L"NOW", font_caption_, pal().accent_soft,
-                 DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-    }
 
     row_y += h;
   }

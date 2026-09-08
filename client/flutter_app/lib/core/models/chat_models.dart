@@ -110,6 +110,11 @@ class ChatMessage {
     this.renderBlocks,
     this.replyBlocks,
     this.pendingMediaCards,
+    this.taskId,
+    this.taskState,
+    this.taskGoal,
+    this.taskProgress,
+    this.taskStartedAt,
   });
 
   final String messageId;
@@ -190,4 +195,31 @@ class ChatMessage {
   /// 前端把图插到正在打字的正文下方实时展示；`chat.assistant_done` 到达后
   /// 以 `renderBlocks` 的最终顺序渲染，此字段被清空。
   final List<Map<String, dynamic>>? pendingMediaCards;
+
+  // ===== 后台任务回执（contentType="task_receipt" 专用，2026-09-08）=====
+  //
+  // 前后台分工：task.dispatch 派发后台任务后，服务端以 chat.task_update 推送
+  // 生命周期变更，客户端在对话流内落一张轻量回执（原地更新，不持久化——
+  // 任务结果本身以 assistant 消息落位并持久化，回执只是进行中的“状态屏”）。
+
+  /// 后台任务 id（TaskHub taskId）。
+  final String? taskId;
+
+  /// 任务生命周期态：running / awaiting_input / done / failed / cancelled。
+  final String? taskState;
+
+  /// 任务目标（一句话自包含）。
+  final String? taskGoal;
+
+  /// 最近一条进度行（工具调用/排队提示）。
+  final String? taskProgress;
+
+  /// 任务提交时间 epoch ms（算“已运行 X 分钟”用）。
+  final int? taskStartedAt;
+
+  /// 是否终态（回执上不再显示取消入口）。
+  bool get isTaskTerminal {
+    final String? s = taskState;
+    return s == "done" || s == "failed" || s == "cancelled";
+  }
 }

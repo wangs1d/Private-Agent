@@ -381,7 +381,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
                     const SizedBox(height: 12),
                     if (!_useDesktopFloating) ...<Widget>[
                       _buildScheduleSection(),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 26),
                     ],
                     _buildToolsSection(cs),
                   ],
@@ -891,26 +891,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
                   ),
                 ),
               ),
-              if (isNext) ...<Widget>[
-                const SizedBox(width: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 5, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: skin.accent.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    "NOW",
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.5,
-                      color: skin.accentSoft,
-                    ),
-                  ),
-                ),
-              ],
             ],
           ),
         ),
@@ -1381,7 +1361,8 @@ class _SchedSkin {
   });
 
   final Color accent;
-  /// 在浅色底上可读的强调色（暖色主题下比 accent 更深一档）。
+  /// 在浅色底上可读的强调色（暖色主题下比 accent 更深一档；
+  /// 深色主题下与 titleText 同为浅白，避免纯黑文字在深底上不可见）。
   final Color accentSoft;
   final Color titleText;
   final Color bodyText;
@@ -1418,12 +1399,14 @@ class _SchedSkin {
       Theme.of(context).brightness == Brightness.dark ? _dark : _warm;
 
   static final _SchedSkin _dark = _SchedSkin(
-    accent: const Color(0xFF000000),
-    accentSoft: const Color(0xFF000000),
+    // 深色皮肤强调色对齐 titleText 浅白（原纯黑在深底上不可见）
+    accent: const Color(0xFFE8E8E8),
+    accentSoft: const Color(0xFFE8E8E8),
     titleText: const Color(0xFFE8E8E8),
     bodyText: const Color(0xFFDEDEDE),
     mutedText: const Color(0xFF989898),
-    cardFill: const Color(0x07FFFFFF),
+    // 卡底：surfaceContainer #1C1C1C 上叠白 10% → 渲染 #333333 浅灰
+    cardFill: const Color(0x1AFFFFFF),
     cardBorder: const Color(0x12FFFFFF),
     cardShadow: null,
     track: const Color(0x12FFFFFF),
@@ -1432,13 +1415,14 @@ class _SchedSkin {
     doneDotFill: const Color(0xFF3A3D42),
     doneDotRing: const Color(0xFF6B7076),
     line: const Color(0x17FFFFFF),
-    dotBlue: const Color(0xFF000000),
+    dotBlue: const Color(0xFF5B8DEF),
     dotAmber: const Color(0xFFF2B94B),
-    dotGreen: const Color(0xFF000000),
+    dotGreen: const Color(0xFF2FAE84),
     dotGray: const Color(0xFF8A8F96),
-    focusGradient: const <Color>[Color(0x21000000), Color(0x12000000)],
-    focusBorder: const Color(0x4D000000),
-    focusBorderHover: const Color(0x8C000000),
+    // 焦点卡：新卡底 #333333 上叠白 8%→4% → 渲染 #434343→#3B3B3B（略亮于卡底）
+    focusGradient: const <Color>[Color(0x14FFFFFF), Color(0x0AFFFFFF)],
+    focusBorder: const Color(0x33FFFFFF),
+    focusBorderHover: const Color(0x59FFFFFF),
     focusNote: const Color(0xFF8FA6AD),
     focusTime: const Color(0xFFEAFDFF),
     chipGradient: const <Color>[Color(0x38A3A3A3), Color(0x2EA3A3A3)],

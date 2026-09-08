@@ -37,6 +37,11 @@ import {
 import { handleAgentEmbodimentStateEvent } from "./handlers/agent-embodiment-state.js";
 import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.js";
 import { getTaskOutbox } from "../task-plane/task-outbox.js";
+import { getTaskHub } from "../task-plane/task-hub.js";
+import {
+  buildTaskUpdateEnvelope,
+  isTaskPlaneWsEventsEnabled,
+} from "../task-plane/task-events.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "../services/location-coordinator.js";
@@ -775,6 +780,17 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             // 离线结果重放（2026-09-08 outbox）：用户离线期间完成的任务面结果
             // 暂存于 TaskOutbox，重连时按 FIFO 原样重推，闭合「离线=结果丢失」缺口。
             getTaskOutbox().replayFor(actorId, socket);
+            // 活跃任务快照重播（2026-09-08 任务回执）：断线重连/换设备后，
+            // 客户端凭 running/awaiting_input 任务的幂等快照重建对话流内回执。
+            if (isTaskPlaneWsEventsEnabled()) {
+              for (const record of getTaskHub().activeRecords(actorId)) {
+                try {
+                  socket.send(buildTaskUpdateEnvelope(record));
+                } catch {
+                  /* 单条失败不影响其余快照 */
+                }
+              }
+            }
             // 早间简报：WS 连接建立时把 session 加入调度器，按用户偏好定时推送
             morningBriefingScheduler?.subscribe(actorId, getUserPreferences(actorId));
             // 晚间 digest（Task 15 生活节律）：连接建立时订阅，到点推送今日回顾+明日预告
@@ -1153,6 +1169,28 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               sendUnifiedError,
             },
             event.payload,
+          );
+          return;
+        }
+
+        if (event.type === ClientEventType.ChatTaskCancel) {
+          // 用户取消后台任务（对话流内任务回执上的取消入口）。
+          // 与「发送新消息打断前台回复」语义分离：只作用于任务面的这条任务。
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const cancelPl = (event.payload ?? {}) as Record<string, unknown>;
+          const cancelTaskId = String(cancelPl.taskId ?? "").trim();
+          if (!cancelTaskId) {
+            sendUnifiedError("BAD_REQUEST", "缺少 taskId");
+            return;
+          }
+          const cancelled =
+            runtime.cancelBackgroundTask?.(boundActorId, cancelTaskId) ?? false;
+          app.log.debug(
+            { actorId: boundActorId, taskId: cancelTaskId, cancelled },
+            "chat.task_cancel",
           );
           return;
         }

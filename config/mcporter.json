@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "yby6-video": {
-      "command": "C:/Users/lenovo/.local/bin/yby6_video_mcp_server.exe",
+      "command": "E:/ws-project/Private-Agent/server/tools/mcp/yby6-video/Scripts/yby6_video_mcp_server.exe",
       "args": [],
-      "description": "全网短视频去水印解析(抖音/小红书/快手/微博等20+平台)"
+      "description": "全网短视频去水印解析(抖音/小红书/快手/微博等20+平台)。PyPI 包 yby6-video-mcp-server 装在项目内 venv"
     }
   }
 }

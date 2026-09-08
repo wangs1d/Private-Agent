@@ -75,6 +75,12 @@ class ChatPage extends StatefulWidget {
 
     /// 「选择型卡片」按钮点击回调(可选;null 时仅在 UI 上锁定按钮)
     this.onUserAction,
+
+    /// 后台进行中的任务数（任务面回执聚合，状态带展示「N 个任务后台进行中」）
+    this.backgroundTaskCount = 0,
+
+    /// 取消后台任务回调（回执 hover 取消按钮；null 时仅展示无取消入口）
+    this.onCancelBackgroundTask,
   });
 
   final List<ChatMessage> messages;
@@ -142,6 +148,12 @@ class ChatPage extends StatefulWidget {
 
   /// 停止当前 agent 处理（由输入框的发送按钮在处理中态触发）
   final VoidCallback? onStopAgent;
+
+  /// 后台进行中的任务数（任务面回执聚合）
+  final int backgroundTaskCount;
+
+  /// 取消后台任务回调（回执 hover 取消按钮）
+  final void Function(String taskId)? onCancelBackgroundTask;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -771,12 +783,22 @@ class _ChatPageState extends State<ChatPage>
   /// - 长工具心跳带 percent 时附进度百分比 + 细进度条
   Widget _buildAgentStatusStrip(ColorScheme cs) {
     final String tool = widget.currentToolName?.trim() ?? "";
-    final bool active = widget.isAgentProcessing || tool.isNotEmpty;
+    // 前台轮次（流式回复/工具调用）与后台任务面（回执聚合）都会点亮状态条；
+    // 前台空闲时条上只显示「N 个任务后台进行中」——前后台分工后,
+    // 「没在流式回复」不再等于「没在干活」。
+    final bool foregroundActive =
+        widget.isAgentProcessing || tool.isNotEmpty;
+    final int bgCount = widget.backgroundTaskCount;
+    final bool active = foregroundActive || bgCount > 0;
     if (!active) {
       return const SizedBox.shrink();
     }
 
-    final String text = tool.isNotEmpty ? "正在调用：$tool" : _processingStatusText();
+    final String text = tool.isNotEmpty
+        ? "正在调用：$tool"
+        : foregroundActive
+            ? _processingStatusText()
+            : "$bgCount 个任务后台进行中";
     final int? percent = widget.agentStatusPercent;
 
     return Material(
@@ -800,11 +822,14 @@ class _ChatPageState extends State<ChatPage>
                 children: <Widget>[
                   // 思考动画首位:emotion-ball 小球,情绪跟随全局 MoodBridge
                   // (listening/thinking/speaking/happy/alert 自动换表情);
-                  // 工具调用中优先显示「检索资料」,挂载初期按思考/检索兜底。
+                  // 工具调用中优先显示「检索资料」,挂载初期按思考/检索兜底;
+                  // 仅后台任务活跃时按检索态(干活力反馈)。
                   MoodDrivenEmotionBall(
                     fallback: tool.isNotEmpty
                         ? EmotionBallIds.retrieving
-                        : EmotionBallIds.thinking,
+                        : foregroundActive
+                            ? EmotionBallIds.thinking
+                            : EmotionBallIds.retrieving,
                     toolOverride:
                         tool.isNotEmpty ? EmotionBallIds.retrieving : null,
                     size: 22,
@@ -831,6 +856,17 @@ class _ChatPageState extends State<ChatPage>
                       style: Theme.of(context).textTheme.labelSmall?.copyWith(
                             color: cs.primary,
                             fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ],
+                  // 前台处理中且后台还有任务时，附一个轻量计数提示
+                  if (bgCount > 0 && foregroundActive) ...<Widget>[
+                    const SizedBox(width: 10),
+                    Text(
+                      "另有 $bgCount 个后台任务",
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: cs.primary.withValues(alpha: 0.85),
+                            fontWeight: FontWeight.w600,
                           ),
                     ),
                   ],
@@ -915,6 +951,7 @@ class _ChatPageState extends State<ChatPage>
       onDeleteConfirm: _confirmDeleteSelection,
       onDeleteCancel: _cancelDeleteMode,
       onUserAction: widget.onUserAction,
+      onCancelBackgroundTask: widget.onCancelBackgroundTask,
     );
   }
 
@@ -1168,12 +1205,14 @@ class _ChatPageState extends State<ChatPage>
                         },
                         child: KeyedSubtree(
                           key: ValueKey<String>(
-                            widget.isAgentProcessing ||
+                            (widget.isAgentProcessing ||
                                     (widget.currentToolName?.trim()
                                         .isNotEmpty ??
-                                        false)
+                                        false))
                                 ? "status-${widget.currentToolName?.trim() ?? ""}"
-                                : "__idle__",
+                                : widget.backgroundTaskCount > 0
+                                    ? "status-bg"
+                                    : "__idle__",
                           ),
                           child: _buildAgentStatusStrip(cs),
                         ),
@@ -1531,6 +1570,9 @@ class _HoverableMessageWidget extends StatelessWidget {
 
     /// 「选择型卡片」按钮点击回调(可选,透传至内容渲染)
     this.onUserAction,
+
+    /// 取消后台任务回调（任务回执 hover 取消按钮）
+    this.onCancelBackgroundTask,
   });
 
   final ColorScheme cs;
@@ -1546,6 +1588,9 @@ class _HoverableMessageWidget extends StatelessWidget {
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
   final List<String> Function(String messageId)? onGetRelatedMessageIds;
+
+  /// 取消后台任务回调（任务回执 hover 取消按钮）
+  final void Function(String taskId)? onCancelBackgroundTask;
 
   /// 全局删除选择模式是否激活
   final bool deleteSelectionMode;
@@ -1603,6 +1648,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       onDeleteConfirm: onDeleteConfirm,
       onDeleteCancel: onDeleteCancel,
       onUserAction: onUserAction,
+      onCancelBackgroundTask: onCancelBackgroundTask,
     );
   }
 }
@@ -1632,6 +1678,7 @@ class _HoverableMessageContent extends StatefulWidget {
     required this.onDeleteConfirm,
     required this.onDeleteCancel,
     this.onUserAction,
+    this.onCancelBackgroundTask,
   });
 
   final ColorScheme cs;
@@ -1659,6 +1706,9 @@ class _HoverableMessageContent extends StatefulWidget {
   /// 「选择型卡片」按钮点击回调(透传至消息正文渲染)
   final void Function(AgentResultAction action,
       {required AgentResultData cardData})? onUserAction;
+
+  /// 取消后台任务回调（任务回执 hover 取消按钮）
+  final void Function(String taskId)? onCancelBackgroundTask;
 
   @override
   State<_HoverableMessageContent> createState() =>
@@ -1783,11 +1833,20 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   Widget _buildMessageRow(BuildContext context) {
     // 给气泡加个最大宽度限制（屏宽 72%），避免长文本横向铺满整行。
     // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
+    final bool isTaskReceipt =
+        widget.mainMessage.contentType == "task_receipt";
     final bool isVoiceMessage = widget.mainMessage.contentType == "audio" &&
         widget.mainMessage.attachments.any(
             (MessageAttachment a) => a.type == MessageAttachmentType.audio);
     final Widget bubble;
-    if (isVoiceMessage) {
+    if (isTaskReceipt) {
+      // 后台任务回执：轻量状态行（非 IM 气泡），hover 才浮现取消入口，
+      // 不打断对话流的阅读连续性（无缝形态的视觉兜底）。
+      bubble = _TaskReceiptBubble(
+        message: widget.mainMessage,
+        onCancel: widget.onCancelBackgroundTask,
+      );
+    } else if (isVoiceMessage) {
       final MessageAttachment audio = widget.mainMessage.attachments.firstWhere(
         (MessageAttachment a) => a.type == MessageAttachmentType.audio,
       );
@@ -2413,4 +2472,175 @@ Map<String, dynamic> _messageToGroup(ChatMessage msg) {
     "progress": null,
     "isProgress": false,
   };
+}
+
+/// 后台任务回执（contentType="task_receipt"，2026-09-08 前后台分工对话改造）。
+///
+/// 对话流内的轻量"状态屏"：非 IM 气泡——低对比底、细描边、一行目标 +
+/// 可选进度小字；hover 才浮现取消入口（平时零视觉噪音，不打断对话阅读）。
+/// 状态/进度由 `chat.task_update` 原地更新（main.dart 对同一 taskId 复用
+/// 同一 messageId，只替换消息对象）；结果真正落位后整条回执被移除。
+class _TaskReceiptBubble extends StatefulWidget {
+  const _TaskReceiptBubble({required this.message, this.onCancel});
+
+  final ChatMessage message;
+
+  /// 取消回调（null 时 hover 不出现取消入口，仅展示状态）
+  final void Function(String taskId)? onCancel;
+
+  @override
+  State<_TaskReceiptBubble> createState() => _TaskReceiptBubbleState();
+}
+
+class _TaskReceiptBubbleState extends State<_TaskReceiptBubble> {
+  bool _hovering = false;
+
+  static String _stateLabel(String? state) {
+    switch (state) {
+      case "running":
+        return "进行中";
+      case "awaiting_input":
+        return "等待输入";
+      case "done":
+        return "已完成";
+      case "failed":
+        return "失败";
+      case "cancelled":
+        return "已取消";
+      default:
+        return "任务";
+    }
+  }
+
+  /// 活跃任务的已运行时长（无 live 刷新：随每次 task_update 事件顺带更新）
+  String? _elapsedLabel(ChatMessage msg) {
+    if (msg.isTaskTerminal) return null;
+    final int? startedAt = msg.taskStartedAt;
+    if (startedAt == null || startedAt <= 0) return null;
+    final int mins = (DateTime.now().millisecondsSinceEpoch - startedAt) ~/ 60000;
+    if (mins < 1) return "刚刚开始";
+    if (mins < 60) return "已 $mins 分钟";
+    return "已 ${mins ~/ 60} 小时 ${mins % 60} 分";
+  }
+
+  Widget _statusIcon(ColorScheme cs, String? state) {
+    switch (state) {
+      case "done":
+        return Icon(Icons.check_circle_outline, size: 16, color: cs.primary);
+      case "failed":
+        return Icon(Icons.error_outline, size: 16, color: cs.error);
+      case "cancelled":
+        return Icon(Icons.cancel_outlined, size: 16, color: cs.onSurfaceVariant);
+      case "awaiting_input":
+        return Icon(Icons.help_outline, size: 16, color: cs.tertiary);
+      default:
+        // running / 未知态：细旋转指示（进行中的"呼吸感"）
+        return SizedBox(
+          width: 14,
+          height: 14,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+          ),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ChatMessage msg = widget.message;
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final bool active = !msg.isTaskTerminal;
+    final String goal =
+        (msg.taskGoal?.isNotEmpty == true) ? msg.taskGoal! : msg.text;
+    final String? progress =
+        active && (msg.taskProgress?.isNotEmpty == true) ? msg.taskProgress : null;
+    final String? elapsed = _elapsedLabel(msg);
+    final String trailing = elapsed ?? _stateLabel(msg.taskState);
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: Opacity(
+        opacity: active ? 1.0 : 0.75,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
+          decoration: BoxDecoration(
+            color: cs.onSurface.withValues(alpha: 0.035),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: <Widget>[
+              _statusIcon(cs, msg.taskState),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      goal,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: cs.onSurface.withValues(alpha: 0.85),
+                            fontWeight: FontWeight.w500,
+                            height: 1.25,
+                          ),
+                    ),
+                    if (progress != null) ...<Widget>[
+                      const SizedBox(height: 2),
+                      Text(
+                        progress,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(color: cs.onSurfaceVariant),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                trailing,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: cs.onSurfaceVariant.withValues(alpha: 0.9),
+                    ),
+              ),
+              // hover 才出现的取消入口：与「发送新消息打断前台回复」分离——
+              // 这里只取消任务面的这一条任务
+              if (active && widget.onCancel != null && _hovering) ...<Widget>[
+                const SizedBox(width: 4),
+                SizedBox(
+                  width: 26,
+                  height: 26,
+                  child: IconButton(
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    iconSize: 15,
+                    tooltip: "取消此任务",
+                    icon: Icon(Icons.close_rounded,
+                        color: cs.onSurfaceVariant),
+                    onPressed: () {
+                      final String? taskId = msg.taskId;
+                      if (taskId != null && taskId.isNotEmpty) {
+                        widget.onCancel!(taskId);
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

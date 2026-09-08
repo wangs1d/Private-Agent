@@ -39,6 +39,20 @@ export type TaskPlaneRecord = {
 const TERMINAL_RETENTION_MS = 10 * 60_000;
 const MAX_RECORDS = 200;
 
+/**
+ * TaskHub 记录变更监听器（2026-09-08 对话面回执）：
+ *   - kind="submit"   任务派发（state=running）
+ *   - kind="state"    生命周期态迁移（done/failed/cancelled/awaiting_input…）
+ *   - kind="progress" 进度行更新（工具调用/排队提示）
+ * TaskHub 本身保持零 WS 依赖；广播由 agent-core 注入监听器实现
+ * （见 task-plane/task-events.ts），开关关闭时监听器为 null，行为与旧版一致。
+ */
+export type TaskHubChangeListenerKind = "submit" | "state" | "progress";
+export type TaskHubChangeListener = (
+  record: TaskPlaneRecord,
+  kind: TaskHubChangeListenerKind,
+) => void;
+
 function pruneExpired(records: Map<string, TaskPlaneRecord>): void {
   const now = Date.now();
   for (const [id, rec] of records) {
@@ -51,6 +65,20 @@ export class TaskHub {
   private readonly records = new Map<string, TaskPlaneRecord>();
   /** 提交序号：同毫秒提交时保证"最近任务"排序确定（startedAt 粒度不足） */
   private seq = 0;
+  private changeListener: TaskHubChangeListener | null = null;
+
+  /** 注入/清除记录变更监听器（null 清除）。重复注入覆盖前一个。 */
+  setChangeListener(listener: TaskHubChangeListener | null): void {
+    this.changeListener = listener;
+  }
+
+  private notify(record: TaskPlaneRecord, kind: TaskHubChangeListenerKind): void {
+    try {
+      this.changeListener?.(record, kind);
+    } catch {
+      /* 监听器异常不反噬任务记账 */
+    }
+  }
 
   submit(input: {
     taskId: string;
@@ -71,6 +99,7 @@ export class TaskHub {
     };
     this.records.set(record.taskId, record);
     if (this.records.size > MAX_RECORDS) pruneExpired(this.records);
+    this.notify(record, "submit");
     return record;
   }
 
@@ -79,6 +108,7 @@ export class TaskHub {
     if (!rec) return;
     rec.state = state;
     rec.updatedAt = Date.now();
+    this.notify(rec, "state");
   }
 
   setProgress(taskId: string, progressLine: string): void {
@@ -86,6 +116,7 @@ export class TaskHub {
     if (!rec) return;
     rec.progressLine = progressLine;
     rec.updatedAt = Date.now();
+    this.notify(rec, "progress");
   }
 
   get(taskId: string): TaskPlaneRecord | undefined {

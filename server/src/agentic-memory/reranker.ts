@@ -19,6 +19,7 @@
 import OpenAI from "openai";
 
 import {
+  getAgenticMemoryLlmModel,
   getMemoryRerankerApiKey,
   getMemoryRerankerEndpoint,
   getMemoryRerankerMode,
@@ -111,7 +112,10 @@ async function llmRerankScores(
   try {
     const client = opts.client ?? new OpenAI({ apiKey });
     const response = await client.chat.completions.create({
-      model: opts.model ?? getMemoryRerankerModel(),
+      // llm 档是 chat.completions 调用，默认必须用对话模型（AGENT_AGENTIC_MEMORY_LLM_MODEL
+      // → OPENAI_MODEL）；AGENT_MEMORY_RERANKER_MODEL 是 api 档的 rerank 模型名，
+      // 传给对话端点会被拒（每次调用都降级）
+      model: opts.model ?? getAgenticMemoryLlmModel(),
       temperature: 0,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },

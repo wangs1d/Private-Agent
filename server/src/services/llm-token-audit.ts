@@ -25,6 +25,8 @@ export type LlmAuditStage =
   | "commitment_extract"
   /** 统一结构化抽取（P1-6：决策+记忆+承诺+纠正 单次调用） */
   | "memory_unified_extract"
+  /** 记忆库 LLM 定期审查（lifecycle：过时/矛盾/冗余 → 归档） */
+  | "memory_llm_review"
   /** 记忆召回结果压缩（超阈值时） */
   | "recall_compress"
   /** 对话滚动摘要 / recap 增强（历史被 trim 丢弃时） */
@@ -41,6 +43,10 @@ export type LlmAuditStage =
   | "self_evolution"
   /** 代码修复 */
   | "code_repair"
+  /** 任务面后台任务（先轻后重段1：Flash 档 + 桥召回） */
+  | "task_plane_fast"
+  /** 任务面后台任务（升级段/完整通道：Pro 档） */
+  | "task_plane_complex"
   /** 其他（外部科技扫描等低频旁路） */
   | "other";
 
@@ -61,6 +67,10 @@ export type LlmUsageRecord = {
   promptCacheHitTokens?: number;
   /** API 真实返回的 prefix cache 未命中 token 数（DeepSeek prompt_cache_miss_tokens）。 */
   promptCacheMissTokens?: number;
+  /** API usage 真实返回的 prompt tokens（流末尾 usage；无 usage 时走字符估算）。 */
+  apiPromptTokens?: number;
+  /** API usage 真实返回的 completion tokens。 */
+  apiCompletionTokens?: number;
 };
 
 export type LlmUsageAggregate = {
@@ -70,6 +80,10 @@ export type LlmUsageAggregate = {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  /** 以下为 API usage 真实值聚合（仅带 usage 的主链路调用计入；估算值不混入）。 */
+  apiCalls: number;
+  apiInputTokens: number;
+  apiOutputTokens: number;
 };
 
 /** 简短环境信息，便于区分不同部署实例 */
@@ -125,7 +139,15 @@ export function recordLlmUsage(rec: Omit<LlmUsageRecord, "t" | "inputTokens" | "
     inputTokens,
     outputTokens,
     totalTokens: inputTokens + outputTokens,
+    apiCalls: 0,
+    apiInputTokens: 0,
+    apiOutputTokens: 0,
   };
+  if (typeof rec.apiPromptTokens === "number" || typeof rec.apiCompletionTokens === "number") {
+    aggregate.apiCalls = 1;
+    aggregate.apiInputTokens = rec.apiPromptTokens ?? 0;
+    aggregate.apiOutputTokens = rec.apiCompletionTokens ?? 0;
+  }
   const key = rec.stage;
   const prev = AGG_BUCKETS.get(key);
   if (prev) {
@@ -135,6 +157,9 @@ export function recordLlmUsage(rec: Omit<LlmUsageRecord, "t" | "inputTokens" | "
     prev.inputTokens += inputTokens;
     prev.outputTokens += outputTokens;
     prev.totalTokens += aggregate.totalTokens;
+    prev.apiCalls += aggregate.apiCalls;
+    prev.apiInputTokens += aggregate.apiInputTokens;
+    prev.apiOutputTokens += aggregate.apiOutputTokens;
   } else {
     AGG_BUCKETS.set(key, aggregate);
   }
@@ -148,12 +173,16 @@ export function recordLlmUsage(rec: Omit<LlmUsageRecord, "t" | "inputTokens" | "
         t: new Date().toISOString(),
         inputTokens,
         outputTokens,
-        // 只落盘真实缓存值，undefined 不序列化
+        // 只落盘真实值，undefined 不序列化
         ...(typeof rec.promptCacheHitTokens === "number"
           ? { promptCacheHitTokens: rec.promptCacheHitTokens }
           : {}),
         ...(typeof rec.promptCacheMissTokens === "number"
           ? { promptCacheMissTokens: rec.promptCacheMissTokens }
+          : {}),
+        ...(typeof rec.apiPromptTokens === "number" ? { apiPromptTokens: rec.apiPromptTokens } : {}),
+        ...(typeof rec.apiCompletionTokens === "number"
+          ? { apiCompletionTokens: rec.apiCompletionTokens }
           : {}),
       }) + "\n",
     );
@@ -176,6 +205,10 @@ export function recordLlmUsageByChars(args: {
   promptCacheHitTokens?: number;
   /** API 真实返回的 prefix cache 未命中 token 数（可选） */
   promptCacheMissTokens?: number;
+  /** API usage 真实 prompt tokens（可选，优先于字符估算用于计费分析） */
+  apiPromptTokens?: number;
+  /** API usage 真实 completion tokens（可选） */
+  apiCompletionTokens?: number;
 }): void {
   recordLlmUsage({
     stage: args.stage,
@@ -186,6 +219,8 @@ export function recordLlmUsageByChars(args: {
     model: args.model,
     promptCacheHitTokens: args.promptCacheHitTokens,
     promptCacheMissTokens: args.promptCacheMissTokens,
+    apiPromptTokens: args.apiPromptTokens,
+    apiCompletionTokens: args.apiCompletionTokens,
   });
 }
 
@@ -203,8 +238,19 @@ export function countChars(values: Array<string | null | undefined>): number {
 
 /**
  * 内存聚合快照：按环节输出占比（totalTokens 降序）。
+ * api* 字段为 API usage 真实值（仅带 usage 的调用计入）；估算值与真实值分列，不混算。
  */
-export function getLlmUsageSummary(): Array<{ stage: LlmAuditStage | string; calls: number; inputTokens: number; outputTokens: number; totalTokens: number; pct: number }> {
+export function getLlmUsageSummary(): Array<{
+  stage: LlmAuditStage | string;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  pct: number;
+  apiCalls: number;
+  apiInputTokens: number;
+  apiOutputTokens: number;
+}> {
   const rows = [...AGG_BUCKETS.entries()].map(([stage, agg]) => ({
     stage,
     calls: agg.calls,
@@ -212,6 +258,9 @@ export function getLlmUsageSummary(): Array<{ stage: LlmAuditStage | string; cal
     outputTokens: agg.outputTokens,
     totalTokens: agg.totalTokens,
     pct: 0,
+    apiCalls: agg.apiCalls ?? 0,
+    apiInputTokens: agg.apiInputTokens ?? 0,
+    apiOutputTokens: agg.apiOutputTokens ?? 0,
   }));
   const grand = rows.reduce((s, r) => s + r.totalTokens, 0);
   for (const r of rows) {
@@ -223,7 +272,7 @@ export function getLlmUsageSummary(): Array<{ stage: LlmAuditStage | string; cal
 /**
  * 从落盘 NDJSON 聚合（跨进程重启后仍可查）。文件不存在返回空数组。
  */
-export function getLlmUsageSummaryFromDisk(): Array<{ stage: string; calls: number; inputTokens: number; outputTokens: number; totalTokens: number; pct: number }> {
+export function getLlmUsageSummaryFromDisk(): Array<{ stage: string; calls: number; inputTokens: number; outputTokens: number; totalTokens: number; pct: number; apiCalls: number; apiInputTokens: number; apiOutputTokens: number }> {
   const path = auditLogPath();
   if (!existsSync(path)) return [];
   const map = new Map<string, LlmUsageAggregate>();
@@ -233,6 +282,8 @@ export function getLlmUsageSummaryFromDisk(): Array<{ stage: string; calls: numb
       try {
         const rec = JSON.parse(line) as LlmUsageRecord;
         const agg = map.get(rec.stage);
+        const hasApiUsage =
+          typeof rec.apiPromptTokens === "number" || typeof rec.apiCompletionTokens === "number";
         const add = {
           calls: 1,
           inputChars: rec.inputChars ?? 0,
@@ -240,6 +291,9 @@ export function getLlmUsageSummaryFromDisk(): Array<{ stage: string; calls: numb
           inputTokens: rec.inputTokens ?? 0,
           outputTokens: rec.outputTokens ?? 0,
           totalTokens: (rec.inputTokens ?? 0) + (rec.outputTokens ?? 0),
+          apiCalls: hasApiUsage ? 1 : 0,
+          apiInputTokens: rec.apiPromptTokens ?? 0,
+          apiOutputTokens: rec.apiCompletionTokens ?? 0,
         };
         if (agg) {
           agg.calls += add.calls;
@@ -248,6 +302,9 @@ export function getLlmUsageSummaryFromDisk(): Array<{ stage: string; calls: numb
           agg.inputTokens += add.inputTokens;
           agg.outputTokens += add.outputTokens;
           agg.totalTokens += add.totalTokens;
+          agg.apiCalls += add.apiCalls;
+          agg.apiInputTokens += add.apiInputTokens;
+          agg.apiOutputTokens += add.apiOutputTokens;
         } else {
           map.set(rec.stage, add);
         }
@@ -265,6 +322,9 @@ export function getLlmUsageSummaryFromDisk(): Array<{ stage: string; calls: numb
     outputTokens: agg.outputTokens,
     totalTokens: agg.totalTokens,
     pct: 0,
+    apiCalls: agg.apiCalls ?? 0,
+    apiInputTokens: agg.apiInputTokens ?? 0,
+    apiOutputTokens: agg.apiOutputTokens ?? 0,
   }));
   const grand = rows.reduce((s, r) => s + r.totalTokens, 0);
   for (const r of rows) {

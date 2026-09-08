@@ -105,39 +105,6 @@ String rightPanelTitle(RightPanelKind kind) {
   }
 }
 
-/// 从 payload 中提取可用的异步确认操作列表。
-List<String> confirmationActionsFor(Map<String, dynamic> payload) {
-  final List<dynamic> raw =
-      payload["availableActions"] as List<dynamic>? ?? <dynamic>[];
-  return raw
-      .map((dynamic item) => item.toString())
-      .where((String action) => action.isNotEmpty)
-      .toList();
-}
-
-/// 异步确认操作的展示标签。
-String asyncConfirmationActionLabel(
-  String action,
-  Map<String, dynamic> payload,
-) {
-  final String status = payload["status"]?.toString() ?? "";
-  switch (action) {
-    case "continue_processing":
-      return "继续处理";
-    case "retry":
-      return "失败重试";
-    case "confirm":
-      return status == "awaiting_confirmation" ? "取消" : "确认";
-    default:
-      return action;
-  }
-}
-
-/// 是否为主要异步确认操作（继续处理 / 失败重试）。
-bool isPrimaryAsyncConfirmationAction(String action) {
-  return action == "continue_processing" || action == "retry";
-}
-
 /// 移动端简报摘要文本。
 String buildMobileBriefingSummary(Map<String, dynamic> briefing) {
   final List<String> parts = <String>[];

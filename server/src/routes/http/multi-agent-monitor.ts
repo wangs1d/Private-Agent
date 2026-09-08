@@ -3,8 +3,10 @@
  *
  * 2026-08-29 架构收敛：master 委派层（MasterAgentCoordinator / 子 Agent 编排）已删除，
  * 任务轮统一走 plan-and-execute 全量工具循环。本文件原委派监控端点
- * （metrics / history / suggestions / concurrency / background-tasks / status）随层一并移除；
- * `/api/agent/async-center` 保留，`backgroundTasks` 通道恒为空（占位兼容旧客户端），
+ * （metrics / history / suggestions / concurrency / background-tasks / status）随层一并移除。
+ * 2026-09-08 彻底清除：`backgroundTasks` 通道占位与 `background_task` 动作分支
+ * 一并删除——后台任务的对客状态链路已由任务面接管（TaskHub → chat.task_update
+ * 广播 + chat.task_cancel 取消，见 task-plane/），HTTP 轮询/动作通道不再保留。
  * `scheduledAgentTasks`（定时任务）通道不受影响。
  */
 
@@ -47,20 +49,9 @@ function buildAsyncCenterPayload(
     sessionId,
     messageId: messageId ?? null,
     summary: {
-      runningBackgroundCount: 0,
-      completedBackgroundCount: 0,
-      reportCount: 0,
-      hasBackgroundWork: false,
-      hasStagedDialogue: true,
       scheduledAgentTaskCount: scheduledAgentTasks.length,
     },
     channels: {
-      backgroundTasks: {
-        running: [],
-        backgroundCompleted: [],
-        reports: [],
-        note: "master 委派层已下线；长任务由 plan-and-execute 统一执行",
-      },
       scheduledAgentTasks: {
         items: scheduledAgentTasks,
       },
@@ -72,10 +63,6 @@ function buildAsyncCenterPayload(
       },
     },
     routingGuide: {
-      backgroundTask:
-        "Use for long-running, detachable, independently deliverable work that should complete even if the user leaves the current chat.",
-      stagedDialogue:
-        "Use for short-running, context-heavy work that still belongs to the current conversation and benefits from step-by-step visible progress.",
       scheduledAgentTask:
         "Use for recurring or delayed agent work that should run again in the future and be managed from the async center.",
     },
@@ -89,7 +76,6 @@ export function registerMultiAgentMonitorRoutes(
   /**
    * GET /api/agent/async-center?sessionId=&messageId=
    * 统一异步中心聚合接口：
-   * - backgroundTasks: 恒为空（master 委派层已下线）
    * - scheduledAgentTasks: 定时/周期任务
    * - stagedDialogue: 客户端根据 chat.turn_* 事件流渲染的分阶段对话
    */
@@ -130,13 +116,6 @@ export function registerMultiAgentMonitorRoutes(
     }
     if (!runtime) {
       return reply.code(503).send({ ok: false, error: "Agent Runtime 未就绪" });
-    }
-
-    if (channel === "background_task") {
-      return reply.code(410).send({
-        ok: false,
-        error: "background_task 通道已下线（master 委派层已删除）",
-      });
     }
 
     if (channel === "scheduled_agent_task") {

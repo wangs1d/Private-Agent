@@ -137,6 +137,16 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     );
   }
 
+  /**
+   * 后台任务的单条事实记录（2026-09-08）：assistant 角色、带「[后台任务记录]」前缀，
+   * 取代旧的「伪造 user 轮 [后台任务] <原文> + assistant 回复对」。user 轮会让
+   * 后续对话把任务原文当作用户说过的话接茬（把「刘浩存才是真主 未来的老婆」
+   * 接成说媒拒绝的事故根因之一）。
+   */
+  appendTaskRecord(sessionId: string, goal: string, resultText: string): void {
+    this.threads.appendTaskRecord(sessionId, this.systemPrompt, goal, resultText);
+  }
+
   protected thread(sessionId: string): ChatCompletionMessageParam[] {
     return this.threads.thread(sessionId, this.systemPrompt);
   }
@@ -315,12 +325,29 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     // ── 工具分支 ──
     if (tools && toolPlan && toolSearchPrepared) {
       let completed = false;
+      // 已流式送达用户的内容累计（2026-09-08 中断记账）：异常/中断时用于
+      // 「保留现场」——用户亲眼看到的回复必须落进 thread。此前整体回滚
+      // （msgs.length = turnStartLen）会让 thread 与用户所见分叉：实测一轮
+      // 成功流式的回复中断后，thread 里只剩「未生成完整回复」占位符，
+      // recap 把已办成的事记成反复未完成，agent 据此反复重问。
+      let streamedVisible = "";
+      const trackingDelta: StreamDeltaHandler = (delta: string) => {
+        if (!delta) {
+          onDelta(delta);
+          return;
+        }
+        streamedVisible += delta;
+        onDelta(delta);
+      };
+      const hasToolCallPayload = (m: ChatCompletionMessageParam): boolean =>
+        Array.isArray((m as { tool_calls?: unknown }).tool_calls) &&
+        ((m as { tool_calls?: unknown[] }).tool_calls as unknown[]).length > 0;
       try {
         const full = await streamCompletionWithTools(
           client,
           model,
           llmView,
-          onDelta,
+          trackingDelta,
           tools,
           {
             onAfterToolBatch: effectiveStreamOpts.toolLoop?.onAfterToolBatch,
@@ -341,7 +368,12 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             // 工具循环内的 LLM 流式请求（规划轮 + 总结轮）一并中断，
             // 不再吃满 SDK 默认超时（与非工具分支对齐）。
             signal: effectiveStreamOpts.signal,
-            audit: { sessionId, stage: "main_chat" },
+            audit: {
+              sessionId,
+              // B1 stage 打标：任务面透传 task_plane_*；缺省 = 前台工具循环 main_chat_tools
+              // （该 stage 此前已声明但从未被写入，工具循环的用量一直混在 main_chat 里）。
+              stage: (streamOpts?.auditStage as Parameters<typeof recordLlmUsageByChars>[0]["stage"] | undefined) ?? "main_chat_tools",
+            },
           },
         );
         completed = true;
@@ -354,13 +386,30 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
               if (m && !llmViewLiveObjects.has(m)) msgs.push(m);
             }
           }
+          // 中断兜底（2026-09-08）：循环正常返回但回写内容里没有最终 assistant 正文
+          // （如末轮流被中断、循环内部吞掉流异常后返回）时，用已送达的部分文本补一条
+          // assistant 消息，保证「用户看到的」=「thread 记录的」，且 fold 后不留
+          // 「未生成完整回复」空占位。
+          const hasFinalAssistant = msgs
+            .slice(turnStartLen)
+            .some((m) => m.role === "assistant" && !hasToolCallPayload(m));
+          if (!hasFinalAssistant && streamedVisible.trim()) {
+            msgs.push({ role: "assistant", content: streamedVisible.trim() });
+          }
           this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
           this.threads.afterTurnCompleted(sessionId, msgs);
         }
         return full;
       } catch (e) {
         if (!completed && !ephemeral) {
-          msgs.length = turnStartLen;
+          if (streamedVisible.trim()) {
+            // 用户已看到部分回复：保留现场而非整体回滚（用户消息 + 工具记录 +
+            // 部分回复一并留存），与客户端所见保持一致。fold 会把工具链折叠到
+            // 这条部分回复上，占位符不再出现。
+            msgs.push({ role: "assistant", content: streamedVisible.trim() });
+          } else {
+            msgs.length = turnStartLen;
+          }
         }
         throw e;
       }
@@ -394,6 +443,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     }
 
     let visible = "";
+    // 已流式送达用户的内容累计（2026-09-08 中断记账，与工具分支同语义）
+    let streamedVisible = "";
     // API 流末尾 chunk 返回的 prefix cache 计费数据（scope 提升供下方 token 审计采集）
     let streamUsage: NormalUsage | undefined;
     try {
@@ -410,7 +461,10 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             // 2026-08-29 扩展：再叠一层元术语整句过滤（"上一轮转入规划任务..."），
             // 兜底 LLM 在流式中把系统元描述整段写进回复。
             const clean = metaFilter(sanitizer(d));
-            if (clean) onDelta(clean);
+            if (clean) {
+              streamedVisible += clean;
+              onDelta(clean);
+            }
           },
           providerId: this.id,
           model,
@@ -427,6 +481,15 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
           `[stream-idle-timeout] provider=${this.id} model=${model} ` +
             `→ 使用 ${visible.length} 字符的 partial content 兜底`,
         );
+      } else if (streamedVisible.trim()) {
+        // 中断记账（2026-09-08）：流异常但用户已看到部分回复 → 保留现场
+        // （user 消息 + 部分回复），不整体回滚；e 继续上抛由上层按中断处理。
+        if (!ephemeral) {
+          msgs.push({ role: "assistant", content: streamedVisible.trim() });
+          this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
+          this.threads.afterTurnCompleted(sessionId, msgs);
+        }
+        throw e;
       } else {
         msgs.length = turnStartLen;
         throw e;
@@ -441,16 +504,20 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       this.threads.afterTurnCompleted(sessionId, msgs);
     }
     // Token 用量审计（非工具分支）：输入为发往 LLM 的 messages + 可见工具 schema，
-    // 并附带 API 真实返回的 prefix cache 命中/未命中 token（若流末尾带 usage）
+    // 并附带 API 真实返回的 usage（prompt/completion tokens + prefix cache 命中/未命中）
     try {
       recordLlmUsageByChars({
-        stage: "main_chat",
+        stage: (streamOpts?.auditStage as Parameters<typeof recordLlmUsageByChars>[0]["stage"]) ?? "main_chat",
         sessionId,
         inputChars: requestAuditInput,
         outputChars: visible.length,
         model,
         promptCacheHitTokens: streamUsage?.promptCacheHitTokens,
         promptCacheMissTokens: streamUsage?.promptCacheMissTokens,
+        ...(typeof streamUsage?.inputTokens === "number" ? { apiPromptTokens: streamUsage.inputTokens } : {}),
+        ...(typeof streamUsage?.outputTokens === "number"
+          ? { apiCompletionTokens: streamUsage.outputTokens }
+          : {}),
       });
     } catch {
       /* 审计失败静默 */

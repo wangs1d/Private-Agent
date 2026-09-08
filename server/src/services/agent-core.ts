@@ -208,7 +208,6 @@ import {
 import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
 import {
-  hasCommitmentClaim,
   isDeflectionStyleFallback,
 } from "../agent/commitment-gate.js";
 import { FRESH_FACT_RE } from "../agent/task-context.js";
@@ -239,6 +238,8 @@ import { getAgentTaskStore } from "./agent-task-store.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
 import { getTaskOutbox } from "../task-plane/task-outbox.js";
+import { broadcastTaskUpdate } from "../task-plane/task-events.js";
+import { backgroundTaskLimiter } from "./concurrency-limiter.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
 import { TurnFinalizer } from "../agent/execution/turn-finalizer.js";
 import { ToolPolicyResolver } from "../agent/execution/tool-policy-resolver.js";
@@ -420,6 +421,13 @@ export class AgentCore {
   /** 在 bootstrap 注册 WS 连接注册表后注入，用于将情绪事件推送给客户端。 */
   setWsRegistry(registry: ClientPushPort | null): void {
     this.wsRegistry = registry;
+    // 任务面回执广播（2026-09-08）：TaskHub 生命周期变更 → chat.task_update。
+    // 监听器随 registry 生命周期注入/清除；开关关闭时 broadcastTaskUpdate 自行短路。
+    getTaskHub().setChangeListener(
+      registry
+        ? (record) => broadcastTaskUpdate(registry, record)
+        : null,
+    );
   }
 
   /** 在 bootstrap 注册 LifeSignalHub 后注入，用于在情绪推理后发布 mood 信号。 */
@@ -1840,6 +1848,11 @@ if (this.isComplexMode(route.mode)) {
     const provider = this.externalChat!;
     /** 本轮是否执行过任何工具（出口诚实闸的「动作」一侧证据）。 */
     let toolExecutedThisTurn = false;
+    /**
+     * 本轮实际发起过的工具调用摘要（A2 升级段轨迹延续）：onToolExecuteStart 在
+     * 工具真正执行前触发，含工具名 + 模型填写的参数；截断参数防长输入刷屏。
+     */
+    const attemptedToolCalls: string[] = [];
     const toolCtx: ChatToolExecutionContext = this.toolContextFactory.create(
       {
         actorId,
@@ -1863,6 +1876,11 @@ if (this.isComplexMode(route.mode)) {
       {
         onToolExecuteStart: (info) => {
           toolExecutedThisTurn = true;
+          if (attemptedToolCalls.length < 12) {
+            attemptedToolCalls.push(
+              `${info.toolName}(${JSON.stringify(info.input ?? {}).slice(0, 120)})`,
+            );
+          }
           if (ctx.taskHubTaskId) {
             getTaskHub().setProgress(ctx.taskHubTaskId, `正在使用 ${info.toolName}`);
           }
@@ -2160,9 +2178,17 @@ if (this.isComplexMode(route.mode)) {
                     },
                   }
                 : {}),
-              // 后台任务（dispatch/诚实闸派发）以 ephemeral 执行：不自动落 thread，
-              // 由 dispatchBackgroundTask 以 [后台任务] 标记显式并入（防 user 消息重复）
+              // 后台任务（dispatch 派发）以 ephemeral 执行：不自动落 thread，
+              // 由 dispatchBackgroundTask 以单条任务记录显式并入（防 user 消息重复）
               ...(ctx.ephemeralTurn ? { ephemeralTurn: true } : {}),
+              // B1 度量打标：任务面按档位分 stage（fast=先轻后重段1，complex=升级段/完整通道）；
+              // 前台对话轮不传，由 provider 按分支落 main_chat / main_chat_tools
+              ...(ctx.taskHubTaskId
+                ? {
+                    auditStage:
+                      ctx.turnPlan?.tier === "fast" ? "task_plane_fast" : "task_plane_complex",
+                  }
+                : {}),
               agentAccessMode: ctx.orchestrateToolCtx?.agentAccessMode,
               desktopBridgeOnline: ctx.orchestrateToolCtx?.desktopBridgeOnline,
               phoneBridgeOnline: ctx.orchestrateToolCtx?.phoneBridgeOnline,
@@ -2201,29 +2227,17 @@ if (this.isComplexMode(route.mode)) {
         }
       }
 
-      // ── 出口诚实闸（2026-09-05 前后台架构，前台一半，话题无关）──
-      // 前台回复含「已办妥/这就去办」类承诺、但本轮既无派发标签也无工具动作
-      // → 大概率空口承诺（或标签格式失败），自动补派后台任务把承诺变成真。
-      if (
-        this.isFastMode(mode) &&
-        !toolExecutedThisTurn &&
-        dispatchedViaTag === 0 &&
-        hasCommitmentClaim(full)
-      ) {
-        console.info(`[AgentCore] 诚实闸补派后台任务：${text.slice(0, 48)}`);
-        this.dispatchBackgroundTask(actorId, {
-          sessionId: ctx.sessionId,
-          chatUserMessageId: opts?.chatUserMessageId,
-          goal: text,
-          source: "commitment_gate",
-        });
-      }
-
       // ── 出口闪避闸（2026-09-06 P0 修复，「该调不调」兜底）──
       // 实时类请求（天气/新闻/价格…）本轮既无工具动作也无派发，回复是
       // 「没实时数据/查不了/让系统去查」式闪避 → 转任务面重跑一次，让工具
       // 循环真正执行 search_web/task.dispatch 后再答。天然只触发一次：重跑走
       // complex 车道（isFastMode=false），不会再进本闸。
+      //
+      // 历史（2026-09-08 拆除）：此处原还有「出口诚实闸」——回复含「已办妥」
+      // 话术且本轮无工具时自动补派后台任务。已删除：其前提（无工具=空口承诺）
+      // 与记忆管线/日程工具的真实生效路径冲突，实测误把闲聊记忆话术（「记下了」）
+      // 派成任务并以裸气泡直推用户。承诺诚实改由提示词约束 + 中断轮次兜底记账
+      // （settleInterruptedTurn）承担。
       if (
         this.isFastMode(mode) &&
         !toolExecutedThisTurn &&
@@ -2256,7 +2270,7 @@ if (this.isComplexMode(route.mode)) {
       }
     }
 
-    return await this.turnFinalizer.finish(actorId, text, full, {
+    const reply = await this.turnFinalizer.finish(actorId, text, full, {
       streamedChunks: true,
       modelCallsConsumed,
       planExecuteUsed: useExplicitPlanner,
@@ -2266,6 +2280,10 @@ if (this.isComplexMode(route.mode)) {
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
     }, opts?.onAssistantDelta);
+    if (attemptedToolCalls.length > 0) {
+      reply.attemptedToolCalls = attemptedToolCalls;
+    }
+    return reply;
   }
 
   /**
@@ -2366,16 +2384,43 @@ if (this.isComplexMode(route.mode)) {
   /**
    * 前后台架构：派发后台任务（2026-09-05）。
    *
-   * task.dispatch 工具与出口诚实闸的唯一执行端：立即登记 TaskHub 并返回
+   * task.dispatch 工具的唯一执行端：立即登记 TaskHub 并返回
    * taskId（前台不阻塞，继续与用户对话）。后台以 ephemeral 会话执行
    * （不继承外层 signal、不重复写 user 消息进 thread），完成后：
    *   - 结果以新 messageId（assistant-task-<id>）经 wsRegistry 直推为独立
-   *     assistant 消息——不经过 WS turn 的 isStale 门控，用户中途继续对话
-   *     也不会丢结果；
-   *   - 交换以「[后台任务]」标记显式并入对话 thread，后续轮次上下文可见。
+   *     assistant 消息——带「[后台任务·目标]」标识头，不经过 WS turn 的
+   *     isStale 门控，用户中途继续对话也不会丢结果；
+   *   - 交换以单条 assistant 角色「任务记录」显式并入对话 thread，后续
+   *     轮次上下文可见（不伪造 user 轮，防任务原文被当成用户发言）。
    *
    * @returns taskId（launch 未就绪/provider 不可用时返回 null）
    */
+  /**
+   * 用户取消后台任务（2026-09-08 对话面回执配套）。
+   *
+   * 软取消语义：标记 TaskHub 记录为 cancelled 并广播；执行闭包在
+   * 排队出列/每次流式增量/收尾投递三处检查该标记——排队中直接短路不跑，
+   * 已在跑的 LLM 轮自然跑完但不投递结果、不并对话 thread（有界浪费，
+   * 换取不动 runStandardLlmPath 的信号量契约）。
+   *
+   * @returns 是否成功标记（任务不存在/会话不符/已是终态返回 false）
+   */
+  cancelBackgroundTask(actorId: string, taskId: string): boolean {
+    const taskHub = getTaskHub();
+    const record = taskHub.get(taskId);
+    if (!record || record.sessionId !== actorId) return false;
+    if (
+      record.state === "done" ||
+      record.state === "failed" ||
+      record.state === "cancelled"
+    ) {
+      return false;
+    }
+    taskHub.setState(taskId, "cancelled");
+    console.info(`[AgentCore] 后台任务已取消 ${taskId} (goal=${record.goal.slice(0, 60)})`);
+    return true;
+  }
+
   dispatchBackgroundTask(
     actorId: string,
     input: {
@@ -2402,9 +2447,12 @@ if (this.isComplexMode(route.mode)) {
 
     const registry = this.wsRegistry;
     const messageId = `assistant-task-${taskId}`;
+    /** 软取消检查：cancelled 后停止一切向对话面的投递（增量/结果/thread 并入）。 */
+    const isCancelled = (): boolean =>
+      getTaskHub().get(taskId)?.state === "cancelled";
     let seq = 0;
     const pushDelta = (delta: string): void => {
-      if (!delta) return;
+      if (!delta || isCancelled()) return;
       seq += 1;
       try {
         registry?.trySend(
@@ -2445,11 +2493,21 @@ if (this.isComplexMode(route.mode)) {
     };
 
     void (async () => {
+      // A3 后台任务全局并发闸（2026-09-08）：超出的任务在此 FIFO 排队（acquire 无超时），
+      // 防止无限并行同时打满 LLM provider 限流。排队期间 TaskHub 仍为 running，
+      // 进度行注明等待槽位。
+      getTaskHub().setProgress(taskId, "等待并行执行槽位");
+      const releaseTaskSlot = await backgroundTaskLimiter.acquire(0);
+      // 排队期间被取消：出列即短路，不再执行（已广播 cancelled 回执）
+      if (isCancelled()) {
+        releaseTaskSlot();
+        return;
+      }
       const fastAttemptStart = Date.now();
       try {
         // 快速通道（默认起步，2026-09-05 先轻后重）：tool router 召回执行
-        //（可见集=桥工具，零业务 schema）+ Flash 档 + 缓冲执行；产出道歉式/空
-        // → 升级完整通道：planner + 预算波 + Pro 档（流式）。
+        //（可见集=桥工具，零业务 schema）+ Flash 档；段1 即流式（A4，2026-09-08）：
+        // 产出直接推给用户（pushDone 以完整 finalText 收尾同一 messageId），升级段延续同一消息流。
         let result = await this.runStandardLlmPath(
           actorId,
           input.goal,
@@ -2457,6 +2515,7 @@ if (this.isComplexMode(route.mode)) {
           {
             sessionId,
             ...(input.chatUserMessageId ? { chatUserMessageId: input.chatUserMessageId } : {}),
+            onAssistantDelta: pushDelta,
           },
           {
             sessionId,
@@ -2467,14 +2526,28 @@ if (this.isComplexMode(route.mode)) {
           },
         );
         let finalText = (result.text ?? "").trim();
+        const fastAttemptedTools = result.attemptedToolCalls ?? [];
         const fastAttemptMs = Date.now() - fastAttemptStart;
         if (!finalText || isApologyStyleFallback(finalText)) {
+          // 分级升级（A2，2026-09-08）：废除无差别整轮重放（旧"先轻后重"残留，
+          // 与双面架构"升级重放→换路续波"原则相悖）。
+          // - 段1 已真实调用过工具 → 召回是好的、败在收尾：保留桥召回（toolRecallOnly，
+          //   免 planner + 免全量 schema），把已尝试的调用轨迹带入升级段 prompt，
+          //   相同调用在 60s TTL 缓存内直接复用结果，不重复执行；
+          // - 段1 零工具调用 → 大概率召回失败：维持完整通道（planner 显式注入）。
+          const carryTrace = fastAttemptedTools.length > 0;
+          if (carryTrace) {
+            pushDelta("\n\n");
+          }
           console.info(
-            `[AgentCore] 快速通道未收尾，升级 plan-and-execute：${input.goal.slice(0, 60)}`,
+            `[AgentCore] 快速通道未收尾，升级任务面执行（mode=${carryTrace ? "trace-carry" : "full-replan"}）：${input.goal.slice(0, 60)}`,
           );
+          const upgradedGoal = carryTrace
+            ? `${input.goal}\n\n[系统备注] 此前一次快速执行已调用过：${fastAttemptedTools.slice(0, 6).join("；")}，但未产出有效回复。请在其基础上继续完成任务并给出最终回复；相同调用的结果已被缓存，可直接重发获取，不要从零重复无关步骤。`
+            : input.goal;
           result = await this.runStandardLlmPath(
             actorId,
-            input.goal,
+            upgradedGoal,
             "complex",
             {
               sessionId,
@@ -2486,6 +2559,7 @@ if (this.isComplexMode(route.mode)) {
               turnPlan: { budget: 3, capabilities: ["full"], tier: "complex" },
               taskHubTaskId: taskId,
               ephemeralTurn: true,
+              ...(carryTrace ? { toolRecallOnly: true } : {}),
             },
           );
           finalText = (result.text ?? "").trim();
@@ -2497,32 +2571,88 @@ if (this.isComplexMode(route.mode)) {
         } else {
           recordFastChannelOutcome("fast_ok", fastAttemptMs, input.goal);
         }
+        // 已取消：轮次自然跑完但一切投递/记账短路——结果不进对话、不并 thread，
+        // TaskHub 终态维持 cancelled（不被 done/failed 覆盖）。
+        if (isCancelled()) {
+          console.info(`[AgentCore] 后台任务取消后收尾，结果不再投递 ${taskId}`);
+          return;
+        }
         taskHub.setState(taskId, finalText ? "done" : "failed");
+        // 任务标识头（单行、防换行）：后台任务结果绝不能伪装成 agent 的自发闲聊
+        // 气泡——2026-09-08 事故里任务面回复以裸气泡直推，用户看到「突然蹦出一句」。
+        const goalLabel = input.goal.replace(/\s+/g, " ").trim().slice(0, 40) || "未命名任务";
         if (finalText) {
-          // 对话 thread 显式并入后台任务交换（ephemeral 执行不自动落 thread）
+          // 对话 thread 以单条「任务记录」并入（ephemeral 执行不自动落 thread）。
+          // 2026-09-08 改造：不再伪造 user 轮「[后台任务] <原文>」+ assistant 回复对
+          // ——user 轮会让后续对话把任务原文当作用户说过的话接茬（说媒事故根因之一）。
           try {
-            provider.appendThreadTurn?.(
+            provider.appendTaskRecord?.(
               resolvePrimaryChatSessionId(
                 actorId,
                 getAgentRuntimeConfig().masterDelegation.enabled,
               ),
-              { text: `[后台任务] ${input.goal}` },
+              input.goal,
               finalText,
             );
           } catch {
             /* thread 并入失败不影响结果投递 */
           }
-          pushDone(finalText);
+          pushDone(`[后台任务·${goalLabel}]\n${finalText}`);
         } else {
-          pushDone(FALLBACK_TEXT_BACKGROUND_FAILED());
+          pushDone(`[后台任务·${goalLabel}]\n${FALLBACK_TEXT_BACKGROUND_FAILED()}`);
         }
       } catch (err) {
-        taskHub.setState(taskId, "failed");
-        console.error("[AgentCore] 后台任务执行失败:", err);
-        pushDone(FALLBACK_TEXT_BACKGROUND_FAILED());
+        // 取消后的异常（含短路退出触发的竞态）不覆盖 cancelled 终态、不投递兜底文案
+        if (!isCancelled()) {
+          taskHub.setState(taskId, "failed");
+          console.error("[AgentCore] 后台任务执行失败:", err);
+          pushDone(FALLBACK_TEXT_BACKGROUND_FAILED());
+        }
+      } finally {
+        releaseTaskSlot();
       }
     })();
     return taskId;
+  }
+
+  /**
+   * 中断/异常轮次的最小化兜底记账（2026-09-08）。
+   *
+   * 背景：轮次被新消息打断或异常失败时，各执行路径的 catch 直接返回空结果，
+   * turnFinalizer.finish 整体跳过——已流式送达用户的部分回复不进任何账本：
+   * 短期记忆挂起栈里的原始请求无法结清（默认 TTL 6 小时，期间每轮注入 open-loops，
+   * agent 会反复重问已办成的事，实测「安排好了 11:30 提醒」后仍被追问「要提前多久」）、
+   * turn WAL / 当日日志缺失该轮。
+   *
+   * 本方法以「已送达的部分回复」完成最小化收尾：STM 挂起项结清、WAL/日志记账、
+   * 高信号记忆种植。只做记账，不触发任何 LLM 调用（finish 的 regenerateEmptyReply
+   * 仅在文本为空时触发，此处文本非空不会走到）。幂等安全：reconcile/入栈均为
+   * 去重幂等操作，重复调用无副作用。
+   *
+   * @param partialAssistantText 已流式送达用户的部分回复（空串时为无操作）
+   */
+  settleInterruptedTurn(
+    actorId: string,
+    userText: string,
+    partialAssistantText: string,
+    meta?: { sessionId?: string; messageId?: string },
+  ): void {
+    const trimmed = partialAssistantText.trim();
+    if (!trimmed) return;
+    void this.turnFinalizer
+      .finish(actorId, userText, trimmed, {
+        streamedChunks: true,
+        modelCallsConsumed: 1,
+        planExecuteUsed: false,
+        pePlan: null,
+        peExhausted: false,
+        trajCap: undefined,
+        ...(meta?.messageId ? { messageId: meta.messageId } : {}),
+        ...(meta?.sessionId ? { sessionId: meta.sessionId } : {}),
+      })
+      .catch((err) => {
+        console.warn("[AgentCore] 中断轮次兜底记账失败(忽略):", err);
+      });
   }
 
   /**

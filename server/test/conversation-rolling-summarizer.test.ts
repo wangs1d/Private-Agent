@@ -204,7 +204,7 @@ test("ChatThreadStore: 折叠触发后同步兜底 recap + LLM 增强回写", as
   );
 });
 
-test("ChatThreadStore: 增量合并——已有 recap 行原文保留，不被 LLM 重写覆盖（漂移回归）", async () => {
+test("ChatThreadStore: 增量合并——已有 recap 行原文保留，LLM 改写变体被事件级去重拒绝（漂移回归）", async () => {
   const store = new ChatThreadStore(null);
   store.setRecapSummarizer(async () => ["[今天] 用户要求晚上七点半提醒开线上会议（LLM改写）"]);
 
@@ -226,8 +226,13 @@ test("ChatThreadStore: 增量合并——已有 recap 行原文保留，不被 L
     recap.content.includes("用户要求晚上七点提醒开线上会议"),
     "已有 recap 行应原文保留，不被 LLM 重写漂移",
   );
-  // LLM 新行增量并入
-  assert.ok(recap.content.includes("七点半提醒开线上会议（LLM改写）"), "LLM 新行应增量并入");
+  // 2026-09-08 收紧：LLM 的改写变体（七点→七点半）与已有行是同一事件，
+  // 事件级去重直接拒绝——漂移连「追加变体行」的机会都没有（实测变体行
+  // 逐轮繁殖会诱导 agent 反复重问已办成的事）。
+  assert.ok(
+    !recap.content.includes("七点半提醒开线上会议（LLM改写）"),
+    "LLM 同一事件的改写变体应被事件级去重拒绝",
+  );
 });
 
 test("ChatThreadStore: seq 防覆盖——期间有新 trim 时丢弃旧增强结果", async () => {

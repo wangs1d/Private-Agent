@@ -1,12 +1,24 @@
 import type { Memory } from "mem0ai/oss";
+import OpenAI from "openai";
 
 import {
   getMemoryTTLDays,
+  getMemoryTTLTemporaryDays,
+  getMemoryArchiveRetentionDays,
   getLifecycleIntervalMin,
   getDedupSimilarityThreshold,
   getDedupMaxChecksPerCycle,
+  getAgenticMemoryLlmModel,
+  getMemoryLlmReviewBatchSize,
+  getMemoryLlmReviewIntervalHours,
+  isMemoryLlmReviewEnabled,
   isMemoryReinforcementEnabled,
+  resolveOpenAiApiKey,
 } from "./env.js";
+import {
+  resolvePrimaryLlmClientConfig,
+  bypassChatRequestExtras,
+} from "../external-model/resolve-provider.js";
 import type { MemoryReinforcementStore } from "./memory-reinforcement.js";
 
 interface Mem0MemoryItem {
@@ -28,17 +40,57 @@ interface Mem0SearchResult {
 
 export type Mem0DeletedNotifier = (deletedIds: string[]) => void;
 
+export type LifecycleCycleResult = {
+  /** 本轮新归档数（两阶段第一阶段；等于 archived，保留字段名兼容旧调用方） */
+  pruned: number;
+  /** 本轮新归档数（可恢复，未物理删除） */
+  archived: number;
+  /** 本轮物理删除的到期归档数（两阶段第二阶段） */
+  purged: number;
+  /** 语义去重合并（物理删除）数 */
+  merged: number;
+  /** LLM 审查覆盖的条数（0=本轮未到审查窗口/未启用） */
+  llmReviewed: number;
+  /** getAll 扫描总条数（含已归档未物理删的） */
+  scanned: number;
+};
+
 /** getAll 拉取上限；命中上限说明可能被截断（告警，下轮继续从新扫描） */
 const GET_ALL_TOP_K = 10_000;
 
 /** 缺失 importance 的旧数据按中性分处理（不加分不减分） */
 const NEUTRAL_IMPORTANCE = 0.5;
 
+/** lifecycle_kv 表的键名（去重游标 / LLM 审查时间戳，进程重启不再重置） */
+const KV_DEDUP_CURSOR = "lifecycle.dedup_cursor_ms";
+const KV_LLM_REVIEW_LAST = "lifecycle.llm_review_last_ms";
+
 function importanceOf(item: Mem0MemoryItem): number {
   const raw = Number(item.metadata?.importance);
   if (Number.isFinite(raw)) return Math.max(0, Math.min(1, raw));
   // 旧数据无连续分：高信号按 0.85，其余中性
   return item.metadata?.highSignal === true ? 0.85 : NEUTRAL_IMPORTANCE;
+}
+
+function semanticClassOf(item: Mem0MemoryItem): string {
+  const raw = item.metadata?.memorySemanticClass;
+  return typeof raw === "string" ? raw : "";
+}
+
+function actorIdOf(item: Mem0MemoryItem): string {
+  const a = item.metadata?.actorId;
+  if (typeof a === "string" && a) return a;
+  const u = item.metadata?.user_id;
+  return typeof u === "string" ? u : "";
+}
+
+/**
+ * 核心事实豁免 TTL（设计「核心事实 TTL=永久」）：
+ * importance ≥ 0.8，或 stable_* 语义类（stable_preference/identity/constraint）。
+ * 旧数据无语义类时由 highSignal→0.85 兜住。
+ */
+function isPermanentMemory(item: Mem0MemoryItem): boolean {
+  return importanceOf(item) >= 0.8 || semanticClassOf(item).startsWith("stable_");
 }
 
 function effectiveTimestamp(item: Mem0MemoryItem): number {
@@ -55,25 +107,44 @@ function parseTimestamp(ts: string | undefined): number {
   return 0;
 }
 
+const LLM_REVIEW_SYSTEM_PROMPT = [
+  "你是个人记忆库的审查员。给定同一用户的一组记忆条目，找出其中明确的：",
+  "① 过时（信息已被更新取代，如旧地址、旧偏好）；② 矛盾（与其他条目冲突）；③ 冗余（与另一条几乎同义）。",
+  "只标记有把握的条目；拿不准一律保留（宁保留不误删）。",
+  '只输出 JSON：{"forget":[{"n":序号,"reason":"一句话理由"}]}；未列出的条目视为保留。',
+].join("\n");
+
 export class AgenticMemoryLifecycleService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private deletedNotifier: Mem0DeletedNotifier | null = null;
   /**
    * 语义去重增量游标：只处理 updatedAt 晚于游标的记忆（新写入/被强化的），
    * 每轮至多 getDedupMaxChecksPerCycle() 次向量检索，存量首轮逐步消化。
-   * 进程重启后归零 → 全量重扫一遍（幂等，重复对已合并的库近似 no-op）。
+   * 游标持久化在 lifecycle_kv（进程重启不再归零重扫）；无持久层时退回内存态。
    */
   private dedupCursorMs = 0;
+  /** LLM 审查上次执行时间（持久化，按 interval 判定是否到窗） */
+  private llmReviewLastAt = 0;
+  private lastCycleAt = 0;
+  private lastCycleResult: LifecycleCycleResult | null = null;
 
   constructor(
     private readonly memory: Memory,
     private readonly reinforcement: MemoryReinforcementStore | null = null,
-  ) {}
+  ) {
+    if (reinforcement) {
+      const cursor = Number.parseInt(reinforcement.kvGet(KV_DEDUP_CURSOR) ?? "", 10);
+      if (Number.isFinite(cursor) && cursor > 0) this.dedupCursorMs = cursor;
+      const lastReview = Number.parseInt(reinforcement.kvGet(KV_LLM_REVIEW_LAST) ?? "", 10);
+      if (Number.isFinite(lastReview) && lastReview > 0) this.llmReviewLastAt = lastReview;
+    }
+  }
 
   /**
-   * 注入删除通知（P0-3）：TTL 清理/去重绕过 memory-bridge 直接删 Mem0 记录，
+   * 注入删除通知（P0-3）：TTL 物理删/去重绕过 memory-bridge 直接删 Mem0 记录，
    * bootstrap 把通知接到 bridge.handleMem0Deleted 做 linkage 调和（摘除被删 id /
    * tombstone 摘空的链接），否则 bridge_links 里会积累永远扫不完的僵尸链接。
+   * 归档不删向量记录，不触发通知；到期物理删时才走 deleteConfirmed。
    */
   setDeletedNotifier(notifier: Mem0DeletedNotifier | null): void {
     this.deletedNotifier = notifier;
@@ -123,7 +194,9 @@ export class AgenticMemoryLifecycleService {
     this.timer.unref();
 
     console.info(
-      `[memory-lifecycle] started (TTL=${ttlDays}d, interval=${intervalMin}min)`,
+      `[memory-lifecycle] started (TTL=${ttlDays}d/temp=${getMemoryTTLTemporaryDays()}d, ` +
+        `archive=${getMemoryArchiveRetentionDays()}d, llm-review=${isMemoryLlmReviewEnabled() ? `${getMemoryLlmReviewIntervalHours()}h` : "off"}, ` +
+        `interval=${intervalMin}min)`,
     );
   }
 
@@ -134,19 +207,68 @@ export class AgenticMemoryLifecycleService {
     }
   }
 
-  async runCycle(): Promise<{ pruned: number; merged: number; scanned: number }> {
-    // 单次全量拉取供 TTL + 去重共享（原实现两阶段各自 getAll 一次，全表扫两遍）
+  /** 观测快照：供 /api/memory/lifecycle/stats 展示遗忘是否真的在发生。 */
+  getStatsSnapshot(): {
+    lastCycleAt: string | null;
+    lastCycle: LifecycleCycleResult | null;
+    dedupCursorMs: number;
+    llmReviewLastAt: string | null;
+    archivedRows: number | null;
+  } {
+    return {
+      lastCycleAt: this.lastCycleAt ? new Date(this.lastCycleAt).toISOString() : null,
+      lastCycle: this.lastCycleResult,
+      dedupCursorMs: this.dedupCursorMs,
+      llmReviewLastAt: this.llmReviewLastAt ? new Date(this.llmReviewLastAt).toISOString() : null,
+      archivedRows: this.reinforcement ? this.reinforcement.archivedCount() : null,
+    };
+  }
+
+  async runCycle(): Promise<LifecycleCycleResult> {
+    const startedAt = Date.now();
+    // 快照先取（TTL/去重/审查共用），但物理删发生在本轮内——被删 id 需从
+    // live 集合排除，否则 pruneExpired 会对已消失的向量记录重建僵尸归档行。
     const allMemories = await this.fetchAll();
+
+    // 两阶段第二步：归档到期的向量记录物理删除（deleteConfirmed 附带 bridge 调和）
+    const purgedIds = await this.purgeExpiredArchives();
+    const purgedSet = new Set(purgedIds);
+
+    // 已归档（未物理删）的记忆从本轮 TTL/去重/审查中排除——它们的遗忘已生效
+    const archivedSet =
+      this.reinforcement && isMemoryReinforcementEnabled()
+        ? this.reinforcement.getArchivedIds((allMemories ?? []).map((m) => m.id).filter(Boolean))
+        : new Set<string>();
+    const liveMemories =
+      allMemories
+        ?.filter((m) => !archivedSet.has(m.id) && !purgedSet.has(m.id)) ?? null;
+
     const ttlDays = getMemoryTTLDays();
-    let pruned = 0;
-    if (ttlDays > 0 && allMemories) {
-      pruned = await this.pruneExpired(allMemories, ttlDays);
+    let archivedNow = 0;
+    if (ttlDays > 0 && liveMemories) {
+      archivedNow = await this.pruneExpired(liveMemories, ttlDays);
     }
     let merged = 0;
-    if (allMemories) {
-      merged = await this.deduplicate(allMemories);
+    if (liveMemories) {
+      merged = await this.deduplicate(liveMemories);
     }
-    return { pruned, merged, scanned: allMemories?.length ?? 0 };
+    const llmReviewed = await this.maybeLlmReview(liveMemories);
+
+    if (this.reinforcement) {
+      this.reinforcement.kvSet(KV_DEDUP_CURSOR, String(this.dedupCursorMs));
+    }
+
+    const result: LifecycleCycleResult = {
+      pruned: archivedNow,
+      archived: archivedNow,
+      purged: purgedIds.length,
+      merged,
+      llmReviewed,
+      scanned: allMemories?.length ?? 0,
+    };
+    this.lastCycleAt = startedAt;
+    this.lastCycleResult = result;
+    return result;
   }
 
   private async fetchAll(): Promise<Mem0MemoryItem[] | null> {
@@ -170,44 +292,208 @@ export class AgenticMemoryLifecycleService {
   }
 
   /**
-   * TTL 过期清理（遗忘曲线版）：
-   *   - 过期判据用 max(createdAt, updatedAt, lastAccessAt)——经常被召回的记忆
-   *     不再因"创建太久"被误删（use-it-or-lose-it）；
-   *   - 有效 TTL 按重要性缩放：ttl × (0.5 + importance)，高重要性活得更久、
-   *     低重要性加速淡出（importance 缺失按 0.5 中性）；
-   *   - importance ≥ 0.8（含旧数据 highSignal）豁免 TTL。
+   * TTL 过期处理（两阶段遗忘第一阶段 + 分类 TTL）：
+   *   - 分类 TTL：temporary_context 走 7 天档（设计「临时信息 TTL=7 天」），
+   *     其余走 base TTL（默认 90 天）；stable_* 与 importance ≥ 0.8 豁免（核心事实永久）；
+   *   - 有效 TTL 按重要性缩放：ttl × (0.5 + importance)，低重要性加速淡出；
+   *   - 召回强化：过期判据用 max(createdAt, updatedAt, last_access_at)，且有效期按
+   *     access_count 延长 ×(1 + min(count,10)×0.1)（上限 ×2，常用则牢）；
+   *   - 到期先归档（archived_at，召回侧过滤，可恢复），归档超过
+   *     getMemoryArchiveRetentionDays() 天后才由 purgeExpiredArchives 物理删除。
+   * 强化存储关闭时退回旧路径（直接物理删除）。
    */
   private async pruneExpired(allMemories: Mem0MemoryItem[], ttlDays: number): Promise<number> {
     const now = Date.now();
     const baseTtlMs = ttlDays * 86_400_000;
+    const tempTtlMs = getMemoryTTLTemporaryDays() * 86_400_000;
     const reinforcementOn = isMemoryReinforcementEnabled() && this.reinforcement;
 
-    const candidates = allMemories.filter((mem) => importanceOf(mem) < 0.8);
+    const candidates = allMemories.filter((mem) => !isPermanentMemory(mem));
     if (candidates.length === 0) return 0;
 
     const stats = reinforcementOn
       ? this.reinforcement!.getStats(candidates.map((m) => m.id))
       : null;
 
-    const toDelete: string[] = [];
+    const expired: Mem0MemoryItem[] = [];
     for (const mem of candidates) {
       const importance = importanceOf(mem);
-      const effectiveTtlMs = baseTtlMs * (0.5 + importance);
+      const classTtlMs = semanticClassOf(mem) === "temporary_context" ? tempTtlMs : baseTtlMs;
+      let effectiveTtlMs = classTtlMs * (0.5 + importance);
       let lastAlive = effectiveTimestamp(mem);
       const s = stats?.get(mem.id);
-      if (s && s.lastAccessAt > lastAlive) lastAlive = s.lastAccessAt;
-      if (now - lastAlive > effectiveTtlMs) toDelete.push(mem.id);
+      if (s) {
+        if (s.lastAccessAt > lastAlive) lastAlive = s.lastAccessAt;
+        // 高频召回延长有效期：access_count=10+ 时上限 ×2
+        effectiveTtlMs *= 1 + Math.min(s.accessCount, 10) * 0.1;
+      }
+      if (now - lastAlive > effectiveTtlMs) expired.push(mem);
+    }
+    if (expired.length === 0) return 0;
+
+    if (!reinforcementOn) {
+      const deleted = await this.deleteConfirmed(expired.map((m) => m.id));
+      if (deleted.length > 0) {
+        console.info(
+          `[memory-lifecycle] pruned ${deleted.length}/${expired.length} expired memories ` +
+            `(base TTL=${ttlDays}d, importance-scaled, hard-delete fallback)`,
+        );
+      }
+      return deleted.length;
     }
 
-    if (toDelete.length === 0) return 0;
-    const deleted = await this.deleteConfirmed(toDelete);
-    if (deleted.length > 0) {
+    // 按 actor 分组归档：侧表行以 actor_id 归属，purgeActor 级联回收依赖它
+    const byActor = new Map<string, string[]>();
+    for (const mem of expired) {
+      const actorId = actorIdOf(mem);
+      const group = byActor.get(actorId);
+      if (group) group.push(mem.id);
+      else byActor.set(actorId, [mem.id]);
+    }
+    let archived = 0;
+    for (const [actorId, ids] of byActor) {
+      archived += this.reinforcement!.archiveIds(ids, actorId, now);
+    }
+    if (archived > 0) {
       console.info(
-        `[memory-lifecycle] pruned ${deleted.length}/${toDelete.length} expired memories ` +
-          `(base TTL=${ttlDays}d, importance-scaled)`,
+        `[memory-lifecycle] archived ${archived}/${expired.length} expired memories ` +
+          `(regular=${ttlDays}d/temp=${getMemoryTTLTemporaryDays()}d, access-boosted, recoverable)`,
       );
     }
-    return deleted.length;
+    return archived;
+  }
+
+  /** 两阶段遗忘第二步：归档超过保留期的记录从向量库物理删除（可配置 0=永久保留归档）。返回删除的 id。 */
+  private async purgeExpiredArchives(): Promise<string[]> {
+    if (!this.reinforcement || !isMemoryReinforcementEnabled()) return [];
+    const retentionDays = getMemoryArchiveRetentionDays();
+    if (retentionDays <= 0) return [];
+    const ids = this.reinforcement.expiredArchived(retentionDays);
+    if (ids.length === 0) return [];
+    const deleted = await this.deleteConfirmed(ids);
+    if (deleted.length > 0) {
+      console.info(
+        `[memory-lifecycle] purged ${deleted.length}/${ids.length} archived memories (archived >${retentionDays}d)`,
+      );
+    }
+    return deleted;
+  }
+
+  /**
+   * Mem0 库 LLM 定期审查（设计「LLM 主动遗忘」）：规则 TTL/去重判不了的
+   * 「过时/矛盾/冗余」（如同义改写之外的语义重复、已被新事实取代的旧值）
+   * 由 LLM 抽批复审，命中者归档（不直接删）。审查窗口按
+   * AGENT_MEMORY_LLM_REVIEW_INTERVAL_H（默认 24h）判定；无 LLM 渠道时静默跳过，
+   * 下轮再试。
+   */
+  private async maybeLlmReview(liveMemories: Mem0MemoryItem[] | null): Promise<number> {
+    if (!liveMemories || liveMemories.length === 0) return 0;
+    if (!isMemoryLlmReviewEnabled() || !this.reinforcement || !isMemoryReinforcementEnabled()) {
+      return 0;
+    }
+    const now = Date.now();
+    if (now - this.llmReviewLastAt < getMemoryLlmReviewIntervalHours() * 3_600_000) return 0;
+
+    const llmConfig = resolvePrimaryLlmClientConfig();
+    const apiKey = resolveOpenAiApiKey();
+    if (!llmConfig || !apiKey) return 0;
+
+    const batchSize = getMemoryLlmReviewBatchSize();
+    const stats = this.reinforcement.getStats(liveMemories.map((m) => m.id));
+    // 审查优先级：最久未访问优先——高频召回的记忆大概率仍有效，不值得花额度
+    const candidates = liveMemories
+      .filter((mem) => !isPermanentMemory(mem))
+      .map((mem) => ({
+        mem,
+        lastAccess: stats.get(mem.id)?.lastAccessAt || effectiveTimestamp(mem),
+      }))
+      .sort((a, b) => a.lastAccess - b.lastAccess)
+      .slice(0, batchSize)
+      .map(({ mem }) => mem);
+    if (candidates.length === 0) return 0;
+
+    let forgetIdx: number[] = [];
+    try {
+      const openai = new OpenAI({ apiKey, baseURL: llmConfig.baseURL });
+      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        { role: "system", content: LLM_REVIEW_SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: JSON.stringify({
+            memories: candidates.map((mem, i) => ({
+              n: i,
+              text: mem.memory.slice(0, 160),
+              importance: importanceOf(mem),
+              class: semanticClassOf(mem) || "unknown",
+            })),
+          }),
+        },
+      ];
+      const auditInputChars = JSON.stringify(messages).length;
+      const response = await openai.chat.completions.create({
+        model: getAgenticMemoryLlmModel(),
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages,
+        ...bypassChatRequestExtras(),
+      });
+      const content = response.choices[0]?.message?.content?.trim();
+      if (!content) return 0;
+      const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
+      recordLlmUsageByChars({
+        stage: "memory_llm_review",
+        inputChars: auditInputChars,
+        outputChars: content.length,
+        model: getAgenticMemoryLlmModel(),
+      });
+      const parsed = JSON.parse(content) as { forget?: Array<{ n?: unknown; reason?: unknown }> };
+      if (Array.isArray(parsed.forget)) {
+        const valid = parsed.forget
+          .filter(
+            (item) =>
+              item &&
+              typeof item.n === "number" &&
+              Number.isInteger(item.n) &&
+              item.n >= 0 &&
+              item.n < candidates.length,
+          )
+          .map((item) => item.n as number);
+        forgetIdx = [...new Set(valid)].slice(0, batchSize);
+      }
+    } catch (err) {
+      console.warn(
+        "[memory-lifecycle] LLM 审查失败（下轮重试）:",
+        err instanceof Error ? err.message : err,
+      );
+      return 0;
+    }
+
+    if (forgetIdx.length === 0) {
+      this.llmReviewLastAt = Date.now();
+      this.reinforcement.kvSet(KV_LLM_REVIEW_LAST, String(this.llmReviewLastAt));
+      return 0;
+    }
+
+    // 按 actor 分组归档（LLM 判弃走归档通道，可恢复，不直接物理删）
+    const byActor = new Map<string, string[]>();
+    for (const idx of forgetIdx) {
+      const mem = candidates[idx]!;
+      const actorId = actorIdOf(mem);
+      const group = byActor.get(actorId);
+      if (group) group.push(mem.id);
+      else byActor.set(actorId, [mem.id]);
+    }
+    let archived = 0;
+    for (const [actorId, ids] of byActor) {
+      archived += this.reinforcement.archiveIds(ids, actorId);
+    }
+    this.llmReviewLastAt = Date.now();
+    this.reinforcement.kvSet(KV_LLM_REVIEW_LAST, String(this.llmReviewLastAt));
+    console.info(
+      `[memory-lifecycle] llm-review: reviewed ${candidates.length}, archived ${archived} ` +
+        `(outdated/contradictory/redundant, recoverable)`,
+    );
+    return candidates.length;
   }
 
   /**
@@ -227,12 +513,7 @@ export class AgenticMemoryLifecycleService {
     const cycleStart = Date.now();
     const byActor = new Map<string, Mem0MemoryItem[]>();
     for (const mem of allMemories) {
-      const actorId =
-        typeof mem.metadata?.actorId === "string"
-          ? mem.metadata.actorId
-          : typeof mem.metadata?.user_id === "string"
-            ? mem.metadata.user_id
-            : "";
+      const actorId = actorIdOf(mem);
       if (!actorId) continue;
       const group = byActor.get(actorId);
       if (group) group.push(mem);
@@ -305,13 +586,15 @@ export class AgenticMemoryLifecycleService {
         parseTimestamp(hit.metadata?.createdAt as string | undefined),
         parseTimestamp(hit.metadata?.updatedAt as string | undefined),
       );
+      // 对方无时间戳无法比新旧：跳过该命中（宁保留不误删，原逻辑会误删对方）
+      if (!hitTs) continue;
 
       // 保留规则：importance 高者胜；平手保新。mem 是待检方——
       // 若对方更该保留，删 mem 并终止（mem 已消失，无需再比其余命中）；
       // 若 mem 更该保留，删对方。
       const memWins =
         selfImportance > hitImportance ||
-        (selfImportance === hitImportance && selfTs >= (hitTs || selfTs));
+        (selfImportance === hitImportance && selfTs >= hitTs);
       if (memWins) {
         toDelete.push(hit.id);
       } else {

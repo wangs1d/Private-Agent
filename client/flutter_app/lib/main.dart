@@ -26,7 +26,6 @@ import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
 import "core/services/world_api_client.dart";
 import "core/services/client_location_service.dart";
-import "core/services/multi_agent_api_client.dart";
 import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
@@ -201,8 +200,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       ScheduleApiClient(baseUrl: ApiConfig.httpBase);
   final CatalogApiClient _catalogApi =
       CatalogApiClient(baseUrl: ApiConfig.httpBase);
-  final MultiAgentApiClient _multiAgentApi =
-      MultiAgentApiClient(baseUrl: ApiConfig.httpBase);
   final UserPreferencesApi _preferencesApi =
       UserPreferencesApi(baseUrl: ApiConfig.httpBase);
   final BriefingDeliveryApi _briefingDeliveryApi =
@@ -372,10 +369,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 与 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
   bool _subAgentDelegationActive = false;
-  final Set<String> _backgroundRunningTaskIds = <String>{};
-  final List<Map<String, dynamic>> _pendingAsyncConfirmations =
-      <Map<String, dynamic>>[];
-  bool _isSubmittingAsyncConfirmation = false;
+
+  /// 任务面回执（chat.task_update，2026-09-08 前后台分工对话改造）：
+  /// taskId → 对话流内回执消息 id 的注册表；回执消息本身存在 _messages 里
+  /// （contentType="task_receipt"，内存态不持久化）。状态迁移原地替换同一
+  /// messageId 的消息对象，不在对话流里追加新条目。
+  final Map<String, String> _taskReceiptMessageIdByTaskId =
+      <String, String>{};
+
+  /// 当前非终态（进行中/等待输入）的任务面任务 id，供状态带聚合展示。
+  final Set<String> _taskPlaneActiveTaskIds = <String>{};
 
   Timer? _assistantChunkFlushTimer;
   Timer? _agentReplyWatchdog;
@@ -1107,27 +1110,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           // 阶段 2：执行事件（工具 / 子 Agent / thought / log）。
           _handleExecutionEventV2(payload);
         }
-        if (type == "agent.async_task_update") {
-          final String taskId = payload["taskId"]?.toString() ?? "";
-          final String status = payload["status"]?.toString() ?? "";
-          if (status == "running") {
-            if (mounted) {
-              setState(() {
-                if (taskId.isNotEmpty) {
-                  _backgroundRunningTaskIds.add(taskId);
-                }
-              });
-            } else {
-              if (taskId.isNotEmpty) {
-                _backgroundRunningTaskIds.add(taskId);
-              }
-            }
-          }
-          if (status == "awaiting_confirmation") {
-            _enqueueAsyncConfirmation(payload);
-            return;
-          }
-          await _appendAsyncTaskReportMessage(payload);
+        // ===== 任务面回执（chat.task_update，前后台分工对话改造）=====
+        // 派发 → 对话流内落轻量回执；进度/终态 → 原地更新同一回执。
+        // 开关关闭（服务端不发事件）时本分支天然不触发，行为同旧版。
+        if (type == "chat.task_update") {
+          _handleTaskPlaneUpdate(payload);
         }
         // ===== /v2 =====
         if (type == "chat.assistant_chunk") {
@@ -1216,6 +1203,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           return;
         }
         if (type == "chat.assistant_done") {
+          // 任务面结果（source=task_plane，2026-09-08）：与前台轮次完成语义分离。
+          // 前后台分工下任务完成时前台可能正在流式回复——绝不能走下方前台收尾
+          // （清 _pendingAgentUserMessageId/处理中状态/打字机缓冲会腰斩前台轮次）。
+          // 只把结果消息独立落进对话流，并移除对应过程回执。
+          if (payload["source"]?.toString() == "task_plane") {
+            await _handleTaskPlaneResultDone(payload);
+            return;
+          }
           final String? doneTraceId = payload["traceId"]?.toString();
           final String? activeTraceId = _pendingAgentUserMessageId;
           if (doneTraceId != null &&
@@ -2937,268 +2932,156 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 常用工具「笔记」入口：跳转到与笔记 Agent 的独立对话页（独立 WebSocket 命名空间，
-  /// 记忆写入 context=notes）。
-  Future<Map<String, dynamic>> _runAsyncCenterAction(
-    String channel,
-    String action,
-    String targetId,
-  ) async {
-    final Map<String, dynamic> result =
-        await _multiAgentApi.runAsyncCenterAction(
-      sessionId: ApiConfig.effectiveActorId,
-      channel: channel,
-      action: action,
-      targetId: targetId,
-    );
-    final Map<String, dynamic> snapshot =
-        (result["snapshot"] as Map?)?.cast<String, dynamic>() ?? result;
-    _syncBackgroundTaskBadgeFromSnapshot(snapshot);
-    return result;
-  }
+  // ═══════════════════════════════════════════════════════════
+  // 任务面回执（chat.task_update / chat.task_cancel）
+  // ═══════════════════════════════════════════════════════════
 
-  void _syncBackgroundTaskBadgeFromSnapshot(Map<String, dynamic> snapshot) {
-    final Map<String, dynamic> background =
-        ((snapshot["channels"] as Map?)?["backgroundTasks"] as Map?)
-                ?.cast<String, dynamic>() ??
-            snapshot;
-    final List<dynamic> running =
-        background["running"] as List<dynamic>? ?? <dynamic>[];
-    final Set<String> nextIds = running
-        .map((dynamic item) => (item as Map)["taskId"]?.toString() ?? "")
-        .where((String id) => id.isNotEmpty)
-        .toSet();
-    if (!mounted) {
-      _backgroundRunningTaskIds
-        ..clear()
-        ..addAll(nextIds);
-      return;
-    }
-    setState(() {
-      _backgroundRunningTaskIds
-        ..clear()
-        ..addAll(nextIds);
-    });
-  }
-
-  void _enqueueAsyncConfirmation(Map<String, dynamic> payload) {
+  /// 处理任务面生命周期广播：首条落回执进对话流，后续原地替换。
+  ///
+  /// 设计要点（无缝对话形态）：回执是"状态屏"不是新消息——同一 taskId 永远
+  /// 复用同一个 messageId，状态迁移只替换消息对象；任务结果本身仍由
+  /// chat.assistant_done(source=task_plane) 以普通 assistant 消息落位并
+  /// 持久化，回执仅内存态（重启后由结果消息的「[后台任务·目标]」标识头兜底归属）。
+  void _handleTaskPlaneUpdate(Map<String, dynamic> payload) {
     final String taskId = payload["taskId"]?.toString() ?? "";
-    if (taskId.isEmpty) return;
-    if (!mounted) {
-      _backgroundRunningTaskIds.remove(taskId);
-      _pendingAsyncConfirmations.removeWhere(
-        (Map<String, dynamic> item) => item["taskId"]?.toString() == taskId,
-      );
-      _pendingAsyncConfirmations.add(Map<String, dynamic>.from(payload));
-      return;
-    }
-    setState(() {
-      _backgroundRunningTaskIds.remove(taskId);
-      _pendingAsyncConfirmations.removeWhere(
-        (Map<String, dynamic> item) => item["taskId"]?.toString() == taskId,
-      );
-      _pendingAsyncConfirmations.add(Map<String, dynamic>.from(payload));
-    });
-  }
+    final String state = payload["state"]?.toString() ?? "";
+    if (taskId.isEmpty || state.isEmpty) return;
+    final String? goal = payload["goal"]?.toString().trim();
+    final String progress = payload["progressLine"]?.toString().trim() ?? "";
+    final int? startedAt =
+        payload["startedAt"] is int ? payload["startedAt"] as int : null;
 
-  Future<void> _handleAsyncConfirmationAction(
-    Map<String, dynamic> payload,
-    String action,
-  ) async {
-    final String taskId = payload["taskId"]?.toString() ?? "";
-    if (taskId.isEmpty || _isSubmittingAsyncConfirmation) return;
-    if (mounted) {
-      setState(() => _isSubmittingAsyncConfirmation = true);
+    final bool terminal =
+        state == "done" || state == "failed" || state == "cancelled";
+    if (terminal) {
+      _taskPlaneActiveTaskIds.remove(taskId);
     } else {
-      _isSubmittingAsyncConfirmation = true;
+      _taskPlaneActiveTaskIds.add(taskId);
     }
-    try {
-      final Map<String, dynamic> result = await _runAsyncCenterAction(
-        "background_task",
-        action,
-        taskId,
-      );
-      final bool ok = result["ok"] == true;
-      if (!ok) {
-        final String error =
-            result["error"]?.toString().trim().isNotEmpty == true
-                ? result["error"]!.toString()
-                : "操作未成功，请稍后再试";
-        if (mounted) {
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            SnackBar(content: Text(error)),
-          );
-        }
-        return;
-      }
-      if (!mounted) {
-        _pendingAsyncConfirmations.removeWhere(
-          (Map<String, dynamic> item) => item["taskId"]?.toString() == taskId,
-        );
-        return;
-      }
-      setState(() {
-        _pendingAsyncConfirmations.removeWhere(
-          (Map<String, dynamic> item) => item["taskId"]?.toString() == taskId,
-        );
-      });
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(content: Text("处理失败，请稍后重试")),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isSubmittingAsyncConfirmation = false);
-      } else {
-        _isSubmittingAsyncConfirmation = false;
-      }
-    }
-  }
 
-  Widget _buildAsyncConfirmationOverlay() {
-    if (_pendingAsyncConfirmations.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final Map<String, dynamic> payload = _pendingAsyncConfirmations.first;
-    final List<String> actions = confirmationActionsFor(payload);
-    if (actions.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final String agentName = payload["agentName"]?.toString() ?? "后台任务";
-    final String summary = payload["userFacingText"]?.toString().trim() ?? "";
-    final String taskDescription =
-        payload["taskDescription"]?.toString().trim() ?? "";
-    final ThemeData theme = Theme.of(context);
-    final ColorScheme cs = theme.colorScheme;
-
-    return Positioned(
-      top: 88,
-      right: 20,
-      child: SafeArea(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 360),
-          child: Material(
-            elevation: 10,
-            borderRadius: BorderRadius.circular(18),
-            color: cs.surface,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-              decoration: BoxDecoration(
-                color: cs.surface,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: cs.outlineVariant.withValues(alpha: 0.65),
-                ),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    "$agentName 需要你的决定",
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    summary.isNotEmpty ? summary : "这项异步任务已经走到需要你拍板的阶段。",
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: cs.onSurfaceVariant,
-                      height: 1.35,
-                    ),
-                  ),
-                  if (taskDescription.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 10),
-                    Text(
-                      taskDescription,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: cs.onSurfaceVariant.withValues(alpha: 0.9),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 14),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: actions.map((String action) {
-                      final String label =
-                          asyncConfirmationActionLabel(action, payload);
-                      final bool primary =
-                          isPrimaryAsyncConfirmationAction(action);
-                      if (primary) {
-                        return FilledButton(
-                          onPressed: _isSubmittingAsyncConfirmation
-                              ? null
-                              : () => unawaited(
-                                    _handleAsyncConfirmationAction(
-                                      payload,
-                                      action,
-                                    ),
-                                  ),
-                          child: Text(label),
-                        );
-                      }
-                      return OutlinedButton(
-                        onPressed: _isSubmittingAsyncConfirmation
-                            ? null
-                            : () => unawaited(
-                                  _handleAsyncConfirmationAction(
-                                    payload,
-                                    action,
-                                  ),
-                                ),
-                        child: Text(label),
-                      );
-                    }).toList(),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
+    final String receiptId =
+        _taskReceiptMessageIdByTaskId.putIfAbsent(taskId, () => "task-receipt-$taskId");
+    final String fallbackText =
+        _taskReceiptFallbackText(state, goal ?? "");
+    final int? idx = _messageIndexById(receiptId);
+    final ChatMessage next = ChatMessage(
+      messageId: receiptId,
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      contentType: "task_receipt",
+      text: fallbackText,
+      timestamp: (idx != null && idx < _messages.length)
+          ? _messages[idx].timestamp
+          : DateTime.now(),
+      taskId: taskId,
+      taskState: state,
+      taskGoal: (goal == null || goal.isEmpty) ? null : goal,
+      taskProgress: progress.isEmpty ? null : progress,
+      taskStartedAt: startedAt,
     );
+
+    void apply() {
+      if (idx != null && idx < _messages.length) {
+        _messages[idx] = next;
+        _assistantMessageIndexById[receiptId] = idx;
+      } else {
+        _messages.add(next);
+        _assistantMessageIndexById[receiptId] = _messages.length - 1;
+      }
+    }
+
+    if (!mounted) {
+      apply();
+      return;
+    }
+    setState(apply);
   }
 
-  Future<void> _appendAsyncTaskReportMessage(
-      Map<String, dynamic> payload) async {
-    final String taskId = payload["taskId"]?.toString() ?? "";
-    final String status = payload["status"]?.toString() ?? "";
-    final String text = payload["userFacingText"]?.toString().trim() ?? "";
-    if (taskId.isEmpty || text.isEmpty || status == "running") return;
-    final String messageId = "async-task-$taskId-$status";
-    // 带兜底的索引查询：索引失真时也能识别已存在的消息，防止重复追加
-    if (_messageIndexById(messageId) != null) return;
+  /// 回执降级文案：仅供不支持 task_receipt 渲染的旧路径/通知兜底读取
+  /// （正常渲染走专用回执组件，读 taskGoal/taskState 结构化字段）。
+  static String _taskReceiptFallbackText(String state, String goal) {
+    final String target = goal.trim();
+    switch (state) {
+      case "running":
+        return target.isEmpty ? "已在后台办理" : "已在后台办理：$target";
+      case "awaiting_input":
+        return target.isEmpty ? "任务等待你的输入" : "需要你补充信息：$target";
+      case "done":
+        return target.isEmpty ? "后台任务已完成" : "已办妥：$target";
+      case "failed":
+        return target.isEmpty ? "后台任务执行失败" : "没办成：$target";
+      case "cancelled":
+        return target.isEmpty ? "后台任务已取消" : "已取消：$target";
+      default:
+        return target;
+    }
+  }
+
+  /// 取消后台任务（回执 hover 取消入口）：与「发送新消息打断前台回复」
+  /// 语义分离——本事件只作用于任务面的这条任务，不影响当前对话轮次。
+  void _cancelBackgroundTask(String taskId) {
+    if (taskId.isEmpty) return;
+    _ws.sendEvent("chat.task_cancel", <String, dynamic>{
+      "sessionId": ApiConfig.sessionId,
+      "taskId": taskId,
+    });
+  }
+
+  /// 任务面结果落位（chat.assistant_done + source=task_plane，含离线 outbox 重放）。
+  ///
+  /// 结果以独立 assistant 消息入列（服务端自带「[后台任务·目标]」标识头做归属），
+  /// 不触碰前台轮次的任何状态；落位后移除该任务的过程回执——回执只为
+  /// 「进行中」提供状态屏，真正的结果消息接管后回执即完成使命。
+  Future<void> _handleTaskPlaneResultDone(Map<String, dynamic> payload) async {
+    final String messageId = payload["messageId"]?.toString() ??
+        "assistant-task-${DateTime.now().microsecondsSinceEpoch}";
+    final String finalText = _sanitizeAssistantVisibleText(
+        payload["finalText"]?.toString() ?? "");
+    _dismissTaskReceiptForMessage(messageId);
+    if (finalText.trim().isEmpty) return;
+    final int? idx = _messageIndexById(messageId);
     final ChatMessage message = ChatMessage(
       messageId: messageId,
       sessionId: ApiConfig.effectiveActorId,
       role: "assistant",
-      text: text,
-      timestamp: DateTime.now(),
+      text: finalText,
+      timestamp: (idx != null && idx < _messages.length)
+          ? _messages[idx].timestamp
+          : DateTime.now(),
     );
-    if (!mounted) {
-      _messages.add(message);
-      _assistantMessageIndexById[messageId] = _messages.length - 1;
-      _backgroundRunningTaskIds.remove(taskId);
-      unawaited(_store.saveMessage(message).catchError((Object e) {
-        debugPrint("[chat] async task saveMessage failed: $e");
-      }));
-      return;
+    void apply() {
+      if (idx != null && idx < _messages.length) {
+        _messages[idx] = message;
+        _assistantMessageIndexById[messageId] = idx;
+      } else {
+        _messages.add(message);
+        _assistantMessageIndexById[messageId] = _messages.length - 1;
+      }
     }
-    setState(() {
-      _messages.add(message);
-      _assistantMessageIndexById[messageId] = _messages.length - 1;
-      _backgroundRunningTaskIds.remove(taskId);
+
+    if (mounted) {
+      setState(apply);
+    } else {
+      apply();
+    }
+    await _store.saveMessage(message).catchError((Object e) {
+      debugPrint("[chat] task plane result saveMessage failed: $e");
     });
-    unawaited(_store.saveMessage(message).catchError((Object e) {
-      debugPrint("[chat] async task saveMessage failed: $e");
-    }));
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(content: Text(status == "completed" ? "后台任务已完成" : "后台任务执行失败")),
-    );
+  }
+
+  /// 按结果 messageId（assistant-task-<taskId>）定位并移除对话流内的过程回执。
+  void _dismissTaskReceiptForMessage(String resultMessageId) {
+    if (!resultMessageId.startsWith("assistant-task-")) return;
+    final String taskId = resultMessageId.substring("assistant-task-".length);
+    final String? receiptId = _taskReceiptMessageIdByTaskId.remove(taskId);
+    _taskPlaneActiveTaskIds.remove(taskId);
+    if (receiptId == null || !mounted) return;
+    final int? idx = _messageIndexById(receiptId);
+    if (idx == null || idx >= _messages.length) return;
+    setState(() {
+      _messages.removeAt(idx);
+      _rebuildAssistantIndex();
+    });
   }
 
   /// 删除单条消息（本地 + 通知服务端清除上下文）
@@ -3294,7 +3177,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       setState(() {
         _messages.clear();
         _relayInbound.clear();
-        _backgroundRunningTaskIds.clear();
+        _taskReceiptMessageIdByTaskId.clear();
+        _taskPlaneActiveTaskIds.clear();
         _rebuildAssistantIndex();
       });
       ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(tip)));
@@ -4603,7 +4487,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                       ],
                     ),
                     const FloatingAgentSphere(),
-                    _buildAsyncConfirmationOverlay(),
                     // 右侧面板：顶到自绘标题栏下沿（Stack 顶端），
                     // 在面板宽度范围内覆盖 AppBar / 主内容。
                     // side 模式 288px，split 模式动态宽度。
@@ -5196,7 +5079,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         return ImagePreviewPanel(
           urls: urls,
           index: item.index < urls.length ? item.index : 0,
-          title: item.title,
           source: item.source,
         );
       case RightPanelKind.travelPlan:
@@ -5271,6 +5153,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       onDeleteFromMessage: _deleteMessagesFrom,
       onStopAgent: _cancelCurrentTurn,
       onUserAction: _handleCardAction,
+      // 任务面回执聚合（状态带「N 个任务后台进行中」）+ 逐任务取消入口
+      backgroundTaskCount: _taskPlaneActiveTaskIds.length,
+      onCancelBackgroundTask: _cancelBackgroundTask,
     );
   }
 

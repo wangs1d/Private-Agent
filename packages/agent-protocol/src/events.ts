@@ -15,6 +15,12 @@ export const ClientEventType = {
    * 服务端将其转写为 chat.user_message 走原有 chat 流程。
    */
   ChatUserAction: "chat.user_action",
+  /**
+   * 用户取消一个后台任务（任务面 TaskHub 记录，payload 带 taskId）。
+   * 与「打断前台回复」（发送新消息触发）语义分离：本事件只作用于
+   * 后台任务——任务标记 cancelled 后不再向对话推送结果。
+   */
+  ChatTaskCancel: "chat.task_cancel",
   /** 客户端「Agent 处理中」UI 显隐；false 时服务端锁定本轮，不再合并后续消息 */
   ChatAgentProcessingUi: "chat.agent_processing_ui",
   /** 客户端请求清除聊天历史（服务端同步清除 ChatThreadStore + 持久化） */
@@ -90,6 +96,16 @@ export const ServerEventType = {
    * 这是纯协议层 received-confirmation，不带任何内容。
    */
   ChatMessageReceived: "chat.message_received",
+  /**
+   * 任务面（TaskHub）生命周期变更广播：任务派发/进度/终态。
+   * 前后台分工的客户端契约——前台模型把实事派给后台（task.dispatch）后，
+   * 客户端凭此事件在对话流里落一张轻量「任务回执」（无缝对话形态：
+   * 状态原地更新，不打断用户继续聊天；结果本身仍走 chat.assistant_done，
+   * 以 [后台任务·目标] 标识头自指涉落位）。
+   * 可用 AGENT_TASK_PLANE_WS_EVENTS_ENABLED=0 关闭（回退到旧行为：
+   * 无回执，任务完成后结果消息直接落进对话流）。
+   */
+  ChatTaskUpdate: "chat.task_update",
   ChatAssistantChunk: "chat.assistant_chunk",
   ChatAssistantDone: "chat.assistant_done",
   /**
@@ -124,8 +140,6 @@ export const ServerEventType = {
    * 模型内部 thought 都按 kind 结构化下发，UI 按 kind 决定卡片样式。
    */
   ChatExecutionEvent: "chat.execution_event",
-  /** 后台异步任务状态更新：开始/完成/失败，供异步中心与原对话主动回报 */
-  AgentAsyncTaskUpdate: "agent.async_task_update",
   /** 模型生成的口语化进度/状态行（如委派子 Agent），供客户端替代「思考中」 */
   ChatAgentStatus: "chat.agent_status",
   /** 日程/提醒任务已创建或更新，客户端应刷新日程视图 */
@@ -442,4 +456,32 @@ export type ChatExecutionEventPayload = {
   };
   /** 兜底：v1 过渡期自由文本 */
   log?: string;
+};
+
+// ============================================================
+// 任务面（TaskHub）↔ 客户端 事件载荷（2026-09-08 前后台分工对话改造）
+// ============================================================
+
+/** chat.task_update 载荷：TaskHub 记录的一次生命周期变更（幂等全量快照）。 */
+export type ChatTaskUpdatePayload = {
+  sessionId: string;
+  taskId: string;
+  /** TaskHub 生命周期态：submit=running；结果/取消/异常=done|failed|cancelled */
+  state: "running" | "awaiting_input" | "done" | "failed" | "cancelled";
+  /** 任务目标（一句话自包含），客户端回执的主文案 */
+  goal: string;
+  /** 最近一条进度（工具调用名/排队提示），可缺省 */
+  progressLine?: string;
+  /** 结果归属的用户消息 id（发起该任务的消息），可缺省 */
+  replyAnchorId?: string;
+  /** 任务提交时间 epoch ms */
+  startedAt: number;
+  /** 事件发出时已运行时长 epoch ms 差值 */
+  elapsedMs: number;
+};
+
+/** chat.task_cancel 载荷：用户请求取消一个后台任务。 */
+export type ChatTaskCancelPayload = {
+  sessionId: string;
+  taskId: string;
 };

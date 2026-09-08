@@ -4,6 +4,7 @@ import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getHumanLikeMemoryService } from "./human-like-memory-service.js";
 import { getAgenticMemoryRuntime, getMemoryComponents } from "../agentic-memory/index.js";
+import { getMemoryReinforcementStore } from "../agentic-memory/memory-reinforcement.js";
 import { getDailyDigestService } from "./daily-digest-service.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { getConversationTimelineService } from "./conversation-timeline.js";
@@ -93,10 +94,13 @@ export async function clearAllMemoryForActor(
   const understandingCleared = components.understandingStore?.purgeActor(actorId) ?? 0;
   const factsCleared = components.factStore?.purgeActor(actorId) ?? 0;
   const ftsCleared = components.fts?.purgeActor(actorId) ?? 0;
-  if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared + understandingCleared + factsCleared + ftsCleared > 0) {
+  // 召回强化/归档侧表行（含两阶段遗忘的 archived 行）：Mem0 记录上面第 4 步已删，
+  // 侧表行不回收会变成孤儿且归档量统计失真。
+  const reinforcementCleared = getMemoryReinforcementStore()?.purgeActor(actorId) ?? 0;
+  if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared + understandingCleared + factsCleared + ftsCleared + reinforcementCleared > 0) {
     console.info(
       `[memory-clear] agentic-memory 级联清理：ledger=${ledgerCleared} commitments=${commitmentsCleared} ` +
-        `provenance=${provenanceCleared} bridgeLinks=${bridgeLinksCleared} understanding=${understandingCleared} facts=${factsCleared} fts=${ftsCleared}`,
+        `provenance=${provenanceCleared} bridgeLinks=${bridgeLinksCleared} understanding=${understandingCleared} facts=${factsCleared} fts=${ftsCleared} reinforcement=${reinforcementCleared}`,
     );
   }
 

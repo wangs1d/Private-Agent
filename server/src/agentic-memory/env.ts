@@ -160,9 +160,41 @@ export function getRecallCompressThreshold(): number {
   return envPositiveInt("AGENT_MEMORY_RECALL_COMPRESS_THRESHOLD", 2500);
 }
 
-/** 记忆 TTL（天），超过此天数的低重要性记忆可被清理。0=不清理 */
+/**
+ * 记忆常规 TTL（天），超过此天数的低重要性记忆可被清理。0=不清理。
+ * 分类 TTL：temporary_context 类走 getMemoryTTLTemporaryDays（7 天），
+ * stable_* 类豁免（核心事实永久），其余走本值（设计文档「常规信息 TTL=90 天」）。
+ */
 export function getMemoryTTLDays(): number {
-  return envPositiveInt("AGENT_MEMORY_TTL_DAYS", 60);
+  return envPositiveInt("AGENT_MEMORY_TTL_DAYS", 90);
+}
+
+/** 临时信息 TTL（天）：temporary_context 类记忆的有效期（「临时信息 TTL=7 天」）。 */
+export function getMemoryTTLTemporaryDays(): number {
+  return envPositiveInt("AGENT_MEMORY_TTL_TEMPORARY_DAYS", 7);
+}
+
+/**
+ * 归档保留天数（两阶段遗忘）：TTL 到期/LLM 判弃的记忆先归档（召回侧过滤，
+ * 可恢复），超过此天数才物理删除。0=归档后不自动物理删（仅手动清空时回收）。
+ */
+export function getMemoryArchiveRetentionDays(): number {
+  return envPositiveInt("AGENT_MEMORY_ARCHIVE_RETENTION_DAYS", 14);
+}
+
+/** Mem0 库 LLM 定期审查开关：判断过时/矛盾/冗余，命中者归档（不直接删）。 */
+export function isMemoryLlmReviewEnabled(): boolean {
+  return envBool("AGENT_MEMORY_LLM_REVIEW_ENABLED", true);
+}
+
+/** LLM 审查间隔（小时） */
+export function getMemoryLlmReviewIntervalHours(): number {
+  return envPositiveInt("AGENT_MEMORY_LLM_REVIEW_INTERVAL_H", 24);
+}
+
+/** LLM 审查每批条数（按最久未访问优先抽取） */
+export function getMemoryLlmReviewBatchSize(): number {
+  return envPositiveInt("AGENT_MEMORY_LLM_REVIEW_BATCH", 40);
 }
 
 /** 生命周期清理间隔（分钟） */

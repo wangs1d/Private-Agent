@@ -230,6 +230,11 @@ export type AgentStreamOptions = {
   };
   /** 单轮快路径：不写入 provider 会话 thread（避免历史越积越慢） */
   ephemeralTurn?: boolean;
+  /**
+   * Token 审计 stage 覆盖（B1 度量，2026-09-08）：任务面传入 task_plane_fast /
+   * task_plane_complex；缺省时 provider 按分支落 main_chat（非工具）/ main_chat_tools（工具循环）。
+   */
+  auditStage?: string;
   /** 替换默认 system（跳过 UAP 记忆拼装，用于低延迟场景） */
   systemPromptOverride?: string;
   /** 覆盖默认 chat 模型（如专用快模型） */
@@ -411,4 +416,11 @@ export interface ExternalChatProvider {
    * 用于 fast→complex 升级重放前清理 fast 轮写入的线程残迹（防重复落盘）。
    */
   removeUserTurnAndAfter?(sessionId: string, clientMessageId?: string): void;
+
+  /**
+   * 可选：把后台任务的目标与结果作为单条 assistant 角色事实记录写入线程。
+   * 取代旧的「伪造 user 轮 [后台任务] <原文> + assistant 回复对」——user 轮
+   * 会让后续对话把任务原文当作用户说过的话接茬（2026-09-08 事故根因之一）。
+   */
+  appendTaskRecord?(sessionId: string, goal: string, resultText: string): void;
 }

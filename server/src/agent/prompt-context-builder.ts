@@ -620,8 +620,13 @@ export class PromptContextBuilder {
         ? memoryManager?.getYesterdayHighlightForPrompt(input.actorId) ?? undefined
         : undefined;
     const followUpAnchor = buildFollowUpAnchorPrompt(userText);
+    // scheduleSnapshot 注入门控（2026-09-08 扩展）：除日程语义命中外，追问轮
+    // （ambiguousFollowUp）也注入——追问轮正是 agent 回头确认「正事」的场景，
+    // 权威日程快照（含提醒触发时间）能纠正 recap/挂起栈的记忆偏差，防止对
+    // 已创建的提醒反复追问「要提前多久」。
     const scheduleSnapshot =
-      this.deps.scheduleTaskService != null && shouldInjectScheduleSnapshot(userText)
+      this.deps.scheduleTaskService != null &&
+      (shouldInjectScheduleSnapshot(userText) || ambiguousFollowUp)
         ? buildSchedulePromptSnapshot(this.deps.scheduleTaskService, input.actorId, userText)
         : undefined;
     // 行程状态热层：仅行程语义命中时注入一行回执列表（目的地/日期/planId），

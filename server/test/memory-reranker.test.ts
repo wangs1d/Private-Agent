@@ -54,6 +54,29 @@ test("rerank：llm 档正常 JSON → 按 relevance 降序", async () => {
   assert.ok(calls[0]!.includes("3. 用户住在杭州"), "候选编号进入 prompt");
 });
 
+test("rerank：llm 档默认用对话模型（AGENT_AGENTIC_MEMORY_LLM_MODEL），不用 rerank 模型名", async () => {
+  const saved = process.env.AGENT_AGENTIC_MEMORY_LLM_MODEL;
+  process.env.AGENT_AGENTIC_MEMORY_LLM_MODEL = "test-chat-model";
+  try {
+    const calls: Array<{ model: string }> = [];
+    const client: RerankLlmClient = {
+      chat: {
+        completions: {
+          async create(args) {
+            calls.push({ model: args.model });
+            return { choices: [{ message: { content: '{"scores":[{"index":1,"score":1}]}' } }] };
+          },
+        },
+      },
+    };
+    await rerankTexts("q", TEXTS, { mode: "llm", client });
+    assert.equal(calls[0]?.model, "test-chat-model");
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_AGENTIC_MEMORY_LLM_MODEL;
+    else process.env.AGENT_AGENTIC_MEMORY_LLM_MODEL = saved;
+  }
+});
+
 test("rerank：llm 档容忍 ``` 围栏与前后杂文", async () => {
   const client = makeLlmClient('好的，结果如下：\n```json\n{"scores":[{"index":1,"score":0.9},{"index":2,"score":0.2},{"index":3,"score":0.5}]}\n```\n以上。');
   const out = await rerankTexts("query", TEXTS, { mode: "llm", client });

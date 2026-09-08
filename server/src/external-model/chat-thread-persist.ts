@@ -135,8 +135,22 @@ export class ChatThreadPersistence {
   private persistChain: Promise<void> = Promise.resolve();
   private readonly debounceMs = 250;
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * 启动竞态守卫（2026-09-08）：初始 load 未完成期间为非空 promise。
+   * this.data 在 load 完成前是空骨架——此期间任何落盘都会用空 sessions
+   * **全量覆写**已持久化的全部会话（实测 dev watch 重启后 chat-threads.json
+   * 被清空、当晚对话上下文丢失）。写入方（scheduleSave/deleteSession/flushToDisk）
+   * 必须先 await 本 gate。
+   */
+  private loadGate: Promise<void> | null = null;
 
-  constructor(filePath?: string, notesFilePath?: string) {
+  constructor(
+    filePath?: string,
+    notesFilePath?: string,
+    /** 可注入的文件读取器（仅测试用它放慢 load、确定性复现竞态窗口）。 */
+    private readonly readFileImpl: (path: string) => Promise<string> = (path) =>
+      readFile(path, "utf8"),
+  ) {
     const defaultDir = join(process.cwd(), "data");
     this.filePath =
       filePath?.trim() ||
@@ -162,12 +176,31 @@ export class ChatThreadPersistence {
   }
 
   async load(): Promise<void> {
-    await Promise.all([this.loadOne(this.filePath, false), this.loadOne(this.notesFilePath, true)]);
+    // 幂等：boot 期间可能被多处触发，复用同一 gate；完成后清空，
+    // 此后写入方走 whenLoaded() 的立即通过路径，零开销。
+    if (this.loadGate) return this.loadGate;
+    const gate = (async () => {
+      await Promise.all([this.loadOne(this.filePath, false), this.loadOne(this.notesFilePath, true)]);
+    })();
+    this.loadGate = gate;
+    void gate
+      .finally(() => {
+        if (this.loadGate === gate) this.loadGate = null;
+      })
+      .catch(() => {
+        /* gate 自身的 rejection 由返回值传给调用方（bootLoads），此处不再重复处理 */
+      });
+    return gate;
+  }
+
+  /** 启动竞态守卫：初始 load 未完成时返回其 promise（写入方必须等待），否则立即通过。 */
+  private whenLoaded(): Promise<void> {
+    return this.loadGate ?? Promise.resolve();
   }
 
   private async loadOne(path: string, isNotes: boolean): Promise<void> {
     try {
-      const raw = await readFile(path, "utf8");
+      const raw = await this.readFileImpl(path);
       const parsed = JSON.parse(raw) as PersistedShape;
       if (!parsed?.sessions || typeof parsed.sessions !== "object") return;
       if (isNotes) {
@@ -263,31 +296,45 @@ export class ChatThreadPersistence {
     if (prev) clearTimeout(prev);
     const timer = setTimeout(() => {
       this.debounceTimers.delete(sessionId);
-      const sanitized = sanitizeToolCallMessageChain(nonSystem, "[chat-thread-persist-save]");
-      const snapshot = tailMessages(sanitized, getChatThreadPersistMaxMessages());
-      // P3 修复：写盘失败必须打日志并保持链条存活。此前 rejection 存进
-      // persistChain 无人消费——一次磁盘错误既静默丢弃本次保存，又让链上
-      // 后续所有保存被 .then 跳过（持久化永久瘫痪且无任何日志）。
-      this.persistChain = this.persistChain
-        .then(() => this.writeSession(sessionId, snapshot))
-        .catch((err) =>
-          console.error(`[chat-thread-persist] 线程落盘失败（${this.filePath}）:`, err),
-        );
+      void (async () => {
+        // 启动竞态守卫：先等 load 完成，再读写 this.data——否则写的是空骨架，
+        // load 完成后该写入丢失，且 load 一完成就全量覆写掉已持久化的会话。
+        await this.whenLoaded();
+        const sanitized = sanitizeToolCallMessageChain(nonSystem, "[chat-thread-persist-save]");
+        const snapshot = tailMessages(sanitized, getChatThreadPersistMaxMessages());
+        // P3 修复：写盘失败必须打日志并保持链条存活。此前 rejection 存进
+        // persistChain 无人消费——一次磁盘错误既静默丢弃本次保存，又让链上
+        // 后续所有保存被 .then 跳过（持久化永久瘫痪且无任何日志）。
+        this.persistChain = this.persistChain
+          .then(() => this.writeSession(sessionId, snapshot))
+          .catch((err) =>
+            console.error(`[chat-thread-persist] 线程落盘失败（${this.filePath}）:`, err),
+          );
+      })().catch((err) =>
+        console.error(`[chat-thread-persist] 线程落盘失败（${this.filePath}）:`, err),
+      );
     }, this.debounceMs);
     this.debounceTimers.set(sessionId, timer);
   }
 
   deleteSession(sessionId: string): void {
-    const store = this.pickStore(sessionId);
-    delete store.sessions[sessionId];
     const prev = this.debounceTimers.get(sessionId);
     if (prev) clearTimeout(prev);
     this.debounceTimers.delete(sessionId);
-    this.persistChain = this.persistChain
-      .then(() => this.flushToDisk())
-      .catch((err) =>
-        console.error(`[chat-thread-persist] 删除会话落盘失败（${this.filePath}）:`, err),
-      );
+    // 启动竞态守卫：删除必须作用在 load 完成后的数据上——否则删的是空骨架，
+    // load 完成后该会话在内存里“复活”，与调用方的清除意图相悖。
+    void (async () => {
+      await this.whenLoaded();
+      const store = this.pickStore(sessionId);
+      delete store.sessions[sessionId];
+      this.persistChain = this.persistChain
+        .then(() => this.flushToDisk())
+        .catch((err) =>
+          console.error(`[chat-thread-persist] 删除会话落盘失败（${this.filePath}）:`, err),
+        );
+    })().catch((err) =>
+      console.error(`[chat-thread-persist] 删除会话处理失败（${this.filePath}）:`, err),
+    );
   }
 
   private async writeSession(
@@ -303,6 +350,10 @@ export class ChatThreadPersistence {
   }
 
   private async flushToDisk(): Promise<void> {
+    // 启动竞态守卫（兜底）：load 内部的修复写盘（sanitize/migrate）会走到这里，
+    // 等 gate 解析后写的是已加载完成的完整数据——gate 的解析不依赖 flush 本身，
+    // 无死锁；外部写入路径已在 scheduleSave/deleteSession 先行等待。
+    await this.whenLoaded();
     await writeJsonAtomic(this.filePath, this.data);
     // 仅在 notes 存储非空时落盘
     if (Object.keys(this.notesData.sessions).length > 0 || this.notesDataWasFlushedOnce) {
@@ -317,6 +368,10 @@ let sharedPersistence: ChatThreadPersistence | null = null;
 export function getChatThreadPersistence(): ChatThreadPersistence {
   if (!sharedPersistence) {
     sharedPersistence = new ChatThreadPersistence();
+    // 单例创建即启动 load：竞态守卫从进程生命周期的最早时刻生效——
+    // boot 里任何先于显式 load() 调用的写入路径也会等待加载完成。
+    // 显式 load() 幂等复用同一 gate，rejection 仍会传给 bootLoads 启动链路。
+    void sharedPersistence.load().catch(() => {});
   }
   return sharedPersistence;
 }

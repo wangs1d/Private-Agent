@@ -91,7 +91,7 @@ export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
 
   app.get("/api/nightly-memory/stats", async (_request, reply) => {
     const service = getNightlyMemoryTaskService();
-    
+
     if (!service) {
       return reply.status(503).send({
         error: "Nightly memory service not initialized",
@@ -99,35 +99,18 @@ export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
     }
 
     try {
-      let totalMessages = 0;
-      let todayMessages = 0;
-      const days = new Set<string>();
-
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key?.startsWith("pai_daily_chat_")) {
-          try {
-            const raw = localStorage.getItem(key);
-            if (raw) {
-              const messages = JSON.parse(raw);
-              totalMessages += messages.length;
-              const day = key.replace("pai_daily_chat_", "");
-              days.add(day);
-              
-              const today = new Date().toISOString().split("T")[0];
-              if (day === today) {
-                todayMessages = messages.length;
-              }
-            }
-          } catch {
-            
-          }
-        }
-      }
+      // 统计来自 daily-chat-sync 持久层（原实现误用浏览器 localStorage，服务端必然 500）
+      const sync = getDailyChatSyncService().getSyncStatus();
+      const actorStats = sync.actorStats ?? [];
+      const days = new Set(actorStats.map((s) => s.day));
+      const today = new Date().toISOString().split("T")[0];
+      const todayMessages = actorStats
+        .filter((s) => s.day === today)
+        .reduce((sum, s) => sum + s.messageCount, 0);
 
       return {
         totalDays: days.size,
-        totalMessages,
+        totalMessages: sync.totalMessages,
         todayMessages,
         storedDays: Array.from(days).sort().reverse(),
         timestamp: new Date().toISOString(),
@@ -205,6 +188,20 @@ export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  });
+
+  // 遗忘可观测：上一轮 cycle 结果 / 去重游标 / LLM 审查时间 / 当前归档量
+  app.get("/api/memory/lifecycle/stats", async (_request, reply) => {
+    const runtime = getAgenticMemoryRuntime();
+    if (!runtime) {
+      return reply.status(503).send({
+        error: "Agentic memory runtime not initialized",
+      });
+    }
+    return {
+      stats: runtime.lifecycle.getStatsSnapshot(),
+      timestamp: new Date().toISOString(),
+    };
   });
 
   app.post("/api/memory/consolidation/flush", async (_request, reply) => {
