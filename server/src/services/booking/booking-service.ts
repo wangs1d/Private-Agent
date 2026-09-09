@@ -26,6 +26,7 @@
  * isHighRiskFinancialTool 名单中，require_approval）。
  */
 
+import { randomBytes } from "node:crypto";
 import { resolveActorId } from "../../agent/actor-id.js";
 import type { CommitmentBoard } from "../../agentic-memory/commitment-board.js";
 import type { AuditService } from "../audit-service.js";
@@ -41,6 +42,7 @@ import type {
 import { newBookingOrderId, BookingOrderStore, localDateKey, type StoredBookingOrder } from "./booking-order-store.js";
 import { BookingConfirmationStore, type BookingPendingConfirmation } from "./booking-confirmation.js";
 import { getBookingConfig, type BookingConfig } from "./booking-config.js";
+import type { ScheduleBookingBridge } from "../schedule-booking-bridge.js";
 
 export type BookingServiceResult =
   | { ok: true; summary: string } & Record<string, unknown>
@@ -63,6 +65,8 @@ export interface BookingServiceDeps {
   /** 承诺板可延后注入（bootstrap 中晚于服务构造） */
   board?: CommitmentBoard | null;
   audit?: AuditService | null;
+  /** 日程联动桥可延后注入（bootstrap 中晚于冲突服务构造） */
+  scheduleBridge?: ScheduleBookingBridge | null;
   config?: Partial<BookingConfig>;
   now?: () => Date;
 }
@@ -72,6 +76,7 @@ export class BookingService {
   private readonly store: BookingOrderStore;
   private board: CommitmentBoard | null;
   private readonly audit: AuditService | null;
+  private bridge: ScheduleBookingBridge | null;
   private readonly config: BookingConfig;
   private readonly now: () => Date;
   private readonly confirmations: BookingConfirmationStore;
@@ -83,6 +88,7 @@ export class BookingService {
     this.store = deps.store ?? new BookingOrderStore(null);
     this.board = deps.board ?? null;
     this.audit = deps.audit ?? null;
+    this.bridge = deps.scheduleBridge ?? null;
     this.config = { ...getBookingConfig(), ...(deps.config ?? {}) };
     this.now = deps.now ?? (() => new Date());
     this.confirmations = new BookingConfirmationStore({
@@ -94,6 +100,11 @@ export class BookingService {
   /** bootstrap 中承诺板构造完成后注入（见 create-app-services.ts）。 */
   setCommitmentBoard(board: CommitmentBoard | null): void {
     this.board = board;
+  }
+
+  /** bootstrap 中日程冲突服务构造完成后注入（见 create-app-services.ts）。 */
+  setScheduleBridge(bridge: ScheduleBookingBridge | null): void {
+    this.bridge = bridge;
   }
 
   dispose(): void {
@@ -140,7 +151,7 @@ export class BookingService {
   }
 
   private providerContext(ctx: ToolContext): BookingProviderContext {
-    return { actorId: resolveActorId(ctx), location: ctx.clientLocation ?? null };
+    return { actorId: resolveActorId(ctx), location: ctx.clientLocation ?? null, toolContext: ctx };
   }
 
   // ------------------------------------------------------------------ //
@@ -296,12 +307,27 @@ export class BookingService {
       }
     }
     const scheduleAt = option.scheduleAt ?? input.scheduleAt ?? null;
+    // 日程冲突预检（程序层）：有冲突时在摘要中提示，由 LLM 向用户转述并让用户决定
+    let conflictInfo: Record<string, unknown> | null = null;
+    if (this.bridge && scheduleAt) {
+      try {
+        const precheck = this.bridge.precheckBookConflict(
+          { actorId, scheduleAt },
+          option.durationMinutes,
+          ctx.clientLocation?.timezone?.trim() || "Asia/Shanghai",
+        );
+        if (precheck.conflict) conflictInfo = precheck.toolResult;
+      } catch {
+        // 冲突预检失败不阻断预订链路
+      }
+    }
     const summaryParts = [
       `即将预订「${DOMAIN_LABELS[domain]}」`,
       option.title,
       option.description ?? "",
       amount != null ? `金额：¥${amount}` : "金额：以平台为准",
       scheduleAt ? `服务时间：${scheduleAt}` : "",
+      conflictInfo ? "⚠️ 该时间与已有日程冲突" : "",
       option.simulated ? "⚠️ 模拟模式：不会真实下单" : "",
     ].filter(Boolean);
     const summary = summaryParts.join("，");
@@ -313,6 +339,7 @@ export class BookingService {
       title: option.title,
       amountCny: amount,
       scheduleAt,
+      durationMinutes: option.durationMinutes ?? null,
       summary,
       params: draftParams,
     };
@@ -345,7 +372,15 @@ export class BookingService {
       amountCny: amount,
       scheduleAt,
       simulated: option.simulated === true,
-      hint: "请向用户复述上述摘要（模拟模式必须说明是模拟），得到明确同意后，带 confirm=true + confirmationToken 再调用完成预订",
+      ...(conflictInfo
+        ? {
+            scheduleConflict: conflictInfo,
+            hint:
+              "该预订时间与用户已有日程冲突：请先向用户逐条转述 scheduleConflict.conflicts 并询问是否仍要预订；用户明确坚持后再走阶段二确认。",
+          }
+        : {
+            hint: "请向用户复述上述摘要（模拟模式必须说明是模拟），得到明确同意后，带 confirm=true + confirmationToken 再调用完成预订",
+          }),
     };
   }
 
@@ -470,10 +505,27 @@ export class BookingService {
         persistenceFailed: persistenceError != null,
       });
 
+      // 日程联动：下单成功自动建日程（失败不阻断下单结果，仅透出告警）
+      let scheduleWarning: string | null = null;
+      let scheduleTaskId: string | null = null;
+      if (this.bridge) {
+        try {
+          const task = await this.bridge.onBooked(order, {
+            timezone: ctx.clientLocation?.timezone?.trim() || "Asia/Shanghai",
+            durationMinutes: draft.durationMinutes,
+          });
+          if (task) scheduleTaskId = task.taskId;
+        } catch (err) {
+          scheduleWarning = err instanceof Error ? err.message : String(err);
+          console.warn(`[Booking] 预订联动建日程失败（不影响下单）：orderId=${orderId}，${scheduleWarning}`);
+        }
+      }
+
       const summaryParts = [
         `已提交${DOMAIN_LABELS[draft.domain]}预订${simulated ? "（模拟模式，未真实下单）" : ""}`,
         draft.title,
         draft.amountCny != null ? `金额 ¥${draft.amountCny}` : "",
+        scheduleTaskId ? "已自动加入日程" : "",
         bookResult.paymentUrl ? "支付链接已返回，请在支付页面手动完成支付" : "",
       ].filter(Boolean);
 
@@ -490,6 +542,10 @@ export class BookingService {
         simulated,
         commitmentId,
         tracking: bookResult.tracking,
+        ...(scheduleTaskId ? { scheduleTaskId } : {}),
+        ...(scheduleWarning
+          ? { scheduleWarning: `预订已成功，但自动创建日程失败：${scheduleWarning}` }
+          : {}),
         ...(persistenceError
           ? { persistenceWarning: `订单已在平台创建，但本地记录落库失败：${persistenceError}。请知悉该订单可能不会出现在本地订单列表中。` }
           : {}),
@@ -679,6 +735,16 @@ export class BookingService {
         // 承诺板异常不影响主链路
       }
     }
+    // 日程反向同步：取消预订 → 取消关联日程（失败不阻断）
+    let scheduleSyncWarning: string | null = null;
+    if (this.bridge) {
+      try {
+        await this.bridge.onCancelled(order);
+      } catch (err) {
+        scheduleSyncWarning = err instanceof Error ? err.message : String(err);
+        console.warn(`[Booking] 取消联动日程失败：orderId=${order.orderId}，${scheduleSyncWarning}`);
+      }
+    }
     await this.recordAudit(ctx, "cancel_stage2", order.domain, {
       orderId: order.orderId,
       providerOrderId: order.providerOrderId,
@@ -691,6 +757,132 @@ export class BookingService {
       orderId: order.orderId,
       status: "cancelled",
       simulated: order.simulated,
+      ...(scheduleSyncWarning
+        ? { scheduleWarning: `订单已取消，但关联日程取消失败：${scheduleSyncWarning}，可让用户手动删除该日程` }
+        : {}),
+    };
+  }
+
+  // ------------------------------------------------------------------ //
+  // requestRefund（已支付/已出票订单退改工单：Agent 立单+导航，不代办真实退改）
+  // ------------------------------------------------------------------ //
+
+  /**
+   * travel 域已出票订单的退票/改签：真实退改只能在原下单平台办理且涉及
+   * 资金退回，Agent 不代办最终提交。本方法只做两件事：
+   *   1. 两阶段确认后在本地订单上创建退改工单（params.refundTickets，可断点续办）
+   *   2. 返回平台导航指引：经用户批准后由 agent_browser 打开原平台订单页，
+   *      退改入口的「最终提交」必须由用户本人点击
+   */
+  async requestRefund(
+    ctx: ToolContext,
+    domain: BookingDomain,
+    orderId: string,
+    input: {
+      kind: "refund" | "change";
+      reason?: string;
+      confirm: boolean;
+      confirmationToken?: string;
+    },
+  ): Promise<BookingServiceResult> {
+    const actorId = resolveActorId(ctx);
+    const order = await this.store.get(orderId);
+    if (!order || order.actorId !== actorId) {
+      return { ok: false, error: `订单 ${orderId} 不存在` };
+    }
+    if (order.domain !== domain) {
+      return { ok: false, error: `订单 ${orderId} 不属于「${DOMAIN_LABELS[domain]}」` };
+    }
+    if (order.status === "cancelled") {
+      return { ok: false, error: "订单已取消，无需退改" };
+    }
+    if (order.status === "pending_payment") {
+      return {
+        ok: false,
+        error: "订单尚未支付，直接取消即可（cancel），无需退改工单",
+        retryable: false,
+      };
+    }
+    if (order.status === "completed") {
+      return {
+        ok: false,
+        error: "订单已完成（行程/入住已结束），退改时效一般已过；如需办理请直接联系商家或平台客服",
+        retryable: false,
+      };
+    }
+
+    if (input.confirm) {
+      const consumed = this.confirmations.consume(input.confirmationToken ?? "", {
+        actorId,
+        action: "refund",
+        domain,
+      });
+      if (!consumed.ok) return consumed;
+      return this.executeRefundStage2(ctx, order, input.kind, input.reason);
+    }
+
+    const summary =
+      `即将为「${DOMAIN_LABELS[domain]}」订单「${order.title}」创建${input.kind === "refund" ? "退票" : "改签"}工单。` +
+      "真实退改将在原下单平台办理（Agent 只立单并提供页面导航，退改费用与时效以平台规则为准，最终提交须用户本人确认）";
+    const pending = this.confirmations.mint({
+      actorId,
+      domain,
+      provider: order.provider,
+      action: "refund",
+      orderId: order.orderId,
+      summary,
+      amountCny: order.amountCny,
+    });
+    await this.recordAudit(ctx, "refund_stage1", domain, { orderId, kind: input.kind, token: pending.token });
+    return {
+      ok: true,
+      summary,
+      needsConfirmation: true,
+      confirmationToken: pending.token,
+      expiresInMs: this.config.confirmationTtlMs,
+      hint: "请向用户复述工单摘要（含「真实退改在原平台办理、费用以平台规则为准」），用户明确同意后带 confirm=true + confirmationToken 再调用完成立单",
+    };
+  }
+
+  private async executeRefundStage2(
+    ctx: ToolContext,
+    order: StoredBookingOrder,
+    kind: "refund" | "change",
+    reason?: string,
+  ): Promise<BookingServiceResult> {
+    const ticketId = `rft_${this.now().getTime().toString(36)}_${randomBytes(3).toString("hex")}`;
+    const ticket = {
+      ticketId,
+      kind,
+      reason: reason ?? null,
+      status: "pending_user",
+      createdAt: this.now().toISOString(),
+    };
+    const existing = Array.isArray(order.params.refundTickets) ? order.params.refundTickets : [];
+    await this.store.update(order.orderId, {
+      params: { ...order.params, refundTickets: [...existing, ticket] },
+    });
+    await this.recordAudit(ctx, "refund_ticket_created", order.domain, {
+      orderId: order.orderId,
+      providerOrderId: order.providerOrderId,
+      ticketId,
+      kind,
+      reason,
+    });
+
+    return {
+      ok: true,
+      summary: `退改工单已创建（${ticketId}，${kind === "refund" ? "退票" : "改签"}）。真实退改须在原下单平台办理，Agent 不代办最终提交`,
+      orderId: order.orderId,
+      ticketId,
+      kind,
+      navigation: {
+        platformHint:
+          "经用户批准后，用 agent_browser.open 打开原下单平台的「我的订单」页（如携程 my.ctrip.com、12306 订单页、酒店平台订单页），" +
+          "定位该订单进入退改签入口；页面上的「提交退票/改签」最终确认必须由用户本人点击，Agent 不得代点",
+        cashierUrl: typeof order.params.cashierUrl === "string" ? order.params.cashierUrl : null,
+      },
+      note: "退改手续费与时效以平台规则为准，请如实转告用户；工单已随订单保存，可断点续办",
     };
   }
 
@@ -746,6 +938,17 @@ export class BookingService {
         // 承诺板异常不影响主链路
       }
     }
+    // 日程反向同步：改期预订 → 更新关联日程时间（失败不阻断）
+    let scheduleSyncWarning: string | null = null;
+    if (this.bridge) {
+      try {
+        const updatedOrder = { ...order, scheduleAt, deadline: scheduleAt };
+        await this.bridge.onRescheduled(updatedOrder, scheduleAt);
+      } catch (err) {
+        scheduleSyncWarning = err instanceof Error ? err.message : String(err);
+        console.warn(`[Booking] 改期联动日程失败：orderId=${orderId}，${scheduleSyncWarning}`);
+      }
+    }
     await this.recordAudit(ctx, "reschedule", domain, { orderId, scheduleAt });
 
     return {
@@ -754,6 +957,9 @@ export class BookingService {
       orderId,
       scheduleAt,
       simulated: order.simulated,
+      ...(scheduleSyncWarning
+        ? { scheduleWarning: `订单已改期，但关联日程改期失败：${scheduleSyncWarning}，可让用户手动调整该日程` }
+        : {}),
     };
   }
 

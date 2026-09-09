@@ -184,7 +184,7 @@ export class TaobaoAdapter implements ShoppingPlatformAdapter {
     }
   }
 
-  async submitOrder(page: Page): Promise<{ ok: boolean; orderId?: string; error?: string; retryable?: boolean }> {
+  async submitOrder(page: Page): Promise<{ ok: boolean; orderId?: string; error?: string; retryable?: boolean; paymentUrl?: string }> {
     try {
       // 点"提交订单"按钮（多组选择器兜底）—— 不点"立即支付"
       const submitSelectors = [
@@ -231,6 +231,7 @@ export class TaobaoAdapter implements ShoppingPlatformAdapter {
       return {
         ok: true,
         orderId,
+        paymentUrl: onPaymentPage ? page.url() : undefined,
         error: onPaymentPage && !orderId ? "订单已提交，请在客户端完成支付" : undefined,
       };
     } catch (err) {

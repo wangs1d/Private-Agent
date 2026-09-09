@@ -171,7 +171,9 @@ function isContinuityTurn(text: string): boolean {
   const normalized = normalizeInput(text);
   if (!normalized) return false;
   if (CONTINUITY_TURN_RE.test(normalized)) return true;
-  if (normalized.length <= 12 && /^(?:这|那|它|他|她|继续|接着|然后|再|改|修|看|做|this|that|it|next|then)/i.test(normalized)) {
+  // 「重新」入表（2026-09-09）：「重新找/重新搜」类短指代此前不命中续接判定，
+  // 被解析成 topic_switch → recent-context/episodic 块均不注入（短期记忆漏注入事故点）。
+  if (normalized.length <= 12 && /^(?:这|那|它|他|她|继续|接着|然后|再|重新|改|修|看|做|this|that|it|next|then)/i.test(normalized)) {
     return true;
   }
   return false;

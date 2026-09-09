@@ -65,6 +65,16 @@ export type ScheduleTaskRecord = {
   reminderMessage?: string;
   action?: ScheduleActionConfig;
   agentTask?: ScheduleAgentTaskConfig;
+  /** 事件时长（分钟）；0/缺省 = 时间点提醒（无区间）。用于冲突检测与「今日安排」区间展示。 */
+  durationMinutes?: number;
+  /** 提前量提醒（分钟数组，如 [15,5]）：到点前按各偏移各推一次，主触发前不打断。 */
+  remindBeforeMinutes?: number[];
+  /** 来源标记：manual=用户/LLM 直建；booking=预订下单联动自动生成。 */
+  source?: "manual" | "booking";
+  /** 关联的本地预订订单号（source=booking 时写入，用于取消/改期反向同步）。 */
+  sourceBookingOrderId?: string;
+  /** 本次待触发周期内已发出的提前提醒偏移（主触发后重置）。 */
+  firedPreReminderOffsets?: number[];
   createdAt: string;
   updatedAt: string;
   lastRunAt?: string;
@@ -101,9 +111,13 @@ export type CreateScheduleTaskInput = {
   reminderMessage?: string;
   action?: ScheduleActionConfig;
   agentTask?: ScheduleAgentTaskConfig;
+  durationMinutes?: number;
+  remindBeforeMinutes?: number[];
+  source?: "manual" | "booking";
+  sourceBookingOrderId?: string;
 };
 
-type UpdateScheduleTaskInput = {
+export type UpdateScheduleTaskInput = {
   title?: string;
   shortTitle?: string;
   description?: string;
@@ -116,6 +130,8 @@ type UpdateScheduleTaskInput = {
   reminderMessage?: string;
   action?: ScheduleActionConfig;
   agentTask?: ScheduleAgentTaskConfig;
+  durationMinutes?: number;
+  remindBeforeMinutes?: number[];
   status?: Extract<ScheduleTaskStatus, "active" | "paused" | "cancelled">;
 };
 
@@ -132,6 +148,30 @@ export type ScheduleTaskChangeHandler = (
   action: ScheduleTaskChangeAction,
   task: ScheduleTaskRecord,
 ) => void | Promise<void>;
+
+/** 宽松解析时长（分钟）：非法/越界回退 undefined；0 视为无区间。 */
+export function normalizeDurationMinutes(value: unknown): number | undefined {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.min(Math.round(n), 24 * 60 * 7);
+}
+
+/** 宽松解析提前量数组（分钟）：过滤非法值、去重、倒序（大偏移在前），最多 5 个。 */
+export function normalizeRemindBeforeMinutes(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<number>();
+  for (const raw of value.slice(0, 5)) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0 && n <= 24 * 60 * 7) seen.add(Math.round(n));
+  }
+  if (seen.size === 0) return undefined;
+  return [...seen].sort((a, b) => b - a);
+}
+
+/** 任务在给定起点时刻的结束时刻（UTC ms）；无 durationMinutes 时 = 起点（零长区间）。 */
+export function taskEndMs(startMs: number, durationMinutes?: number): number {
+  return startMs + (durationMinutes && durationMinutes > 0 ? durationMinutes : 0) * 60_000;
+}
 
 export class ScheduleTaskService {
   private readonly byTaskId = new Map<string, ScheduleTaskRecord>();
@@ -257,6 +297,16 @@ export class ScheduleTaskService {
     return this.byTaskId.get(taskId);
   }
 
+  /** 按关联预订订单号查找未结束的日程（预订取消/改期反向同步用）。 */
+  findTaskByBookingOrderId(orderId: string): ScheduleTaskRecord | undefined {
+    const id = orderId.trim();
+    if (!id) return undefined;
+    for (const task of this.byTaskId.values()) {
+      if (task.sourceBookingOrderId === id && task.status !== "cancelled") return task;
+    }
+    return undefined;
+  }
+
   async deleteTask(taskId: string): Promise<void> {
     const task = this.byTaskId.get(taskId);
     if (!task) {
@@ -291,6 +341,10 @@ export class ScheduleTaskService {
       reminderMessage: input.reminderMessage?.trim() || undefined,
       action: input.action,
       agentTask: input.agentTask,
+      durationMinutes: normalizeDurationMinutes(input.durationMinutes),
+      remindBeforeMinutes: normalizeRemindBeforeMinutes(input.remindBeforeMinutes),
+      source: input.source,
+      sourceBookingOrderId: input.sourceBookingOrderId?.trim() || undefined,
       createdAt: now,
       updatedAt: now,
     };
@@ -327,6 +381,14 @@ export class ScheduleTaskService {
       reminderMessage: input.reminderMessage?.trim() || task.reminderMessage,
       action: input.action ?? task.action,
       agentTask: input.agentTask ?? task.agentTask,
+      durationMinutes:
+        input.durationMinutes !== undefined
+          ? normalizeDurationMinutes(input.durationMinutes)
+          : task.durationMinutes,
+      remindBeforeMinutes:
+        input.remindBeforeMinutes !== undefined
+          ? normalizeRemindBeforeMinutes(input.remindBeforeMinutes)
+          : task.remindBeforeMinutes,
       updatedAt: new Date().toISOString(),
     };
     if (
@@ -378,6 +440,7 @@ export class ScheduleTaskService {
 
   private async tick(): Promise<void> {
     const now = Date.now();
+    await this.firePreReminders(now);
     const dueTasks = Array.from(this.byTaskId.values()).filter((task) => {
       if (task.status !== "active" || !task.nextRunAt) return false;
       return new Date(task.nextRunAt).getTime() <= now;
@@ -389,6 +452,40 @@ export class ScheduleTaskService {
       void this.executeTask(task, plannedAt).finally(() => {
         this.runningTaskIds.delete(task.taskId);
       });
+    }
+  }
+
+  /** 提前量提醒：到点前按 remindBeforeMinutes 各偏移推送一次（不产生 run、不推进 nextRunAt）。 */
+  private async firePreReminders(now: number): Promise<void> {
+    if (!this.reminderHandler) return;
+    for (const task of Array.from(this.byTaskId.values())) {
+      if (task.status !== "active" || !task.nextRunAt) continue;
+      if (task.kind !== "reminder") continue;
+      const offsets = task.remindBeforeMinutes;
+      if (!offsets?.length) continue;
+      const runMs = new Date(task.nextRunAt).getTime();
+      // 全部到期偏移一次触发（tick 间隔大于偏移间隔时不漏提醒）
+      const dueOffsets = offsets.filter(
+        (o) =>
+          !(task.firedPreReminderOffsets ?? []).includes(o) &&
+          now >= runMs - o * 60_000 &&
+          now < runMs,
+      );
+      if (dueOffsets.length === 0) continue;
+      const updated: ScheduleTaskRecord = {
+        ...task,
+        firedPreReminderOffsets: [...(task.firedPreReminderOffsets ?? []), ...dueOffsets],
+      };
+      this.byTaskId.set(task.taskId, updated);
+      await this.persist();
+      const base = task.reminderMessage || task.title || task.description;
+      for (const dueOffset of dueOffsets.sort((a, b) => b - a)) {
+        try {
+          await this.reminderHandler(updated, `【提前${dueOffset}分钟】${base}`);
+        } catch {
+          // 提前提醒推送失败不影响主触发链路
+        }
+      }
     }
   }
 
@@ -451,6 +548,8 @@ export class ScheduleTaskService {
       ...task,
       lastRunAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      // 主触发后重置提前提醒记录，下一周期可再次推送
+      firedPreReminderOffsets: undefined,
     };
     if (!wasSuccessful) {
       updated.nextRunAt = new Date(Date.now() + 60_000).toISOString();

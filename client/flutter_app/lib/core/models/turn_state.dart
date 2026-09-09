@@ -19,6 +19,7 @@ enum TurnIntentMode {
   static TurnIntentMode fromWire(String? raw) {
     switch (raw) {
       case 'fast_chat':
+      case 'chat':
         return TurnIntentMode.fastChat;
       case 'master_only':
         return TurnIntentMode.masterOnly;

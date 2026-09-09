@@ -45,7 +45,7 @@ export type SemanticIntent = {
   /** 澄清问题（clarificationNeeded=true 时必填） */
   clarificationQuestion?: ClarificationQuestion;
   /** 建议的路由模式 */
-  preferredMode: "fast" | "complex";
+  preferredMode: "chat" | "task";
   /** 建议的工具域（如 "weather" / "calendar" / "desktop"） */
   preferredToolDomain?: string;
   /** 原始 LLM 返回文本（调试用） */

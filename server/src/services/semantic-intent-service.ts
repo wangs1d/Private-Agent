@@ -157,7 +157,7 @@ export class SemanticIntentService {
       subIntents: this.toStringArray(raw.subIntents),
       clarificationNeeded,
       ...(clarificationQuestion ? { clarificationQuestion } : {}),
-      preferredMode: raw.preferredMode === "complex" ? "complex" : "fast",
+      preferredMode: raw.preferredMode === "task" ? "task" : "chat",
       ...(typeof raw.preferredToolDomain === "string" && raw.preferredToolDomain.trim()
         ? { preferredToolDomain: raw.preferredToolDomain.trim() }
         : {}),
@@ -173,7 +173,7 @@ export class SemanticIntentService {
       entities: [],
       subIntents: [],
       clarificationNeeded: false,
-      preferredMode: "fast",
+      preferredMode: "chat",
     };
   }
 

@@ -151,7 +151,7 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
     return {
       userMessage,
       system: "system1",
-      mode: "fast",
+      mode: "direct",
       rationale: "寒暄匹配 fast",
       decidedAt: nowIso(),
     };
@@ -160,7 +160,7 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
     return {
       userMessage,
       system: "system1",
-      mode: "fast",
+      mode: "direct",
       rationale: "简单任务匹配 fast",
       decidedAt: nowIso(),
     };
@@ -169,7 +169,7 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
     return {
       userMessage,
       system: "system2",
-      mode: "complex",
+      mode: "tool_loop",
       rationale: "研究类任务匹配 complex",
       decidedAt: nowIso(),
     };
@@ -178,7 +178,7 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
     return {
       userMessage,
       system: "system2",
-      mode: "complex",
+      mode: "tool_loop",
       rationale: "多步任务匹配 complex",
       decidedAt: nowIso(),
     };
@@ -186,7 +186,7 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
   return {
     userMessage,
     system: "system1",
-    mode: "fast",
+    mode: "direct",
     rationale: "默认路由到 fast",
     decidedAt: nowIso(),
   };
@@ -599,15 +599,15 @@ function mergeStepStatuses(
  */
 function mapRouteMode(rawMode: unknown): { system: "system1" | "system2"; mode: SystemRouteMode } {
   if (typeof rawMode !== "string") {
-    return { system: "system1", mode: "fast" };
+    return { system: "system1", mode: "direct" };
   }
   switch (rawMode) {
-    case "fast":
-      return { system: "system1", mode: "fast" };
-    case "complex":
-      return { system: "system2", mode: "complex" };
+    case "direct":
+      return { system: "system1", mode: "direct" };
+    case "tool_loop":
+      return { system: "system2", mode: "tool_loop" };
     default:
-      return { system: "system1", mode: "fast" };
+      return { system: "system1", mode: "direct" };
   }
 }
 
@@ -1327,7 +1327,7 @@ export class PlannerCortex {
       const route: SystemRouteDecision = {
         userMessage,
         system: "system2",
-        mode: "complex",
+        mode: "tool_loop",
         rationale: `shouldDelegate 主动委派→${delegation.agentType}：${delegation.reason}`,
         decidedAt: nowIso(),
       };

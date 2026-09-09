@@ -15,6 +15,7 @@
 import type { ToolRegistry } from "../../tool-registry.js";
 import type { FinanceDeepService } from "../../../services/finance-deep-service.js";
 import type { SubscriptionAuditService } from "../../../services/subscription-audit-service.js";
+import type { BillManagementService } from "../../../services/bill-management-service.js";
 
 import { FINANCE_DEEP_CHAT_TOOLS } from "./chat-tools.js";
 import {
@@ -28,6 +29,12 @@ import {
   createFinanceListSubscriptionsHandler,
   createFinanceConfirmSubscriptionHandler,
   createFinanceUpdateSubscriptionHandler,
+  createFinanceCancelSubscriptionHandler,
+  createFinanceSavingsSummaryHandler,
+  createFinanceAddBillHandler,
+  createFinanceListBillsHandler,
+  createFinanceUpdateBillHandler,
+  createFinancePayBillHandler,
 } from "./handlers.js";
 
 export { FINANCE_DEEP_CHAT_TOOLS } from "./chat-tools.js";
@@ -43,6 +50,7 @@ export function registerFinanceDeepTools(
   deps: {
     financeDeepService: FinanceDeepService;
     subscriptionAuditService?: SubscriptionAuditService;
+    billManagementService?: BillManagementService;
   },
 ): void {
   const service = deps.financeDeepService;
@@ -53,11 +61,21 @@ export function registerFinanceDeepTools(
   registry.register("finance.reconcile", createFinanceReconcileHandler(service));
   registry.register("finance.categorize", createFinanceCategorizeHandler(service));
   registry.register("finance.export_report", createFinanceExportReportHandler(service));
-  // 订阅盘点（未装配 SubscriptionAuditService 时不注册，避免 handler 空引用）
+  // 订阅盘点 + 自动取消（未装配 SubscriptionAuditService 时不注册，避免 handler 空引用）
   const audit = deps.subscriptionAuditService;
   if (audit) {
     registry.register("finance.list_subscriptions", createFinanceListSubscriptionsHandler(audit));
     registry.register("finance.confirm_subscription", createFinanceConfirmSubscriptionHandler(audit));
     registry.register("finance.update_subscription", createFinanceUpdateSubscriptionHandler(audit));
+    registry.register("finance.cancel_subscription", createFinanceCancelSubscriptionHandler(audit));
+    registry.register("finance.savings_summary", createFinanceSavingsSummaryHandler(audit));
+  }
+  // 账单管理（追踪/提醒/预算联动；未装配 BillManagementService 时不注册）
+  const bills = deps.billManagementService;
+  if (bills) {
+    registry.register("finance.add_bill", createFinanceAddBillHandler(bills));
+    registry.register("finance.list_bills", createFinanceListBillsHandler(bills));
+    registry.register("finance.update_bill", createFinanceUpdateBillHandler(bills));
+    registry.register("finance.pay_bill", createFinancePayBillHandler(bills));
   }
 }

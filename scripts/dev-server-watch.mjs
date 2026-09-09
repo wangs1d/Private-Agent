@@ -17,6 +17,16 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const serverDir = join(root, "server");
 const isWin = process.platform === "win32";
 
+// tsx watch 监听整个 server/ 目录，而服务运行时会落盘 data/、logs/ 及测试残留 JSON，
+// 若不排除会形成「启动→落盘→重启」死循环，这里只保留源码路径触发重启。
+const WATCH_EXCLUDES = [
+  "--exclude", "data/**",
+  "--exclude", "logs/**",
+  "--exclude", "test/**",
+  "--exclude", "**/*.tmp",
+  "--exclude", "test-*.json*",
+];
+
 // `node dev-server-watch.mjs runtime` → remote 拓扑：runtime watch（内部端口）
 // + gateway watch（对外端口）；缺省参数 → embedded 单进程（src/index.ts）
 const entryArg = process.argv[2] ?? "";
@@ -53,7 +63,7 @@ if (!(await isTcpPortInUse(gatewayPort))) {
 // tool-router FastAPI：与 TS 服务异步并行拉起（端口占用时自动跳过）
 const toolRouterChild = await spawnToolRouter();
 
-const child = spawn("npx", ["tsx", "watch", "--clear-screen=false", entry], {
+const child = spawn("npx", ["tsx", "watch", "--clear-screen=false", ...WATCH_EXCLUDES, entry], {
   cwd: serverDir,
   stdio: "inherit",
   shell: isWin,
@@ -71,7 +81,7 @@ const child = spawn("npx", ["tsx", "watch", "--clear-screen=false", entry], {
 // remote 拓扑：runtime 之外加挂 gateway watch（对外端口 3000；被占用则跳过）
 let gatewayWatchChild = null;
 if (isRemoteEntry && !(await isTcpPortInUse(port))) {
-  gatewayWatchChild = spawn("npx", ["tsx", "watch", "--clear-screen=false", "src/gateway-main.ts"], {
+  gatewayWatchChild = spawn("npx", ["tsx", "watch", "--clear-screen=false", ...WATCH_EXCLUDES, "src/gateway-main.ts"], {
     cwd: serverDir,
     stdio: "inherit",
     shell: isWin,

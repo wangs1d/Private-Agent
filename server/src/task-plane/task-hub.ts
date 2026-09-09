@@ -34,6 +34,12 @@ export type TaskPlaneRecord = {
   startedSeq: number;
   /** 最近一条进度快照（供"怎么样了"零 LLM 直答） */
   progressLine?: string;
+  /**
+   * 静默任务（2026-09-09）：原地同步执行的轻任务（launchComplexBackgroundTask）
+   * 只记账（路由摘要/取消/进度），不广播 chat.task_update「任务回执」，
+   * 重连快照补发同样跳过——回执只属于真后台派发（dispatchBackgroundTask）。
+   */
+  quiet?: boolean;
 };
 
 const TERMINAL_RETENTION_MS = 10 * 60_000;
@@ -85,6 +91,8 @@ export class TaskHub {
     sessionId: string;
     replyAnchorId?: string;
     goal: string;
+    /** 静默任务：只记账，不广播回执（见 TaskPlaneRecord.quiet） */
+    quiet?: boolean;
   }): TaskPlaneRecord {
     const now = Date.now();
     const record: TaskPlaneRecord = {
@@ -92,6 +100,7 @@ export class TaskHub {
       sessionId: input.sessionId,
       ...(input.replyAnchorId ? { replyAnchorId: input.replyAnchorId } : {}),
       goal: input.goal,
+      ...(input.quiet ? { quiet: true } : {}),
       state: "running",
       startedAt: now,
       updatedAt: now,

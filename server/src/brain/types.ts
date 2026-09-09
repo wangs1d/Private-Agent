@@ -646,8 +646,8 @@ export interface ReActObservation {
 
 // 双模式路由：Fast 前台秒回 + Complex 后台并行
 export type SystemRouteMode =
-  | "fast"     // 快速模式：垫词 + 简单任务 + 轻工具，极快返回
-  | "complex"; // 复杂模式：后台委派子 Agent / 复杂工具链 / 多步计划，完成后分步推送
+  | "direct"     // 快速模式：垫词 + 简单任务 + 轻工具，极快返回
+  | "tool_loop"; // 复杂模式：后台委派子 Agent / 复杂工具链 / 多步计划，完成后分步推送
 
 // 快慢双系统路由决策
 export interface SystemRouteDecision {

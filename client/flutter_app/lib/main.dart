@@ -261,9 +261,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 图片预览面板当前要展示的图片快照（来自媒体卡点击）。
   ImagePreviewSnapshot? _imagePreview;
 
-  /// 行程规划面板当前要展示的行程数据（来自 travel_itinerary 行程卡点击）。
-  AgentResultData? _travelPlan;
-
   /// 左聊天区 / 右分栏面板 的宽度比例（0.1~0.9），持久化到本地。
   double _splitRatio = SplitRatioPreference.defaultRatio;
 
@@ -467,7 +464,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
     // 右侧双栏「图片预览」面板：媒体卡点击 → 打开右栏大图
     ImagePreviewLauncher.setHandler(_openImagePreview);
-    // 右侧双栏「行程规划」面板：行程卡点击 → 打开右栏双面板规划界面
+    // 「行程规划」独立界面：行程卡点击 / autoOpen → 全屏路由打开
     TravelPlanLauncher.setHandler(_openTravelPlanPanel);
     // 行程面板共享 WebView 进程级预加载：地图常驻，打开卡片/进出全屏零重载
     TravelWebPanelHost.preload();
@@ -1208,6 +1205,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           // （清 _pendingAgentUserMessageId/处理中状态/打字机缓冲会腰斩前台轮次）。
           // 只把结果消息独立落进对话流，并移除对应过程回执。
           if (payload["source"]?.toString() == "task_plane") {
+            // 2026-09-08 任务面异步收尾：服务端派发后台任务后本轮以空正文立即结束，
+            // done 带 traceId 指向当前轮——先结清前台处理状态（发送按钮恢复普通态、
+            // 停 watchdog），再走任务面落位（空文本只做回执清理，不落正文气泡）。
+            // 后台任务结果的 done 不带 traceId，不进此分支，前台状态不受影响。
+            final String? dispatchedTraceId = payload["traceId"]?.toString();
+            if (dispatchedTraceId != null &&
+                dispatchedTraceId.isNotEmpty &&
+                dispatchedTraceId == _pendingAgentUserMessageId) {
+              _takePendingAssistantChunkText();
+              _pendingAgentUserMessageId = null;
+              _disarmAgentReplyWatchdog();
+              _flushAssistantChunks();
+              _clearAgentProcessingState(done: true);
+            }
             await _handleTaskPlaneResultDone(payload);
             return;
           }
@@ -1351,7 +1362,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             await _store.saveMessage(finalMessage);
           }
           // 行程卡自动展开：本轮规划实时完成且带 autoOpen 的 travel_itinerary 卡
-          // → 直接打开右侧双面板，无需用户点按钮。卡片已随消息入列/落库，
+          // → 直接弹出独立规划界面，无需用户点按钮。卡片已随消息入列/落库，
           // 历史回看时可随时点卡片按钮重开；历史加载不走本事件，不会重复弹开。
           final AgentResultParseResult doneParsed =
               AgentResultParser.parse(resolvedText);
@@ -2886,18 +2897,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 行程规划入口：行程卡(travel_itinerary)点击 → 在右侧双栏中打开行程规划界面。
+  /// 行程规划入口：行程卡(travel_itinerary)点击 / autoOpen → 以独立界面
+  /// （全屏路由）打开行程规划，不再占用右侧双栏。
   void _openTravelPlanPanel(AgentResultData data) {
-    setState(() {
-      _tabIndex = 0;
-      _travelPlan = data;
-      _rightPanel = RightPanelKind.travelPlan;
-      // 保存当前 splitRatio，关闭时恢复
-      _previousSplitRatio = _splitRatio;
-      // 保存 side 模式下的原右面板宽度，关闭时恢复
-      _previousRightPanelWidth = _rightPanelWidth;
-      _splitRatio = RightPanelKind.travelPlan.defaultSplitRatio;
-    });
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    setState(() => _tabIndex = 0); // 关闭界面后回到聊天页，行程卡就在眼前
+    Navigator.of(navCtx).push<void>(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) => TravelPlanFullscreenPage(data: data),
+      ),
+    );
   }
 
   /// 图库入口：与好友/消息/日程一致，从右侧滑出 split 双栏面板
@@ -2936,84 +2946,24 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // 任务面回执（chat.task_update / chat.task_cancel）
   // ═══════════════════════════════════════════════════════════
 
-  /// 处理任务面生命周期广播：首条落回执进对话流，后续原地替换。
+  /// 处理任务面生命周期广播（2026-09-09 仿扣子形态改造）。
   ///
-  /// 设计要点（无缝对话形态）：回执是"状态屏"不是新消息——同一 taskId 永远
-  /// 复用同一个 messageId，状态迁移只替换消息对象；任务结果本身仍由
-  /// chat.assistant_done(source=task_plane) 以普通 assistant 消息落位并
-  /// 持久化，回执仅内存态（重启后由结果消息的「[后台任务·目标]」标识头兜底归属）。
+  /// 回执气泡已整体移除：任务过程反馈收进输入框上方状态条
+  /// （`_taskPlaneActiveTaskIds` 计数驱动「N 个任务后台进行中」），任务结果由
+  /// chat.assistant_done(source=task_plane) 以普通 assistant 消息直接落进对话流，
+  /// 落位即终态——对话流里不再出现「已在后台办理/已完成」等过程回执。
   void _handleTaskPlaneUpdate(Map<String, dynamic> payload) {
     final String taskId = payload["taskId"]?.toString() ?? "";
     final String state = payload["state"]?.toString() ?? "";
     if (taskId.isEmpty || state.isEmpty) return;
-    final String? goal = payload["goal"]?.toString().trim();
-    final String progress = payload["progressLine"]?.toString().trim() ?? "";
-    final int? startedAt =
-        payload["startedAt"] is int ? payload["startedAt"] as int : null;
 
     final bool terminal =
         state == "done" || state == "failed" || state == "cancelled";
-    if (terminal) {
-      _taskPlaneActiveTaskIds.remove(taskId);
-    } else {
-      _taskPlaneActiveTaskIds.add(taskId);
-    }
-
-    final String receiptId =
-        _taskReceiptMessageIdByTaskId.putIfAbsent(taskId, () => "task-receipt-$taskId");
-    final String fallbackText =
-        _taskReceiptFallbackText(state, goal ?? "");
-    final int? idx = _messageIndexById(receiptId);
-    final ChatMessage next = ChatMessage(
-      messageId: receiptId,
-      sessionId: ApiConfig.effectiveActorId,
-      role: "assistant",
-      contentType: "task_receipt",
-      text: fallbackText,
-      timestamp: (idx != null && idx < _messages.length)
-          ? _messages[idx].timestamp
-          : DateTime.now(),
-      taskId: taskId,
-      taskState: state,
-      taskGoal: (goal == null || goal.isEmpty) ? null : goal,
-      taskProgress: progress.isEmpty ? null : progress,
-      taskStartedAt: startedAt,
-    );
-
-    void apply() {
-      if (idx != null && idx < _messages.length) {
-        _messages[idx] = next;
-        _assistantMessageIndexById[receiptId] = idx;
-      } else {
-        _messages.add(next);
-        _assistantMessageIndexById[receiptId] = _messages.length - 1;
-      }
-    }
-
-    if (!mounted) {
-      apply();
-      return;
-    }
-    setState(apply);
-  }
-
-  /// 回执降级文案：仅供不支持 task_receipt 渲染的旧路径/通知兜底读取
-  /// （正常渲染走专用回执组件，读 taskGoal/taskState 结构化字段）。
-  static String _taskReceiptFallbackText(String state, String goal) {
-    final String target = goal.trim();
-    switch (state) {
-      case "running":
-        return target.isEmpty ? "已在后台办理" : "已在后台办理：$target";
-      case "awaiting_input":
-        return target.isEmpty ? "任务等待你的输入" : "需要你补充信息：$target";
-      case "done":
-        return target.isEmpty ? "后台任务已完成" : "已办妥：$target";
-      case "failed":
-        return target.isEmpty ? "后台任务执行失败" : "没办成：$target";
-      case "cancelled":
-        return target.isEmpty ? "后台任务已取消" : "已取消：$target";
-      default:
-        return target;
+    final bool changed = terminal
+        ? _taskPlaneActiveTaskIds.remove(taskId)
+        : _taskPlaneActiveTaskIds.add(taskId);
+    if (changed && mounted) {
+      setState(() {});
     }
   }
 
@@ -3029,7 +2979,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 任务面结果落位（chat.assistant_done + source=task_plane，含离线 outbox 重放）。
   ///
-  /// 结果以独立 assistant 消息入列（服务端自带「[后台任务·目标]」标识头做归属），
+  /// 结果以独立 assistant 消息入列（只含结果本体，归属由任务回执与
+  /// thread 任务记录承接），
   /// 不触碰前台轮次的任何状态；落位后移除该任务的过程回执——回执只为
   /// 「进行中」提供状态屏，真正的结果消息接管后回执即完成使命。
   Future<void> _handleTaskPlaneResultDone(Map<String, dynamic> payload) async {
@@ -3038,7 +2989,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final String finalText = _sanitizeAssistantVisibleText(
         payload["finalText"]?.toString() ?? "");
     _dismissTaskReceiptForMessage(messageId);
-    if (finalText.trim().isEmpty) return;
+    // 媒体卡片（2026-09-09）：照片/视频任务的后台执行结果随 done 携带结构化卡片，
+    // 与前台轮次的 mediaCards 同构——没有它照片任务只剩文字描述。
+    final List<Map<String, dynamic>>? mediaCardsFromPayload =
+        payload["mediaCards"] is List
+            ? (payload["mediaCards"] as List)
+                .whereType<Map<String, dynamic>>()
+                .toList()
+            : null;
+    if (finalText.trim().isEmpty && (mediaCardsFromPayload == null || mediaCardsFromPayload.isEmpty)) {
+      return;
+    }
     final int? idx = _messageIndexById(messageId);
     final ChatMessage message = ChatMessage(
       messageId: messageId,
@@ -3048,6 +3009,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       timestamp: (idx != null && idx < _messages.length)
           ? _messages[idx].timestamp
           : DateTime.now(),
+      mediaCards: mediaCardsFromPayload,
     );
     void apply() {
       if (idx != null && idx < _messages.length) {
@@ -5025,10 +4987,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       ),
       child: Row(
         children: <Widget>[
-          // 图片预览/行程规划面板：隐藏左侧拖拽图标与标题，仅保留关闭按钮
-          // （面板组件内部自带完整顶栏：图片大图区 / 行程目的地+全屏入口）
-          if (_rightPanel != RightPanelKind.imagePreview &&
-              _rightPanel != RightPanelKind.travelPlan) ...<Widget>[
+          // 图片预览面板：隐藏左侧拖拽图标与标题，仅保留关闭按钮
+          // （面板组件内部自带完整顶栏：图片大图区）
+          if (_rightPanel != RightPanelKind.imagePreview) ...<Widget>[
             Icon(Icons.drag_indicator, size: 16, color: fgMuted),
             const SizedBox(width: 8),
             Text(
@@ -5081,10 +5042,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           index: item.index < urls.length ? item.index : 0,
           source: item.source,
         );
-      case RightPanelKind.travelPlan:
-        final AgentResultData? plan = _travelPlan;
-        if (plan == null) return const SizedBox.shrink();
-        return TravelPlanPanel(data: plan);
       case RightPanelKind.gallery:
         // 嵌入模式：面板顶栏已有"图库"标题，图库页不再渲染自带 AppBar
         return const GalleryPage(embedded: true);

@@ -16,10 +16,10 @@ import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provide
 
 /** 任务分级：按复杂度从低到高 */
 export enum TaskTier {
-  /** Fast 模式：对话/轻量工具/简单查询 — 使用 DeepSeek Flash（deepseek-chat） */
-  FAST = "fast",
-  /** Complex 模式：深度推理/子 Agent 委派/多步计划 — 使用 DeepSeek Pro（deepseek-reasoner） */
-  COMPLEX = "complex",
+  /** flash 档：对话/轻量工具/简单查询 — 使用 DeepSeek Flash（deepseek-chat） */
+  FLASH = "flash",
+  /** pro 档：深度推理/子 Agent 委派/多步计划 — 使用 DeepSeek Pro（deepseek-reasoner） */
+  PRO = "pro",
   /** 最简单：情绪识别 L2、技术扫描评估、简单分类 */
   NANO = "nano",
   /** 中等：EndToEndDecisionMaker、SkillGenerator、CodeRepairCortex、子 Agent */
@@ -30,8 +30,8 @@ export enum TaskTier {
 
 /** 默认模型映射 */
 const DEFAULT_MODELS: Record<TaskTier, string> = {
-  [TaskTier.FAST]: "deepseek-chat",       // DeepSeek Flash（V3 快模型）
-  [TaskTier.COMPLEX]: "deepseek-reasoner", // DeepSeek Pro（R1 推理模型）
+  [TaskTier.FLASH]: "deepseek-chat",       // DeepSeek Flash（V3 快模型）
+  [TaskTier.PRO]: "deepseek-reasoner", // DeepSeek Pro（R1 推理模型）
   [TaskTier.NANO]: "gpt-4.1-nano",
   [TaskTier.MINI]: "gpt-4.1-mini",
   [TaskTier.FULL]: "", // 空字符串表示使用主模型（OPENAI_MODEL / MOONSHOT_MODEL）
@@ -39,8 +39,8 @@ const DEFAULT_MODELS: Record<TaskTier, string> = {
 
 /** 环境变量名前缀 */
 const ENV_PREFIX: Record<TaskTier, string> = {
-  [TaskTier.FAST]: "MODEL_FAST",
-  [TaskTier.COMPLEX]: "MODEL_COMPLEX",
+  [TaskTier.FLASH]: "MODEL_FAST",
+  [TaskTier.PRO]: "MODEL_COMPLEX",
   [TaskTier.NANO]: "MODEL_NANO",
   [TaskTier.MINI]: "MODEL_MINI",
   [TaskTier.FULL]: "MODEL_FULL",
@@ -140,8 +140,8 @@ export function buildModelOverrideOpts(
  */
 export function dumpModelRouting(): Record<string, string> {
   return {
-    [TaskTier.FAST]: getModelForTask(TaskTier.FAST) || "(provider default)",
-    [TaskTier.COMPLEX]: getModelForTask(TaskTier.COMPLEX) || "(provider default)",
+    [TaskTier.FLASH]: getModelForTask(TaskTier.FLASH) || "(provider default)",
+    [TaskTier.PRO]: getModelForTask(TaskTier.PRO) || "(provider default)",
     [TaskTier.NANO]: getModelForTask(TaskTier.NANO) || "(provider default)",
     [TaskTier.MINI]: getModelForTask(TaskTier.MINI) || "(provider default)",
     [TaskTier.FULL]: getModelForTask(TaskTier.FULL) || "(provider default)",

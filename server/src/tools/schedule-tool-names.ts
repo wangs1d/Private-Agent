@@ -7,6 +7,7 @@ export const SCHEDULE_CREATE_TOOL_NAMES = new Set([
 
 export const SCHEDULE_MUTATION_TOOL_NAMES = new Set([
   ...SCHEDULE_CREATE_TOOL_NAMES,
+  "calendar.update_task",
   "calendar.delete_task",
 ]);
 

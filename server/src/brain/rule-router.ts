@@ -204,7 +204,7 @@ export class RuleRouter {
     const text = (userText ?? "").trim();
     if (!text) {
       return {
-        mode: "fast",
+        mode: "direct",
         confidence: 0.5,
         reason: "empty_input",
         matchedRules: ["empty_input"],
@@ -221,7 +221,7 @@ export class RuleRouter {
         matchedRules.push(`urgent:${kw}`);
         // 紧急事务都映射到 life 子 Agent（资金/订单/敏感操作）
         return {
-          mode: "complex",
+          mode: "tool_loop",
           confidence: 0.95,
           reason: `紧急/敏感事务关键词命中：${kw}（委派 life 子 Agent + 安全检查）`,
           matchedRules,
@@ -236,7 +236,7 @@ export class RuleRouter {
       if (msg.includes(kw.toLowerCase())) {
         matchedRules.push(`chitchat:${kw}`);
         return {
-          mode: "fast",
+          mode: "direct",
           confidence: 0.9,
           reason: `闲聊关键词命中：${kw}（主 Agent 直接回复，无需工具）`,
           matchedRules,
@@ -255,7 +255,7 @@ export class RuleRouter {
     if (matchedSimpleTools.length > 0) {
       matchedRules.push(`simple_tool:${matchedSimpleTools.join(",")}`);
       return {
-        mode: "fast",
+        mode: "direct",
         confidence: 0.85,
         reason: `简单工具关键词命中：${matchedSimpleTools.join(",")}（主 Agent 自带工具，走工具循环）`,
         matchedRules,
@@ -268,7 +268,7 @@ export class RuleRouter {
       if (msg.includes(kw)) {
         matchedRules.push(`followup:${kw}`);
         return {
-          mode: "fast",
+          mode: "direct",
           confidence: 0.7,
           reason: `追问指代词命中：${kw}（让 streamCompletion 基于上下文回答，避免 LLM 路由幻觉）`,
           matchedRules,
@@ -285,7 +285,7 @@ export class RuleRouter {
     if (isUserStatingData(text)) {
       matchedRules.push("user_stating_data:skip_location_probe");
       return {
-        mode: "fast",
+        mode: "direct",
         confidence: 0.8,
         reason:
           "用户陈述具体数据（含温度/降水/行程/日期动作），非查询；跳过 userLocation 反问，主 Agent 直接回复",
@@ -322,7 +322,7 @@ export class RuleRouter {
       matchedRules.push(`delegate_multi_step:${matchedAgentType}(steps=${stepCount})`);
       matchedRules.push(...matchedDelegateKws);
       return {
-        mode: "complex",
+        mode: "tool_loop",
         confidence: 0.8,
         reason: `多步任务委派（步骤数≈${stepCount}，匹配${matchedAgentType}类关键词：${matchedDelegateKws.length}个）`,
         matchedRules,
@@ -336,7 +336,7 @@ export class RuleRouter {
       matchedRules.push(`delegate_single_step:${matchedAgentType}(steps=${stepCount})`);
       matchedRules.push(...matchedDelegateKws);
       return {
-        mode: "fast",
+        mode: "direct",
         confidence: 0.6,
         reason: `单步任务带工具意图（步骤数≈${stepCount}，匹配${matchedAgentType}类关键词，主 Agent 自处理）`,
         matchedRules,
@@ -353,7 +353,7 @@ export class RuleRouter {
     if (isActionableTaskRequest(text)) {
       matchedRules.push("task_execution_intent");
       return {
-        mode: "complex",
+        mode: "tool_loop",
         confidence: 0.75,
         reason: "泛化任务执行意图命中（祈使/动作-对象，无法自信判定为闲聊/纯提问，升 complex 确保执行）",
         matchedRules,
@@ -365,7 +365,7 @@ export class RuleRouter {
     // === 规则 7：无匹配 → 默认 direct_llm ===
     matchedRules.push("no_match:default_fast");
     return {
-      mode: "fast",
+      mode: "direct",
       confidence: 0.5,
       reason: "无关键词命中（默认主 Agent 自处理，走工具循环）",
       matchedRules,

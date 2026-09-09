@@ -220,7 +220,14 @@ export class InfoHubService {
       isNewsKeyword ? fetchDomesticOfficialNews(keyword, Math.min(12, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
     ]);
 
-    let merged = dedupeByUrl([...official, ...bingResults, ...tech]); // 官方媒体 RSS 排前面（实时性更高）
+    // 相关性闸门（2026-09-08 用户反馈：搜「我老婆最近有什么消息」返回一堆中新网滚动热点）：
+    // 官方/科技 RSS 与动态发现的新闻源是「整源拉取」——fetchDomesticOfficialNews 拿着
+    // topic 参数但从不做关键词过滤，返回的就是当前最新通用新闻。这类条目必须在并入前
+    // 按 query 关键词过滤，零命中就整组丢弃——实体化/个人化 query 搜不到时宁可返回空，
+    // 让 LLM 如实说「没搜到」，也不能拿通用热点冒充搜索结果。
+    const relevantOfficial = filterItemsByQueryKeywords(official, keyword);
+    const relevantTech = filterItemsByQueryKeywords(tech, keyword);
+    let merged = dedupeByUrl([...relevantOfficial, ...bingResults, ...relevantTech]); // 官方媒体 RSS 排前面（实时性更高）
     console.error(`[DEBUG-search] 首轮耗时=${Date.now() - __t0}ms items=${merged.length} keyword=${keyword.slice(0,20)}`);
 
     // 5. 第二轮扩搜：结果偏少时用完整 query 再宽松搜一轮（skipRelevanceFilter 时代保留的
@@ -242,8 +249,10 @@ export class InfoHubService {
     const allBingResults = dedupeByUrl(bingResults);
     if (merged.length < effectiveLimit && allBingResults.length > 0 && !overBudget()) {
       const discovered = await discoverHtmlSourcesFromResults(allBingResults, keyword, domesticOpts);
-      if (discovered.length > 0) {
-        merged = dedupeByUrl([...merged, ...discovered]);
+      // 同样过相关性闸门：首页爬取条目与 query 无关时不并入
+      const relevantDiscovered = filterItemsByQueryKeywords(discovered, keyword);
+      if (relevantDiscovered.length > 0) {
+        merged = dedupeByUrl([...merged, ...relevantDiscovered]);
       }
     }
     console.error(`[DEBUG-search] 动态发现后耗时=${Date.now() - __t0}ms itemCount=${merged.length}`);
@@ -576,6 +585,52 @@ function summarizePlainText(text: string): string {
   const chunks = text.split(/[。！？.!?]/).map((s) => s.trim()).filter(Boolean);
   if (chunks.length === 0) return "";
   return chunks.slice(0, 3).join("。");
+}
+
+/**
+ * 从 query 提取匹配用关键词片段：
+ *  - 标点/空白切词（≥2 字符）
+ *  - 中文连续段按 2 字滑窗切碎片（「刘浩存最近」→ 刘浩/浩存/存最/最近…，
+ *    滑窗保证「刘浩存」这类实体无论处在 query 什么位置都能命中标题）
+ *  - 英文单词（≥2 字符）
+ */
+function extractQueryMatchFragments(query: string): string[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const words = q
+    .split(/[\s,，、。；;:：/|?？!！（）()【\[\]]+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 2);
+  const fragments: string[] = [];
+  for (const run of q.matchAll(/[\u4e00-\u9fff]{2,}/gu)) {
+    const text = run[0];
+    for (let i = 0; i + 2 <= text.length; i++) {
+      fragments.push(text.slice(i, i + 2));
+    }
+  }
+  const enWords = [...q.matchAll(/\b[a-z]{2,}\b/gi)].map((m) => m[0].toLowerCase());
+  return [...new Set([...words, ...fragments, ...enWords])];
+}
+
+/**
+ * 整源拉取条目（官方/科技 RSS、动态发现的新闻首页）的相关性闸门：
+ * 条目的标题/摘要/URL 至少命中一个 query 关键词片段才允许并入搜索结果。
+ * query 无可用片段（纯符号/空白）时不过滤，保持原行为。
+ */
+function filterItemsByQueryKeywords(items: InfoSearchItem[], query: string): InfoSearchItem[] {
+  if (items.length === 0) return items;
+  const fragments = extractQueryMatchFragments(query);
+  if (fragments.length === 0) return items;
+  const kept = items.filter((item) => {
+    const hay = `${item.title}\n${item.snippet}\n${item.url}`.toLowerCase();
+    return fragments.some((k) => hay.includes(k));
+  });
+  if (kept.length < items.length) {
+    console.error(
+      `[INFO-search] 相关性闸门：${items.length} 条整源拉取条目中 ${items.length - kept.length} 条与 query 无关键词命中，已丢弃 keyword=${query.slice(0, 24)}`,
+    );
+  }
+  return kept;
 }
 
 function decodeHtmlEntities(text: string): string {

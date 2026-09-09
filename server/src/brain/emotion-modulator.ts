@@ -182,14 +182,14 @@ export class EmotionModulator {
     const isUrgent = valence < -0.5; // 强负面
     const isExcited = arousal > 0.8; // 高唤醒
     const isLowEnergy = arousal < 0.3 && valence < 0; // 低能量
-    const isCasualMode = route.mode === "fast";
+    const isCasualMode = route.mode === "direct";
 
     // 1. 强负面情绪：升级到更谨慎路径
-    if (isUrgent && isCasualMode && route.mode !== "complex") {
+    if (isUrgent && isCasualMode && route.mode !== "tool_loop") {
       // valence < -0.5 且当前是闲聊路径 → 升级到 complex
       const newRoute: RuleRouteDecision = {
         ...route,
-        mode: "complex",
+        mode: "tool_loop",
         reason: `${route.reason}；情绪调节：valence=${valence.toFixed(2)} 强负面，升级到 complex`,
         confidence: Math.max(route.confidence - 0.15, 0.4),
       };
@@ -199,7 +199,7 @@ export class EmotionModulator {
     }
 
     // 2. 高唤醒 + 闲聊 → 保持 fast 但加急速标记
-    if (isExcited && route.mode === "fast") {
+    if (isExcited && route.mode === "direct") {
       this.stats.adjusted++;
       return {
         route: { ...route, reason: `${route.reason}；情绪调节：arousal=${arousal.toFixed(2)} 高唤醒，急速响应` },
@@ -210,7 +210,7 @@ export class EmotionModulator {
     }
 
     // 3. 低能量 + 低效价 + 闲聊 → 保持闲聊（可能用户无聊需要陪伴）
-    if (isLowEnergy && route.mode === "fast") {
+    if (isLowEnergy && route.mode === "direct") {
       this.stats.adjusted++;
       return {
         route: { ...route, reason: `${route.reason}；情绪调节：低能量低效价，保持陪伴` },
@@ -221,10 +221,10 @@ export class EmotionModulator {
     }
 
     // 4. dominance < 0.3（用户受支配感）+ 非闲聊 → 升级
-    if (dominance < 0.3 && route.mode === "complex") {
+    if (dominance < 0.3 && route.mode === "tool_loop") {
       const newRoute: RuleRouteDecision = {
         ...route,
-        mode: "complex",
+        mode: "tool_loop",
         reason: `${route.reason}；情绪调节：dominance=${dominance.toFixed(2)} 低支配感，升级 complex`,
       };
       this.stats.adjusted++;

@@ -119,6 +119,44 @@ export function createShoppingCancelHandler(
   };
 }
 
+/** shopping.order.list —— 本地订单列表（零副作用）。 */
+export function createShoppingListHandler(
+  service: ShoppingOrderService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const platform = typeof input.platform === "string" && input.platform.trim()
+      ? input.platform.trim()
+      : undefined;
+    const includeFinished = input.includeFinished !== false;
+    const limit = typeof input.limit === "number" && Number.isFinite(input.limit)
+      ? Math.floor(input.limit)
+      : undefined;
+    return service.listOrders(context, { platform, includeFinished, limit });
+  };
+}
+
+/** shopping.pay.submit —— 支付宝收银台代付（仅限拿到 alipay 收银台链接的本地订单）。 */
+export function createShoppingPaySubmitHandler(
+  service: ShoppingOrderService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const orderId = typeof input.orderId === "string" ? input.orderId.trim() : "";
+    if (!orderId) return { ok: false, error: "缺少 orderId（本地订单号 so_*）" };
+    return service.payOrder(context, orderId);
+  };
+}
+
+/** shopping.pay.check —— 订单支付状态查询 + 本地状态同步。 */
+export function createShoppingPayCheckHandler(
+  service: ShoppingOrderService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const orderId = typeof input.orderId === "string" ? input.orderId.trim() : "";
+    if (!orderId) return { ok: false, error: "缺少 orderId（本地单号 so_* 或平台订单号）" };
+    return service.checkPayment(context, orderId);
+  };
+}
+
 /**
  * 注册 shopping-order 全部工具到 ToolRegistry。
  *
@@ -134,4 +172,7 @@ export function registerShoppingOrderTools(
   registry.register("shopping.order.place", createShoppingPlaceHandler(shoppingOrderService));
   registry.register("shopping.order.track", createShoppingTrackHandler(shoppingOrderService));
   registry.register("shopping.order.cancel", createShoppingCancelHandler(shoppingOrderService));
+  registry.register("shopping.order.list", createShoppingListHandler(shoppingOrderService));
+  registry.register("shopping.pay.submit", createShoppingPaySubmitHandler(shoppingOrderService));
+  registry.register("shopping.pay.check", createShoppingPayCheckHandler(shoppingOrderService));
 }

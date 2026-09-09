@@ -37,7 +37,7 @@ test("对话面：寒暄/闲聊 → chat 平面零工具零预算（L1 语义分
     assert.equal(d.plane, "chat", `${text} 应落对话面，实际 ${d.plane}（${d.reasons.join(",")}）`);
     assert.equal(d.capabilities.length, 0, `${text} 对话面不得携带能力束`);
     assert.equal(d.budget, 0, `${text} 对话面预算必须为 0`);
-    assert.equal(d.tier, "fast");
+    assert.equal(d.tier, "flash");
     assert.equal(calls.count, 1, `${text} 应恰好一次 L1 语义分类`);
   }
 });
@@ -50,8 +50,6 @@ const TASK_CASES: Array<{
   why: string;
   minBudget?: number;
 }> = [
-  { text: "帮我订明天上午去上海的机票", intent: "action_write", why: "写操作（订票）必须真实执行" },
-  { text: "明天早上八点提醒我开会", intent: "action_write", why: "写日程/提醒必须真实写入" },
   { text: "把电脑上这批照片整理到新建文件夹", intent: "multi_step_task", why: "多步桌面操作" },
   { text: "帮我搜索一下景甜最近的照片", intent: "media_retrieval", why: "媒体检索必须真搜", minBudget: 2 },
   { text: "今天天气怎么样？要带伞吗", intent: "realtime_lookup", why: "天气查询必须调天气工具（对话面零工具）" },
@@ -74,6 +72,19 @@ test("任务面：L1 语义分类把工具轮映射到任务面且带正预算",
       `「${tc.text}」预算应 ≥${tc.minBudget ?? 1}，实际 ${d.budget}`,
     );
     assert.ok(d.capabilities.length > 0, `「${tc.text}」任务面必须声明能力束`);
+  }
+});
+
+test("对话面直办：action_write（提醒/日程等简单写操作）落对话面零预算（2026-09-08）", async () => {
+  // 简单写操作不再派后台：前台直调 reminder.plan/calendar 当场办成并直接回复，
+  // 不出任务回执、不产生「派发提示 + 结果」两段消息；耗时重写动作由前台
+  // 模型经 task.dispatch 自决派后台。
+  for (const text of ["明天早上八点提醒我开会", "帮我订明天上午去上海的机票"]) {
+    const { provider } = fakeProvider("action_write");
+    const d = await routeTurnByLlm(provider, `sess-write-${text}`, text);
+    assert.equal(d.plane, "chat", `「${text}」应落对话面直办，实际 ${d.plane}`);
+    assert.equal(d.budget, 0, `「${text}」对话面直办预算必须为 0`);
+    assert.equal(d.capabilities.length, 0, `「${text}」对话面直办不携带能力束`);
   }
 });
 
@@ -124,18 +135,18 @@ test("路由效率：词法判定与 L1 每轮各至多一次（不重复计费�
   assert.equal(d2.plane, "task");
 });
 
-test("任务面档位：单点查询用 Flash 档，写操作/多步才上 Pro 档（省 token）", async () => {
+test("任务面档位：单点查询用 Flash 档，多步才上 Pro 档（省 token）", async () => {
   const realtime = await routeTurnByLlm(
     fakeProvider("realtime_lookup").provider,
     "sess-tier-1",
     "今天金价多少",
   );
-  assert.equal(realtime.tier, "fast", "单点查询应使用 Flash 档");
+  assert.equal(realtime.tier, "flash", "单点查询应使用 Flash 档");
 
   const write = await routeTurnByLlm(
     fakeProvider("action_write").provider,
     "sess-tier-2",
     "明天早上八点提醒我开会",
   );
-  assert.equal(write.tier, "complex", "写操作应使用 Pro 档");
+  assert.equal(write.tier, "flash", "简单写操作对话面直办，Flash 档（2026-09-08）");
 });

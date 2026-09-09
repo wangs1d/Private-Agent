@@ -23,9 +23,11 @@ import type { MediaMusicService } from "../../services/media-music-service.js";
 import type { HealthFitnessService } from "../../services/health-fitness-service.js";
 import type { FinanceDeepService } from "../../services/finance-deep-service.js";
 import type { SubscriptionAuditService } from "../../services/subscription-audit-service.js";
+import type { BillManagementService } from "../../services/bill-management-service.js";
 import type { SocialOutreachService } from "../../services/social-outreach-service.js";
 import type { CodeSandboxService } from "../../services/code-sandbox-service.js";
 import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
+import type { ShoppingCompareService } from "../../services/shopping-compare-service.js";
 import type { AgentBrowserService } from "../../services/agent-browser-service.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
 import type { ClientPushPort } from "../../ports/client-push-port.js";
@@ -78,6 +80,12 @@ import {
   registerShoppingOrderTools,
 } from "./shopping-order/index.js";
 import {
+  SHOPPING_COMPARE_CHAT_TOOLS,
+  SHOPPING_COMPARE_INTENT_RULES,
+  SHOPPING_COMPARE_CATEGORY_MAPPING,
+  registerShoppingCompareTools,
+} from "./shopping-compare/index.js";
+import {
   AGENT_BROWSER_CHAT_TOOLS,
   AGENT_BROWSER_INTENT_RULES,
   AGENT_BROWSER_CATEGORY_MAPPING,
@@ -101,6 +109,12 @@ import {
   RESTAURANT_BOOKING_CATEGORY_MAPPING,
   registerRestaurantBookingTools,
 } from "./restaurant-booking/index.js";
+import {
+  TRAVEL_BOOKING_CHAT_TOOLS,
+  TRAVEL_BOOKING_INTENT_RULES,
+  TRAVEL_BOOKING_CATEGORY_MAPPING,
+  registerTravelBookingTools,
+} from "./travel-booking/index.js";
 import {
   PICTURE_INTENT_RULES,
   registerPictureModuleTools,
@@ -147,11 +161,15 @@ export interface CapabilityModuleDeps {
   wsConnectionRegistry: ClientPushPort;
   healthFitnessService: HealthFitnessService;
   financeDeepService: FinanceDeepService;
-  /** 订阅盘点服务（finance.list/confirm/update_subscription 工具与月报订阅段的数据源） */
+  /** 订阅盘点服务（finance.list/confirm/update/cancel_subscription 工具与月报订阅段的数据源） */
   subscriptionAuditService: SubscriptionAuditService;
+  /** 账单管理服务（finance.add/list/update/pay_bill 工具与账单到期提醒的数据源） */
+  billManagementService: BillManagementService;
   socialOutreachService: SocialOutreachService;
   codeSandboxService: CodeSandboxService;
   shoppingOrderService: ShoppingOrderService;
+  /** 购物比价服务（跨平台同款比价 + 降价监控 + 调研比价，只读零副作用） */
+  shoppingCompareService: ShoppingCompareService;
   agentBrowserService: AgentBrowserService;
   /** 统一预订编排服务（方案 A：网约车/家政/餐厅共用） */
   bookingService: BookingService;
@@ -257,16 +275,18 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
         registerFinanceDeepTools(registry, {
           financeDeepService: deps.financeDeepService,
           subscriptionAuditService: deps.subscriptionAuditService,
+          billManagementService: deps.billManagementService,
         }),
       category: {
         name: "finance_deep",
         keywords: [
           "finance", "transaction", "budget", "spending", "reconcile",
           "categorize", "report", "import", "money", "expense",
-          "subscription", "renewal", "membership",
+          "subscription", "renewal", "membership", "cancel subscription", "savings", "bill",
           "财务", "交易", "预算", "支出", "对账",
           "分类", "报告", "导入", "钱", "花费", "账单",
-          "订阅", "续费", "会员",
+          "订阅", "续费", "会员", "退订", "取消订阅", "自动续费", "省钱",
+          "缴费", "水电", "房租", "话费", "还款", "到期", "固定支出",
         ],
       },
     },
@@ -303,6 +323,14 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       category: SHOPPING_ORDER_CATEGORY_MAPPING,
     },
     {
+      domain: "shopping_compare",
+      label: "购物比价（跨平台同款比价 + 降价监控 + 保险/服务调研对比）",
+      chatTools: SHOPPING_COMPARE_CHAT_TOOLS,
+      intentRules: SHOPPING_COMPARE_INTENT_RULES,
+      register: (registry) => registerShoppingCompareTools(registry, { shoppingCompareService: deps.shoppingCompareService }),
+      category: SHOPPING_COMPARE_CATEGORY_MAPPING,
+    },
+    {
       domain: "agent_browser",
       label: "Agent 虚拟浏览器（通用网页多步操作）",
       chatTools: AGENT_BROWSER_CHAT_TOOLS,
@@ -333,6 +361,14 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       intentRules: RESTAURANT_BOOKING_INTENT_RULES,
       register: (registry) => registerRestaurantBookingTools(registry, { bookingService: deps.bookingService }),
       category: RESTAURANT_BOOKING_CATEGORY_MAPPING,
+    },
+    {
+      domain: "travel_booking",
+      label: "机票/火车票/酒店预订（统一预订抽象层 + 多源报价比价）",
+      chatTools: TRAVEL_BOOKING_CHAT_TOOLS,
+      intentRules: TRAVEL_BOOKING_INTENT_RULES,
+      register: (registry) => registerTravelBookingTools(registry, { bookingService: deps.bookingService }),
+      category: TRAVEL_BOOKING_CATEGORY_MAPPING,
     },
     {
       domain: "picture",

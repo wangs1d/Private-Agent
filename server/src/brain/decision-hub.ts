@@ -352,15 +352,15 @@ export class DecisionHub {
       const hasPausedTask = wm.goals.some((g) => g.status === "paused");
       const isSimpleGreeting = /^(你好|嗨|hi|hello|早|晚上好|下午好|在吗)/i.test(userText.trim());
 
-      if (hasHighPriorityGoal && !isSimpleGreeting && route.mode === "fast") {
+      if (hasHighPriorityGoal && !isSimpleGreeting && route.mode === "direct") {
         // 有活跃高优先级目标时，升级 fast → complex（更谨慎处理）
-        route.mode = "complex";
+        route.mode = "tool_loop";
         route.reason = `${route.reason}；工作记忆有活跃高优先级目标，升级到 complex`;
         route.confidence = Math.max(route.confidence - 0.1, 0.5); // 略降置信度，表示需要工具支撑
       }
-      if (hasPausedTask && route.mode === "fast") {
+      if (hasPausedTask && route.mode === "direct") {
         // 有暂停任务时，升级 complex（需要更多上下文以正确恢复/延续暂停任务）
-        route.mode = "complex";
+        route.mode = "tool_loop";
         route.confidence = Math.max(route.confidence - 0.1, 0.5);
         route.reason = `${route.reason}；工作记忆有暂停任务，升级到 complex`;
       }
@@ -388,8 +388,8 @@ export class DecisionHub {
       const up = context.userPattern;
       try {
         // 高频否定模式 → 倾向 complex（用户可能对结果不满意，需要更认真处理）
-        if (up.negativeFeedbackCount > 3 && route.mode === "fast") {
-          route.mode = "complex";
+        if (up.negativeFeedbackCount > 3 && route.mode === "direct") {
+          route.mode = "tool_loop";
           route.reason = `${route.reason}；用户画像：高频否定(${up.negativeFeedbackCount}次)，升级到 complex`;
           route.confidence = Math.max(route.confidence - 0.1, 0.5);
         }
@@ -399,11 +399,11 @@ export class DecisionHub {
           route.reason = `${route.reason}；用户画像：极高否定(${up.negativeFeedbackCount}次)，降低置信度`;
         }
         // 高频工具偏好 → 保持 fast（用户熟悉工具操作）
-        if (up.preferredToolDomain && route.mode === "fast") {
+        if (up.preferredToolDomain && route.mode === "direct") {
           route.reason = `${route.reason}；用户画像：偏好${up.preferredToolDomain}领域`;
         }
         // 学习活跃期 → 尝试更深入的回答
-        if (up.learningActive === true && route.mode === "fast") {
+        if (up.learningActive === true && route.mode === "direct") {
           route.reason = `${route.reason}；用户画像：学习活跃期`;
         }
       } catch (err) {
@@ -427,7 +427,7 @@ export class DecisionHub {
 
     // 4. Step 7 扩展：工具链规划（complex 时）
     let toolPlan: ToolPlan | null = null;
-    if (this.toolPlanning && route.mode === "complex") {
+    if (this.toolPlanning && route.mode === "tool_loop") {
       try {
         toolPlan = this.toolPlanning.planTools(
           input.actorId,
@@ -450,7 +450,7 @@ export class DecisionHub {
     }
 
     // 6. Step 7 扩展：工作记忆更新（push 当前任务为目标）
-    if (this.workingMemory && route.mode === "complex") {
+    if (this.workingMemory && route.mode === "tool_loop") {
       try {
         // 性能优化（方案 C）：复用阶段 1 已加载的 wm 快照（内存引用），pushGoal/touch
         // 都接受同一 wm，避免内部重复 load。pushGoal 修改 wm 后引用同步更新。
@@ -481,7 +481,7 @@ export class DecisionHub {
     const action = this.inferActionFromRoute(route, input);
 
     // 10. needsToolLoop 由路由模式决定
-    const needsToolLoop = route.mode === "fast";
+    const needsToolLoop = route.mode === "direct";
 
     // 11. 综合置信度：使用路由 confidence
     const finalConfidence = route.confidence;
@@ -522,7 +522,7 @@ export class DecisionHub {
     const now = new Date().toISOString();
 
     // 路由 1：complex → 写入"任务委派"记忆
-    if (route.mode === "complex") {
+    if (route.mode === "tool_loop") {
       writes.push({
         actorId: input.actorId,
         kind: "procedure",
@@ -536,7 +536,7 @@ export class DecisionHub {
     }
 
     // 路由 2：complex + 紧急事务 → 写入"敏感操作"记忆
-    if (route.mode === "complex" && route.confidence >= 0.9) {
+    if (route.mode === "tool_loop" && route.confidence >= 0.9) {
       writes.push({
         actorId: input.actorId,
         kind: "event",
@@ -575,7 +575,7 @@ export class DecisionHub {
     input: CognitiveInput,
   ): { tool: string; args: Record<string, unknown>; reason: string } | undefined {
     // 紧急事务场景：标记需要安全检查
-    if (route.mode === "complex" && route.confidence >= 0.9) {
+    if (route.mode === "tool_loop" && route.confidence >= 0.9) {
       return {
         tool: "safety_check",
         args: {

@@ -23,6 +23,8 @@ export type TaskOutboxEntry = {
   sessionId: string;
   messageId: string;
   finalText: string;
+  /** 任务面媒体卡片：照片/视频结果与 finalText 同生命周期，重放必须原样携带。 */
+  mediaCards?: Array<Record<string, unknown>>;
   enqueuedAt: number;
 };
 
@@ -33,7 +35,10 @@ export class TaskOutbox {
   private readonly entries = new Map<string, TaskOutboxEntry[]>();
 
   /** 投递失败入箱（同 messageId 去重——同一结果只补投一次）。 */
-  enqueue(sessionId: string, entry: { messageId: string; finalText: string }): void {
+  enqueue(
+    sessionId: string,
+    entry: { messageId: string; finalText: string; mediaCards?: Array<Record<string, unknown>> },
+  ): void {
     if (!sessionId || !entry.messageId || !entry.finalText) return;
     let queue = this.entries.get(sessionId);
     if (!queue) {
@@ -45,6 +50,7 @@ export class TaskOutbox {
       sessionId,
       messageId: entry.messageId,
       finalText: entry.finalText,
+      ...(entry.mediaCards && entry.mediaCards.length > 0 ? { mediaCards: entry.mediaCards } : {}),
       enqueuedAt: Date.now(),
     });
     if (queue.length > MAX_PER_SESSION) queue.splice(0, queue.length - MAX_PER_SESSION);
@@ -83,12 +89,19 @@ export class TaskOutbox {
               finalText: entry.finalText,
               toolCalls: [],
               source: "task_plane",
+              ...(entry.mediaCards && entry.mediaCards.length > 0
+                ? { mediaCards: entry.mediaCards }
+                : {}),
             },
           }),
         );
       } catch {
         // 单条失败重新入箱，剩余批次继续（部分网络抖动不吞结果）
-        this.enqueue(sessionId, { messageId: entry.messageId, finalText: entry.finalText });
+        this.enqueue(sessionId, {
+          messageId: entry.messageId,
+          finalText: entry.finalText,
+          mediaCards: entry.mediaCards,
+        });
       }
     }
     return batch.length;

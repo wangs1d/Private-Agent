@@ -18,6 +18,7 @@
  */
 
 import type { ClientLocationWire } from "../../types/client-location.js";
+import type { ToolContext } from "../../tools/tool-registry.js";
 
 /** 预订域（新增域时在此扩展，并同步 agent-capabilities.ts 的域清单）。 */
 export type BookingDomain = "ride" | "home_service" | "restaurant" | "travel";
@@ -93,6 +94,8 @@ export interface BookingDraft {
   amountCny: number | null;
   /** 服务发生时间（ISO）；用于承诺板 deadline */
   scheduleAt?: string | null;
+  /** 服务时长（分钟，来自 option）；用于日程区间与冲突预检 */
+  durationMinutes?: number | null;
   /** 复述给用户的摘要（阶段一返回原文） */
   summary: string;
   /** 域特定下单参数（同 BookingSearchQuery.params） */
@@ -127,6 +130,8 @@ export interface BookingProviderStatusPayload {
 export interface BookingProviderContext {
   actorId: string;
   location?: ClientLocationWire | null;
+  /** 原始工具上下文（报价聚合层等需要透传给检索/HTTP 能力时使用） */
+  toolContext?: ToolContext;
 }
 
 /**

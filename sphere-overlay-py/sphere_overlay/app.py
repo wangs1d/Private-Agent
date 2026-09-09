@@ -58,8 +58,8 @@ from .win32_utils import (
 
 
 # ===== 常量 =====
-PET_WIDTH = 186
-PET_HEIGHT = 232
+PET_WIDTH = 372
+PET_HEIGHT = 464
 MENU_WIDTH = 204
 
 SCHEDULE_WIDTH = 280

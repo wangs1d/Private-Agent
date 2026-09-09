@@ -1,5 +1,5 @@
 import "dart:async" show Timer, unawaited;
-import "dart:math" show min;
+import "dart:math" show max, min;
 
 import "package:flutter/foundation.dart" show kIsWeb, defaultTargetPlatform;
 import "package:flutter/material.dart";
@@ -24,6 +24,12 @@ const double _kTimelineRowHeight = 24.0;
 
 /// 时间轴最多展示的行数，超出的折叠进底部「查看全部」。
 const int _kMaxVisibleEvents = 5;
+
+/// 「常用工具」上方内容区（代办足迹 + 今日安排）的固定高度。
+/// 高度恒定 → 工具区起点 Y 恒定，代办足迹条目增减、日程事项增减都只
+/// 在这块区域内部消化（超出内部滚动），不会再把工具区推上推下。
+/// 取值略小于两区块满载总高（≈600），绝大多数情况无需内部滚动。
+const double _kUpperAreaFixedHeight = 560.0;
 
 /// 今日安排标题简洁化：剥离「该X啦」提醒式包装、指令前缀、元描述前缀、
 /// 以及和左侧时间列重复的时间词，再清理冗余代词词头，只保留核心文案
@@ -77,6 +83,8 @@ String simplifyScheduleTitle(String raw) {
 /// 设计理念：简洁、轻盈、不抢视线
 /// - 去掉厚重卡片阴影，改用细腻的分隔线区分区块
 /// - 工具图标更紧凑，一屏展示全部，无需展开/收起
+/// - 「常用工具」原位固定（今日安排下方）：上方内容区恒高、内部滚动，
+///   工具区起点 Y 不随动态/日程内容增减而位移
 /// - 「今日安排」采用焦点时间轴卡片（设计稿
 ///   docs/design/today-schedule-redesign）：24h 日程带 + 下一事项焦点卡 +
 ///   时间轴列表，now 游标与倒计时每 30s 刷新
@@ -366,30 +374,45 @@ class _RightSidePanelState extends State<RightSidePanel> {
       child: SafeArea(
         right: false,
         top: false,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                physics: const AlwaysScrollableScrollPhysics(),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    // 助手动态卡：Agent 主动代办结果台账（顶替原天气 Header 的面板首位）
-                    const AgentActivitySection(),
-                    const SizedBox(height: 12),
-                    if (!_useDesktopFloating) ...<Widget>[
-                      _buildScheduleSection(),
-                      const SizedBox(height: 26),
-                    ],
-                    _buildToolsSection(cs),
-                  ],
+        child: LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints constraints) {
+            // 矮窗口时按可用高度压缩上方固定区（保底 180），
+            // 保证工具区与桌宠按钮始终可见。340 ≈ 工具区编辑态 + 底部按钮 + 间距余量。
+            final double upperHeight = max(
+              180.0,
+              min(_kUpperAreaFixedHeight, constraints.maxHeight - 340),
+            );
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                // 上方内容区：恒定高度 + 内部滚动。内容增减在这块区域内消化，
+                // 从而下方工具区的起点 Y 恒定（原位固定）。
+                SizedBox(
+                  height: upperHeight,
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        // 助手动态卡：Agent 主动代办结果台账（顶替原天气 Header 的面板首位）
+                        const AgentActivitySection(),
+                        const SizedBox(height: 12),
+                        if (!_useDesktopFloating) _buildScheduleSection(),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-            ),
-            _buildPetFooter(cs),
-          ],
+                // 「常用工具」：固定在上方恒高区域正下方，位置不随内容变化
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+                  child: _buildToolsSection(cs),
+                ),
+                const Spacer(),
+                _buildPetFooter(cs),
+              ],
+            );
+          },
         ),
       ),
     );

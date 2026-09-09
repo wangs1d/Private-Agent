@@ -203,7 +203,7 @@ class TravelPlanDay {
   final List<TravelDayEntry> entries;
 }
 
-/// 双面板行程界面数据（优先来自服务端结构化 travelPlan，兜底从卡 items 文本启发式解析）。
+/// 行程规划界面数据（优先来自服务端结构化 travelPlan，兜底从卡 items 文本启发式解析）。
 class TravelPlanData {
   const TravelPlanData({
     required this.title,

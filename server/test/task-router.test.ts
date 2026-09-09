@@ -2,7 +2,7 @@
  * task-router（2026-09-05 双面架构）单元测试。
  *
  * 本模块只承担两件事：
- *   1. 类型与执行计划派生（planFieldsForMode）；
+ *   1. 类型与执行计划派生（planFieldsForLane）；
  *   2. 高精度纯闲聊短路（isHighPrecisionChatText）——锚定全文匹配，
  *      不含任何话题关键词（价格/天气/新闻词表已删除，工具需求由 L1 语义分类判定）。
  */
@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import {
   isHighPrecisionChatText,
   determineSegmentable,
-  planFieldsForMode,
+  planFieldsForLane,
 } from "../src/agent/task-router.js";
 
 test("高精度闲聊：寒暄/口头禅/应答词整句命中", () => {
@@ -48,10 +48,10 @@ test("分段判定：对话面分段，任务面不分段", () => {
 });
 
 test("执行计划派生：fast=对话面零工具；complex=任务面保守预算", () => {
-  const chat = planFieldsForMode("fast");
-  assert.deepEqual(chat, { plane: "chat", capabilities: [], budget: 0, tier: "fast" });
+  const chat = planFieldsForLane("chat");
+  assert.deepEqual(chat, { plane: "chat", capabilities: [], budget: 0, tier: "flash" });
 
-  const task = planFieldsForMode("complex");
+  const task = planFieldsForLane("task");
   assert.equal(task.plane, "task");
   assert.deepEqual(task.capabilities, ["full"]);
   assert.ok(task.budget >= 1);

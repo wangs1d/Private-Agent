@@ -38,6 +38,7 @@ import type { EmailSmsService } from "../services/email-sms-service.js";
 import type { MediaMusicService } from "../services/media-music-service.js";
 import type { HealthFitnessService } from "../services/health-fitness-service.js";
 import type { FinanceDeepService } from "../services/finance-deep-service.js";
+import type { BillManagementService } from "../services/bill-management-service.js";
 import type { SocialOutreachService } from "../services/social-outreach-service.js";
 import type { CodeSandboxService } from "../services/code-sandbox-service.js";
 import type { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
@@ -113,6 +114,8 @@ export type AppServices = {
   healthFitnessService: HealthFitnessService;
   /** 财务深度服务（finance.import_transactions / analyze_spending / set_budget / get_budget_status / reconcile / categorize / export_report） */
   financeDeepService: FinanceDeepService;
+  /** 账单管理服务（finance.add/list/update/pay_bill：账单追踪/到期提醒/缴费入账联动预算） */
+  billManagementService: BillManagementService;
   /** 社交主动出击服务（social.post / comment / repost / like / get_feed / search_posts，外部真实平台） */
   socialOutreachService: SocialOutreachService;
   /** 代码执行沙盒服务（code.run / list_files / read_file / write_file，python/node 子进程） */

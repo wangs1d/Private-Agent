@@ -782,8 +782,10 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             getTaskOutbox().replayFor(actorId, socket);
             // 活跃任务快照重播（2026-09-08 任务回执）：断线重连/换设备后，
             // 客户端凭 running/awaiting_input 任务的幂等快照重建对话流内回执。
+            // quiet 任务（原地同步执行的轻任务）不补发（2026-09-09）。
             if (isTaskPlaneWsEventsEnabled()) {
               for (const record of getTaskHub().activeRecords(actorId)) {
+                if (record.quiet) continue;
                 try {
                   socket.send(buildTaskUpdateEnvelope(record));
                 } catch {

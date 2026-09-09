@@ -159,7 +159,7 @@ export class JdAdapter implements ShoppingPlatformAdapter {
     }
   }
 
-  async submitOrder(page: Page): Promise<{ ok: boolean; orderId?: string; error?: string; retryable?: boolean }> {
+  async submitOrder(page: Page): Promise<{ ok: boolean; orderId?: string; error?: string; retryable?: boolean; paymentUrl?: string }> {
     try {
       const submitSelectors = [
         '#order-submit, .checkout-submit',
@@ -201,6 +201,7 @@ export class JdAdapter implements ShoppingPlatformAdapter {
       return {
         ok: true,
         orderId,
+        paymentUrl: onPaymentPage ? page.url() : undefined,
         error: onPaymentPage && !orderId ? "订单已提交，请在客户端完成支付" : undefined,
       };
     } catch (err) {

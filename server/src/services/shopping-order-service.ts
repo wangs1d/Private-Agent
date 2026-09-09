@@ -2,9 +2,17 @@ import { randomUUID } from "crypto";
 
 import { resolveActorId } from "../agent/actor-id.js";
 import type { AuditService } from "./audit-service.js";
+import type { AlipayBotService } from "./alipay-bot-service.js";
 import type { BrowserSessionService } from "./browser-session-service.js";
 import type { BrowserSessionSiteId } from "./browser-session-sites.js";
 import type { ImportedBrowserCookie } from "./browser-session-types.js";
+import {
+  localDateKey,
+  mapPlatformStatusText,
+  newShoppingOrderId,
+  type ShoppingOrderStore,
+  type StoredShoppingOrder,
+} from "./shopping-order-store.js";
 import { getShoppingPlatformAdapter, listSupportedPlatforms } from "./shopping-platforms/index.js";
 import type {
   CheckoutSnapshot,
@@ -15,10 +23,23 @@ import type {
 } from "./shopping-platforms/index.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 
-/** 金额上限（CNY），结算页总价超此阈值拒绝提交。 */
-function getMaxAmountCny(): number {
+/** 单笔金额上限（CNY）。可用 SHOPPING_ORDER_MAX_AMOUNT_<平台大写>_CNY 按平台覆盖（演出票等高价类目调高）。 */
+function getMaxAmountCny(platform?: string): number {
+  if (platform) {
+    const perPlatform = Number.parseInt(
+      process.env[`SHOPPING_ORDER_MAX_AMOUNT_${platform.toUpperCase()}_CNY`] ?? "",
+      10,
+    );
+    if (Number.isFinite(perPlatform) && perPlatform > 0) return perPlatform;
+  }
   const v = Number.parseInt(process.env.SHOPPING_ORDER_MAX_AMOUNT_CNY ?? "5000", 10);
   return Number.isFinite(v) && v > 0 ? v : 5000;
+}
+
+/** 单日累计下单预算（CNY），阶段一校验：当日已提交金额 + 本单总价 不得超此阈值。 */
+function getDailyBudgetCny(): number {
+  const v = Number.parseInt(process.env.SHOPPING_ORDER_DAILY_BUDGET_CNY ?? "10000", 10);
+  return Number.isFinite(v) && v > 0 ? v : 10000;
 }
 
 /** 确认 token TTL（毫秒）。 */
@@ -55,7 +76,7 @@ interface PendingConfirmation {
 /** 服务返回的通用结构。 */
 export type ShoppingOrderResult =
   | { ok: true; summary: string } & Record<string, unknown>
-  | { ok: false; error: string; retryable?: boolean };
+  | { ok: false; error: string; retryable?: boolean; /** 订单无收银台链接时置位，引导用户去平台 App 支付 */ needManualPayment?: boolean; paymentUrl?: string };
 
 /** Playwright 动态加载（避免在未安装时启动失败）。 */
 async function loadPlaywright(): Promise<typeof import("playwright") | null> {
@@ -136,6 +157,10 @@ export class ShoppingOrderService {
     private readonly deps: {
       browserSessionService: BrowserSessionService;
       audit?: AuditService;
+      /** 本地订单表（落库 + 单日预算统计）。未注入时退化为纯平台侧下单（无本地记录）。 */
+      store?: ShoppingOrderStore;
+      /** 支付宝钱包通道（shopping.pay.* 收银台代付）。未注入时 pay 工具返回明确错误。 */
+      alipayBot?: AlipayBotService;
     },
   ) {
     // 每 60 秒清理一次过期确认 + 关闭存活 Page
@@ -316,17 +341,34 @@ export class ShoppingOrderService {
         return { ok: false, error: snapshot.error ?? "走到结算页失败", retryable: snapshot.retryable };
       }
 
-      // 金额上限校验
-      if (snapshot.totalPrice != null && snapshot.totalPrice > getMaxAmountCny()) {
+      // 单笔金额上限校验（平台覆盖优先，演出票等高价类目用 SHOPPING_ORDER_MAX_AMOUNT_<平台>_CNY 调高）
+      if (snapshot.totalPrice != null && snapshot.totalPrice > getMaxAmountCny(platform)) {
         await context.close().catch(() => {});
         await this.audit(ctx, "place_blocked_amount", platform, {
-          item, quantity: qty, totalPrice: snapshot.totalPrice, limit: getMaxAmountCny(),
+          item, quantity: qty, totalPrice: snapshot.totalPrice, limit: getMaxAmountCny(platform),
         });
         return {
           ok: false,
-          error: `订单总价 ¥${snapshot.totalPrice} 超过上限 ¥${getMaxAmountCny()}，已拒绝提交。可调整 SHOPPING_ORDER_MAX_AMOUNT_CNY 环境变量。`,
+          error: `订单总价 ¥${snapshot.totalPrice} 超过上限 ¥${getMaxAmountCny(platform)}，已拒绝提交。可调整 SHOPPING_ORDER_MAX_AMOUNT_CNY 或 SHOPPING_ORDER_MAX_AMOUNT_${platform.toUpperCase()}_CNY 环境变量。`,
           retryable: false,
         };
+      }
+
+      // 单日预算校验（当日已提交金额 + 本单总价）
+      if (this.deps.store && snapshot.totalPrice != null) {
+        const dateKey = localDateKey(new Date());
+        const used = await this.deps.store.sumAmountOnDate(actorId, dateKey);
+        if (used + snapshot.totalPrice > getDailyBudgetCny()) {
+          await context.close().catch(() => {});
+          await this.audit(ctx, "place_blocked_daily_budget", platform, {
+            item, quantity: qty, totalPrice: snapshot.totalPrice, usedToday: used, dailyBudget: getDailyBudgetCny(),
+          });
+          return {
+            ok: false,
+            error: `今日已下单 ¥${used}，加上本单 ¥${snapshot.totalPrice} 将超过单日预算 ¥${getDailyBudgetCny()}，已拒绝提交。可调整 SHOPPING_ORDER_DAILY_BUDGET_CNY 环境变量。`,
+            retryable: false,
+          };
+        }
       }
 
       // 生成确认 token，保留存活 Page
@@ -488,15 +530,46 @@ export class ShoppingOrderService {
         return { ok: false, error: submitResult.error ?? "提交订单失败", retryable: submitResult.retryable };
       }
 
+      // 落库（本地订单表是查历史/对账/单日预算的依据；平台未回吐单号时也记录）
+      let localOrderId: string | undefined;
+      if (this.deps.store) {
+        const now = new Date();
+        const stored = await this.deps.store.create({
+          orderId: newShoppingOrderId(now),
+          actorId: pending.actorId,
+          platform,
+          platformOrderId: submitResult.orderId ?? null,
+          title: pending.snapshot.itemTitle ?? pending.item,
+          quantity: pending.snapshot.quantity ?? pending.quantity,
+          amountCny: pending.snapshot.totalPrice ?? null,
+          currency: pending.snapshot.currency,
+          status: "pending_payment",
+          addressSummary: pending.snapshot.addressSummary ?? null,
+          paymentUrl: submitResult.paymentUrl ?? null,
+          checkoutUrl: pending.snapshot.checkoutUrl ?? null,
+          note: submitResult.error ?? null,
+          dateKey: localDateKey(now),
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+        });
+        localOrderId = stored.orderId;
+      }
+
+      await this.audit(ctx, "place_persisted", platform, {
+        localOrderId, orderId: submitResult.orderId, totalPrice: pending.snapshot.totalPrice,
+      });
+
       return {
         ok: true,
-        summary: `已在${platform}提交订单${submitResult.orderId ? `（订单号 ${submitResult.orderId}）` : ""}${submitResult.error ? `；${submitResult.error}` : ""}`,
+        summary: `已在${platform}提交订单${submitResult.orderId ? `（订单号 ${submitResult.orderId}）` : ""}${submitResult.error ? `；${submitResult.error}` : ""}。订单待支付`,
         platform,
         orderId: submitResult.orderId,
+        localOrderId,
         itemTitle: pending.snapshot.itemTitle,
         totalPrice: pending.snapshot.totalPrice,
         currency: pending.snapshot.currency,
-        note: submitResult.error ?? "订单已提交。若需支付，请在客户端完成。",
+        paymentUrl: submitResult.paymentUrl,
+        note: submitResult.error ?? "订单已提交、未支付。可用 shopping.pay.check 查询支付状态；若拿到支付宝收银台链接可用 shopping.pay.submit 代付，否则请在平台 App 内完成支付。",
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -515,11 +588,35 @@ export class ShoppingOrderService {
       return { ok: false, error: `平台「${platform}」暂不支持。已实现：${listSupportedPlatforms().join("/")}` };
     }
 
+    // 本地订单解析：orderId 支持本地 so_* 单号或平台单号
+    let localOrder: StoredShoppingOrder | null = null;
+    let platformOrderId = orderId;
+    if (this.deps.store && orderId) {
+      if (orderId.startsWith("so_")) {
+        const found = await this.deps.store.get(orderId);
+        if (!found || found.actorId !== actorId) {
+          return { ok: false, error: `本地订单 ${orderId} 不存在` };
+        }
+        if (found.platform !== platform) {
+          return { ok: false, error: `订单 ${orderId} 属于平台 ${found.platform}，与请求平台 ${platform} 不符` };
+        }
+        localOrder = found;
+        platformOrderId = found.platformOrderId ?? undefined;
+      } else {
+        localOrder = await this.deps.store.findByPlatformOrder(actorId, platform, orderId);
+      }
+    }
+
     const cookieResult = await this.getCookieAndSiteId(actorId, platform);
-    if (!cookieResult.ok) return cookieResult;
+    if (!cookieResult.ok) {
+      // Cookie 门禁不过：有本地记录时兜底返回本地快照
+      if (localOrder) return this.localOrderResult(platform, localOrder, "平台 Cookie 未导入/未授权，以下为本地记录（非实时）");
+      return cookieResult;
+    }
 
     const pw = await loadPlaywright();
     if (!pw) {
+      if (localOrder) return this.localOrderResult(platform, localOrder, "Playwright 未安装，以下为本地记录（非实时）");
       return { ok: false, error: "Playwright 未安装。请在 server 目录执行: npx playwright install chromium", retryable: false };
     }
 
@@ -536,11 +633,15 @@ export class ShoppingOrderService {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 });
       await page.waitForTimeout(3_000);
 
-      const orders: OrderStatus[] = await adapter.readOrderStatus(page, orderId);
+      const orders: OrderStatus[] = await adapter.readOrderStatus(page, platformOrderId);
 
       await this.audit(ctx, "track", platform, { orderId, resultCount: orders.length });
 
       if (orders.length === 0) {
+        // 平台侧没查到：本地有记录则兜底
+        if (localOrder) {
+          return this.localOrderResult(platform, localOrder, "平台订单页未查到该订单（可能状态页改版或订单已归档），以下为本地记录");
+        }
         return {
           ok: true,
           summary: orderId ? `未在${platform}找到订单 ${orderId}` : `在${platform}未找到订单`,
@@ -549,18 +650,95 @@ export class ShoppingOrderService {
         };
       }
 
+      // 状态回写本地（能识别的状态词才更新，避免覆盖为 null）
+      if (localOrder && this.deps.store) {
+        for (const o of orders) {
+          if (o.orderId && o.orderId === localOrder.platformOrderId) {
+            const mapped = mapPlatformStatusText(o.status ?? o.statusDesc);
+            if (mapped) await this.deps.store.update(localOrder.orderId, { status: mapped });
+            break;
+          }
+        }
+      }
+
+      // 关联本地单号到返回项
+      const enriched = orders.map((o) => ({
+        ...o,
+        localOrderId:
+          localOrder && o.orderId && o.orderId === localOrder.platformOrderId ? localOrder.orderId : undefined,
+      }));
+
       return {
         ok: true,
         summary: `查询到 ${orders.length} 个${platform}订单`,
-        orders,
+        orders: enriched,
         platform,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (localOrder) {
+        return this.localOrderResult(platform, localOrder, `平台查询失败（${message}），以下为本地记录`);
+      }
       return { ok: false, error: `查询订单失败：${message}`, retryable: /timeout|navigation/i.test(message) };
     } finally {
       await browser.close().catch(() => {});
     }
+  }
+
+  /** 本地订单快照兜底返回（平台侧不可用时）。 */
+  private localOrderResult(platform: string, order: StoredShoppingOrder, note: string): ShoppingOrderResult {
+    return {
+      ok: true,
+      summary: `${note}：${order.title}（${order.status}${order.amountCny != null ? `/¥${order.amountCny}` : ""}）`,
+      orders: [
+        {
+          orderId: order.platformOrderId ?? order.orderId,
+          status: order.status,
+          statusDesc: order.status,
+          itemTitle: order.title,
+          totalPrice: order.amountCny ?? undefined,
+          createdAt: order.createdAt,
+          logisticsSummary: order.note ?? undefined,
+        } satisfies OrderStatus,
+      ],
+      platform,
+      localOrderId: order.orderId,
+      paymentUrl: order.paymentUrl,
+      note,
+    };
+  }
+
+  /** 列出本地订单（shopping.order.list 工具；纯本地读，零副作用）。 */
+  async listOrders(
+    ctx: ToolContext,
+    opts: { platform?: string; includeFinished?: boolean; limit?: number } = {},
+  ): Promise<ShoppingOrderResult> {
+    const actorId = resolveActorId(ctx);
+    if (!this.deps.store) {
+      return { ok: false, error: "本地订单表未启用（未注入 ShoppingOrderStore）" };
+    }
+    const orders = await this.deps.store.listByActor(actorId, {
+      platform: opts.platform,
+      includeFinished: opts.includeFinished ?? true,
+      limit: Math.min(Math.max(opts.limit ?? 10, 1), 50),
+    });
+    if (orders.length === 0) return { ok: true, summary: "暂无本地订单记录", orders: [], count: 0 };
+    return {
+      ok: true,
+      summary: `共 ${orders.length} 条本地订单`,
+      count: orders.length,
+      orders: orders.map((o) => ({
+        localOrderId: o.orderId,
+        platform: o.platform,
+        orderId: o.platformOrderId,
+        title: o.title,
+        quantity: o.quantity,
+        amountCny: o.amountCny,
+        status: o.status,
+        paymentUrl: o.paymentUrl,
+        createdAt: o.createdAt,
+      })),
+    };
   }
 
   async cancelOrder(
@@ -646,6 +824,17 @@ export class ShoppingOrderService {
 
       await this.audit(ctx, "cancel_stage2", platform, { orderId, ok: result.ok, error: result.error });
 
+      // 平台取消成功 → 同步本地订单状态（按本地单号或平台单号匹配）
+      if (result.ok && this.deps.store) {
+        const actorId2 = resolveActorId(ctx);
+        const local = orderId.startsWith("so_")
+          ? await this.deps.store.get(orderId)
+          : await this.deps.store.findByPlatformOrder(actorId2, platform, orderId);
+        if (local && local.actorId === actorId2) {
+          await this.deps.store.update(local.orderId, { status: "cancelled" });
+        }
+      }
+
       if (!result.ok) {
         return { ok: false, error: result.error ?? "取消订单失败", retryable: result.retryable };
       }
@@ -661,6 +850,159 @@ export class ShoppingOrderService {
     } finally {
       await browser.close().catch(() => {});
     }
+  }
+
+  // ============ 支付（shopping.pay.*） ============
+
+  /** 支付宝收银台链接判定（alipay-bot 收银台通道只接受 alipay.com 域的收银台链接）。 */
+  private isAlipayCashierUrl(url: string): boolean {
+    return /^https:\/\//i.test(url) && /(cashier|qr)\.alipay\.com/i.test(url);
+  }
+
+  /**
+   * 发起收银台代付（shopping.pay.submit）。
+   *
+   * 只支持「下单时捕获到支付宝收银台链接」的本地订单：经用户本人支付宝钱包
+   * （alipay-bot）拉起收银台，实际扣款由用户在支付宝 App 内确认。
+   * 无收银台链接（绝大多数平台订单）→ 明确引导用户去平台 App 支付。
+   */
+  async payOrder(ctx: ToolContext, orderId: string): Promise<ShoppingOrderResult> {
+    const actorId = resolveActorId(ctx);
+    if (!this.deps.store) return { ok: false, error: "本地订单表未启用，无法按本地单号支付" };
+    const order = orderId.startsWith("so_")
+      ? await this.deps.store.get(orderId)
+      : null;
+    if (!order || order.actorId !== actorId) {
+      return { ok: false, error: `本地订单 ${orderId} 不存在（支付只支持本地单号 so_*，可先用 shopping.order.list 查询）` };
+    }
+    if (order.status === "paid" || order.status === "shipped" || order.status === "completed") {
+      return { ok: true, summary: `订单 ${order.orderId} 已是 ${order.status} 状态，无需重复支付`, orderId: order.orderId, status: order.status };
+    }
+    if (order.status === "cancelled" || order.status === "failed") {
+      return { ok: false, error: `订单 ${order.orderId} 已 ${order.status}，无法支付` };
+    }
+    if (!this.deps.alipayBot) {
+      return { ok: false, error: "支付宝钱包服务未装配（alipayBot 未注入），请在平台 App 内完成支付" };
+    }
+    if (!order.paymentUrl) {
+      return {
+        ok: false,
+        error:
+          `订单 ${order.orderId} 没有捕获到支付宝收银台链接。` +
+          `请在 ${order.platform} App 内完成支付（订单号 ${order.platformOrderId ?? "见平台订单页"}），完成后可用 shopping.pay.check 同步状态`,
+        needManualPayment: true,
+      };
+    }
+    if (!this.isAlipayCashierUrl(order.paymentUrl)) {
+      return {
+        ok: false,
+        error:
+          "订单的支付链接不是支付宝收银台（该平台使用自有收银台），agent 无法代付。" +
+          "请在平台 App 内完成支付，完成后可用 shopping.pay.check 同步状态",
+        paymentUrl: order.paymentUrl,
+        needManualPayment: true,
+      };
+    }
+
+    try {
+      const sessionId = randomUUID();
+      const intentSummary =
+        `服务内容：支付${order.platform}订单「${order.title}」，` +
+        `支付金额：${order.amountCny != null ? `¥${order.amountCny}` : "以收银台为准"}，支付对象：${order.platform}平台商户`;
+      const res = await this.deps.alipayBot.submitPayment(sessionId, order.paymentUrl, intentSummary);
+      await this.audit(ctx, "pay_submit", order.platform, {
+        localOrderId: order.orderId, platformOrderId: order.platformOrderId, ok: res.ok, error: res.error,
+      });
+      if (!res.ok) {
+        return {
+          ok: false,
+          error: `支付宝代付发起失败：${res.error ?? res.stderr?.slice(0, 200) ?? "未知错误"}（请确认已开通并绑定本人支付宝钱包，或在平台 App 内手动支付）`,
+        };
+      }
+      return {
+        ok: true,
+        summary: `已为你拉起「${order.title}」的支付宝收银台（¥${order.amountCny ?? "以收银台为准"}），请在支付宝 App 内确认支付`,
+        orderId: order.orderId,
+        platform: order.platform,
+        amountCny: order.amountCny,
+        stdout: res.stdout.slice(0, 800),
+        hint: "支付完成后用 shopping.pay.check 确认状态并同步订单",
+      };
+    } catch (err) {
+      return { ok: false, error: `支付宝代付失败：${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  /**
+   * 查询订单支付状态（shopping.pay.check）。
+   * 支持本地单号 so_* 或平台单号；有支付宝收银台链接时先查钱包支付状态，
+   * 有平台单号时再经浏览器刷新平台侧状态，最后回写本地订单表。
+   */
+  async checkPayment(ctx: ToolContext, orderId: string): Promise<ShoppingOrderResult> {
+    const actorId = resolveActorId(ctx);
+    if (!this.deps.store) return { ok: false, error: "本地订单表未启用" };
+    let order: StoredShoppingOrder | null = orderId.startsWith("so_")
+      ? await this.deps.store.get(orderId)
+      : null;
+    if (!order) {
+      // 平台单号：遍历该 actor 全部订单匹配
+      const all = await this.deps.store.listByActor(actorId, { limit: 100 });
+      order = all.find((o) => o.platformOrderId === orderId.trim()) ?? null;
+    }
+    if (!order || order.actorId !== actorId) {
+      return { ok: false, error: `本地订单 ${orderId} 不存在（可用 shopping.order.list 查询本地订单）` };
+    }
+
+    // 1) 支付宝收银台支付状态
+    let alipayPaid: boolean | null = null;
+    let alipayDetail: string | undefined;
+    if (order.paymentUrl && this.isAlipayCashierUrl(order.paymentUrl) && this.deps.alipayBot) {
+      try {
+        const res = await this.deps.alipayBot.queryPaymentStatus({ launchUrl: order.paymentUrl });
+        const text = `${res.stdout} ${res.json ? JSON.stringify(res.json) : ""}`;
+        if (/已支付|支付成功|TRADE_SUCCESS|paid/i.test(text)) alipayPaid = true;
+        else if (/未支付|等待|PENDING|WAIT/i.test(text)) alipayPaid = false;
+        alipayDetail = res.stdout.slice(0, 300);
+      } catch (err) {
+        alipayDetail = `钱包查询失败：${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+
+    // 2) 平台侧实时状态（浏览器刷新；失败不阻塞）
+    let platformRefreshed: OrderStatus[] | undefined;
+    if (order.platformOrderId) {
+      const trackRes = await this.trackOrder(ctx, order.platform, order.platformOrderId);
+      if (trackRes.ok) {
+        platformRefreshed = (trackRes as { orders?: OrderStatus[] }).orders;
+      }
+    }
+
+    // 3) 状态判定 + 回写
+    let finalStatus: StoredShoppingOrder["status"] = order.status;
+    if (alipayPaid === true) finalStatus = "paid";
+    else if (platformRefreshed && platformRefreshed.length > 0) {
+      const matched = platformRefreshed.find((o) => o.orderId === order!.platformOrderId) ?? platformRefreshed[0];
+      const mapped = mapPlatformStatusText(matched?.status ?? matched?.statusDesc);
+      if (mapped) finalStatus = mapped;
+    }
+    if (finalStatus !== order.status) {
+      await this.deps.store.update(order.orderId, { status: finalStatus });
+    }
+
+    await this.audit(ctx, "pay_check", order.platform, { localOrderId: order.orderId, status: finalStatus });
+
+    return {
+      ok: true,
+      summary: `订单「${order.title}」当前状态：${finalStatus}${alipayPaid === true ? "（支付宝已确认支付）" : ""}`,
+      localOrderId: order.orderId,
+      platform: order.platform,
+      platformOrderId: order.platformOrderId,
+      status: finalStatus,
+      amountCny: order.amountCny,
+      paymentUrl: order.paymentUrl,
+      alipayDetail,
+      platformOrders: platformRefreshed,
+    };
   }
 
   // ============ 内部工具 ============

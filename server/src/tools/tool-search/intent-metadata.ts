@@ -329,6 +329,31 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       examples: ["每天提醒我喝水", "到点提醒我睡觉"],
     },
   },
+  // ── calendar 族内区分（2026-09-08 新增 update_task/find_free_slots 后黄金回归防挤占）──
+  // 前缀别名让所有 calendar.* 共享「日程/提醒/待办」，族内排名靠各自专属词。
+  {
+    exact: "calendar.list_tasks",
+    metadata: {
+      aliases: ["有哪些日程", "我的日程", "有什么安排", "查看日程", "列出日程", "日程列表", "今天有什么安排"],
+      examples: ["我有哪些日程", "看看我的日程安排", "列出本周的日程"],
+    },
+  },
+  {
+    exact: "calendar.find_free_slots",
+    metadata: {
+      aliases: ["什么时候有空", "有空时段", "空闲时间", "约时间", "帮我约", "几点有空"],
+      examples: ["我明天什么时候有空", "帮我找个有空的时间约她", "下午有哪些空闲时段"],
+      negativeExamples: ["我有哪些日程", "取消明天那个提醒", "明天早上九点提醒我开会"],
+    },
+  },
+  {
+    exact: "calendar.update_task",
+    metadata: {
+      aliases: ["改期", "换个时间", "推迟", "提前到", "改到", "暂停提醒", "恢复提醒"],
+      examples: ["把会议改期到下午三点", "那个提醒推迟半小时", "暂停每天喝水的提醒"],
+      negativeExamples: ["我有哪些日程", "取消明天那个提醒", "明天早上九点提醒我开会"],
+    },
+  },
 ];
 
 const DEFAULT_METADATA_PATH = resolve(process.cwd(), "data", "tool-intent-metadata.json");

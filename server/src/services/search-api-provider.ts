@@ -30,7 +30,12 @@ export type SearchApiConfig = {
   anysearchLang: string;
 };
 
-const SEARCH_API_TIMEOUT_MS = 8000;
+// 搜索 API 超时：必须小于 search_web 的工具执行预算（TOOL_TIMEOUT_SEARCH_MS，默认
+// 6500ms）。曾默认 8000ms > 6500ms——AnySearch 慢响应时整个 search_web 在 6.5s 被外层
+// 击杀（轨迹日志实证「工具执行超时(6500ms)」），API 结果与爬虫兜底全部丢失。
+// 默认 5000ms 给 API，剩余预算留给爬虫兜底；SEARCH_API_TIMEOUT_MS 可调。
+const SEARCH_API_TIMEOUT_MS =
+  Number.parseInt(process.env.SEARCH_API_TIMEOUT_MS ?? "5000", 10) || 5000;
 const ANYSEARCH_ENDPOINT = "https://api.anysearch.com/v1/search";
 const DEFAULT_BING_ENDPOINT = "https://api.cognitive.microsoft.com/bing/v7.0/search";
 
@@ -72,6 +77,22 @@ export async function searchViaSearchApi(
   }
 
   console.log(`[SearchApi] 请求 ${cfg.provider}  查询="${keyword.slice(0, 40)}"  limit=${boundedLimit}`);
+  const result = await dispatchSearchApi(cfg, keyword, boundedLimit);
+  // 可观测性：已配置的 API 返回 0 条（请求失败/业务失败/空结果）时显式告警。
+  // 此前静默回退爬虫链，日志里完全看不出「配了 anysearch 却没走 anysearch」。
+  if (result.length === 0) {
+    console.warn(
+      `[SearchApi] ${cfg.provider} 返回 0 条结果（请求失败/业务失败/空结果），回退爬虫链 -> query="${keyword.slice(0, 40)}"`,
+    );
+  }
+  return result;
+}
+
+async function dispatchSearchApi(
+  cfg: SearchApiConfig,
+  keyword: string,
+  boundedLimit: number,
+): Promise<InfoSearchItem[]> {
   switch (cfg.provider) {
     case "tavily":
       return searchTavily(keyword, boundedLimit, cfg.apiKey);
@@ -83,8 +104,9 @@ export async function searchViaSearchApi(
       return searchJina(keyword, boundedLimit, cfg.jinaKey);
     case "anysearch":
       return searchAnySearch(keyword, boundedLimit, cfg.apiKey, cfg.anysearchZone, cfg.anysearchLang);
+    // normalizeProvider 已把非法值归一为 "none"（上方提前返回 null），此分支不可达
     default:
-      return null;
+      return [];
   }
 }
 
@@ -430,21 +452,38 @@ async function searchAnySearch(
       }),
       signal: controller.signal,
     });
-    if (!response.ok) return [];
+    if (!response.ok) {
+      console.warn(
+        `[SearchApi] AnySearch HTTP ${response.status} ${response.statusText} -> query="${query.slice(0, 40)}"`,
+      );
+      return [];
+    }
     const text = await response.text();
-    if (!text) return [];
+    if (!text) {
+      console.warn(`[SearchApi] AnySearch 响应为空 -> query="${query.slice(0, 40)}"`);
+      return [];
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(text) as unknown;
     } catch {
+      console.warn(`[SearchApi] AnySearch 响应非 JSON -> query="${query.slice(0, 40)}" body=${text.slice(0, 120)}`);
       return [];
     }
     if (!isObj(parsed)) return [];
     // 成功响应：code===0 且 data.results 为数组；非 0 视为业务失败
     const rec = parsed as Record<string, unknown>;
-    if (rec.code !== 0) return [];
+    if (rec.code !== 0) {
+      console.warn(
+        `[SearchApi] AnySearch 业务失败 code=${String(rec.code)} msg=${String(rec.message ?? "")} -> query="${query.slice(0, 40)}"`,
+      );
+      return [];
+    }
     const data = rec.data;
-    if (!isObj(data)) return [];
+    if (!isObj(data)) {
+      console.warn(`[SearchApi] AnySearch 响应缺 data 字段 -> query="${query.slice(0, 40)}"`);
+      return [];
+    }
     const results = Array.isArray((data as Record<string, unknown>).results)
       ? ((data as Record<string, unknown>).results as unknown[])
       : [];

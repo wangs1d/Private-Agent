@@ -10,12 +10,16 @@
 
 import type { BookingProvider } from "../booking-provider.js";
 import type { BookingConfig } from "../booking-config.js";
+import type { QuoteAggregator } from "../quote/index.js";
 import { SimulatedRideProvider } from "./simulated-ride-provider.js";
 import { SimulatedHomeServiceProvider, SimulatedRestaurantProvider } from "./simulated-local-providers.js";
 import { AmapRideProvider } from "./amap-ride-provider.js";
 import { TravelTicketProvider } from "./travel-ticket-provider.js";
 
-export function buildDefaultBookingProviders(config: BookingConfig): BookingProvider[] {
+export function buildDefaultBookingProviders(
+  config: BookingConfig,
+  deps: { quoteAggregator?: QuoteAggregator | null } = {},
+): BookingProvider[] {
   if (config.mode === "mock") {
     return [
       new SimulatedRideProvider(),
@@ -23,11 +27,11 @@ export function buildDefaultBookingProviders(config: BookingConfig): BookingProv
       new SimulatedRestaurantProvider(),
       // travel 域在 mock 模式也注册：本 provider 的 book 只建「待支付」订单，
       // 真实扣款必须经用户本人支付宝钱包授权（booking.travel-pay），无静默扣款风险
-      new TravelTicketProvider(),
+      new TravelTicketProvider({ quoteAggregator: deps.quoteAggregator ?? null }),
     ];
   }
   const providers: BookingProvider[] = [
-    new TravelTicketProvider(),
+    new TravelTicketProvider({ quoteAggregator: deps.quoteAggregator ?? null }),
   ];
   if (config.rideAmapWebKey) {
     providers.push(new AmapRideProvider(config));

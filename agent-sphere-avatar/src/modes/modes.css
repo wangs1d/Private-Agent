@@ -82,20 +82,20 @@ html.embed-root #root {
 
 .overlay-pet-pane {
   position: relative;
-  flex: 0 0 186px;
-  width: 186px;
+  flex: 0 0 372px;
+  width: 372px;
   height: 100%;
-  min-width: 186px;
-  padding: 8px 8px 60px;
+  min-width: 372px;
+  padding: 16px 16px 120px;
   box-sizing: border-box;
 }
 
 .overlay-pet-pane canvas {
-  height: calc(100% - 60px) !important;
+  height: calc(100% - 120px) !important;
 }
 
 .overlay-pet-pane .inner-thought {
-  top: calc(100% - 60px);
+  top: calc(100% - 120px);
   /* 桌宠仅透明度渐显，禁用基类 translateY/scale 入场，避免流式时轻微位移 */
   animation: overlay-inner-in 0.25s ease-out;
 }
@@ -110,7 +110,7 @@ html.embed-root #root {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 56px;
+  bottom: 112px;
   max-height: 55%;
   overflow-y: auto;
   overflow-x: hidden;

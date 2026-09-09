@@ -101,7 +101,7 @@ test("B1：API 真实 usage 进入聚合与落盘，task_plane_* stage 正确分
   const auditPath = join(DATA_DIR, "llm-token-audit.ndjson");
 
   recordLlmUsageByChars({
-    stage: "task_plane_fast",
+    stage: "task_plane_light",
     inputChars: 1000,
     outputChars: 200,
     model: "deepseek-chat",
@@ -112,7 +112,7 @@ test("B1：API 真实 usage 进入聚合与落盘，task_plane_* stage 正确分
     promptCacheMissTokens: 300,
   });
   recordLlmUsageByChars({
-    stage: "task_plane_complex",
+    stage: "task_plane_full",
     inputChars: 2000,
     outputChars: 400,
     model: "deepseek-reasoner",
@@ -124,15 +124,15 @@ test("B1：API 真实 usage 进入聚合与落盘，task_plane_* stage 正确分
   recordLlmUsageByChars({ stage: "mood_inference", inputChars: 100, outputChars: 20 });
 
   const rows = getLlmUsageSummary();
-  const fastRow = rows.find((r) => r.stage === "task_plane_fast");
-  const complexRow = rows.find((r) => r.stage === "task_plane_complex");
+  const lightRow = rows.find((r) => r.stage === "task_plane_light");
+  const fullRow = rows.find((r) => r.stage === "task_plane_full");
   const moodRow = rows.find((r) => r.stage === "mood_inference");
 
-  assert.ok(fastRow && complexRow && moodRow, "新 stage 必须被聚合");
-  assert.equal(fastRow.apiCalls, 1);
-  assert.equal(fastRow.apiInputTokens, 1500);
-  assert.equal(fastRow.apiOutputTokens, 300);
-  assert.equal(complexRow.apiInputTokens, 2800);
+  assert.ok(lightRow && fullRow && moodRow, "新 stage 必须被聚合");
+  assert.equal(lightRow.apiCalls, 1);
+  assert.equal(lightRow.apiInputTokens, 1500);
+  assert.equal(lightRow.apiOutputTokens, 300);
+  assert.equal(fullRow.apiInputTokens, 2800);
   assert.equal(moodRow.apiCalls, 0, "无 usage 的旁路调用不计入真实值聚合");
 
   // 落盘记录携带真实 usage 字段（取最后一行校验）
@@ -143,9 +143,9 @@ test("B1：API 真实 usage 进入聚合与落盘，task_plane_* stage 正确分
 
   // 跨重启聚合（磁盘路径）
   const diskRows = getLlmUsageSummaryFromDisk();
-  const diskFast = diskRows.find((r) => r.stage === "task_plane_fast");
-  assert.ok(diskFast);
-  assert.equal(diskFast.apiInputTokens, 1500);
+  const diskLight = diskRows.find((r) => r.stage === "task_plane_light");
+  assert.ok(diskLight);
+  assert.equal(diskLight.apiInputTokens, 1500);
 
   resetLlmUsageAuditForTest();
 });

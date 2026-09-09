@@ -2,8 +2,8 @@
  * shopping-order 能力模块安全冒烟测试。
  *
  * 验证护栏逻辑（不花真钱、不产生订单）：
- *   1. 工具 schema（4 个工具名 + 参数结构）
- *   2. 意图规则（prefix + 4 exact）
+ *   1. 工具 schema（7 个工具名 + 参数结构：order.search/place/track/cancel/list + pay.submit/check）
+ *   2. 意图规则（prefix + 7 exact）
  *   3. 分类映射
  *   4. ToolRegistry 注册
  *   5. 沙箱模式下可调用（不因 agentAccessMode="sandbox" 被拒绝）
@@ -58,14 +58,22 @@ async function withTempDataDir<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-test("SHOPPING_ORDER_CHAT_TOOLS has 4 tools with correct names", () => {
+test("SHOPPING_ORDER_CHAT_TOOLS has 7 tools with correct names", () => {
   const names = SHOPPING_ORDER_CHAT_TOOLS
     .map((t) => (t.type === "function" ? t.function?.name : null))
     .filter((n): n is string => Boolean(n));
-  assert.equal(names.length, 4);
+  assert.equal(names.length, 7);
   assert.deepEqual(
     [...names].sort(),
-    ["shopping.order.cancel", "shopping.order.place", "shopping.order.search", "shopping.order.track"],
+    [
+      "shopping.order.cancel",
+      "shopping.order.list",
+      "shopping.order.place",
+      "shopping.order.search",
+      "shopping.order.track",
+      "shopping.pay.check",
+      "shopping.pay.submit",
+    ],
   );
   // 每个工具必须有 description + parameters
   for (const tool of SHOPPING_ORDER_CHAT_TOOLS) {
@@ -102,18 +110,21 @@ test("shopping.order.place schema has two-stage confirm fields", () => {
   assert.deepEqual(params.required, ["platform", "item"]);
 });
 
-test("SHOPPING_ORDER_INTENT_RULES has prefix rule + 4 exact rules", () => {
+test("SHOPPING_ORDER_INTENT_RULES has prefix rule + 7 exact rules", () => {
   const prefixRules = SHOPPING_ORDER_INTENT_RULES.filter((r) => "prefix" in r);
   const exactRules = SHOPPING_ORDER_INTENT_RULES.filter((r) => "exact" in r);
   assert.equal(prefixRules.length, 1);
   assert.equal(prefixRules[0]?.prefix, "shopping.order.");
-  assert.equal(exactRules.length, 4);
+  assert.equal(exactRules.length, 7);
   const exactNames = exactRules.map((r) => (r as { exact: string }).exact).sort();
   assert.deepEqual(exactNames, [
     "shopping.order.cancel",
+    "shopping.order.list",
     "shopping.order.place",
     "shopping.order.search",
     "shopping.order.track",
+    "shopping.pay.check",
+    "shopping.pay.submit",
   ]);
   // prefix 规则必须有 negativeAliases（区分 shopping.suggest / wallet / fetch_page）
   const meta = prefixRules[0]?.metadata;
@@ -130,12 +141,20 @@ test("SHOPPING_ORDER_CATEGORY_MAPPING has correct name + keywords", () => {
   assert.ok(SHOPPING_ORDER_CATEGORY_MAPPING.keywords.includes("下单"));
 });
 
-test("registerShoppingOrderTools registers 4 tools in registry", () => {
+test("registerShoppingOrderTools registers 7 tools in registry", () => {
   const registry = new MockRegistry();
   const service = {} as ShoppingOrderService; // 只测注册，handler 不实际调用
   registerShoppingOrderTools(registry as unknown as ToolRegistry, { shoppingOrderService: service });
-  assert.equal(registry.handlers.size, 4);
-  for (const name of ["shopping.order.search", "shopping.order.place", "shopping.order.track", "shopping.order.cancel"]) {
+  assert.equal(registry.handlers.size, 7);
+  for (const name of [
+    "shopping.order.search",
+    "shopping.order.place",
+    "shopping.order.track",
+    "shopping.order.cancel",
+    "shopping.order.list",
+    "shopping.pay.submit",
+    "shopping.pay.check",
+  ]) {
     assert.ok(registry.handlers.has(name), `未注册 ${name}`);
   }
 });
@@ -177,8 +196,8 @@ test("unknown platform is rejected (platform whitelist)", async () => {
     registerShoppingOrderTools(registry as unknown as ToolRegistry, { shoppingOrderService: service });
     const ctx = makeCtx("full");
 
-    // pdd 暂未实现 adapter
-    const result = await registry.handlers.get("shopping.order.search")!({ platform: "pdd", query: "test" }, ctx);
+    // dianping 暂未实现 adapter（pdd/douyin/damai/maoyan 已实现）
+    const result = await registry.handlers.get("shopping.order.search")!({ platform: "dianping", query: "test" }, ctx);
     assert.equal(result.ok, false);
     assert.match((result as { error: string }).error, /暂不支持/);
 

@@ -23,7 +23,7 @@ function createFakeFacade() {
       return { ok: true, result: { done: true } };
     },
     async routeTurnForWs() {
-      return { mode: "fast", reasons: ["test"], segmentable: false };
+      return { reasons: ["test"], segmentable: false };
     },
     async resumeAutonomousTasks() {
       return 3;
@@ -76,7 +76,7 @@ test("runtime 链路：req/res、流式 ev 帧、abort 与鉴权", async (t) => 
 
   // 简单 RPC
   const decision = await client.routeTurnForWs("actor-1", "hi");
-  assert.equal(decision.mode, "fast");
+  assert.equal(decision.plane, "chat");
   const restored = await client.resumeAutonomousTasks();
   assert.equal(restored, 3);
   const tool = await client.runToolIfNeeded("actor-1", { text: "x", toolName: "t", toolInput: {} });

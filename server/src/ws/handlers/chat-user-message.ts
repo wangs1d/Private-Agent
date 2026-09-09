@@ -587,7 +587,7 @@ async function processBatchedMessage(
   // turn 面板 v2 阶段 0/1（路由结果就绪后补发，不阻塞主链路）
   void decisionPromise
     .then((decision) => {
-      const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {
+      const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, {
         enabled: cfg.interimAck.enabled,
       });
       if (cfg.turnPanelV2.enabled && phasedAsyncEnabled) {
@@ -822,6 +822,9 @@ async function processBatchedMessage(
       sessionId: typeof batched.sessionId === "string" ? batched.sessionId : undefined,
       signal: turnAbortController.signal,
       routeDecision: decisionPromise,
+      // 任务面异步收尾（2026-09-08）：plane=task 派发后台任务后本轮立即结束，
+      // 对话窗回到空闲态；结果由后台完成后以 source=task_plane 独立消息回灌。
+      taskPlaneAsync: true,
       onAssistantDelta: (delta) => {
         // 实时流式：delta 即刻喂分段器（增量去重由分段器内部保证）；
         // 同时累积原始流式文本，供最终残差计算与兜底。knowledge_qa 缓冲模式
@@ -1310,6 +1313,10 @@ async function processBatchedMessage(
           traceId: batched.originalMessageId,
           finalText,
           toolCalls: reply.toolName ? [reply.toolName] : [],
+          // 任务面异步收尾：本轮已把任务派发到后台（无正文），客户端按
+          // source=task_plane + traceId 结清前台处理状态、不落正文气泡——
+          // 任务回执与结果由任务面事件（chat.task_update / 结果 done）独立承载。
+          ...(reply.taskDispatched ? { source: "task_plane" } : {}),
           // 结构化媒体卡片（Coze 式架构）：独立于 LLM 文本，前端直接渲染缩略图
           ...(mediaCards.length > 0 ? { mediaCards } : {}),
           // 交错渲染块：按正文顺序切好的「文字段+媒体组」，前端按序渲染

@@ -16,4 +16,10 @@ export type AgentReply = {
    * 后台任务升级段用它延续快通道的执行轨迹，避免整轮从零重跑（A2）。
    */
   attemptedToolCalls?: string[];
+  /**
+   * 任务面异步收尾（2026-09-08）：本轮已把任务派发到后台并立即结束（text 为空，
+   * 无正文产出）。WS 层据此以 source=task_plane 发送 assistant_done，客户端据此
+   * 结清前台处理状态且不落正文气泡（任务回执/结果由任务面事件独立承载）。
+   */
+  taskDispatched?: boolean;
 };

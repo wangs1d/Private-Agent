@@ -19,9 +19,9 @@ export interface BookingPendingConfirmation {
   actorId: string;
   domain: BookingDomain;
   provider: string;
-  /** 确认的动作：book（下单）/ cancel（取消） */
-  action: "book" | "cancel";
-  /** book：订单草稿；cancel：待取消的本地 orderId */
+  /** 确认的动作：book（下单）/ cancel（取消）/ refund（退改工单） */
+  action: "book" | "cancel" | "refund";
+  /** book：订单草稿；cancel/refund：待处理的本地 orderId */
   draft: BookingDraft | null;
   orderId: string | null;
   /** 复述给用户的摘要 */
@@ -55,7 +55,7 @@ export class BookingConfirmationStore {
     actorId: string;
     domain: BookingDomain;
     provider: string;
-    action: "book" | "cancel";
+    action: "book" | "cancel" | "refund";
     draft?: BookingDraft | null;
     orderId?: string | null;
     summary: string;
@@ -81,7 +81,7 @@ export class BookingConfirmationStore {
   /** 阶段二：校验并一次性消费 token。 */
   consume(
     token: string,
-    expect: { actorId: string; action: "book" | "cancel"; domain: BookingDomain },
+    expect: { actorId: string; action: "book" | "cancel" | "refund"; domain: BookingDomain },
   ): ConsumeResult {
     if (!token) return { ok: false, error: "缺少 confirmationToken（来自阶段一）" };
     const pending = this.pendings.get(token);

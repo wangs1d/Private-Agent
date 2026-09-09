@@ -102,6 +102,78 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       cardType: "schedule",
     };
   },
+
+  // 跨平台比价结果：组内最低价升序，每组一行「¥价格 [平台] 商品名（店铺）」
+  "shopping.compare.prices": (r) => {
+    const groups = Array.isArray(r.groups) ? r.groups : [];
+    if (groups.length === 0) return null;
+    const items: ToolCardItem[] = [];
+    let shown = 0;
+    for (const g of groups) {
+      if (shown >= 8) break;
+      const rec = (g ?? {}) as Record<string, unknown>;
+      const offers = Array.isArray(rec.offers) ? rec.offers : [];
+      if (offers.length === 0) continue;
+      const best = (offers[0] ?? {}) as Record<string, unknown>;
+      const price = num(best.priceCny);
+      const platform = str(best.platform);
+      const title = str(best.title);
+      const shop = str(best.shop);
+      const similar = rec.matchType === "similar" ? "（疑似同款）" : "";
+      const priceText = price != null ? `¥${price}` : "价格待查";
+      items.push({
+        type: "num",
+        text: `${priceText} [${platform || "未知平台"}] ${title.slice(0, 40)}${shop ? `（${shop.slice(0, 12)}）` : ""}${similar}`,
+      });
+      shown += 1;
+    }
+    if (items.length === 0) return null;
+    const bestOffer = (r.bestOffer ?? {}) as Record<string, unknown>;
+    const bestPlatform = str(bestOffer.platform);
+    const bestPrice = num(bestOffer.priceCny);
+    const footer =
+      bestPrice != null && bestPlatform
+        ? `最低价 ¥${bestPrice} 来自 ${bestPlatform} · 信息为平台实时抓取，以下单结算页为准`
+        : "信息为平台实时抓取，以下单结算页为准";
+    return {
+      title: `比价结果：${str(r.query)}`,
+      items,
+      footer,
+      cardType: "",
+    };
+  },
+
+  // 本地订单列表：so_* 单号 + 状态 + 金额
+  "shopping.order.list": (r) => {
+    const orders = Array.isArray(r.orders) ? r.orders : [];
+    if (orders.length === 0) return null;
+    const statusLabel: Record<string, string> = {
+      pending_payment: "待支付",
+      paid: "已支付",
+      shipped: "已发货",
+      completed: "已完成",
+      cancelled: "已取消",
+      failed: "失败",
+    };
+    const items: ToolCardItem[] = orders.slice(0, 8).map((o) => {
+      const rec = (o ?? {}) as Record<string, unknown>;
+      const platform = str(rec.platform);
+      const title = str(rec.title) || "（无标题）";
+      const amount = num(rec.amountCny);
+      const status = statusLabel[str(rec.status)] ?? (str(rec.status) || "未知");
+      return {
+        type: amount != null && amount > 0 ? "num" : "check",
+        text: `[${platform}] ${title.slice(0, 36)} · ${status}${amount != null && amount > 0 ? ` ¥${amount}` : ""}`,
+      };
+    });
+    const count = num(r.count) ?? orders.length;
+    return {
+      title: "购物订单",
+      items,
+      footer: count > 8 ? `共 ${count} 条，仅显示前 8 条` : `共 ${count} 条`,
+      cardType: "order",
+    };
+  },
 };
 
 /** 查注册 builder；未注册返回 null */

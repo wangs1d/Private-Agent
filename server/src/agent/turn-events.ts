@@ -23,7 +23,6 @@ import type {
   ChatSubAgentPlan,
   ChatTurnStartedPayload,
 } from "../protocol.js";
-import type { LlmExecutionMode } from "./task-router.js";
 import type { RouteDecision } from "./task-router.js";
 
 /** 发送回调：handler 把 WS send 闭包传进来。 */
@@ -35,9 +34,9 @@ export type TurnEventEmitter = {
   emitExecutionEvent(payload: ChatExecutionEventPayload): void;
 };
 
-/** LlmExecutionMode → ChatIntentMode（值相同，仅做名义收口）。 */
-function modeToIntentMode(mode: LlmExecutionMode): ChatIntentMode {
-  return mode;
+/** 执行平面 → 协议意图模式（chat=对话面；task=任务面）。 */
+function planeToIntentMode(plane: RouteDecision["plane"]): ChatIntentMode {
+  return plane;
 }
 
 export function createTurnEventEmitter(opts: {
@@ -95,7 +94,7 @@ export function buildIntentDetectedPayload(opts: {
   return {
     sessionId: opts.sessionId,
     traceId: opts.traceId,
-    mode: modeToIntentMode(opts.decision.mode),
+    mode: planeToIntentMode(opts.decision.plane),
     reasons: opts.decision.reasons,
     plan: opts.plan,
     subAgents: opts.subAgents,

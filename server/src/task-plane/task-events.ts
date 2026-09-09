@@ -39,12 +39,15 @@ export function buildTaskUpdateEnvelope(record: TaskPlaneRecord): string {
   return JSON.stringify({ type: ServerEventType.ChatTaskUpdate, payload });
 }
 
-/** 经 push 端口向该会话全部在线设备广播任务变更；端口缺失/关闭开关时为无操作。 */
+/**
+ * 经 push 端口向该会话全部在线设备广播任务变更；端口缺失/关闭开关/静默任务时为无操作。
+ * quiet（2026-09-09）：原地同步执行的轻任务不出「任务回执」，只记账不广播。
+ */
 export function broadcastTaskUpdate(
   registry: Pick<ClientPushPort, "trySend"> | null | undefined,
   record: TaskPlaneRecord,
 ): void {
-  if (!registry || !isTaskPlaneWsEventsEnabled()) return;
+  if (!registry || !isTaskPlaneWsEventsEnabled() || record.quiet) return;
   try {
     registry.trySend(record.sessionId, buildTaskUpdateEnvelope(record));
   } catch {

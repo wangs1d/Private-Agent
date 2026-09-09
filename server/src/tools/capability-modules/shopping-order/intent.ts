@@ -123,6 +123,58 @@ export const SHOPPING_ORDER_INTENT_RULES: ToolIntentRule[] = [
       ],
     },
   },
+  {
+    exact: "shopping.order.list",
+    metadata: {
+      aliases: [
+        "order history", "my orders", "order list", "purchased items",
+        "订单列表", "我买过什么", "历史订单", "我的订单", "买过的东西", "查订单",
+      ],
+      examples: [
+        "我之前买过哪些东西",
+        "看一下我的订单列表",
+        "show my order history",
+      ],
+      negativeExamples: [
+        "查一下这个订单的物流", // 实时物流走 shopping.order.track
+        "帮我下单这个商品",
+      ],
+    },
+  },
+  {
+    exact: "shopping.pay.submit",
+    metadata: {
+      aliases: [
+        "pay order", "pay for me", "alipay pay", "checkout payment", "代付", "帮我付款", "支付订单", "去支付",
+      ],
+      examples: [
+        "帮我把刚才那个订单付了",
+        "用我的支付宝把这笔订单付掉",
+        "pay this order with my alipay wallet",
+      ],
+      negativeExamples: [
+        "查一下付了没", // 状态查询走 shopping.pay.check
+        "转账给朋友", // 转账走 wallet.transfer
+      ],
+    },
+  },
+  {
+    exact: "shopping.pay.check",
+    metadata: {
+      aliases: [
+        "payment status", "check payment", "paid or not", "支付状态", "付了没", "付款了吗", "订单支付查询",
+      ],
+      examples: [
+        "刚才那单付了没",
+        "查一下订单支付状态",
+        "check if my order is paid",
+      ],
+      negativeExamples: [
+        "帮我付款", // 发起支付走 shopping.pay.submit
+        "查一下物流到哪了", // 物流走 shopping.order.track
+      ],
+    },
+  },
 ];
 
 export const SHOPPING_ORDER_CATEGORY_MAPPING: { name: string; keywords: string[] } = {
@@ -130,13 +182,16 @@ export const SHOPPING_ORDER_CATEGORY_MAPPING: { name: string; keywords: string[]
   keywords: [
     // 中英关键词，覆盖用户口语
     "shopping", "order", "buy", "purchase", "checkout", "cart", "place order",
-    "track order", "cancel order", "refund",
+    "track order", "cancel order", "refund", "pay order", "payment status",
     "taobao", "tmall", "jd", "jingdong", "meituan", "pdd", "pinduoduo",
-    "dianping", "douyin", "tiktok shop",
+    "dianping", "douyin", "tiktok shop", "damai", "maoyan",
     "购物", "下单", "购买", "买东西", "买", "网购", "帮我买",
     "淘宝", "天猫", "京东", "美团", "拼多多", "点评", "抖音",
+    "大麦", "猫眼", "演唱会", "话剧", "演出票", "音乐会", "livehouse", "票务",
+    "杂货", "日用品", "超市", "闪购", "囤货", "纸巾", "洗衣液", "矿泉水", "牛奶",
     "点外卖", "点餐", "外卖", "麦当劳", "肯德基", "奶茶", "饿了么",
     "加入购物车", "结算", "提交订单",
-    "查订单", "订单状态", "物流", "取消订单", "退款", "退货",
+    "查订单", "订单状态", "物流", "取消订单", "退款", "退货", "订单列表", "历史订单",
+    "代付", "帮我付款", "支付订单", "付了没", "支付状态",
   ],
 };

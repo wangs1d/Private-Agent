@@ -181,11 +181,11 @@ class AgentResultData {
 
   /// 结构化行程数据(仅 travel_itinerary 卡携带,来自服务端结构化结果):
   /// {toolName, ts, destination, title, days:[{date, items:[{type,name,startTime,...}]}]}。
-  /// 供双面板行程界面直读渲染;为 null 时前端回退到 items 文本解析。
+  /// 供行程规划界面直读渲染;为 null 时前端回退到 items 文本解析。
   final Map<String, dynamic>? travelPlan;
 
   /// 自动展开标志(目前仅 travel_itinerary 卡使用):服务端在本轮规划实时完成时置
-  /// true,chat.assistant_done 收到后直接展开双面板,无需用户点按钮。卡片仍保留
+  /// true,chat.assistant_done 收到后直接弹出独立规划界面,无需用户点按钮。卡片仍保留
   /// 在消息里供回看;历史加载不走 done 事件,不会重复弹开。
   final bool autoOpen;
 
@@ -250,7 +250,7 @@ class AgentResultParser {
   ///
   /// 文本含多个卡片块时（如通用列表卡之后确定性附加的行程卡），
   /// [data] 优先取 travel_itinerary 行程卡——它是唯一携带 autoOpen
-  /// （右侧双面板自动展开）与结构化行程数据的卡；cleanedText 剥离
+  /// （独立规划界面自动弹出）与结构化行程数据的卡；cleanedText 剥离
   /// 全部卡片块，避免剩余块的原始标记/JSON 混进正文展示。
   static AgentResultParseResult parse(String text) {
     if (text.isEmpty) {

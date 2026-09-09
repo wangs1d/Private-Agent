@@ -3,21 +3,29 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 /**
  * 购物/下单能力 —— ChatCompletionTool schema。
  *
- * 工具族（点号命名空间 `shopping.order.*`）：
+ * 工具族（点号命名空间 `shopping.order.*` / `shopping.pay.*`）：
  *   - shopping.order.search  后台无头浏览器搜索商品
  *   - shopping.order.place   两阶段确认下单
- *   - shopping.order.track   查询订单状态/物流
+ *   - shopping.order.track   查询订单状态/物流（支持本地单号 so_*）
  *   - shopping.order.cancel  两阶段确认取消订单
+ *   - shopping.order.list    本地订单列表（零副作用）
+ *   - shopping.pay.submit    支付宝收银台代付（仅限拿到 alipay 收银台链接的订单）
+ *   - shopping.pay.check     订单支付状态查询 + 本地状态同步
  *
  * 核心定位：在**服务端后台启动 Playwright 无头浏览器**，注入用户预先导入并授权
  * 的 Cookie，直接在后台完成下单/查单/取消，把结果呈现给用户。
  *
  * 与现有能力的边界：
+ *   - shopping.compare.*：只读比价/降价监控，不下单；买前比价 → 本工具族下单
  *   - browser.fetch_page：只读抓页读价，明文禁止下单；本工具突破此边界
- *   - shopping.suggest：仅比价建议，不执行下单；本工具真实提交订单
- *   - wallet.purchase：纯内存记账；本工具真实下单后可联动它记账
- *   - desktop.visual.run_task：操控用户电脑真实软件；本工具在服务端无头浏览器
+ *   - shopping.suggest：仅比价建议，不执行下单
+ *   - wallet.purchase：纯内存记账；本工具真实下单后经消费管家自动入账
  *   - meituan.create_order：调平台开放 API；本工具走浏览器，不依赖开放 API
+ *
+ * 支付边界：**只点提交订单，不点支付**。订单落本地表（so_* 单号）；
+ * 拿到支付宝收银台链接（cashier/qr.alipay.com）的订单可用 shopping.pay.submit
+ * 经用户本人支付宝钱包代付（用户在支付宝 App 内确认扣款）；其余平台订单
+ * 引导用户去平台 App 支付，shopping.pay.check 同步状态。
  *
  * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
  *   1. 用户不会每轮都下单，进核心会浪费 token
@@ -25,10 +33,13 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *
  * 安全护栏（不依赖访问模式，沙箱下也可用）：
  *   - 须先导入平台 Cookie 并授权 agentAllowed=true
- *   - 金额上限 SHOPPING_ORDER_MAX_AMOUNT_CNY（默认 5000）
+ *   - 单笔上限 SHOPPING_ORDER_MAX_AMOUNT_CNY（默认 5000，可按平台覆盖）
+ *   - 单日预算 SHOPPING_ORDER_DAILY_BUDGET_CNY（默认 10000）
  *   - place / cancel 两阶段确认（5 分钟 TTL token）
- *   - 平台白名单 + 审计日志
+ *   - 平台白名单 + 审计日志 + 本地订单落库
  */
+export const SHOPPING_PLATFORM_ENUM = ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"] as const;
+
 export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
@@ -42,17 +53,19 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         "（POST /integrations/browser-sessions/import + /consent）。沙箱模式下也可用。\n" +
         "与 browser.fetch_page（只读读价）/ shopping.suggest（仅比价建议）的区别：" +
         "本工具为后续下单做准备，返回的商品列表可直接传给 shopping.order.place。\n" +
-        "已实现 adapter 的平台：taobao/tmall/jd/meituan；" +
-        "pdd/dianping/douyin 暂未实现 adapter，调用会返回「暂不支持」。",
+        "已实现 adapter 的平台：taobao/tmall/jd/meituan/pdd/douyin/damai/maoyan；" +
+        "dianping 暂未实现 adapter，调用会返回「暂不支持」。\n" +
+        "品类建议：杂货/日用品/外卖用 meituan（或 jd 超市）；演唱会/话剧/演出票用 damai 或 maoyan" +
+        "（实名制演出须用户先在其账号内添加观演人）。",
       parameters: {
         type: "object",
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "dianping", "pdd", "douyin"],
+            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
             description:
-              "目标购物平台。taobao=淘宝, tmall=天猫, jd=京东, meituan=美团, " +
-              "dianping=大众点评, pdd=拼多多, douyin=抖音商城。",
+              "目标购物平台。taobao=淘宝, tmall=天猫, jd=京东, meituan=美团(外卖/闪购), " +
+              "pdd=拼多多, douyin=抖音商城, damai=大麦(演出票), maoyan=猫眼(演出票), dianping=大众点评。",
           },
           query: {
             type: "string",
@@ -91,18 +104,21 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         "在服务端后台无头浏览器中代用户下单。**两阶段确认**：\n" +
         "① confirm=false（默认）：走到结算页（不点提交订单按钮），返回订单摘要" +
         "（商品名/数量/单价/总价/收货地址）+ 确认 token + 结算页截图。LLM 须向用户复述摘要。\n" +
-        "② confirm=true + confirmationToken：校验 token 后点击提交订单按钮，返回订单号。\n" +
+        "② confirm=true + confirmationToken：校验 token 后点击提交订单按钮，返回订单号 + 本地单号 localOrderId。\n" +
         "前置条件：用户须先导入平台 Cookie 并授权 agentAllowed=true。沙箱模式下也可用。\n" +
-        "安全：金额上限 SHOPPING_ORDER_MAX_AMOUNT_CNY（默认 5000），超阈值拒绝提交；" +
-        "确认 token 5 分钟过期；不自动支付（只点提交订单，不点立即支付）。\n" +
-        "与 wallet.purchase（仅记账）/ shopping.suggest（仅建议）的区别：本工具真实提交订单。\n" +
+        "安全：单笔上限 SHOPPING_ORDER_MAX_AMOUNT_CNY（默认 5000，可按平台覆盖），" +
+        "单日预算 SHOPPING_ORDER_DAILY_BUDGET_CNY（默认 10000），超限拒绝提交；" +
+        "确认 token 5 分钟过期；**只提交订单、不支付**。\n" +
+        "提交成功后订单落本地表（状态 pending_payment）：拿到支付宝收银台链接的订单可用 " +
+        "shopping.pay.submit 代付（用户本人支付宝确认扣款），其余引导用户去平台 App 支付。\n" +
+        "与 wallet.purchase（仅记账）/ shopping.suggest（仅建议）/ shopping.compare.prices（只读比价）的区别：本工具真实提交订单。\n" +
         "下单前必须先返回确认摘要让用户确认，得到用户明确同意后再带 confirm=true+token 执行。",
       parameters: {
         type: "object",
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "dianping", "pdd", "douyin"],
+            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
             description: "目标购物平台。",
           },
           item: {
@@ -136,16 +152,16 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "shopping.order.track",
       description:
-        "在服务端后台无头浏览器中打开指定平台的订单列表页，读取订单状态/物流信息。\n" +
+        "查询订单状态/物流：优先经后台无头浏览器打开平台订单页实时刷新；传本地单号（so_*）或平台订单号均可。\n" +
         "适用场景：用户说「帮我查一下淘宝订单」「京东那个订单到哪了」等。\n" +
-        "前置条件：用户须先导入平台 Cookie 并授权 agentAllowed=true。沙箱模式下也可用。\n" +
-        "未传 orderId 时返回最近订单列表；传 orderId 时优先查找指定订单。",
+        "平台 Cookie 未导入/未授权或平台查询失败时，自动回退返回本地订单记录（标注非实时）。\n" +
+        "未传 orderId 时返回平台最近订单列表；查本地订单列表请用 shopping.order.list（零副作用）。",
       parameters: {
         type: "object",
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "dianping", "pdd", "douyin"],
+            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
             description: "目标购物平台。",
           },
           orderId: {
@@ -173,7 +189,7 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "dianping", "pdd", "douyin"],
+            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
             description: "目标购物平台。",
           },
           orderId: {
@@ -192,6 +208,81 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["platform", "orderId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "shopping.order.list",
+      description:
+        "查询本地订单列表（零副作用，纯本地读取，不访问平台）。\n" +
+        "返回 agent 代用户提交过的全部订单：本地单号（so_*）/平台/平台单号/商品/金额/状态/支付链接。\n" +
+        "适用场景：用户说「我买过什么」「之前下的单有哪些」「查一下订单」。\n" +
+        "需要某订单的实时物流/支付状态时，再用 shopping.order.track（传 localOrderId）或 shopping.pay.check。",
+      parameters: {
+        type: "object",
+        properties: {
+          platform: {
+            type: "string",
+            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
+            description: "按平台过滤（可选）。",
+          },
+          includeFinished: {
+            type: "boolean",
+            description: "是否包含已完成/已取消/已失败的终态订单，默认 true。",
+          },
+          limit: {
+            type: "integer",
+            description: "返回条数上限，默认 10，最大 50。",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "shopping.pay.submit",
+      description:
+        "对本地订单发起支付宝收银台代付。**仅当订单捕获到支付宝收银台链接**（cashier/qr.alipay.com）时可用：" +
+        "经用户本人支付宝钱包拉起收银台，实际扣款由用户在支付宝 App 内确认，agent 不持有支付凭据。\n" +
+        "订单没有收银台链接或平台使用自有收银台（淘宝/京东/美团等大多数情况）时返回明确指引，" +
+        "此时应提示用户去平台 App 完成支付。orderId 使用本地单号（so_*，shopping.order.place 返回的 localOrderId）。\n" +
+        "调用前必须向用户复述订单摘要并获得明确同意。",
+      parameters: {
+        type: "object",
+        properties: {
+          orderId: {
+            type: "string",
+            description: "本地订单号（so_*）。",
+          },
+        },
+        required: ["orderId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "shopping.pay.check",
+      description:
+        "查询订单支付状态并同步本地订单表：优先查支付宝钱包收银台支付状态（若有收银台链接），" +
+        "再经浏览器刷新平台侧订单状态（若有平台单号），回写本地状态。\n" +
+        "适用场景：用户说「付了没」「订单什么状态」；shopping.pay.submit 之后的确认也用它。\n" +
+        "orderId 支持本地单号（so_*）或平台订单号。",
+      parameters: {
+        type: "object",
+        properties: {
+          orderId: {
+            type: "string",
+            description: "本地订单号（so_*）或平台订单号。",
+          },
+        },
+        required: ["orderId"],
         additionalProperties: false,
       },
     },

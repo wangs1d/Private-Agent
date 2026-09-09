@@ -6,9 +6,10 @@
 #include <functional>
 #include <string>
 
-// ── macOS 风格系统通知弹窗（v2） ──
-//    DWM Acrylic 真毛玻璃（桌面背景真实模糊）+ DWM 系统级圆角（无黑角）
-//    全部控件由父窗口 GDI 自绘（无子控件黑底），点击热区自管理
+// ── 桌面通知弹窗（v3 精修版） ──
+//    玻璃背景 = 低透明度 DWM Acrylic 模糊 + 自绘半透明渐变压暗层（通透度可控，
+//    不依赖系统“透明效果”开关）；DWM 系统级圆角；
+//    形状与文字全部 GDI+ 抗锯齿渲染（写入正确的预乘 alpha，玻璃表面无伪影）。
 class DesktopNotificationWindow {
  public:
   using ConfirmCallback = std::function<void()>;
@@ -50,13 +51,9 @@ class DesktopNotificationWindow {
 
   // ── 绘制 ──
   void Paint(HWND hwnd, HDC hdc);
-  void FillSolidCircle(HDC hdc, const RECT& rc, COLORREF fill);
-  void DrawBell(HDC hdc, int cx, int cy, COLORREF color);
-  void DrawCloseGlyph(HDC hdc, const RECT& rc, COLORREF color);
-  void DrawOutlineButton(HDC hdc, const RECT& rc,
-                         const std::wstring& label, bool hovered);
-  void DrawLine(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color,
-                int width);
+  void DrawBellGlyph(HDC hdc, const RECT& rc, COLORREF color);
+  int  MeasureButtonWidth(HDC hdc, const std::wstring& label) const;
+  int  MeasureMessageHeight(HDC hdc) const;
 
   // 热区命中：0=无，1=关闭，2=稍后(dismiss)，3=知道了(confirm)
   int  HitTest(const POINT& pt) const;
@@ -68,6 +65,9 @@ class DesktopNotificationWindow {
   std::wstring confirm_text_;  // 主按钮文字
   bool show_confirm_button_ = false;
   int auto_close_ms_ = 0;
+  COLORREF accent_color_ = RGB(0x7A, 0xA2, 0xFF);  // 按 priority 着色
+  int window_height_ = 172;                        // Show 时按内容计算
+  ULONGLONG show_tick_ = 0;                        // 自动关闭进度起点
 
   // 布局热区
   RECT rc_close_{};
@@ -82,9 +82,13 @@ class DesktopNotificationWindow {
   DismissCallback on_dismiss_;
   TimeoutCallback on_timeout_;
 
-  static constexpr UINT_PTR kAutoCloseTimerId = 3001;
-  static constexpr int kWindowWidth  = 360;
-  static constexpr int kWindowHeight = 172;
+  // GDI+ 生命周期
+  ULONG_PTR gdiplus_token_ = 0;
+
+  static constexpr UINT_PTR kTickTimerId = 3002;
+  static constexpr int kWindowWidth  = 384;
+  static constexpr int kMinHeight    = 132;
+  static constexpr int kMaxHeight    = 320;
   static constexpr int kMargin       = 16;
   static constexpr const wchar_t* kClassName =
       L"PAI_DesktopNotification_Window";

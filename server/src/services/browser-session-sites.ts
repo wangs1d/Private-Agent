@@ -50,6 +50,16 @@ export const BROWSER_SESSION_SITES = {
     hosts: ["douyin.com", "www.douyin.com", "haohuo.jinritemai.com"],
     homeUrl: "https://www.douyin.com",
   },
+  damai: {
+    label: "大麦",
+    hosts: ["damai.com", "www.damai.com", "search.damai.cn", "detail.damai.cn"],
+    homeUrl: "https://www.damai.com",
+  },
+  maoyan: {
+    label: "猫眼演出",
+    hosts: ["maoyan.com", "www.maoyan.com"],
+    homeUrl: "https://www.maoyan.com",
+  },
 } as const;
 
 export type BrowserSessionSiteId = keyof typeof BROWSER_SESSION_SITES;

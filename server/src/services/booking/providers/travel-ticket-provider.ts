@@ -10,6 +10,7 @@ import type {
   BookingSearchQuery,
 } from "../booking-provider.js";
 import { pricingService, type PricingContext } from "../../../skills/travel-planning/pricing-service.js";
+import type { QuoteAggregator, QuoteRequest, TravelQuote } from "../quote/index.js";
 
 /**
  * travel 域预订 Provider —— 机票 / 火车票 / 酒店的「Agent 代办 + 真实支付」闭环。
@@ -71,22 +72,134 @@ export class TravelTicketProvider implements BookingProvider {
   /** providerOrderId → 状态（进程内；本地权威快照在 BookingOrderStore） */
   private readonly states = new Map<string, TravelProviderOrderState>();
 
+  /**
+   * 实时报价比价聚合器（可选注入）。
+   * 有 → search 走多源比价（local 保底 + MCP/浏览器实时源）；
+   * 无 → 回退本地价格库/基准价估算（原行为，测试与最小部署可用）。
+   */
+  private readonly quoteAggregator: QuoteAggregator | null;
+
+  constructor(deps: { quoteAggregator?: QuoteAggregator | null } = {}) {
+    this.quoteAggregator = deps.quoteAggregator ?? null;
+  }
+
   availability(): { ok: boolean; reason?: string } {
-    // 无外部 API 依赖：价格来自本地价格库 / 估算，支付走用户自己的支付宝钱包
+    // 无外部 API 依赖：价格来自报价聚合层（本地价格库保底），支付走用户自己的支付宝钱包
     return { ok: true };
   }
 
-  async search(query: BookingSearchQuery): Promise<BookingProviderResult<{ options: BookingOption[]; note?: string }>> {
+  async search(
+    query: BookingSearchQuery,
+    ctx: BookingProviderContext,
+  ): Promise<BookingProviderResult<{ options: BookingOption[]; note?: string }>> {
     const params = query.params ?? {};
     const type = this.resolveType(params.type);
     if (!type) {
       return { ok: false, error: "缺少 type（flight / train / hotel）", retryable: true };
     }
 
+    // 聚合层可用 → 多源比价（local 源内部即原 PricingService/基准价逻辑）
+    if (this.quoteAggregator && ctx.toolContext) {
+      const req = this.buildQuoteRequest(type, query, params);
+      const agg = await this.quoteAggregator.aggregate(req, ctx.toolContext);
+      if (agg.ok) {
+        return {
+          ok: true,
+          options: agg.quotes.map((q) => this.quoteToOption(q)),
+          note: agg.note,
+        };
+      }
+      // 聚合层无结果：如实回退（本地估算仍可能给出选项）
+      const fallback =
+        type === "hotel"
+          ? await this.searchHotel(query, params)
+          : await this.searchTransport(type, params);
+      if (fallback.ok && fallback.options.length > 0) {
+        const notes = [fallback.note, agg.note ? `比价源无结果：${agg.note}` : ""].filter(Boolean);
+        return {
+          ok: true,
+          options: fallback.options,
+          note: notes.join("；") || undefined,
+        };
+      }
+      return fallback;
+    }
+
     if (type === "hotel") {
       return this.searchHotel(query, params);
     }
     return this.searchTransport(type, params);
+  }
+
+  /** BookingSearchQuery.params → QuoteRequest（字段口径与原 searchHotel/searchTransport 对齐）。 */
+  private buildQuoteRequest(
+    type: "flight" | "train" | "hotel",
+    query: BookingSearchQuery,
+    params: Record<string, unknown>,
+  ): QuoteRequest {
+    if (type === "hotel") {
+      const tierRaw = str(params, "tier");
+      return {
+        type: "hotel",
+        city: str(params, "city") || query.city || "",
+        to: str(params, "city") || query.city || "",
+        hotelName: str(params, "hotelName") || str(params, "hotel") || undefined,
+        checkInDate: str(params, "checkInDate") || str(params, "checkIn") || query.scheduleAt || "",
+        checkOutDate: str(params, "checkOutDate") || str(params, "checkOut") || "",
+        tier: tierRaw === "budget" || tierRaw === "luxury" ? tierRaw : "mid",
+      };
+    }
+    return {
+      type,
+      code: str(params, "code") || str(params, type === "flight" ? "flightNo" : "trainNo") || undefined,
+      from: str(params, "from") || str(params, "fromStation") || str(params, "fromCity") || undefined,
+      to: str(params, "to") || str(params, "toStation") || str(params, "toCity") || undefined,
+      departTime: str(params, "departTime") || query.scheduleAt || undefined,
+      seat: str(params, "seat") || str(params, "seatClass") || undefined,
+      basePriceCny: numOrNull(params, "basePriceCny") ?? numOrNull(params, "price") ?? undefined,
+    };
+  }
+
+  /** TravelQuote → BookingOption（id 不含金额：两阶段确认会重新报价，价格波动时仍能按 id 匹配到最新价）。 */
+  private quoteToOption(q: TravelQuote): BookingOption {
+    const nights = q.nights && q.nights > 1 ? q.nights : 1;
+    const amount = Math.round(q.amountCny * nights);
+    const nameKey = q.code ?? q.name ?? "";
+    return {
+      id: `quote:${q.source}:${q.type}:${nameKey}:${q.seat ?? ""}:${q.checkInDate ?? q.departTime ?? ""}`.replace(/\s+/g, "_"),
+      provider: this.key,
+      title:
+        q.type === "hotel"
+          ? `${q.name ?? "酒店"}${q.seat ? `（${q.seat}）` : ""}${nights > 1 ? ` ${nights} 晚` : ""}`
+          : `${q.type === "flight" ? "航班" : "车次"} ${nameKey}${q.from && q.to ? ` ${q.from}→${q.to}` : ""}${q.seat ? ` ${q.seat}` : ""}`,
+      description: [
+        q.departTime ? `出发 ${q.departTime}` : "",
+        q.arriveTime ? `到达 ${q.arriveTime}` : "",
+        q.note ?? "",
+        nights > 1 ? `¥${q.amountCny}/晚 × ${nights} 晚` : "",
+      ]
+        .filter(Boolean)
+        .join("，"),
+      amountCny: amount,
+      currency: "CNY",
+      validUntil: null,
+      scheduleAt: q.departTime || q.checkInDate || null,
+      extra: {
+        type: q.type,
+        code: q.code,
+        name: q.name,
+        from: q.from,
+        to: q.to,
+        departTime: q.departTime,
+        arriveTime: q.arriveTime,
+        seat: q.seat,
+        nights,
+        quoteSource: q.source,
+        quoteSourceLabel: q.sourceLabel,
+        priceSource: q.priceSource,
+        priceNote: q.note,
+      },
+    };
   }
 
   /** 酒店：价格走 PricingService（本地价格库 + POI 覆盖，来源标注在 quote.note）。 */

@@ -43,9 +43,9 @@ export type LlmAuditStage =
   | "self_evolution"
   /** 代码修复 */
   | "code_repair"
-  /** 任务面后台任务（先轻后重段1：Flash 档 + 桥召回） */
+  /** 任务面后台任务（首轮：轻量档） */
   | "task_plane_fast"
-  /** 任务面后台任务（升级段/完整通道：Pro 档） */
+  /** 任务面后台任务（升级段/完整通道） */
   | "task_plane_complex"
   /** 其他（外部科技扫描等低频旁路） */
   | "other";

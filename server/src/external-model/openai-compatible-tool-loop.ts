@@ -139,12 +139,9 @@ const TOOL_RESULT_STRIP_KEYS: Record<string, string[]> = {
  * 元工具 / 能力查询类工具：输出是结构化 JSON（工具 schema、能力清单、匹配列表），
  * 不是用户可读的自然语言内容。
  *
- * 这些工具的输出绝不能进入 `roundToolOutputs`（→ `lastToolOutputFallback`）：
- * 否则当 LLM 末轮输出道歉式/空回复时，兜底逻辑会把工具 JSON 原样拼成回复推给前端，
- * 用户会看到「reminder.plan 参数 schema」「availableDomains 数组」这类内部数据。
- *
- * 过滤后这些工具的结果仍会作为 tool message 回填给 LLM 供其理解，
- * 只是不再可能成为面向用户的兜底回复文本。
+ * 这些工具的结果只作为 tool message 回填给 LLM 供其理解，绝不能作为面向用户的
+ * 回复文本透出（历史教训：兜底逻辑曾把工具 JSON 原样拼成回复推给前端，用户看到
+ * 「reminder.plan 参数 schema」「availableDomains 数组」这类内部数据）。
  */
 const META_TOOL_NAMES = new Set<string>([
   "tool_discover",
@@ -178,50 +175,6 @@ function getToolResultStripKeys(toolName: string): string[] | undefined {
   return TOOL_RESULT_STRIP_KEYS[toolName];
 }
 
-/**
- * 判定工具输出是否是「空洞 JSON」：对象内所有字符串值（含嵌套）均为空。
- * 典型形态 `{"title":"Untitled","content":"","summary":""}`（空页抓取的空壳结果）。
- * 这类输出不携带任何信息，不应作为兜底答案透出给用户。
- */
-function isMeaninglessToolOutput(text: string): boolean {
-  const t = text.trim();
-  if (!t) return true;
-  try {
-    const parsed = JSON.parse(t) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-    const seen: string[] = [];
-    const walk = (v: unknown): void => {
-      if (typeof v === "string") seen.push(v);
-      else if (Array.isArray(v)) v.forEach(walk);
-      else if (v && typeof v === "object") Object.values(v).forEach(walk);
-    };
-    walk(parsed);
-    return !seen.some((s) => s.trim().length > 0);
-  } catch {
-    return false;
-  }
-}
-
-function buildFallbackAnswerFromToolOutputs(outputs: string[]): string {
-  const lines = outputs
-    .map((item) => item.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim())
-    .filter((item) => item && !isMeaninglessToolOutput(item));
-  if (lines.length === 0) return "";
-  const unique: string[] = [];
-  for (const line of lines) {
-    if (!unique.includes(line)) unique.push(line);
-  }
-  return unique.join("\n\n").trim();
-}
-
-/**
- * 检测 LLM 最终回复是否是「道歉式兜底」（无法整合工具结果/道歉重试）。
- * 当工具结果已有真实数据时，这种 apology 不应替代搜索结果 — 应回退到工具结果拼接。
- *
- * 触发条件（任一即视为兜底）：
- *  - 含"抱歉/请稍后重试/无法生成回复/不太清楚/我不太确定"等认错短语
- *  - 长度很短（< 60 字符）且不含任何事实/数字/链接（说明 LLM 没尝试整合）
- */
 /**
  * 行动宣告正则：识别「我这就去查…」/「稍后告诉你」/「别急」这类面向未来动作的
  * 承诺性表述（真人感·行动宣告提示词的产物），但此时 LLM 未必真正调用工具。
@@ -1021,9 +974,9 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             enum: ["none", "daily", "weekly", "yearly"],
             description: "默认 none；仅用户明确要每天/每周/每年重复时才填 daily/weekly/yearly",
           },
-          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"。缺省时服务端自动生成。" },
+          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；用户对助手的称呼（如「小弟」「老哥」）也要去掉。缺省时服务端自动生成。" },
           category: { type: "string", enum: ["itinerary", "trivia"], description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。" },
-          reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」" },
+          reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」；不要把用户对助手的称呼（如「小弟」）写进文案" },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
         },
         required: ["text"],
@@ -1042,6 +995,10 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           text: { type: "string", description: "用户原句，含时间与事项" },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
+          forceCreate: {
+            type: "boolean",
+            description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）",
+          },
         },
         required: ["text"],
         additionalProperties: false,
@@ -1058,7 +1015,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
         type: "object",
         properties: {
           title: { type: "string", description: "完整任务标题（用于日程页完整列表；reminder 类型可选，由 reminderMessage 兜底）" },
-          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"。reminder 类型必填；其他类型缺省用 title 兜底。" },
+          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；用户对助手的称呼（如「小弟」「老哥」）也要去掉。reminder 类型必填；其他类型缺省用 title 兜底。" },
           description: { type: "string" },
           kind: {
             type: "string",
@@ -1077,6 +1034,16 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "默认 none；勿在用户未要求时填 daily",
           },
           timezone: { type: "string" },
+          durationMinutes: { type: "number", description: "事件时长（分钟）。会议/就诊/课程等有时长的安排必填（用于冲突检测与区间展示）；纯时间点提醒不填。" },
+          remindBeforeMinutes: {
+            type: "array",
+            items: { type: "number" },
+            description: "提前量提醒（分钟数组，如 [15,5] 表示提前 15 和 5 分钟各提醒一次）。重要安排可填。",
+          },
+          forceCreate: {
+            type: "boolean",
+            description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）",
+          },
           reminderMessage: { type: "string", description: "仅 kind=reminder。到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」" },
           action: {
             type: "object",
@@ -1130,6 +1097,70 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           taskId: { type: "string", description: "要删除的日程/提醒 taskId（list_tasks 返回）" },
         },
         required: ["taskId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "calendar.update_task",
+      description:
+        "【内置 Calendar】改期/编辑单个日程：改时间、改时长、改提前量、暂停或恢复。taskId 来自 calendar.list_tasks。",
+      parameters: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "要更新的日程 taskId" },
+          title: { type: "string" },
+          shortTitle: { type: "string" },
+          description: { type: "string" },
+          reminderMessage: { type: "string" },
+          category: { type: "string", enum: ["itinerary", "trivia"] },
+          runAt: { type: "string", description: "新时间（ISO-8601，改期用）" },
+          recurrence: { type: "string", enum: ["none", "daily", "weekly", "yearly"] },
+          timezone: { type: "string" },
+          durationMinutes: { type: "number", description: "新时长（分钟）" },
+          remindBeforeMinutes: {
+            type: "array",
+            items: { type: "number" },
+            description: "新提前量提醒数组（分钟）",
+          },
+          status: {
+            type: "string",
+            enum: ["active", "paused", "cancelled"],
+            description: "paused=暂停提醒；cancelled=取消（软删）；active=恢复",
+          },
+          forceCreate: { type: "boolean", description: "用户明知改期后仍冲突时传 true 强制改" },
+        },
+        required: ["taskId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "calendar.find_free_slots",
+      description:
+        "【内置 Calendar】查询未来空闲时段（自动扣除已有安排占用）。用于「什么时候有空」「帮我约时间」，或改期遇 conflict=true 后给用户改期建议。返回 slots[]（startLocal/endLocal 展示），由用户选定。",
+      parameters: {
+        type: "object",
+        properties: {
+          durationMinutes: { type: "number", description: "需要的连续时长（分钟），默认 60" },
+          from: { type: "string", description: "范围起点 ISO，可选" },
+          to: { type: "string", description: "范围终点 ISO，可选" },
+          dailyWindow: {
+            type: "object",
+            description: "每日可用窗口（HH:MM），默认 09:00–21:00",
+            properties: {
+              start: { type: "string" },
+              end: { type: "string" },
+            },
+          },
+          timezone: { type: "string", description: "IANA 时区" },
+          excludeTaskId: { type: "string", description: "排除自身任务" },
+          limit: { type: "number", description: "最多返回几个空闲槽" },
+        },
         additionalProperties: false,
       },
     },
@@ -1773,8 +1804,8 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     // 2026-08-29 C 端生活管家强化：补齐提醒类口语关键词（提醒我/别忘了/到点叫我/
     // 定个闹钟），让 fast 模式下 reminder.plan / calendar.* 能被可靠召回。
     category: 'calendar',
-    keywords: ['提醒', '提醒我', '别忘了', '到点叫我', '定个闹钟', 'reminder', '日程', 'schedule', '日历', 'calendar', '任务', 'task', '定时', 'timer', '闹钟', 'alarm', '计划', 'plan', '会议', 'meeting', '预约', 'appointment'],
-    toolNames: ['reminder.plan', 'calendar.create_from_text', 'calendar.create_task', 'calendar.list_tasks']
+    keywords: ['提醒', '提醒我', '别忘了', '到点叫我', '定个闹钟', 'reminder', '日程', 'schedule', '日历', 'calendar', '任务', 'task', '定时', 'timer', '闹钟', 'alarm', '计划', 'plan', '会议', 'meeting', '预约', 'appointment', '有空', '空闲', '改期', '冲突'],
+    toolNames: ['reminder.plan', 'calendar.create_from_text', 'calendar.create_task', 'calendar.list_tasks', 'calendar.update_task', 'calendar.find_free_slots']
   },
   {
     // 2026-08-29 C 端生活管家强化：补齐支付/记账口语关键词（付钱/买单/代付/缴费/
@@ -2454,7 +2485,6 @@ export async function streamCompletionWithTools(
   // 避免多分类检索的顺序抖动破坏 DeepSeek/Kimi 等 provider 的前缀上下文缓存。
   const stableApiTools = stabilizeToolOrderForSession(apiTools, options?.audit?.sessionId);
   let lastAssistantText = "";
-  let lastToolOutputFallback = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
   // 累积所有工具调用结果，供 summary 调用时做数据质量评估 + 策略注入
   const allToolExecResults: Array<{
@@ -2750,6 +2780,9 @@ export async function streamCompletionWithTools(
 
     // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为思考前导话，
     // 不进入最终回复，也不推送给前端。
+    // 注意：下方三个收尾闸门（宣告补打/出口自检/空正文兜底）命中 continue 重试前
+    // 会清空本累积——重试轮「替换」上一轮文本而非拼接，否则上一轮的宣告/自语会
+    // 和重试后的新答案拼成一条两句同义的回复（2026-09-09 实测事故）。
     if (finishReason !== "tool_calls" || normalizedToolCalls.length === 0) {
       lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
     }
@@ -2793,6 +2826,9 @@ export async function streamCompletionWithTools(
             "请立即调用相应工具真正完成这件事并基于真实结果回答用户；若工具不可用或确实办不到，请如实向用户说明。" +
             "严禁只重复「我去查/稍后告诉你」这类承诺而不兑现。",
         });
+        // 重试轮替换而非拼接：上一轮宣告文本已 push 进 messages 供模型参考，
+        // 不再计入最终回复（否则两句同义回复拼进同一气泡）。
+        lastAssistantText = "";
         continue;
       }
       // 统一出口自检（2026-09-05 TurnOutcomeGate，不分车道）：「诉求未满足」且预算
@@ -2822,6 +2858,8 @@ export async function streamCompletionWithTools(
               "请换一个关键词重搜、换一个工具（如 search_web / fetch_web / internet.*）或换数据源再试一次，" +
               "拿到真实结果后再回答。若所有途径确实都不可用，请如实向用户说明卡点，不要编造结果。",
           });
+          // 同宣告闸门：重试轮替换而非拼接，上一轮自语/道歉文本不进最终回复。
+          lastAssistantText = "";
           continue;
         }
         if (unsatisfiedReason) {
@@ -2830,10 +2868,8 @@ export async function streamCompletionWithTools(
           );
         }
       }
-      // 空正文整合兜底（2026-08-29）：isApologyStyleFallback("")=true，旧行为会
-      // 把 lastToolOutputFallback（工具输出原文，如 travel.plan-itinerary 的
-      // summarizeItinerary JSON）整段糊给用户。这里先注入一次指令强制模型基于
-      // 工具结果用自然口语回复；仍失败才落到下方工具原文拼接。
+      // 空正文整合兜底（2026-08-29）：LLM 调用了工具但没输出任何正文时，先注入一次
+      // 指令强制模型基于工具结果用自然口语回复（任务完成保障，保留）。
       // wave 预算守卫：fast（maxWaves=1）与最后一波不授予，避免 continue 越过预算。
       if (
         !finalText.trim() &&
@@ -2852,19 +2888,16 @@ export async function streamCompletionWithTools(
             "你刚才调用了工具但还没有向用户输出任何正文。请立即基于以上工具结果用自然口语回复用户，把关键信息讲清楚；" +
             "不要输出 JSON 或原始数据结构（那由前端结构化渲染负责）。若结果为空或失败，请如实向用户说明。",
         });
+        // 同宣告闸门：重试轮替换而非拼接。
+        lastAssistantText = "";
         continue;
       }
-      // 防 LLM "道歉式兜底"（不做额外 LLM1 重建，减少 LLM 调用）：
-      //  - 已有成功工具数据但 LLM 输出是 apology/无法整合 → 直接用工具结果拼接，不额外调 LLM1；
-      //  - 无成功工具数据而 LLM 出 apology/空 → 返回空串，由上层自然处理，不额外调 LLM1。
-      let effectiveFinalText: string;
-      if (isApologyStyleFallback(finalText) && lastToolOutputFallback.trim()) {
-        effectiveFinalText = lastToolOutputFallback.trim();
-      } else if (isApologyStyleFallback(finalText)) {
-        effectiveFinalText = "";
-      } else {
-        effectiveFinalText = finalText;
-      }
+      // 道歉式兜底已彻底删除（2026-09-08 用户指令）：LLM 输出道歉/空文本时，不再用
+      // lastToolOutputFallback（工具输出原文）替换回复——那会把工具原始 JSON 直接糊给
+      // 用户，正是「先流式说没搜到、突然变成搜索结果卡」的直接源头。LLM 说没搜到就
+      // 如实收尾；任务完成由上方「出口自检 → 换路续波」重试与空正文整合兜底保证，
+      // 不靠兜底换货。
+      const effectiveFinalText = finalText;
       // 流式推送最终内容到 onDelta（→ onAssistantDelta → 前端 chat.assistant_chunk）
       // 根源净化：先把 LLM 混进正文的内部控制标签（[STOP...] / [话题切换...]）剥离，
       // 保证推给前端的气泡不出现这些内部信号（此前在 agent-core finishLlmTurn 后置剥离
@@ -2909,7 +2942,6 @@ export async function streamCompletionWithTools(
     messages.push(assistantWithTools);
 
     const toolResults: ToolLoopAfterBatchInfo["toolResults"] = [];
-    const roundToolOutputs: string[] = [];
     // 本波次是否使用了交互式工具（浏览器/桌面/代码链路）：影响波次终止决策
     let waveUsedInteractiveTool = false;
 
@@ -3173,14 +3205,6 @@ export async function streamCompletionWithTools(
       const fullToolContent = typeof ocrText === "string" && ocrText.trim()
         ? `${toolContent}\n\n${ocrText}`
         : toolContent;
-      // 元工具（tool_discover / agent.query_capabilities 等）输出是结构化 JSON，
-      // 不进 roundToolOutputs，防止「道歉式兜底」把它们原样拼成回复透出到前端。
-      // Fix2(加固 fast 轻工具链路)：失败的工具输出（含"工具执行超时/error"）也不进
-      // roundToolOutputs —— 否则它们会被 lastToolOutputFallback/拼接兜底当成答案透出给用户，
-      // 表现为 agent 直接回答"工具超时/没查到"。失败信息仍会作为 tool 消息回给 LLM 供其判断。
-      if (toolContent?.trim() && exec.ok && !META_TOOL_NAMES.has(wireToolName)) {
-        roundToolOutputs.push(toolContent.trim());
-      }
       // 对成功的工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
       // 只追加在本波最后一条成功消息上（内容与具体工具无关，逐条重复纯烧 token）。
       // 关键洞察：LLM 重复调用工具的根因是不确定结果是否足够回答。
@@ -3224,7 +3248,6 @@ export async function streamCompletionWithTools(
       assistantText: fullText,
       toolResults,
     });
-    lastToolOutputFallback = buildFallbackAnswerFromToolOutputs(roundToolOutputs);
 
     // ── 波次终止决策 ──（与 for 条件共用 effectiveMaxWaves：失败发生后预算 +1）
     const wavesRemaining = wave + 1 < effectiveMaxWaves();
@@ -3280,8 +3303,9 @@ export async function streamCompletionWithTools(
    * - escapeAllowed=true 时为「充分性探测」：首行输出 NEED_MORE_TOOLS 表示
    *   结果不足以回答，调用方据此升级一次 replan。为避免标记透出到前端，
    *   首行（或前 48 字符）先缓冲，判定不是标记后才 flush 给 onDelta。
-   * - 产出为空/道歉式 → 确定性回退到工具结果拼接（不额外调 LLM 重建）。
-   * - 调用异常 → 同样回退到工具结果拼接，保证真实数据不丢。
+   * - 产出为空/道歉式 → 道歉式兜底已删除（2026-09-08）：探测模式视为结果不足
+   *   （needMore=true 升级 replan），最终汇总模式原样返回（如实收尾）。
+   * - 调用异常 → 同上：探测模式升级 replan，最终汇总模式返回空串如实收尾。
    */
   async function runSchemaLessSummary(
     escapeAllowed: boolean,
@@ -3454,18 +3478,24 @@ export async function streamCompletionWithTools(
       if (needMore) {
         return { text: "", needMore: true };
       }
+      // 道歉式兜底已彻底删除（2026-09-08 用户指令）：summary 为空/道歉式时不再回退
+      // 「工具结果原文拼接」——那会把工具 JSON 直接糊给用户，是「先流式说没搜到、
+      // 突然变成搜索结果卡」的直接源头。改向：
+      //  - 探测模式（escapeAllowed=true）→ needMore=true，升级 replan 重试（任务完成保障）；
+      //  - 最终汇总模式 → 原样返回（含道歉文本，如实收尾），宁可诚实说没结果也不糊工具原文。
       if (summaryText && !isApologyStyleFallback(summaryText)) {
         return { text: summaryText, needMore: false };
       }
-      // summary 调用成功但产出为空/道歉式 → 直接回退到工具结果拼接（保留真实数据，不额外调 LLM）。
-      return { text: lastToolOutputFallback.trim(), needMore: false };
+      return { text: summaryText, needMore: escapeAllowed };
     } catch (summaryErr) {
       console.log(
-        `[plan-execute] summary 调用失败，回退到工具结果拼接: ${
+        `[plan-execute] summary 调用失败: ${
           summaryErr instanceof Error ? summaryErr.message : String(summaryErr)
         }`,
       );
-      return { text: lastToolOutputFallback.trim(), needMore: false };
+      // 探测模式失败 → 视为结果不足升级 replan（不再拿工具原文冒充答案）；
+      // 最终汇总模式失败 → 返回空串如实收尾（已流式送出的部分文本由前端保留）。
+      return { text: "", needMore: escapeAllowed };
     }
   }
 }

@@ -23,6 +23,26 @@ import type { FinanceDeepService, FinanceCategory } from "./finance-deep-service
 /** 订阅状态：candidate 疑似（待确认）/ confirmed 已确认 / cancelled 已退订 / ignored 非订阅 */
 export type SubscriptionStatus = "candidate" | "confirmed" | "cancelled" | "ignored";
 
+/** 取消方式：agent=自动执行通道代办完成 / guide=生成取消路径指引由用户手动完成 */
+export type SubscriptionCancelMethod = "agent" | "guide";
+
+/** 退订元数据（finance.cancel_subscription / update action=cancel 落），省钱统计的数据源。 */
+export interface SubscriptionCancellation {
+  /** 退订日期 YYYY-MM-DD */
+  cancelledAt: string;
+  method: SubscriptionCancelMethod;
+  /** 每期省下的金额（= 每期订阅费） */
+  savedPerPeriod: number;
+  /** 折算每月省下 */
+  savedMonthly: number;
+  /** 折算每年省下 */
+  savedAnnual: number;
+  /** 用户给的退订原因（可选） */
+  reason?: string;
+  /** 自动执行结果说明 / 回退原因（可选） */
+  detail?: string;
+}
+
 /** 单条订阅记录。 */
 export interface SubscriptionRecord {
   id: string;
@@ -41,6 +61,8 @@ export interface SubscriptionRecord {
   /** 最近使用日期 YYYY-MM-DD（用户口头反馈；从未记录则缺省） */
   lastUsedAt?: string;
   note?: string;
+  /** 退订元数据（status=cancelled 时有值） */
+  cancellation?: SubscriptionCancellation;
   /** 检测证据：命中的交易 ID 与连续期数 */
   evidence?: { transactionIds: string[]; occurrences: number };
   createdAt: string;
@@ -75,6 +97,58 @@ export interface SubscriptionUpdateInput {
   note?: string;
 }
 
+/** 自动取消订阅输入（finance.cancel_subscription）。 */
+export interface SubscriptionCancelInput {
+  /** 目标订阅 ID（与 merchant 二选一） */
+  subscriptionId?: string;
+  /** 商户/服务名（支持归一化精确匹配 + 包含模糊匹配） */
+  merchant?: string;
+  /** 退订原因（记录用） */
+  reason?: string;
+  /** 是否尝试自动执行（默认 true；执行器未注入或失败时回退为取消路径指引） */
+  execute?: boolean;
+}
+
+/** 自动取消订阅结果。 */
+export interface SubscriptionCancelResult {
+  ok: boolean;
+  /** 本次是否实际执行了退订（false 时为返回建议名单） */
+  cancelled: boolean;
+  error?: string;
+  record?: SubscriptionRecord;
+  method?: SubscriptionCancelMethod;
+  savedPerPeriod?: number;
+  savedMonthly?: number;
+  savedAnnual?: number;
+  /** 续费临近警告（≤3 天时要赶在扣款前完成商户侧取消） */
+  renewalWarning?: string;
+  /** 商户侧取消路径指引（guide 模式） */
+  guide?: string[];
+  /** 自动执行结果说明 */
+  detail?: string;
+  /** 未指定目标时返回：建议取消名单（低使用率优先，按月成本降序） */
+  candidates?: SubscriptionRecord[];
+}
+
+/** 省钱统计（订阅与财务清理的口碑指标：累计帮用户省了多少）。 */
+export interface SubscriptionSavingsSummary {
+  /** 已退订且记录了省钱金额的订阅数 */
+  cancelledCount: number;
+  /** 折算每月省下 */
+  savedMonthly: number;
+  /** 折算每年省下 */
+  savedAnnual: number;
+  items: Array<{
+    subscriptionId: string;
+    merchant: string;
+    savedPerPeriod: number;
+    savedMonthly: number;
+    savedAnnual: number;
+    cancelledAt: string;
+    method: SubscriptionCancelMethod;
+  }>;
+}
+
 /** 检测常量 */
 const STANDARD_PERIODS = [7, 30, 90, 365] as const;
 /** 周期容差：±3 天（月付扣款日漂移 / 周付跨月） */
@@ -87,6 +161,8 @@ const MIN_OCCURRENCES = 2;
 const LOW_USAGE_DAYS = 60;
 /** 续费提前提醒天数 */
 const RENEWAL_REMIND_AHEAD_DAYS = 3;
+/** 续费临近警告：取消操作时距下次续费 ≤3 天提示抓紧（与提醒窗口一致） */
+const RENEWAL_URGENT_DAYS = 3;
 
 export interface SubscriptionAuditDeps {
   financeDeepService: FinanceDeepService;
@@ -94,6 +170,14 @@ export interface SubscriptionAuditDeps {
   now?: () => Date;
   /** 续费提醒回调（装配层接 ProactivityHub，life_reminder kind） */
   onRenewalReminder?: (actorId: string, message: string) => void;
+  /**
+   * 自动取消执行器（可选，装配层注入浏览器自动化等真实代办通道）。
+   * 返回 ok=false 或抛错或未注入时，取消流程回退为「生成取消路径指引」。
+   */
+  executeCancellation?: (
+    actorId: string,
+    record: SubscriptionRecord,
+  ) => Promise<{ ok: boolean; detail?: string }>;
 }
 
 export class SubscriptionAuditService {
@@ -118,6 +202,13 @@ export class SubscriptionAuditService {
    */
   setOnRenewalReminder(cb: (actorId: string, message: string) => void): void {
     this.deps.onRenewalReminder = cb;
+  }
+
+  /** 装配层后置接线：注入自动取消执行器（浏览器自动化等）。 */
+  setCancellationExecutor(
+    cb: (actorId: string, record: SubscriptionRecord) => Promise<{ ok: boolean; detail?: string }>,
+  ): void {
+    this.deps.executeCancellation = cb;
   }
 
   private now(): Date {
@@ -180,6 +271,9 @@ export class SubscriptionAuditService {
           ...(typeof r.lastChargedAt === "string" ? { lastChargedAt: r.lastChargedAt } : {}),
           ...(typeof r.lastUsedAt === "string" ? { lastUsedAt: r.lastUsedAt } : {}),
           ...(typeof r.note === "string" ? { note: r.note } : {}),
+          ...(r.cancellation && typeof r.cancellation === "object"
+            ? { cancellation: this.normalizeCancellation(r.cancellation) }
+            : {}),
           ...(r.evidence && typeof r.evidence === "object"
             ? {
                 evidence: {
@@ -194,6 +288,24 @@ export class SubscriptionAuditService {
           updatedAt: typeof r.updatedAt === "string" ? r.updatedAt : this.now().toISOString(),
         };
       });
+  }
+
+  private normalizeCancellation(raw: unknown): SubscriptionCancellation | undefined {
+    if (!raw || typeof raw !== "object") return undefined;
+    const c = raw as Record<string, unknown>;
+    const method: SubscriptionCancelMethod = c.method === "agent" ? "agent" : "guide";
+    const savedPerPeriod = Math.abs(Number(c.savedPerPeriod) || 0);
+    const savedMonthly = Math.abs(Number(c.savedMonthly) || 0);
+    const savedAnnual = Math.abs(Number(c.savedAnnual) || 0);
+    return {
+      cancelledAt: typeof c.cancelledAt === "string" ? c.cancelledAt : isoDay(this.now().getTime()),
+      method,
+      savedPerPeriod,
+      savedMonthly,
+      savedAnnual,
+      ...(typeof c.reason === "string" ? { reason: c.reason } : {}),
+      ...(typeof c.detail === "string" ? { detail: c.detail } : {}),
+    };
   }
 
   // ─── 候选检测（确定性，零 LLM） ─────────────────────────────
@@ -353,12 +465,25 @@ export class SubscriptionAuditService {
         break;
       case "cancel":
         record.status = "cancelled";
+        // 用户口头反馈「已退订」也计入省钱统计（缺省按指引方式落）
+        if (!record.cancellation) {
+          const savedMonthly = monthlyCost(record.amount, record.periodDays);
+          record.cancellation = {
+            cancelledAt: isoDay(now.getTime()),
+            method: "guide",
+            savedPerPeriod: record.amount,
+            savedMonthly,
+            savedAnnual: Number((savedMonthly * 12).toFixed(2)),
+            ...(input.note ? { reason: input.note } : {}),
+          };
+        }
         break;
       case "ignore":
         record.status = "ignored";
         break;
       case "reactivate":
         record.status = "confirmed";
+        delete record.cancellation;
         break;
       case "set_renewal":
         if (input.nextRenewalDate) record.nextRenewalDate = input.nextRenewalDate;
@@ -370,6 +495,173 @@ export class SubscriptionAuditService {
     record.updatedAt = nowIso;
     await this.saveRecords(actorId, records);
     return record;
+  }
+
+  // ─── 自动取消订阅（订阅与财务清理 · 省钱型） ─────────────────
+
+  /**
+   * 识别「想退但嫌麻烦」的退订候选：已确认订阅中 60 天未用 / 从未记录使用的，
+   * 按折算月成本从高到低（省得多的先推荐）。
+   */
+  async findCancelCandidates(actorId: string): Promise<SubscriptionRecord[]> {
+    await this.refreshCandidates(actorId);
+    const confirmed = await this.listSubscriptions(actorId, ["confirmed"]);
+    const now = this.now();
+    return confirmed
+      .filter((r) => isLowUsage(r, now))
+      .sort((a, b) => monthlyCost(b.amount, b.periodDays) - monthlyCost(a.amount, a.periodDays));
+  }
+
+  /**
+   * 自动取消订阅：识别目标 → 计算省钱金额 → 退订落库 → 返回省钱数字 + 商户侧取消指引。
+   *
+   * 目标解析顺序：subscriptionId 精确 → merchant 归一化精确 → merchant 包含模糊（唯一命中才取）。
+   * 未指定目标时不动任何记录，返回建议取消名单（findCancelCandidates）。
+   * execute=true 且装配层注入了执行器时尝试自动代办，否则/失败回退为取消路径指引。
+   */
+  async cancelSubscription(
+    actorId: string,
+    input: SubscriptionCancelInput,
+  ): Promise<SubscriptionCancelResult> {
+    const records = await this.loadRecords(actorId);
+    const now = this.now();
+
+    if (!input.subscriptionId && !input.merchant?.trim()) {
+      const candidates = await this.findCancelCandidates(actorId);
+      return { ok: true, cancelled: false, candidates };
+    }
+
+    let record: SubscriptionRecord | undefined;
+    if (input.subscriptionId) {
+      record = records.find((r) => r.id === input.subscriptionId);
+    }
+    if (!record && input.merchant) {
+      const key = normalizeMerchant(input.merchant);
+      record = records.find(
+        (r) => r.status === "confirmed" && normalizeMerchant(r.merchant) === key,
+      );
+      if (!record) {
+        // 模糊匹配：商户名互包含（如 "netflix" ↔ "Netflix 高级版"），多处命中则放弃
+        const fuzzy = records.filter(
+          (r) =>
+            r.status === "confirmed" &&
+            (r.merchant.toLowerCase().includes(key) || key.includes(normalizeMerchant(r.merchant))),
+        );
+        if (fuzzy.length === 1) record = fuzzy[0];
+      }
+    }
+    if (!record) {
+      const fuzzyAll = input.merchant
+        ? records.filter((r) =>
+            r.merchant.toLowerCase().includes(normalizeMerchant(input.merchant!)),
+          )
+        : [];
+      return {
+        ok: false,
+        cancelled: false,
+        error: fuzzyAll.length > 1
+          ? `「${input.merchant}」匹配到 ${fuzzyAll.length} 个订阅，请指定具体的 subscriptionId`
+          : `找不到已确认的订阅「${input.merchant ?? input.subscriptionId}」（可先 list_subscriptions 查看）`,
+      };
+    }
+    if (record.status !== "confirmed") {
+      return {
+        ok: false,
+        cancelled: false,
+        error:
+          `「${record.merchant}」当前状态为 ${record.status}` +
+          (record.status === "candidate"
+            ? "（疑似订阅，可先 confirm_subscription 确认后再退）"
+            : "") +
+          "，无法执行退订",
+      };
+    }
+
+    const savedPerPeriod = record.amount;
+    const savedMonthly = monthlyCost(record.amount, record.periodDays);
+    const savedAnnual = Number((savedMonthly * 12).toFixed(2));
+
+    // 续费临近警告：赶在扣款前完成商户侧取消
+    let renewalWarning: string | undefined;
+    if (record.nextRenewalDate) {
+      const days = daysUntil(record.nextRenewalDate, now);
+      if (days !== null && days >= 0 && days <= RENEWAL_URGENT_DAYS) {
+        renewalWarning =
+          `下次续费日 ${record.nextRenewalDate}${days === 0 ? "就是今天" : `还有 ${days} 天`}，` +
+          `务必赶在扣款前在商户侧完成取消，扣了就追不回了`;
+      }
+    }
+
+    // 尝试自动执行；无执行器 / 执行失败 → 回退为取消路径指引
+    let method: SubscriptionCancelMethod = "guide";
+    let detail: string | undefined;
+    if (input.execute !== false && this.deps.executeCancellation) {
+      try {
+        const r = await this.deps.executeCancellation(actorId, record);
+        if (r?.ok) {
+          method = "agent";
+          detail = r.detail;
+        } else {
+          detail = r?.detail;
+        }
+      } catch (err) {
+        detail = `自动执行失败：${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+
+    record.status = "cancelled";
+    record.cancellation = {
+      cancelledAt: isoDay(now.getTime()),
+      method,
+      savedPerPeriod,
+      savedMonthly,
+      savedAnnual,
+      ...(input.reason ? { reason: input.reason } : {}),
+      ...(detail ? { detail } : {}),
+    };
+    record.updatedAt = now.toISOString();
+    await this.saveRecords(actorId, records);
+
+    return {
+      ok: true,
+      cancelled: true,
+      record,
+      method,
+      savedPerPeriod,
+      savedMonthly,
+      savedAnnual,
+      ...(renewalWarning ? { renewalWarning } : {}),
+      ...(detail ? { detail } : {}),
+      ...(method === "guide" ? { guide: buildCancelGuide(record.merchant) } : {}),
+    };
+  }
+
+  /** 省钱统计：已退订订阅累计省下的金额（口碑指标）。 */
+  async getSavingsSummary(actorId: string): Promise<SubscriptionSavingsSummary> {
+    const records = await this.loadRecords(actorId);
+    const items: SubscriptionSavingsSummary["items"] = [];
+    for (const r of records) {
+      if (r.status !== "cancelled" || !r.cancellation) continue;
+      items.push({
+        subscriptionId: r.id,
+        merchant: r.merchant,
+        savedPerPeriod: r.cancellation.savedPerPeriod,
+        savedMonthly: r.cancellation.savedMonthly,
+        savedAnnual: r.cancellation.savedAnnual,
+        cancelledAt: r.cancellation.cancelledAt,
+        method: r.cancellation.method,
+      });
+    }
+    items.sort((a, b) => (a.cancelledAt < b.cancelledAt ? 1 : -1));
+    const savedMonthly = Number(
+      items.reduce((acc, i) => acc + i.savedMonthly, 0).toFixed(2),
+    );
+    return {
+      cancelledCount: items.length,
+      savedMonthly,
+      savedAnnual: Number((savedMonthly * 12).toFixed(2)),
+      items,
+    };
   }
 
   // ─── 盘点摘要（月报追加段；纯确定性文本） ────────────────────
@@ -385,8 +677,7 @@ export class SubscriptionAuditService {
     const now = this.now();
     const lines: string[] = [];
     let monthlyTotal = 0;
-    const lowUsage: string[] = [];
-    for (const r of confirmed) {
+    const lowUsage: string[] = [];    for (const r of confirmed) {
       monthlyTotal += monthlyCost(r.amount, r.periodDays);
       const daysUnused = r.lastUsedAt
         ? Math.floor((now.getTime() - Date.parse(r.lastUsedAt)) / 86_400_000)
@@ -414,6 +705,14 @@ export class SubscriptionAuditService {
             (c) =>
               `- ${c.merchant}：¥${c.amount.toFixed(2)}/${periodLabel(c.periodDays)}（近 ${c.evidence?.occurrences ?? "?"} 期规律扣款）`,
           ),
+      );
+    }
+    // 省钱统计（订阅与财务清理的成果段）
+    const savings = await this.getSavingsSummary(actorId);
+    if (savings.cancelledCount > 0) {
+      lines.push(
+        `已退订 ${savings.cancelledCount} 个订阅，累计每月省下 ¥${savings.savedMonthly.toFixed(2)}` +
+          `（一年约 ¥${savings.savedAnnual.toFixed(2)}）。`,
       );
     }
     return lines.join("\n");
@@ -576,6 +875,35 @@ export function isLowUsage(record: SubscriptionRecord, now: Date): boolean {
   if (!record.lastUsedAt) return true;
   const days = Math.floor((now.getTime() - Date.parse(record.lastUsedAt)) / 86_400_000);
   return !Number.isFinite(days) || days >= LOW_USAGE_DAYS;
+}
+
+/**
+ * 商户侧取消路径指引（guide 模式）：按商户关键词给出最短取消路径。
+ * 「嫌麻烦」的根源是找不到自动续费藏在哪——优先指到扣款入口（微信/支付宝/Apple）。
+ */
+export function buildCancelGuide(merchant: string): string[] {
+  const m = merchant.toLowerCase();
+  const steps: string[] = [];
+  if (/apple|icloud|app ?store|itunes/.test(m)) {
+    steps.push("iPhone：设置 → 顶部 Apple ID → 订阅 → 选中该订阅 → 取消订阅");
+  } else if (/微信|wechat/.test(m)) {
+    steps.push("微信：我 → 服务 → 钱包 → 支付设置 → 自动续费 → 关闭该项");
+  } else if (/支付宝|alipay/.test(m)) {
+    steps.push("支付宝：我的 → 设置 → 支付设置 → 免密支付/自动扣款 → 关闭该项");
+  } else if (/netflix|spotify|youtube|google|disney|hbo|prime|adobe|microsoft|xbox/.test(m)) {
+    steps.push("登录官网 → 账户/Subscription 设置 → Cancel subscription（网页端操作最直接）");
+  } else if (/爱奇艺|腾讯视频|优酷|芒果|哔哩哔哩|b站|bilibili|抖音|快手|音乐|网盘|会员/.test(m)) {
+    steps.push("打开 App → 我的 → 会员中心 → 自动续费管理 → 关闭自动续费");
+  }
+  if (steps.length === 0) {
+    steps.push("打开 App 或官网 → 账户/会员中心 → 找到「自动续费 / 订阅管理」→ 关闭自动续费");
+  }
+  // 通用兜底：自动续费常绑在支付平台，商户侧关完再核对扣款入口
+  steps.push(
+    "若扣款走微信/支付宝：在「自动续费 / 免密支付」列表里同步关闭，防止商户侧漏关继续扣款",
+    "关完后回到对话里说一声，我帮你核对下一期是否还在扣款",
+  );
+  return steps;
 }
 
 function isoDay(ms: number): string {

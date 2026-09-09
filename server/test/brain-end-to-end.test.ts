@@ -217,7 +217,7 @@ test("场景 F: cognize 端到端认知——一次 LLM 产出 route + response"
   const expectedRoute: SystemRouteDecision = {
     userMessage: "今天天气怎么样",
     system: "system2",
-    mode: "complex",
+    mode: "tool_loop",
     rationale: "需要调用天气工具",
     decidedAt: new Date().toISOString(),
   };
@@ -241,7 +241,7 @@ test("场景 F: cognize 端到端认知——一次 LLM 产出 route + response"
   });
 
   assert.equal(result.response, "我查一下北京今天的天气", "response 应来自端到端认知 LLM");
-  assert.equal(result.route.mode, "complex", "route 应来自端到端认知 LLM");
+  assert.equal(result.route.mode, "tool_loop", "route 应来自端到端认知 LLM");
   assert.equal(result.route.system, "system2", "应为 system2 慢思考");
   assert.equal(result.needsToolLoop, true, "需要工具循环");
   assert.equal(result.rationale, "weather_query_needs_tool", "rationale 应来自 LLM");
@@ -280,7 +280,7 @@ test("场景 G: cognize 后置——memoryWrites 触发 remember", async () => {
         route: {
           userMessage: "今天天气",
           system: "system1" as const,
-          mode: "fast" as const,
+          mode: "direct" as const,
           rationale: "simple",
           decidedAt: new Date().toISOString(),
         },
@@ -316,7 +316,7 @@ test("场景 H: 未注入 CognitiveEngine → cognize 降级到 routeSystem", as
 
   assert.equal(result.response, "", "无认知引擎时 response 应为空");
   assert.equal(result.rationale, "no_cognitive_engine", "rationale 应标记降级原因");
-  assert.equal(result.route.mode, "fast", "无 planner 时应降级为 fast");
+  assert.equal(result.route.mode, "direct", "无 planner 时应降级为 direct");
   assert.equal(result.route.system, "system1", "应为 system1 快思考");
   assert.equal(result.needsToolLoop, false, "fast 不需要工具循环");
 });

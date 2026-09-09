@@ -1,5 +1,6 @@
 /// 右侧抽屉要展示的内容种类。
-enum RightPanelKind { friends, messages, devices, schedule, imagePreview, travelPlan, gallery, catalog, approvals, settings }
+/// （行程规划不在此列：它以独立全屏界面打开，见 TravelPlanFullscreenPage。）
+enum RightPanelKind { friends, messages, devices, schedule, imagePreview, gallery, catalog, approvals, settings }
 
 /// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
 const double kWideLayoutBreakpoint = 820;
@@ -22,8 +23,6 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.45; // 日程：日历周视图 + 事项列表，需要较大空间
       case RightPanelKind.imagePreview:
         return 0.52; // 图片预览：右栏显示原图，需较大空间
-      case RightPanelKind.travelPlan:
-        return 0.36; // 行程规划：右栏为双面板规划界面，需最大空间
       case RightPanelKind.gallery:
         return 0.45; // 图库：三列网格 + 一键美颜，需较大空间
       case RightPanelKind.catalog:
@@ -92,8 +91,6 @@ String rightPanelTitle(RightPanelKind kind) {
       return "日程";
     case RightPanelKind.imagePreview:
       return "图片预览";
-    case RightPanelKind.travelPlan:
-      return "行程规划";
     case RightPanelKind.gallery:
       return "图库";
     case RightPanelKind.catalog:

@@ -101,7 +101,7 @@ export const ServerEventType = {
    * 前后台分工的客户端契约——前台模型把实事派给后台（task.dispatch）后，
    * 客户端凭此事件在对话流里落一张轻量「任务回执」（无缝对话形态：
    * 状态原地更新，不打断用户继续聊天；结果本身仍走 chat.assistant_done，
-   * 以 [后台任务·目标] 标识头自指涉落位）。
+   * 以独立 assistant 消息落位、只含结果本体）。
    * 可用 AGENT_TASK_PLANE_WS_EVENTS_ENABLED=0 关闭（回退到旧行为：
    * 无回执，任务完成后结果消息直接落进对话流）。
    */
@@ -340,13 +340,13 @@ export type ChatTurnStartedPayload = {
 };
 
 /**
- * 路由模式枚举（与 LlmExecutionMode 同步）：
- *   fast     快速模式：垫词 + 简单任务 + 轻工具，前台秒回
- *   complex  复杂模式：后台委派子 Agent / 复杂工具链 / 多步计划，完成后分步推送
+ * 路由模式枚举（与服务端执行车道同步）：
+ *   chat     对话面：直答 / 前台工具直办，秒回
+ *   task     任务面：后台执行，完成后结果以独立消息回灌
  */
 export type ChatIntentMode =
-  | "fast"
-  | "complex";
+  | "chat"
+  | "task";
 
 /** plan_execute 拆解出的单个步骤。 */
 export type ChatPlanStep = {

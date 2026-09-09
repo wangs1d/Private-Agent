@@ -1,5 +1,5 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
-import type { ScheduleTaskCategory } from "./schedule-task-service.js";
+import { normalizeRemindBeforeMinutes, type ScheduleTaskCategory } from "./schedule-task-service.js";
 
 export type ScheduleDraft = {
   title?: string;
@@ -11,6 +11,10 @@ export type ScheduleDraft = {
   category?: ScheduleTaskCategory;
   runAt: string;
   recurrence: "none" | "daily" | "weekly" | "yearly";
+  /** 事件时长（分钟）；用于冲突检测。缺省 = 时间点提醒（无区间）。 */
+  durationMinutes?: number;
+  /** 提前量提醒（分钟）：如 [15] = 到点前 15 分钟先提醒一次。 */
+  remindBeforeMinutes?: number[];
   reminderMessage?: string;
   action?: {
     url: string;
@@ -89,7 +93,7 @@ export class ScheduleIntentService {
     if (ruleDraft) return applyRecurrenceFromUserText(userText, ruleDraft);
     const modelDraft = await this.parseByModel(sessionId, userText, userTimezone);
     if (!modelDraft) return null;
-    return applyRecurrenceFromUserText(userText, modelDraft);
+    return applyRecurrenceFromUserText(userText, backfillDurationFromUserText(userText, modelDraft));
   }
 
   private async parseByModel(
@@ -128,13 +132,15 @@ export class ScheduleIntentService {
       '  "ok": true,',
       '  "task": {',
       '    "title": "完整标题，如「记得提醒我3点吃药」（可选；reminder 可不填，由 reminderMessage 自动生成）",',
-      '    "shortTitle": "简洁展示标题，用于「今日安排」紧凑列表：去掉时间与「记得/提醒我/帮我/给我」等指令词，只保留核心事项，如「记得提醒我3点吃药」→「吃药」。reminder 必填，其他类型与 title 相同或更短（可选）",',
+      '    "shortTitle": "简洁展示标题，用于「今日安排」紧凑列表：去掉时间与「记得/提醒我/帮我/给我」等指令词，只保留核心事项，如「记得提醒我3点吃药」→「吃药」；用户对助手的称呼（如「小弟」「老哥」）不是事项，也要去掉。reminder 必填，其他类型与 title 相同或更短（可选）",',
       '    "description": "用户原句",',
       '    "kind": "reminder|action|weather_brief",',
       '    "category": "itinerary|trivia",',
       '    "runAt": "ISO-8601 string",',
       '    "recurrence": "none|daily|weekly|yearly",',
-      '    "reminderMessage": "到点时展示给用户的友好提醒，如「该吃药啦！记得按时服药」而非「喊我睡觉」或「睡觉」（仅 reminder）",',
+      '    "durationMinutes": "事件时长（分钟，整数，可选）。用户说了起止时间（如「9点到10点半开会」→ 90）或明确时长（「开会1小时」→ 60）时必须填写；只说「X点提醒我做某事」没有时长概念时省略",',
+      '    "remindBeforeMinutes": "提前量提醒（分钟数组，可选）。用户说「提前15分钟提醒我开会」→ [15]；会议/行程类默认建议 [15]",',
+      '    "reminderMessage": "到点时展示给用户的友好提醒，如「该吃药啦！记得按时服药」而非「喊我睡觉」或「睡觉」；不要把用户对助手的称呼（如「小弟」）写进文案（仅 reminder）",',
       '    "action": { "url": "https://...", "method": "POST", "body": {} }',
       "  }",
       "}",
@@ -158,6 +164,7 @@ export class ScheduleIntentService {
     const runAt = parseDateTimeFromPrompt(normalized, userTimezone);
     if (!runAt) return null;
     const recurrence = inferRecurrenceFromUserText(normalized);
+    const durationMinutes = parseDurationFromUserText(normalized);
     const urlMatch = normalized.match(/https?:\/\/[^\s]+/i);
     if (urlMatch) {
       return {
@@ -194,6 +201,8 @@ export class ScheduleIntentService {
         category: RULE_PATH_TRIVIA_PATTERN.test(normalized) ? "trivia" : undefined,
         runAt: runAt.toISOString(),
         recurrence,
+        durationMinutes,
+        remindBeforeMinutes: parseRemindBeforeFromUserText(normalized),
         reminderMessage: formatReminderMessage(reminderText),
       };
     }
@@ -204,6 +213,67 @@ export class ScheduleIntentService {
 /** 规则路径（无 LLM）的琐事兜底识别：仅命中明确的自我照顾类措辞才判 trivia。 */
 const RULE_PATH_TRIVIA_PATTERN =
   /喝水|喝口水|补水|睡觉|午睡|小睡|小憩|午休|休息一下|休息一会儿|休息会儿|运动|锻炼|健身|散步|伸懒腰|活动筋骨|活动一下|远眺|护眼|眨眨眼|上厕所/;
+
+/** 数字 token 解析（不受 0-23 小时上限约束）：阿拉伯数字 + 中文小写数字（如 90、两、三十五）。 */
+function parseCountToken(token: string): number | null {
+  const t = token.trim();
+  if (!t) return null;
+  if (/^\d{1,4}$/.test(t)) return Number(t);
+  return parseChineseHourToken(t);
+}
+
+/** 从用户原句抽取事件时长（分钟）：支持「9点到10点半」区间与「1小时/90分钟/一个半小时」时长表述。 */
+export function parseDurationFromUserText(text: string): number | undefined {
+  // 先剥离「提前X分钟/小时」状语（相对偏移而非时长），再做时长抽取
+  const normalized = text
+    .trim()
+    .replace(
+      /提前\s*[零一二两三四五六七八九十\d]{1,3}\s*(?:个)?\s*(?:半)?\s*(?:分钟|小时|钟头)/g,
+      " ",
+    );
+  const timeToken = String.raw`\d{1,2}[:：]\d{2}|\d{1,2}\s*点(?:半|\d{1,2}\s*分?)?|[零一二两三四五六七八九十]{1,4}\s*点(?:半|\d{1,2}\s*分?)?`;
+  const range = normalized.match(
+    new RegExp(`(${timeToken})\\s*(?:到|至|~|-|—)\\s*(${timeToken})`),
+  );
+  if (range) {
+    const start = parseHourMinuteFromPrompt(range[1]!);
+    const end = parseHourMinuteFromPrompt(range[2]!);
+    if (start && end) {
+      let diff = end.hours * 60 + end.minutes - (start.hours * 60 + start.minutes);
+      if (diff < 0) diff += 24 * 60; // 跨零点
+      if (diff > 0 && diff <= 12 * 60) return diff;
+    }
+  }
+  // 「一个半小时」（须先于「X小时」匹配，避免只吃到「个小时」）
+  const andHalf = normalized.match(/([零一二两三四五六七八九十]{1,3}|\d+)\s*个半小时/);
+  if (andHalf) {
+    const h = parseCountToken(andHalf[1]!);
+    if (h != null && h > 0 && h <= 12) return h * 60 + 30;
+  }
+  const hours = normalized.match(
+    /([零一二两三四五六七八九十]{1,3}|\d+)?\s*(?:个)?\s*(半)?\s*(?:小时|钟头)(?!后|之后|前)/,
+  );
+  if (hours && (hours[1] || hours[2])) {
+    const base = hours[1] ? parseCountToken(hours[1]) ?? 0 : 0;
+    if (base > 24) return undefined;
+    return base * 60 + (hours[2] ? 30 : 0);
+  }
+  const minutes = normalized.match(/([零一二两三四五六七八九十]{1,3}|\d+)\s*分钟(?!后|之后|以内|前)/);
+  if (minutes) {
+    const m = parseCountToken(minutes[1]!);
+    if (m != null && m > 0 && m <= 720) return m;
+  }
+  return undefined;
+}
+
+/** 从用户原句抽取提前量（分钟）：「提前10分钟提醒我开会」→ [10]。 */
+export function parseRemindBeforeFromUserText(text: string): number[] | undefined {
+  const m = text.trim().match(/提前\s*([零一二两三四五六七八九十]{1,3}|\d+)\s*分钟/);
+  if (!m) return undefined;
+  const n = parseChineseHourToken(m[1]!);
+  if (n == null || n <= 0 || n > 7 * 24 * 60) return undefined;
+  return [n];
+}
 
 function safeParseJsonObject(text: string): Record<string, unknown> | null {
   const trimmed = text.trim();
@@ -241,6 +311,12 @@ function validateDraft(input: unknown): ScheduleDraft | null {
   if (Number.isNaN(runAtDate.getTime())) return null;
   const category: ScheduleTaskCategory | undefined =
     v.category === "trivia" || v.category === "itinerary" ? v.category : undefined;
+  const durationRaw = Number(v.durationMinutes);
+  const durationMinutes =
+    Number.isFinite(durationRaw) && durationRaw > 0 && durationRaw <= 24 * 60
+      ? Math.round(durationRaw)
+      : undefined;
+  const remindBeforeMinutes = normalizeRemindBeforeMinutes(v.remindBeforeMinutes);
   if (kind === "weather_brief") {
     if (!title) return null;
     return { title, shortTitle, description, kind: "weather_brief", category, runAt: runAtDate.toISOString(), recurrence };
@@ -254,6 +330,8 @@ function validateDraft(input: unknown): ScheduleDraft | null {
       category,
       runAt: runAtDate.toISOString(),
       recurrence,
+      durationMinutes,
+      remindBeforeMinutes,
       reminderMessage,
     };
   }
@@ -273,6 +351,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
     category,
     runAt: runAtDate.toISOString(),
     recurrence,
+    durationMinutes,
     action: { url, method, body: actionObj?.body },
   };
 }
@@ -489,6 +568,14 @@ function applyRecurrenceFromUserText(userText: string, draft: ScheduleDraft): Sc
   return { ...draft, recurrence };
 }
 
+/** LLM 路径漏填时长时用规则抽取回填（规则路径已在 parseByRule 内计算）。 */
+function backfillDurationFromUserText(userText: string, draft: ScheduleDraft): ScheduleDraft {
+  if (draft.durationMinutes != null) return draft;
+  const duration = parseDurationFromUserText(userText);
+  if (duration == null) return draft;
+  return { ...draft, durationMinutes: duration };
+}
+
 /** 闹钟/叫醒类意图（含口语「叫我起床」等，不必出现「提醒」二字） */
 function isReminderIntent(text: string): boolean {
   return /提醒我|提醒一下|提醒|闹钟|叫我起床|喊我起床|起床|叫醒|叫我|喊我|定时叫|定时提醒/.test(
@@ -496,10 +583,20 @@ function isReminderIntent(text: string): boolean {
   );
 }
 
+/** 用户对助手的口语称呼（如「五分钟后提醒我睡觉 小弟」的「小弟」）：是称呼不是事项，须从主题中剥离。 */
+const VOCATIVE_WORDS =
+  "小弟|老弟|大哥|老哥|哥哥|姐姐|哥们|兄弟|老铁|老板|大佬|帅哥|美女|亲爱的|宝贝|师傅|师父|老师|同学";
+const LEADING_VOCATIVE_RE = new RegExp(`^(?:${VOCATIVE_WORDS})[\\s，,、；;。：:！!？?]+`);
+// 称呼须与事项有空格/标点分隔才剥离：「睡觉 小弟」剥，「打电话给大哥」不剥（大哥是宾语）。
+const TRAILING_VOCATIVE_RE = new RegExp(
+  `[\\s，,、；;。：:！!？?]+(?:${VOCATIVE_WORDS})[呀啊啦哟哦呗呢吧。！!？?]*$`,
+);
+
 /** 从用户句中提取提醒事项。 */
 export function extractReminderSubject(userText: string): string {
   const normalized = userText.trim();
-  let rest = stripLeadingTimeExpression(normalized);
+  let rest = normalized.replace(LEADING_VOCATIVE_RE, "");
+  rest = stripLeadingTimeExpression(rest);
   rest = rest.replace(/^[，,、；;。\s]+/, "");
   rest = rest.replace(/^(请|帮我|把我)\s*/, "");
   rest = rest.replace(/^(喊我|叫我)\s*/, "");
@@ -507,6 +604,7 @@ export function extractReminderSubject(userText: string): string {
   rest = rest.replace(/^提醒一下\s*/, "");
   rest = rest.replace(/^提醒\s*/, "");
   rest = rest.replace(/\s*提醒我\s*$/, "");
+  rest = rest.replace(TRAILING_VOCATIVE_RE, "");
   rest = rest.replace(/\s+/g, " ").trim();
   return rest || "到点提醒";
 }

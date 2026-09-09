@@ -28,7 +28,7 @@ export type DisplayEffectType =
   | "chips" // 标签/徽章行（内容：全部为短标签）
   | "fold_list" // 折叠列表卡（内容：≥8 条长清单）
   | "quote" // 引用强调卡（markdown 引用块 / 引用式单句结论）
-  | "travel_itinerary" // 旅游行程双面板卡（工具：travel.*）
+  | "travel_itinerary" // 旅游行程卡（工具：travel.*；前端以独立界面打开）
   | "";
 
 /** 展示效果类型的运行时清单（与 DisplayEffectType 逐一对应，供漂移测试）。 */

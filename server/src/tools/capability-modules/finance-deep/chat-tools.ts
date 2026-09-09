@@ -3,7 +3,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 /**
  * 深度财务分析能力域 —— ChatCompletionTool schema。
  *
- * 共 10 个工具：
+ * 共 16 个工具：
  *   - finance.import_transactions  批量导入交易记录（CSV/JSON）
  *   - finance.analyze_spending    消费分析（按类别 / 时间段聚合）
  *   - finance.set_budget          设置预算（按月 / 按类别）
@@ -14,15 +14,21 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - finance.list_subscriptions  订阅盘点：列出自动续费订阅 + 疑似候选
  *   - finance.confirm_subscription 确认候选 / 手动登记订阅
  *   - finance.update_subscription 更新订阅状态 / 使用记录
+ *   - finance.cancel_subscription 自动取消订阅（识别 + 退订 + 省钱统计）
+ *   - finance.savings_summary     订阅省钱统计（已退订累计省下多少）
+ *   - finance.add_bill            登记定期账单（追踪）
+ *   - finance.list_bills          账单追踪：到期日 / 状态 / 月均固定支出
+ *   - finance.update_bill         更新账单信息
+ *   - finance.pay_bill            账单缴费登记（入账 + 预算联动）
  *
  * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
  *   1. 用户不是每轮都会查账本 / 预算
- *   2. 关键词触发（"账单" / "预算" / "对账" / "月度报告" / "订阅"）时由 tool_discover 拉出
+ *   2. 关键词触发（"账单" / "预算" / "对账" / "月度报告" / "订阅" / "退订" / "缴费"）时由 tool_discover 拉出
  *
  * 与 wallet.* / budget.calculate 区分：
  *   - wallet.* 是单条即时操作（转账 / 充值 / 单笔购买）
  *   - budget.calculate 是一次性粗略估算（输入 income/rent/food/transport 出 remain）
- *   - finance.* 维护完整账本 + 预算执行 + 对账 + 报告 + 订阅盘点
+ *   - finance.* 维护完整账本 + 预算执行 + 对账 + 报告 + 订阅盘点/取消 + 账单管理
  */
 export const FINANCE_DEEP_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -349,6 +355,197 @@ export const FINANCE_DEEP_CHAT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["subscriptionId", "action"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.cancel_subscription",
+      description:
+        "自动取消订阅（省钱型）：识别并退订用户「想退但嫌麻烦」的自动续费订阅，并统计省下的钱。\n" +
+        "不传目标时返回建议取消名单（60 天未用 / 从未使用，按月成本从高到低），由用户确认后退订；\n" +
+        "指定 merchant 或 subscriptionId 时执行退订：记录省钱金额（每期/月/年），\n" +
+        "有自动执行通道时直接代办，否则返回该商户的最短取消路径（App/官网 + 微信/支付宝扣款入口）。\n" +
+        "距下次续费 ≤3 天时会给出「赶在扣款前取消」的紧急提示。\n" +
+        "适用场景：「帮我退掉没用的订阅」「Netflix 别自动续费了」「把一直没用想退嫌麻烦的都退了」「退订能省多少」。",
+      parameters: {
+        type: "object",
+        properties: {
+          subscriptionId: {
+            type: "string",
+            description: "订阅记录 ID（finance.list_subscriptions 返回的 id，可选）。",
+          },
+          merchant: {
+            type: "string",
+            description:
+              "商户/服务名（与 subscriptionId 二选一）。支持模糊匹配，如 \"netflix\" / \"B站\"。",
+          },
+          reason: {
+            type: "string",
+            description: "退订原因（可选，记录用）。如 \"太久没用了\" / \"太贵\"。",
+          },
+          execute: {
+            type: "boolean",
+            description:
+              "是否尝试自动执行（默认 true）。无自动执行通道或执行失败时，回退为返回取消路径指引。",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.savings_summary",
+      description:
+        "订阅省钱统计：列出已退订订阅及累计省下的金额（每期 / 每月 / 每年），退订动作的成果账。\n" +
+        "适用场景：「退订省了多少钱」「帮我看看一共省下多少」「订阅退订记录」。",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.add_bill",
+      description:
+        "登记定期账单（账单管理·追踪）：房租 / 水电 / 燃气 / 话费 / 宽带 / 物业 / 信用卡还款 / 保险等。\n" +
+        "登记后自动追踪下次到期日，到期前 3 天主动提醒，缴费后一键入账联动预算。\n" +
+        "周付/月付按 dueDay（周几/几号）自动推算到期日；季付/年付/一次性需给下次到期日 dueDate。\n" +
+        "适用场景：「记一下房租每月1号3500」「水电费每次200左右月底交」「帮我盯住信用卡还款日」。",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "账单名。如 \"房租\" / \"水电费\" / \"信用卡还款\" / \"宽带\"。",
+          },
+          amount: {
+            type: "number",
+            description: "每期金额（正数）。如 3500。",
+          },
+          cadence: {
+            type: "string",
+            enum: ["weekly", "monthly", "quarterly", "yearly", "one_off"],
+            description: "缴费周期：weekly 周付 / monthly 月付 / quarterly 季付 / yearly 年付 / one_off 一次性。",
+          },
+          dueDay: {
+            type: "number",
+            description:
+              "扣费日：monthly/quarterly/yearly 填 1~31（几号）；weekly 填 1~7（1=周一 … 7=周日）。",
+          },
+          dueDate: {
+            type: "string",
+            description:
+              "下次到期日 YYYY-MM-DD：quarterly / yearly / one_off 必填（缴费后自动顺延一个周期）。",
+          },
+          category: {
+            type: "string",
+            enum: ["餐饮", "交通", "购物", "娱乐", "医疗", "教育", "居住", "工资", "其他"],
+            description: "预算分类（可选，默认 居住）。缴费自动入账到该分类，联动预算执行。",
+          },
+          autopay: {
+            type: "boolean",
+            description: "是否自动扣款（可选，默认 false）。影响提醒话术：确认余额充足 vs 记得手动缴。",
+          },
+          merchant: {
+            type: "string",
+            description: "收款方/商户（可选）。如 \"国家电网\" / \"招商银行\"。",
+          },
+          note: {
+            type: "string",
+            description: "备注（可选）。",
+          },
+        },
+        required: ["name", "amount", "cadence"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.list_bills",
+      description:
+        "账单追踪：列出登记的定期账单 + 下次到期日 + 状态（即将到期 due_soon / 已逾期 overdue / 正常 ok / 一次性已缴 paid），\n" +
+        "并汇总月均固定支出（周期账单折算月成本合计，做预算时的固定盘子）。\n" +
+        "按紧迫度排序：逾期 > 即将到期 > 正常。\n" +
+        "适用场景：「最近有什么账单要交」「房租什么时候交」「每月固定支出多少」「有逾期账单吗」。",
+      parameters: {
+        type: "object",
+        properties: {
+          status: {
+            type: "string",
+            enum: ["all", "due_soon", "overdue", "ok", "paid"],
+            description: "状态过滤（可选，默认 all）。",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.update_bill",
+      description:
+        "更新账单信息：改金额 / 扣费日 / 到期日 / 自动扣款标记 / 分类 / 备注（账单涨价、搬家换租常用）。\n" +
+        "适用场景：「房租涨到3800」「水电费改成每月25号扣」「这张账单是自动扣款的」。",
+      parameters: {
+        type: "object",
+        properties: {
+          billId: {
+            type: "string",
+            description: "账单 ID（finance.list_bills 返回的 id）。",
+          },
+          name: { type: "string", description: "新账单名（可选）。" },
+          amount: { type: "number", description: "新每期金额（可选）。" },
+          dueDay: { type: "number", description: "新扣费日（可选，含义同 add_bill）。" },
+          dueDate: { type: "string", description: "新下次到期日 YYYY-MM-DD（可选）。" },
+          category: {
+            type: "string",
+            enum: ["餐饮", "交通", "购物", "娱乐", "医疗", "教育", "居住", "工资", "其他"],
+            description: "新预算分类（可选）。",
+          },
+          autopay: { type: "boolean", description: "是否自动扣款（可选）。" },
+          note: { type: "string", description: "备注（可选，传空串清除）。" },
+        },
+        required: ["billId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.pay_bill",
+      description:
+        "账单缴费登记（账单管理·预算联动）：标记某笔账单已缴，自动把这笔支出写入账本（source=bill_payment），\n" +
+        "季付/年付账单自动顺延一个周期，并返回该分类预算的最新执行进度（已花/剩余/警告级别）。\n" +
+        "适用场景：「房租交了」「水电费我昨天付了」「信用卡还完了」。",
+      parameters: {
+        type: "object",
+        properties: {
+          billId: {
+            type: "string",
+            description: "账单 ID（finance.list_bills 返回的 id）。",
+          },
+          date: {
+            type: "string",
+            description: "缴费日期 YYYY-MM-DD（可选，默认今天）。",
+          },
+          amount: {
+            type: "number",
+            description: "实缴金额（可选，默认账单金额。水电费这类金额浮动的用它）。",
+          },
+        },
+        required: ["billId"],
         additionalProperties: false,
       },
     },

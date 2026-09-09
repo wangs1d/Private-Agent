@@ -13,14 +13,14 @@
  *     对话面误判转任务（agent-core），路由不需要一次判对。
  */
 
-export type LlmExecutionMode = "fast" | "complex";
+/** 执行车道：chat=对话面（直答/前台工具直办）；task=任务面（后台执行）。 */
+export type LlmExecutionMode = "chat" | "task";
 
 export type TurnPlane = import("./intent-router.js").TurnPlane;
 export type TurnCapability = import("./intent-router.js").TurnCapability;
 export type TurnTier = import("./intent-router.js").TurnTier;
 
 export type RouteDecision = {
-  mode: LlmExecutionMode;
   reasons: string[];
   /** 是否需要对回复做短句分段（对话面分段，任务面信息性内容不分段）。 */
   segmentable: boolean;
@@ -47,16 +47,16 @@ export type RouteDecision = {
   };
 };
 
-/** 由二值 mode 派生词法级执行计划（降级路径用）。 */
-export function planFieldsForMode(mode: LlmExecutionMode): {
+/** 由车道派生词法级执行计划（降级路径用）。 */
+export function planFieldsForLane(lane: LlmExecutionMode): {
   plane: TurnPlane;
   capabilities: TurnCapability[];
   budget: number;
   tier: TurnTier;
 } {
-  return mode === "complex"
-    ? { plane: "task", capabilities: ["full"], budget: 2, tier: "fast" }
-    : { plane: "chat", capabilities: [], budget: 0, tier: "fast" };
+  return lane === "task"
+    ? { plane: "task", capabilities: ["full"], budget: 2, tier: "flash" }
+    : { plane: "chat", capabilities: [], budget: 0, tier: "flash" };
 }
 
 /* ────────────────────────────────────────────────────────────

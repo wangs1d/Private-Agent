@@ -11,7 +11,11 @@ import type {
   SubscriptionStatus,
 } from "../../../services/subscription-audit-service.js";
 import { monthlyCost, periodLabel } from "../../../services/subscription-audit-service.js";
-
+import type {
+  BillManagementService,
+  BillStatus,
+} from "../../../services/bill-management-service.js";
+import { billCadenceLabel } from "../../../services/bill-management-service.js";
 /**
  * finance.import_transactions 工具 handler。
  *
@@ -504,6 +508,324 @@ export function createFinanceUpdateSubscriptionHandler(
       ok: true,
       subscription: record,
       summary: `「${record.merchant}」${actionLabels[action]}`,
+    };
+  };
+}
+
+// ─── 自动取消订阅 + 省钱统计（订阅与财务清理） ─────────────────
+
+/**
+ * finance.cancel_subscription 工具 handler。
+ *
+ * 不传目标 → 返回建议取消名单（低使用率优先）；
+ * 指定目标 → 退订 + 省钱数字 + 取消指引/自动执行结果。
+ */
+export function createFinanceCancelSubscriptionHandler(
+  service: SubscriptionAuditService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const subscriptionId =
+      typeof input.subscriptionId === "string" && input.subscriptionId.trim()
+        ? input.subscriptionId.trim()
+        : undefined;
+    const merchant =
+      typeof input.merchant === "string" && input.merchant.trim()
+        ? input.merchant.trim()
+        : undefined;
+    const reason =
+      typeof input.reason === "string" && input.reason.trim() ? input.reason.trim() : undefined;
+    const execute = input.execute === undefined ? true : input.execute === true;
+
+    const actorId = resolveActorId(context);
+    const result = await service.cancelSubscription(actorId, {
+      ...(subscriptionId ? { subscriptionId } : {}),
+      ...(merchant ? { merchant } : {}),
+      ...(reason ? { reason } : {}),
+      execute,
+    });
+
+    if (!result.ok) {
+      return { ok: false, error: result.error };
+    }
+
+    if (!result.cancelled) {
+      const candidates = result.candidates ?? [];
+      const lines = candidates
+        .slice(0, 5)
+        .map(
+          (c) =>
+            `- ${c.merchant}：¥${c.amount.toFixed(2)}/${periodLabel(c.periodDays)}（月成本 ¥${monthlyCost(c.amount, c.periodDays).toFixed(2)}，id=${c.id}）`,
+        );
+      return {
+        ok: true,
+        cancelled: false,
+        candidates,
+        summary:
+          candidates.length === 0
+            ? "没有发现建议取消的订阅（已确认订阅都在使用中）。想退指定的订阅请告诉我商户名。"
+            : `找到 ${candidates.length} 个建议取消的订阅（长期未用，按月成本排序）：\n${lines.join("\n")}\n` +
+              `全退的话每年可省约 ¥${candidates.reduce((acc, c) => acc + monthlyCost(c.amount, c.periodDays) * 12, 0).toFixed(2)}。确认后退订，请说要退哪些。`,
+      };
+    }
+
+    const savedAnnual = result.savedAnnual?.toFixed(2) ?? "0.00";
+    const savedMonthly = result.savedMonthly?.toFixed(2) ?? "0.00";
+    const summaryParts: string[] = [];
+    if (result.method === "agent") {
+      summaryParts.push(
+        `已自动退订「${result.record?.merchant}」🎉 每月省下 ¥${savedMonthly}，一年就是 ¥${savedAnnual}。`,
+      );
+    } else {
+      summaryParts.push(
+        `已把「${result.record?.merchant}」移出订阅清单，每月省下 ¥${savedMonthly}（一年 ¥${savedAnnual}）。` +
+          `商户侧取消路径：${(result.guide ?? []).join("；")}`,
+      );
+    }
+    if (result.renewalWarning) summaryParts.push(`⚠️ ${result.renewalWarning}`);
+
+    return {
+      ok: true,
+      cancelled: true,
+      subscription: result.record,
+      method: result.method,
+      savedPerPeriod: result.savedPerPeriod,
+      savedMonthly: result.savedMonthly,
+      savedAnnual: result.savedAnnual,
+      guide: result.guide,
+      summary: summaryParts.join("\n"),
+    };
+  };
+}
+
+/**
+ * finance.savings_summary 工具 handler。
+ */
+export function createFinanceSavingsSummaryHandler(
+  service: SubscriptionAuditService,
+): ToolHandler {
+  return async (_input: Record<string, unknown>, context: ToolContext) => {
+    const actorId = resolveActorId(context);
+    const summary = await service.getSavingsSummary(actorId);
+    if (summary.cancelledCount === 0) {
+      return {
+        ok: true,
+        ...summary,
+        summary: "还没有退订记录。盘点一下订阅（list_subscriptions），把没用的退掉就开始省钱了。",
+      };
+    }
+    const lines = summary.items
+      .slice(0, 10)
+      .map(
+        (i) =>
+          `- ${i.merchant}：每月 ¥${i.savedMonthly.toFixed(2)}（${i.cancelledAt} 退订，${i.method === "agent" ? "自动代办" : "指引完成"}）`,
+      );
+    return {
+      ok: true,
+      ...summary,
+      summary:
+        `已累计退订 ${summary.cancelledCount} 个订阅，每月省下 ¥${summary.savedMonthly.toFixed(2)}` +
+        `，一年就是 ¥${summary.savedAnnual.toFixed(2)}：\n${lines.join("\n")}`,
+    };
+  };
+}
+
+// ─── 账单管理（追踪 / 提醒 / 预算联动） ───────────────────────
+
+/** finance.add_bill 工具 handler。 */
+export function createFinanceAddBillHandler(service: BillManagementService): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const name = String(input.name ?? "").trim();
+    const amount = Number(input.amount);
+    const cadenceRaw = String(input.cadence ?? "").trim();
+    const validCadences = ["weekly", "monthly", "quarterly", "yearly", "one_off"];
+    if (!name) return { ok: false, error: "缺少 name（账单名）" };
+    if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: "amount 必须为正数" };
+    if (!validCadences.includes(cadenceRaw)) {
+      return { ok: false, error: `cadence 必须为：${validCadences.join(" / ")}` };
+    }
+    const cadence = cadenceRaw as "weekly" | "monthly" | "quarterly" | "yearly" | "one_off";
+    const dueDayRaw = Number(input.dueDay);
+    const dueDay = Number.isFinite(dueDayRaw) ? dueDayRaw : undefined;
+    const dueDate =
+      typeof input.dueDate === "string" && input.dueDate.trim()
+        ? input.dueDate.trim()
+        : undefined;
+    if ((cadence === "weekly" || cadence === "monthly") && dueDay === undefined) {
+      return {
+        ok: false,
+        error: cadence === "weekly" ? "周付账单需要 dueDay（1~7，1=周一）" : "月付账单需要 dueDay（1~31，几号扣费）",
+      };
+    }
+    if (cadence === "quarterly" || cadence === "yearly" || cadence === "one_off") {
+      if (!dueDate) return { ok: false, error: "季付/年付/一次性账单需要 dueDate（下次到期日 YYYY-MM-DD）" };
+    }
+    const categoryRaw = String(input.category ?? "").trim();
+    const category = (FINANCE_CATEGORIES as readonly string[]).includes(categoryRaw)
+      ? (categoryRaw as FinanceCategory)
+      : undefined;
+
+    const actorId = resolveActorId(context);
+    const bill = await service.addBill(actorId, {
+      name,
+      amount,
+      cadence,
+      ...(dueDay !== undefined ? { dueDay } : {}),
+      ...(dueDate ? { dueDate } : {}),
+      ...(category ? { category } : {}),
+      ...(input.autopay !== undefined ? { autopay: input.autopay === true } : {}),
+      ...(typeof input.merchant === "string" && input.merchant.trim()
+        ? { merchant: input.merchant.trim() }
+        : {}),
+      ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
+    });
+    if (!bill) {
+      return { ok: false, error: "登记失败：参数校验未通过（检查 dueDay/dueDate 与周期是否匹配）" };
+    }
+
+    const described = await service.describeBill(actorId, bill.id);
+    const nextDueDate = described?.nextDueDate ?? null;
+    const status = described?.status;
+
+    return {
+      ok: true,
+      bill,
+      nextDueDate,
+      summary:
+        `已登记「${bill.name}」：¥${bill.amount.toFixed(2)}/${billCadenceLabel(bill.cadence)}` +
+        (bill.cadence === "weekly" || bill.cadence === "monthly"
+          ? `，每${billCadenceLabel(bill.cadence)}${bill.dueDay}号扣费`
+          : "") +
+        (nextDueDate ? `，下次到期 ${nextDueDate}` : "") +
+        `（${status === "overdue" ? "已逾期，尽快处理" : "到期前 3 天会提醒你"}）`,
+    };
+  };
+}
+
+/** finance.list_bills 工具 handler。 */
+export function createFinanceListBillsHandler(service: BillManagementService): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const statusRaw = String(input.status ?? "all").trim();
+    const validStatuses = ["all", "due_soon", "overdue", "ok", "paid"];
+    if (!validStatuses.includes(statusRaw)) {
+      return { ok: false, error: `status 必须为：${validStatuses.join(" / ")}` };
+    }
+
+    const actorId = resolveActorId(context);
+    const { bills, summary } = await service.listBills(actorId);
+    const filtered =
+      statusRaw === "all" ? bills : bills.filter((b) => b.status === (statusRaw as BillStatus));
+
+    const lines = filtered.map((b) => {
+      const due = b.nextDueDate
+        ? b.status === "overdue"
+          ? `${b.nextDueDate} 已逾期 ${-(b.daysUntilDue ?? 0)} 天`
+          : `${b.nextDueDate} 到期${b.status === "due_soon" ? `（${b.daysUntilDue === 0 ? "就是今天" : `还有 ${b.daysUntilDue} 天`}）` : ""}`
+        : "已缴清";
+      return (
+        `- ${b.bill.name}：¥${b.bill.amount.toFixed(2)}/${billCadenceLabel(b.bill.cadence)}，${due}` +
+        (b.bill.autopay ? "【自动扣款】" : "") +
+        `（id=${b.bill.id}）`
+      );
+    });
+
+    const summaryParts: string[] = [];
+    if (summary.total === 0) {
+      summaryParts.push("暂无登记的账单");
+    } else {
+      summaryParts.push(
+        `共 ${summary.total} 笔账单，月均固定支出约 ¥${summary.monthlyRecurringTotal.toFixed(2)}`,
+      );
+      if (summary.overdueCount > 0) summaryParts.push(`⚠️ 逾期 ${summary.overdueCount} 笔`);
+      if (summary.dueSoonCount > 0) summaryParts.push(`${summary.dueSoonCount} 笔 3 天内到期`);
+    }
+
+    return {
+      ok: true,
+      bills: filtered,
+      summary: summaryParts.join("，") + (lines.length > 0 ? `\n${lines.join("\n")}` : ""),
+    };
+  };
+}
+
+/** finance.update_bill 工具 handler。 */
+export function createFinanceUpdateBillHandler(service: BillManagementService): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const billId = String(input.billId ?? "").trim();
+    if (!billId) return { ok: false, error: "缺少 billId" };
+    const hasAny =
+      ["name", "amount", "dueDay", "dueDate", "category", "autopay", "merchant", "note"].some(
+        (k) => input[k] !== undefined,
+      );
+    if (!hasAny) return { ok: false, error: "没有要更新的字段" };
+
+    const patch: Record<string, unknown> = {};
+    if (input.name !== undefined) patch.name = String(input.name);
+    if (input.amount !== undefined) patch.amount = Number(input.amount);
+    if (input.dueDay !== undefined) patch.dueDay = Number(input.dueDay);
+    if (input.dueDate !== undefined) patch.dueDate = String(input.dueDate);
+    if (input.category !== undefined) patch.category = String(input.category);
+    if (input.autopay !== undefined) patch.autopay = input.autopay === true;
+    if (input.merchant !== undefined) patch.merchant = String(input.merchant);
+    if (input.note !== undefined) patch.note = String(input.note);
+
+    const actorId = resolveActorId(context);
+    const bill = await service.updateBill(
+      actorId,
+      billId,
+      patch as Parameters<BillManagementService["updateBill"]>[2],
+    );
+    if (!bill) return { ok: false, error: "找不到该账单（可先 list_bills 查看）" };
+
+    return {
+      ok: true,
+      bill,
+      summary: `「${bill.name}」已更新：¥${bill.amount.toFixed(2)}/${billCadenceLabel(bill.cadence)}` +
+        (bill.dueDay != null ? `，扣费日 ${bill.dueDay}` : "") +
+        (bill.dueDate ? `，到期 ${bill.dueDate}` : "") +
+        (bill.autopay ? "，自动扣款" : ""),
+    };
+  };
+}
+
+/** finance.pay_bill 工具 handler。 */
+export function createFinancePayBillHandler(service: BillManagementService): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const billId = String(input.billId ?? "").trim();
+    if (!billId) return { ok: false, error: "缺少 billId" };
+    const date =
+      typeof input.date === "string" && input.date.trim() ? input.date.trim() : undefined;
+    const amountRaw = Number(input.amount);
+    const amount = Number.isFinite(amountRaw) && amountRaw > 0 ? amountRaw : undefined;
+
+    const actorId = resolveActorId(context);
+    const result = await service.markBillPaid(actorId, billId, {
+      ...(date ? { date } : {}),
+      ...(amount !== undefined ? { amount } : {}),
+    });
+    if (!result.ok) return { ok: false, error: result.error };
+
+    const bill = result.bill!;
+    const summaryParts: string[] = [
+      `已记录「${bill.name}」缴费 ¥${(bill.lastPaidAmount ?? bill.amount).toFixed(2)}（${bill.lastPaidAt}），并入账本`,
+    ];
+    if (result.budget) {
+      const b = result.budget;
+      const pct = Math.round(b.progress * 100);
+      summaryParts.push(
+        `${b.budget.category}预算：已花 ¥${b.spent.toFixed(2)} / ¥${b.budget.amount.toFixed(2)}` +
+          `（${pct}%，${b.level === "exceeded" ? "已超支" : b.level === "warning" ? "接近上限" : "正常"}）`,
+      );
+    }
+    if (bill.cadence === "quarterly" || bill.cadence === "yearly") {
+      summaryParts.push(`下次到期已顺延至 ${bill.dueDate}`);
+    }
+
+    return {
+      ok: true,
+      bill,
+      transactionId: result.transactionId,
+      budget: result.budget,
+      summary: summaryParts.join("。"),
     };
   };
 }

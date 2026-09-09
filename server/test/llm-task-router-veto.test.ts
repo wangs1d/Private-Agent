@@ -54,7 +54,7 @@ test("前置路由门：默认模式每轮必跑 L1 分类（旧「整体跳过�
   const { provider, calls } = fakeProvider("chat");
   const decision = await routeTurnByLlm(provider, "sess-gate-1", "在吗");
   assert.equal(decision.plane, "chat");
-  assert.equal(decision.mode, "fast");
+  assert.equal(decision.plane, "chat");
   assert.ok(
     decision.reasons[0]?.startsWith("llm_intent:chat"),
     `应产出真实语义分类理由，实际 ${decision.reasons.join(",")}`,
@@ -65,7 +65,7 @@ test("前置路由门：默认模式每轮必跑 L1 分类（旧「整体跳过�
 test("L1：寒暄经语义分类直判 chat（L0 词法短路已删除，不再有零成本捷径）", async () => {
   const { provider, calls } = fakeProvider("chat");
   const decision = await routeTurnByLlm(provider, "sess-l0-1", "哈喽哈喽");
-  assert.equal(decision.mode, "fast");
+  assert.equal(decision.plane, "chat");
   assert.equal(decision.plane, "chat");
   assert.equal(decision.intent, "chat");
   assert.equal(calls.count, 1, "应到达 L1 语义分类");
@@ -83,10 +83,10 @@ test("L1+L2：realtime_lookup 按路由表映射任务面（轻预算 Flash 档�
   const { provider } = fakeProvider("realtime_lookup");
   const decision = await routeTurnByLlm(provider, "sess-l1-1", "帮我扒扒景甜");
   assert.equal(decision.plane, "task");
-  assert.equal(decision.mode, "complex");
+  assert.equal(decision.plane, "task");
   assert.deepEqual(decision.capabilities, ["search"]);
   assert.equal(decision.budget, 2);
-  assert.equal(decision.tier, "fast");
+  assert.equal(decision.tier, "flash");
   assert.ok(decision.reasons.some((r) => r.includes("route_table:task/search")));
 });
 
@@ -102,7 +102,7 @@ test("L1+L2：chat 直判对话面（零工具零预算）", async () => {
   const { provider, calls } = fakeProvider("chat", 0.9);
   const decision = await routeTurnByLlm(provider, "sess-l1-3", "今天忙了一天真的好累啊不想动了");
   assert.equal(decision.plane, "chat");
-  assert.equal(decision.mode, "fast");
+  assert.equal(decision.plane, "chat");
   assert.deepEqual(decision.capabilities, []);
   assert.equal(decision.budget, 0);
   assert.equal(calls.count, 1, "L1 分类恰好调用一次");
@@ -115,15 +115,15 @@ test("低置信 chat 不再强转任务面（fail-safe 已随前台自决删除�
   assert.ok(!decision.reasons.some((r) => r.includes("low_confidence_fail_safe")));
 });
 
-test("L2 路由表：action_write / multi_step_task 直判任务面", async () => {
+test("L2 路由表：action_write 归位对话面（前台直写工具直办）/ multi_step_task 落任务面", async () => {
   const write = await routeTurnByLlm(
     fakeProvider("action_write").provider,
     "sess-table-1",
     "明天早上八点提醒我开会",
   );
-  assert.equal(write.plane, "task");
+  assert.equal(write.plane, "chat", "提醒/日程单工具直办，不再派后台（2026-09-08）");
   assert.equal(write.intent, "action_write");
-  assert.equal(write.tier, "complex");
+  assert.equal(write.tier, "flash");
 
   const task = await routeTurnByLlm(
     fakeProvider("multi_step_task").provider,

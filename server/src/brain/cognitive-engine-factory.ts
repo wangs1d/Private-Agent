@@ -53,7 +53,7 @@ export function createDefaultCognitiveEngine(): CognitiveEngine {
         `⚠️ 关键原则：宁可误判为 fast（主 Agent 自己能处理），不要漏判。\n` +
         `  只有明确属于上述 complex 场景时才委派。\n` +
         `  查天气、查时间、查日历、简单问答 → fast（主 Agent 自带工具）\n\n` +
-        `只输出 JSON：{"mode": "fast", "rationale": "..."}`;
+        `只输出 JSON：{"mode": "direct", "rationale": "..."}`;
       let raw = "";
       const now = new Date().toISOString();
       try {
@@ -67,22 +67,22 @@ export function createDefaultCognitiveEngine(): CognitiveEngine {
           { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 0 },
         );
       } catch (e) {
-        const route = { userMessage: userText, system: "system1" as const, mode: "fast" as const, rationale: `cognize_llm_failed:${String(e).slice(0, 60)}`, decidedAt: now };
+        const route = { userMessage: userText, system: "system1" as const, mode: "direct" as const, rationale: `cognize_llm_failed:${String(e).slice(0, 60)}`, decidedAt: now };
         return { route, response: "", memoryWrites: [], needsToolLoop: true, rationale: route.rationale };
       }
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) {
-        const route = { userMessage: userText, system: "system1" as const, mode: "fast" as const, rationale: "no_json", decidedAt: now };
+        const route = { userMessage: userText, system: "system1" as const, mode: "direct" as const, rationale: "no_json", decidedAt: now };
         return { route, response: "", memoryWrites: [], needsToolLoop: true, rationale: "no_json" };
       }
       try {
         const parsed = JSON.parse(match[0]);
-        const mode = parsed.mode === "complex" ? "complex" : "fast";
-        const system = mode === "complex" ? "system2" : "system1";
+        const mode = parsed.mode === "tool_loop" ? "tool_loop" : "direct";
+        const system = mode === "tool_loop" ? "system2" : "system1";
         const route = {
           userMessage: userText,
           system: system as "system1" | "system2",
-          mode: mode as "fast" | "complex",
+          mode: mode as "direct" | "tool_loop",
           rationale: typeof parsed.rationale === "string" ? parsed.rationale : "",
           decidedAt: now,
         };
@@ -94,7 +94,7 @@ export function createDefaultCognitiveEngine(): CognitiveEngine {
           rationale: route.rationale,
         };
       } catch {
-        const route = { userMessage: userText, system: "system1" as const, mode: "fast" as const, rationale: "parse_failed", decidedAt: now };
+        const route = { userMessage: userText, system: "system1" as const, mode: "direct" as const, rationale: "parse_failed", decidedAt: now };
         return { route, response: "", memoryWrites: [], needsToolLoop: true, rationale: "parse_failed" };
       }
     },

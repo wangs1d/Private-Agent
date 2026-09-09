@@ -107,7 +107,6 @@ function cacheSet(key: string, decision: RouteDecision): void {
 
 function chatDecision(reason: string): RouteDecision {
   return {
-    mode: "fast",
     reasons: [reason],
     segmentable: true,
     intent: "chat",
@@ -115,7 +114,7 @@ function chatDecision(reason: string): RouteDecision {
     plane: "chat",
     capabilities: [],
     budget: 0,
-    tier: "fast",
+    tier: "flash",
   };
 }
 
@@ -128,13 +127,12 @@ function conservativeFallback(text: string, reason: string): RouteDecision {
     return chatDecision(`${reason}:high_precision_chat`);
   }
   return {
-    mode: "complex",
     reasons: [`${reason}:conservative_task_plane`],
     segmentable: false,
     plane: "task",
     capabilities: ["full"],
     budget: 2,
-    tier: "fast",
+    tier: "flash",
   };
 }
 
@@ -185,7 +183,6 @@ export async function routeTurnByLlm(
   const trimmed = text.trim();
   if (!trimmed) {
     return {
-      mode: "fast",
       reasons: ["llm_route:empty_text"],
       segmentable: true,
       intent: "chat",
@@ -193,7 +190,7 @@ export async function routeTurnByLlm(
       plane: "chat",
       capabilities: [],
       budget: 0,
-      tier: "fast",
+      tier: "flash",
     };
   }
   const key = JSON.stringify([trimmed, recentUserTurns]);
@@ -259,9 +256,7 @@ export async function routeTurnByLlm(
     const budget = plan.budget;
     const tier = plan.tier;
 
-    const mode = plane === "task" ? "complex" : "fast";
     const decision: RouteDecision = {
-      mode,
       reasons,
       segmentable: plane === "chat",
       intent: parsed.intent,

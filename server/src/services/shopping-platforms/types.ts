@@ -106,8 +106,10 @@ export interface ShoppingPlatformAdapter {
    * 点击提交订单按钮，返回订单号。
    * 调用前页面应已处于结算页（由 navigateToCheckout 到达）。
    * **只点提交订单按钮，不点立即支付按钮**。
+   * @returns paymentUrl：提交后落在的收银台/支付页 URL（若有），供用户手动
+   *          支付或支付宝收银台通道代付（仅 cashier/qr.alipay.com 可代付）。
    */
-  submitOrder(page: Page): Promise<{ ok: boolean; orderId?: string; error?: string; retryable?: boolean }>;
+  submitOrder(page: Page): Promise<{ ok: boolean; orderId?: string; error?: string; retryable?: boolean; paymentUrl?: string }>;
 
   /**
    * 在订单列表页读取订单状态。

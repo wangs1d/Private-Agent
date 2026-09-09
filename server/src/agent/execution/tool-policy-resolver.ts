@@ -13,7 +13,7 @@ export class ToolPolicyResolver {
   constructor(private readonly deps: ToolPolicyResolverDeps) {}
 
   resolveExposureProfile(mode: LlmExecutionMode): AgentStreamOptions["toolExposureProfile"] {
-    return mode === "complex" ? "delegate" : "contextual";
+    return mode === "task" ? "delegate" : "contextual";
   }
 
   resolveRankingHint(actorId: string): AgentStreamOptions["toolRankingHint"] {

@@ -1140,10 +1140,10 @@ class _MediaCard extends StatelessWidget {
 /// 旅游行程海报卡：景点实拍背景 + 目的地简介 + 出行叮嘱 + 「打开行程规划」入口。
 ///
 /// 与媒体卡同样采用静态回调桥接（[TravelPlanLauncher.open]）：点击入口后
-/// 在右侧双栏打开行程规划界面（左天数 + 右当日行程），界面内另有全屏按钮。
+/// 以独立界面（全屏路由 TravelPlanFullscreenPage）打开行程规划。
 ///
 /// 设计（2026-09 用户反馈）：
-///   - 不再罗列 Day 1/2/3 摘要（与右侧双面板重复），换成目的地一句话简介
+///   - 不再罗列 Day 1/2/3 摘要（与规划界面重复），换成目的地一句话简介
 ///     + 「记得带」随身物品叮嘱，卡片自身先回答「去哪玩 / 要带什么」；
 ///   - 卡片加大（maxWidth 460，气泡宽度在 chat_page 对行程卡放宽），
 ///     背景取行程中第一个有实拍图的景点（attraction 优先），压深色渐变
@@ -1220,9 +1220,9 @@ class _TravelItineraryCard extends StatelessWidget {
                               horizontal: 12, vertical: 9),
                           minimumSize: const Size(0, 40),
                         ),
-                        icon: const Icon(Icons.splitscreen, size: 16),
+                        icon: const Icon(Icons.travel_explore, size: 16),
                         label: const Text(
-                          "打开行程规划（双面板·可全屏）",
+                          "打开行程规划",
                           style: TextStyle(
                               fontSize: 13.5, fontWeight: FontWeight.w700),
                         ),

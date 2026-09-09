@@ -98,10 +98,10 @@ void main() {
     expect(find.text("印度洋上的珊瑚岛国，一岛一酒店，以水上屋、浮潜与纯净泻湖闻名"), findsOneWidget);
     expect(find.text("记得带"), findsOneWidget);
     expect(find.text("防晒霜 SPF50+"), findsOneWidget);
-    expect(find.text("打开行程规划（双面板·可全屏）"), findsOneWidget);
+    expect(find.text("打开行程规划"), findsOneWidget);
     expect(find.text("共 5 天 · 1 项安排"), findsOneWidget);
 
-    // 用户反馈核心：卡面不再罗列 Day 摘要（明细只在右侧双面板）
+    // 用户反馈核心：卡面不再罗列 Day 摘要（明细只在规划界面）
     expect(find.textContaining("Day 1"), findsNothing);
     expect(find.textContaining("Day 2"), findsNothing);
   });
@@ -109,7 +109,7 @@ void main() {
   testWidgets("无结构化 travelPlan 的历史消息优雅降级：简介/叮嘱隐藏，按钮与海报骨架仍在", (WidgetTester tester) async {
     await pumpCard(tester, _textFallbackData());
 
-    expect(find.text("打开行程规划（双面板·可全屏）"), findsOneWidget);
+    expect(find.text("打开行程规划"), findsOneWidget);
     expect(find.text("马尔代夫"), findsOneWidget);
     expect(find.text("记得带"), findsNothing);
     expect(find.text("印度洋上的珊瑚岛国，一岛一酒店，以水上屋、浮潜与纯净泻湖闻名"), findsNothing);
@@ -122,7 +122,7 @@ void main() {
     //（修复前：raw days 非空即按结构化口径取 days.length，把 fromCard
     // 补的「全程」空骨架天计入，徽章误报 1 天）。
     expect(find.textContaining("天行程"), findsNothing);
-    expect(find.text("打开行程规划（双面板·可全屏）"), findsNothing);
+    expect(find.text("打开行程规划"), findsNothing);
     // 目的地徽章与海报兜底骨架仍在，布局不破损
     expect(find.text("马尔代夫"), findsOneWidget);
   });

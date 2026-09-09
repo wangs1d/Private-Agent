@@ -135,6 +135,8 @@ import { MeituanService } from "../services/meituan-service.js";
 import { AlipayBotService } from "../services/alipay-bot-service.js";
 import { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import { ScheduleTaskService } from "../services/schedule-task-service.js";
+import { ScheduleConflictService } from "../services/schedule-conflict-service.js";
+import { ScheduleBookingBridge } from "../services/schedule-booking-bridge.js";
 import { SessionService } from "../services/session-service.js";
 import { TtsService } from "../services/tts-service.js";
 import { VirtualPhoneService } from "../services/virtual-phone-service.js";
@@ -148,10 +150,13 @@ import { MediaMusicService } from "../services/media-music-service.js";
 import { HealthFitnessService } from "../services/health-fitness-service.js";
 import { FinanceDeepService } from "../services/finance-deep-service.js";
 import { SubscriptionAuditService } from "../services/subscription-audit-service.js";
+import { BillManagementService } from "../services/bill-management-service.js";
 import { FinanceIngestService } from "../services/finance-ingest-service.js";
 import { SocialOutreachService } from "../services/social-outreach-service.js";
 import { CodeSandboxService } from "../services/code-sandbox-service.js";
 import { ShoppingOrderService } from "../services/shopping-order-service.js";
+import { ShoppingOrderStore } from "../services/shopping-order-store.js";
+import { ShoppingCompareService } from "../services/shopping-compare-service.js";
 import { AgentBrowserService } from "../services/agent-browser-service.js";
 import {
   BookingService,
@@ -159,6 +164,7 @@ import {
   buildDefaultBookingProviders,
   getBookingConfig,
 } from "../services/booking/index.js";
+import { buildQuoteAggregator } from "../services/booking/quote/index.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
 import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
@@ -476,6 +482,9 @@ export async function createAppServices(): Promise<AppServices> {
   // 未配置任何 provider 密钥时返回 null（仅保留已有 recap 行，不影响对话主链路）。
   getChatThreadStore().setRecapSummarizer(createLlmRollingRecapSummarizer());
   const scheduleTaskService = new ScheduleTaskService();
+  // 日程冲突检测 + 预订↔日程联动桥（程序层能力，LLM 只负责转述）
+  const scheduleConflictService = new ScheduleConflictService(scheduleTaskService);
+  const scheduleBookingBridge = new ScheduleBookingBridge(scheduleTaskService, scheduleConflictService);
   const weatherService = new WeatherService();
   const weatherPrefsService = new WeatherPrefsService();
   const infoHubService = new InfoHubService();
@@ -675,14 +684,30 @@ export async function createAppServices(): Promise<AppServices> {
   const subscriptionAuditService = new SubscriptionAuditService({
     financeDeepService,
   });
+  // 初始化账单管理服务（订阅与财务清理：账单追踪/到期提醒/缴费入账联动预算，
+  // 与账本同目录 bills.json，懒加载 + 写穿）。
+  const billManagementService = new BillManagementService({
+    financeDeepService,
+  });
   // 初始化社交主动出击服务（Twitter OAuth 1.0a + 微博 + 小红书/朋友圈占位，凭证从环境变量读取）。
   const socialOutreachService = new SocialOutreachService();
   // 初始化代码执行沙盒服务（python/node 子进程，独立工作目录 data/sandbox/{actorId}/{workspaceId}/）。
   const codeSandboxService = new CodeSandboxService();
   // 初始化购物/下单服务（后台 Playwright 无头浏览器，注入用户 Cookie 代用户下单）。
+  // 本地订单表 data/shopping/orders.json（单日预算统计依据）+ 支付宝钱包通道（收银台代付）。
+  const shoppingOrderStore = new ShoppingOrderStore(join(process.cwd(), "data", "shopping", "orders.json"));
   const shoppingOrderService = new ShoppingOrderService({
     browserSessionService,
     audit: auditService,
+    store: shoppingOrderStore,
+    alipayBot: alipayBotService,
+  });
+  // 初始化购物比价服务（跨平台同款比价 + 降价监控 + 保险/服务调研对比，只读零副作用）。
+  // 到价推送 onPriceAlert 在 ProactivityHub 装配段经 setOnPriceAlert 晚接线。
+  const shoppingCompareService = new ShoppingCompareService({
+    shoppingOrderService,
+    upstreamSearchService,
+    dataDir: join(process.cwd(), "data", "shopping"),
   });
   // 初始化 Agent 虚拟浏览器服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
   const agentBrowserService = new AgentBrowserService({
@@ -693,7 +718,14 @@ export async function createAppServices(): Promise<AppServices> {
   // 单笔/单日限额 + 订单落库 + 承诺板跟踪；Provider 按 BOOKING_MODE 组装）。
   // 承诺板在下方 agentic-memory 装配段构造后经 setCommitmentBoard 注入。
   const bookingConfig = getBookingConfig();
-  const bookingProviders = buildDefaultBookingProviders(bookingConfig);
+  // 实时报价比价抽象层：local 价格库保底 + MCP 实时源（RollingGo 酒店）+
+  // 浏览器代查源（携程机票）。源可用性由各自 fetch 内部判定（MCP 未配置 /
+  // Playwright 未装都如实返回空），聚合器汇总，故这里无条件挂载。
+  const quoteAggregator = buildQuoteAggregator({
+    mcpCaller: mcpClientService,
+    browserRunner: agentBrowserService,
+  });
+  const bookingProviders = buildDefaultBookingProviders(bookingConfig, { quoteAggregator });
   const bookingOrderStore = new BookingOrderStore(join(process.cwd(), "data", "booking", "orders.json"));
   const bookingService = new BookingService({
     providers: bookingProviders,
@@ -891,9 +923,11 @@ export async function createAppServices(): Promise<AppServices> {
     healthFitnessService,
     financeDeepService,
     subscriptionAuditService,
+    billManagementService,
     socialOutreachService,
     codeSandboxService,
     shoppingOrderService,
+    shoppingCompareService,
     agentBrowserService,
     bookingService,
   };
@@ -1593,7 +1627,7 @@ export async function createAppServices(): Promise<AppServices> {
 
   const scheduleIntentService = new ScheduleIntentService(externalChat);
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
-  registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService);
+  registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService, scheduleConflictService);
   const smartHomeService = new SmartHomeService();
   registerSmartHomeTools(toolRegistry, smartHomeService);
   // 启动智能家居设备状态轮询（若 HA 已配置），将状态变化发布为 smart_home 信号
@@ -1733,6 +1767,8 @@ export async function createAppServices(): Promise<AppServices> {
   agentCore.setMoodInferenceService(moodInferenceService);
   agentCore.setLifeSignalHubService(lifeSignalHubService);
   agentCore.setWsRegistry(wsConnectionRegistry);
+  // 确定性日程执行（2026-09-09）：提醒/日程由程序层解析直建，模型只转述。
+  agentCore.setScheduleIntentService(scheduleIntentService);
 
   // task.dispatch launch 晚绑定（2026-09-05 前后台架构）：派发端接到 agentCore
   taskDispatchLauncherRef.fn = (input) =>
@@ -4224,6 +4260,27 @@ export async function createAppServices(): Promise<AppServices> {
   proactivityHub.start();
   console.log("[Bootstrap] ProactivityHub 已装配（多元触发 + 频控 + speak/act/advise）");
 
+  // ─── 购物降价监控装配（复用 InterestWatcher 轮询模式，tick=PRICE_WATCH_TICK_MS 默认 60min）───
+  // shopping.compare.watch 工具入库 → 后台定时复查价格 → 到价且为新低价 →
+  // submitIntent（life_reminder kind，走 FrequencyGovernor 频控）speak 闭环主动推。
+  await shoppingCompareService.load();
+  shoppingCompareService.setOnPriceAlert((actorId, watch, hit) => {
+    proactivityHub.submitIntent({
+      actorId,
+      kind: "life_reminder",
+      importance: "medium",
+      title: `「${watch.query}」已降到 ¥${hit.priceCny}`,
+      summary:
+        `用户设置的降价监控命中：用户关注的「${watch.query}」当前在 ${watch.platform} 最低价 ¥${hit.priceCny}，` +
+        `已低于设定的目标价 ¥${watch.targetPrice}。` +
+        `像朋友分享好 deal 一样自然提起${hit.url ? `，附上链接 ${hit.url}` : ""}，轻问一句要不要下单。别写成资讯播报。`,
+      mode: "speak",
+      source: "finance",
+    });
+  });
+  shoppingCompareService.start();
+  console.log("[Bootstrap] 购物降价监控已装配（shopping.compare.watch）");
+
   // ─── Task 16 消费管家闭环装配（场景B）───
   // 工具执行成功 → hookBus tool.executed → 自动入账（finance-deep）
   // → 预算超支检测（life_reminder 单次提醒）→ 每月 1 日上月消费月报
@@ -4296,6 +4353,22 @@ export async function createAppServices(): Promise<AppServices> {
     });
   });
   subscriptionAuditService.start();
+
+  // ─── 账单管理装配（订阅与财务清理）───
+  // 每日扫描：到期前 3 天 / 已逾期 → life_reminder 主动提醒（同一到期日单次）；
+  // 缴费经 pay_bill 工具入账联动预算，不占扫描。
+  billManagementService.setOnBillReminder((actorId, message) => {
+    proactivityHub.submitIntent({
+      actorId,
+      kind: "life_reminder",
+      importance: "medium",
+      title: "账单到期提醒",
+      summary: message,
+      mode: "speak",
+      source: "finance",
+    });
+  });
+  billManagementService.start();
 
   // ─── Task 17 人情关系管家装配（场景C）───
   // 晨报每日生成 = 每日扫描：当天命中重要日子（KV important_dates，由
@@ -4808,8 +4881,10 @@ export async function createAppServices(): Promise<AppServices> {
     upcomingScheduleWatcher.stop();
     proactivityHub.stop();
     interestWatcher.stop();
+    shoppingCompareService.stop();
     consumptionLedgerListener.stop();
     subscriptionAuditService.stop();
+    billManagementService.stop();
     eveningDigestScheduler.stop();
     // 新增子系统：习惯闭环 / 到站监控 / 全双工语音
     habitLoopService.stop();
@@ -4862,6 +4937,7 @@ export async function createAppServices(): Promise<AppServices> {
     mediaMusicService,
     healthFitnessService,
     financeDeepService,
+    billManagementService,
     socialOutreachService,
     codeSandboxService,
     virtualPhoneService,

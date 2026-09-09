@@ -3,10 +3,16 @@
  * 与 Web 聊天里用自然语言建日程、`/chat/schedule-draft` 同源解析（`calendar.create_from_text`）。
  */
 import { resolveActorId } from "../agent/actor-id.js";
+import type { ScheduleConflictService } from "../services/schedule-conflict-service.js";
+import { buildConflictToolResult, precheckCreateConflict } from "../services/schedule-conflict-service.js";
 import type { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import type { ScheduleDraft } from "../services/schedule-intent-service.js";
 import type { CreateScheduleTaskInput, ScheduleTaskService } from "../services/schedule-task-service.js";
-import { parseScheduleTaskCategory } from "../services/schedule-task-service.js";
+import {
+  normalizeDurationMinutes,
+  normalizeRemindBeforeMinutes,
+  parseScheduleTaskCategory,
+} from "../services/schedule-task-service.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import {
   checkScheduleCreateDedup,
@@ -70,6 +76,8 @@ export function buildScheduleCreateInput(
       recurrence: draft.recurrence,
       timezone: tz,
       reminderMessage: draft.reminderMessage?.trim() || draft.description,
+      durationMinutes: draft.durationMinutes,
+      remindBeforeMinutes: draft.remindBeforeMinutes,
     };
   }
   if (draft.kind === "action") {
@@ -87,6 +95,7 @@ export function buildScheduleCreateInput(
       recurrence: draft.recurrence,
       timezone: tz,
       action: draft.action,
+      durationMinutes: draft.durationMinutes,
     };
   }
   return {
@@ -99,6 +108,7 @@ export function buildScheduleCreateInput(
     runAt: draft.runAt,
     recurrence: draft.recurrence,
     timezone: tz,
+    durationMinutes: draft.durationMinutes,
   };
 }
 
@@ -106,12 +116,14 @@ export function registerCalendarTools(
   registry: ToolRegistry,
   scheduleTaskService: ScheduleTaskService,
   scheduleIntentService: ScheduleIntentService,
+  conflictService?: ScheduleConflictService,
 ): void {
   registry.register("calendar.create_from_text", async (input, context) => {
     const text = String(input.text ?? "").trim();
     if (!text) return { ok: false, error: "text 不能为空" };
     const sessionId = resolveActorId(context);
     const tz = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
+    const forceCreate = input.forceCreate === true;
 
     // 去重：同一轮 + 相同文本只创建一次
     const roundId = context.chatUserMessageId || context.sessionId;
@@ -130,6 +142,18 @@ export function registerCalendarTools(
     }
     const draft = guarded.draft;
     try {
+      // 冲突预检（程序层确定性检测）：有冲突且未 forceCreate → 不创建，回冲突详情
+      if (conflictService) {
+        const conflictResult = precheckCreateConflict(conflictService, {
+          sessionId,
+          runAt: draft.runAt,
+          durationMinutes: draft.durationMinutes,
+          category: draft.category,
+          timezone: tz,
+          forceCreate,
+        });
+        if (conflictResult) return conflictResult;
+      }
       const payload = buildScheduleCreateInput(draft, sessionId, tz);
       const task = await scheduleTaskService.createTask(payload);
       const response = {
@@ -143,6 +167,8 @@ export function registerCalendarTools(
         category: task.category,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
+        durationMinutes: task.durationMinutes,
+        remindBeforeMinutes: task.remindBeforeMinutes,
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage,
       };
@@ -182,6 +208,9 @@ export function registerCalendarTools(
       return { ok: false, error: "非提醒类型需要提供 title" };
     }
     const recurrence = recurrenceRaw as "none" | "daily" | "weekly" | "yearly";
+    const durationMinutes = normalizeDurationMinutes(input.durationMinutes);
+    const remindBeforeMinutes = normalizeRemindBeforeMinutes(input.remindBeforeMinutes);
+    const forceCreate = input.forceCreate === true;
 
     // 去重：同一轮 + 相同描述+时间只创建一次
     const roundId = context.chatUserMessageId || context.sessionId;
@@ -190,6 +219,18 @@ export function registerCalendarTools(
     if (dedupHit) return { ...dedupHit, summary: `(同轮重复调用已拦截) ${dedupHit.summary ?? ""}` };
 
     try {
+      // 冲突预检（程序层确定性检测）：有冲突且未 forceCreate → 不创建，回冲突详情
+      if (conflictService) {
+        const conflictResult = precheckCreateConflict(conflictService, {
+          sessionId,
+          runAt,
+          durationMinutes,
+          category,
+          timezone,
+          forceCreate,
+        });
+        if (conflictResult) return conflictResult;
+      }
       if (kindRaw === "reminder") {
         const reminderMessage = String(input.reminderMessage ?? description).trim();
         const task = await scheduleTaskService.createTask({
@@ -203,6 +244,8 @@ export function registerCalendarTools(
           recurrence,
           timezone,
           reminderMessage,
+          durationMinutes,
+          remindBeforeMinutes,
         });
         const response = {
           ok: true,
@@ -215,6 +258,8 @@ export function registerCalendarTools(
           category: task.category,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
+          durationMinutes: task.durationMinutes,
+          remindBeforeMinutes: task.remindBeforeMinutes,
           recurrence: task.recurrence,
           reminderMessage: task.reminderMessage,
         };
@@ -365,5 +410,136 @@ export function registerCalendarTools(
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
     }
+  });
+
+  registry.register("calendar.update_task", async (input, context) => {
+    const sessionId = resolveActorId(context);
+    const taskId = String(input.taskId ?? "").trim();
+    if (!taskId) return { ok: false, error: "taskId 不能为空（来自 calendar.list_tasks）" };
+    const existing = scheduleTaskService.getTask(taskId);
+    if (!existing || existing.sessionId !== sessionId) {
+      return { ok: false, error: `日程 ${taskId} 不存在` };
+    }
+    const timezone = String(input.timezone ?? existing.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
+    const runAt = input.runAt != null && String(input.runAt).trim() ? String(input.runAt).trim() : undefined;
+    const recurrenceRaw = input.recurrence != null ? String(input.recurrence).trim() : undefined;
+    if (recurrenceRaw && !["none", "daily", "weekly", "yearly"].includes(recurrenceRaw)) {
+      return { ok: false, error: "recurrence 须为 none、daily、weekly 或 yearly" };
+    }
+    const durationMinutes =
+      input.durationMinutes !== undefined ? normalizeDurationMinutes(input.durationMinutes) : undefined;
+    const category =
+      input.category !== undefined ? parseScheduleTaskCategory(input.category) : undefined;
+
+    try {
+      // 改期冲突预检：仅当新时间/新时长实际变化时检测
+      if (
+        conflictService &&
+        (runAt || durationMinutes !== undefined) &&
+        input.forceCreate !== true
+      ) {
+        const conflictResult = precheckCreateConflict(conflictService, {
+          sessionId,
+          runAt: runAt ?? existing.nextRunAt ?? existing.runAt,
+          durationMinutes: durationMinutes ?? existing.durationMinutes,
+          category: category ?? existing.category,
+          timezone,
+          excludeTaskId: taskId,
+        });
+        if (conflictResult) return conflictResult;
+      }
+      const task = await scheduleTaskService.updateTask(taskId, {
+        title: input.title != null ? String(input.title) : undefined,
+        shortTitle: input.shortTitle != null ? String(input.shortTitle) : undefined,
+        description: input.description != null ? String(input.description) : undefined,
+        reminderMessage: input.reminderMessage != null ? String(input.reminderMessage) : undefined,
+        category,
+        recurrence: recurrenceRaw as "none" | "daily" | "weekly" | "yearly" | undefined,
+        runAt,
+        timezone: input.timezone != null ? timezone : undefined,
+        durationMinutes,
+        remindBeforeMinutes:
+          input.remindBeforeMinutes !== undefined
+            ? normalizeRemindBeforeMinutes(input.remindBeforeMinutes)
+            : undefined,
+        status:
+          input.status === "active" || input.status === "paused" || input.status === "cancelled"
+            ? input.status
+            : undefined,
+      });
+      return {
+        ok: true,
+        matched: true,
+        summary: "日程已更新",
+        taskId: task.taskId,
+        title: task.reminderMessage || task.title,
+        shortTitle: task.shortTitle,
+        kind: task.kind,
+        category: task.category,
+        status: task.status,
+        nextRunAt: task.nextRunAt,
+        nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
+        durationMinutes: task.durationMinutes,
+        remindBeforeMinutes: task.remindBeforeMinutes,
+        recurrence: task.recurrence,
+        reminderMessage: task.reminderMessage,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: msg };
+    }
+  });
+
+  registry.register("calendar.find_free_slots", async (input, context) => {
+    if (!conflictService) return { ok: false, error: "空闲时段查询未启用" };
+    const sessionId = resolveActorId(context);
+    const durationMinutes = Number(input.durationMinutes ?? 60);
+    if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+      return { ok: false, error: "durationMinutes 须为正整数（分钟）" };
+    }
+    const tz =
+      String(input.timezone ?? context.clientLocation?.timezone ?? "Asia/Shanghai").trim() ||
+      "Asia/Shanghai";
+    const dailyWindowRaw = input.dailyWindow as Record<string, unknown> | undefined;
+    const slots = conflictService.findFreeSlots({
+      sessionId,
+      durationMinutes: Math.round(durationMinutes),
+      from: input.from != null && String(input.from).trim() ? String(input.from).trim() : undefined,
+      to: input.to != null && String(input.to).trim() ? String(input.to).trim() : undefined,
+      timezone: tz,
+      dailyWindow:
+        dailyWindowRaw && typeof dailyWindowRaw.start === "string" && typeof dailyWindowRaw.end === "string"
+          ? { start: dailyWindowRaw.start, end: dailyWindowRaw.end }
+          : undefined,
+      excludeTaskId:
+        input.excludeTaskId != null && String(input.excludeTaskId).trim()
+          ? String(input.excludeTaskId).trim()
+          : undefined,
+      limit: Number.isFinite(Number(input.limit)) ? Number(input.limit) : undefined,
+    });
+    return {
+      ok: true,
+      summary: slots.length > 0 ? `找到 ${slots.length} 个空闲时段` : "范围内没有足够长的空闲时段",
+      durationMinutes: Math.round(durationMinutes),
+      timezone: tz,
+      slots: slots.map((s) => ({
+        startAt: s.startAt,
+        endAt: s.endAt,
+        startLocal: formatNextRunAtLocal(s.startAt, tz),
+        endLocal: new Date(s.endAt).toLocaleString("zh-CN", {
+          timeZone: tz,
+          month: "numeric",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }),
+        durationMinutes: s.durationMinutes,
+      })),
+      hint:
+        slots.length > 0
+          ? "把空闲时段转述给用户（用 startLocal/endLocal 展示），由用户选择后再创建或改期。"
+          : "没有可用空闲时段时，如实告知用户并询问是否缩小范围、缩短时长或改天。",
+    };
   });
 }

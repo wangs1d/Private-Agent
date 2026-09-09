@@ -1269,7 +1269,9 @@ class _DayRailChip extends StatelessWidget {
   }
 }
 
-/// 全屏行程规划页：独立路由，沉浸式浏览行程地图。
+/// 行程规划独立界面：全屏路由，沉浸式浏览行程地图。
+/// 不套 AppBar——网页版自带的玻璃拟态顶栏（目的地标题 + 关闭按钮）即页面顶栏，
+/// 关闭按钮经 [TravelPlanPanel.onClose] 弹出路由；原生兜底版同样渲染关闭按钮。
 class TravelPlanFullscreenPage extends StatelessWidget {
   const TravelPlanFullscreenPage({super.key, required this.data});
 
@@ -1280,16 +1282,11 @@ class TravelPlanFullscreenPage extends StatelessWidget {
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Scaffold(
       backgroundColor: cs.surface,
-      appBar: AppBar(
-        title: const Text("行程规划"),
-        backgroundColor: cs.surfaceContainer,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          tooltip: "返回",
-          onPressed: () => Navigator.of(context).pop(),
-        ),
+      body: TravelPlanPanel(
+        data: data,
+        fullscreen: true,
+        onClose: () => Navigator.of(context).pop(),
       ),
-      body: TravelPlanPanel(data: data, fullscreen: true),
     );
   }
 }

@@ -822,7 +822,7 @@ export class BrainCenter {
    * 未注册 DecisionHub 时返回默认 fast 低置信度（保守，不强制升级）。
    */
   routeLight(userMessage: string): {
-    mode: "fast" | "complex";
+    mode: "direct" | "tool_loop";
     confidence: number;
     reason: string;
     agentType?: "tech" | "info" | "life";
@@ -837,7 +837,7 @@ export class BrainCenter {
         agentType: d.agentType,
       };
     }
-    return { mode: "fast", confidence: 0.5, reason: "no_decision_hub" };
+    return { mode: "direct", confidence: 0.5, reason: "no_decision_hub" };
   }
 
   // ---- Step 7 扩展：新模块注册 + getter --------------------------------
@@ -1508,7 +1508,7 @@ export class BrainCenter {
           route: fallbackRoute,
           response: "",
           memoryWrites: [],
-          needsToolLoop: fallbackRoute.mode !== "fast",
+          needsToolLoop: fallbackRoute.mode !== "direct",
           rationale: `cognize_failed:${String(e).slice(0, 80)}`,
         };
         if (typeof this.awareness?.assessConfidence === "function") {
@@ -1527,7 +1527,7 @@ export class BrainCenter {
         route: fallbackRoute,
         response: "",
         memoryWrites: [],
-        needsToolLoop: fallbackRoute.mode !== "fast",
+        needsToolLoop: fallbackRoute.mode !== "direct",
         rationale: "no_cognitive_engine",
       };
       if (typeof this.awareness?.assessConfidence === "function") {
@@ -1539,7 +1539,7 @@ export class BrainCenter {
 
     // === 阶段 2.5：低置信度路由升级 ===
     // 置信度来源优先级：cognize LLM 基于对话内容的语义评判 > 规则兜底（仅 cognize 失败时）。
-    // score < 0.4 且 route.mode === "fast" 时升级到 complex，让子 Agent 兜底。
+    // score < 0.4 且 route.mode === "direct" 时升级到 complex，让子 Agent 兜底。
     //
     // ⚠️ 仅对 `fast` 路由生效：该路由是「主 Agent 带工具先试」，若 LLM 基于内容
     // 判定置信度低（信息不足/能力缺失），委派给子 Agent 兜底是合理的。
@@ -1552,15 +1552,15 @@ export class BrainCenter {
     const effReason = typeof cognitive.confidence === "number"
       ? (cognitive.confidenceReason ?? `cognize_confidence=${cognitive.confidence.toFixed(2)}`)
       : (ruleFallbackConfidence?.reason ?? "");
-    if (typeof effScore === "number" && effScore < 0.4 && finalRoute.mode === "fast") {
+    if (typeof effScore === "number" && effScore < 0.4 && finalRoute.mode === "direct") {
       console.log(
         `[BrainCenter] 低置信度路由升级 actorId=${actorId} score=${effScore.toFixed(2)} ` +
-          `origMode=${finalRoute.mode} → complex reason=${effReason}`,
+          `reason=${effReason}`,
       );
       finalRoute = {
         userMessage: finalRoute.userMessage,
         system: "system2",
-        mode: "complex",
+        mode: "tool_loop",
         rationale: `low_confidence_override:${effReason}`,
         decidedAt: now,
       };
@@ -2181,7 +2181,7 @@ export class BrainCenter {
       return {
         userMessage,
         system: "system1",
-        mode: "fast",
+        mode: "direct",
         rationale: "PlannerCortex 未注册",
         decidedAt: new Date().toISOString(),
       };
@@ -2193,7 +2193,7 @@ export class BrainCenter {
       return {
         userMessage,
         system: "system1",
-        mode: "fast",
+        mode: "direct",
         rationale: "PlannerCortex 未注册",
         decidedAt: new Date().toISOString(),
       };

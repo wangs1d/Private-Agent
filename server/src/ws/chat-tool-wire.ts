@@ -260,10 +260,16 @@ export function wireToolExecuted(ctx: ChatToolWireContext, info: ToolExecutedInf
     info.result.ok === true &&
     info.result.taskId
   ) {
-    const isDelete = info.toolName.replace(/_/g, ".") === "calendar.delete_task";
+    const normalized = info.toolName.replace(/_/g, ".");
+    const action =
+      normalized === "calendar.delete_task"
+        ? "deleted"
+        : normalized === "calendar.update_task"
+          ? "updated"
+          : "created";
     sendScheduleTasksChanged(ctx, {
       ...info.result,
-      action: isDelete ? "deleted" : "created",
+      action,
     });
   }
 

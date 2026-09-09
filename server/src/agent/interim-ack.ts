@@ -14,7 +14,6 @@ const NOISE_PREFIXES = /^(你好|hi|hello|hey|谢谢|thanks|thank you|再见|bye
  */
 export function shouldEmitInterimAck(
   text: string,
-  _mode: LlmExecutionMode,
   opts: { enabled: boolean } = { enabled: true },
 ): boolean {
   if (!opts.enabled) return false;
@@ -28,8 +27,7 @@ export function shouldEmitInterimAck(
 
 export function shouldUsePhasedAsyncConversation(
   text: string,
-  mode: LlmExecutionMode,
   opts: { enabled: boolean } = { enabled: true },
 ): boolean {
-  return shouldEmitInterimAck(text, mode, opts);
+  return shouldEmitInterimAck(text, opts);
 }
