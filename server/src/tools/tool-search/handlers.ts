@@ -12,6 +12,8 @@ import { getQueryEmbedding, getQueryEmbeddingBounded, peekQueryEmbedding } from 
 import { sharedHistoryStore, type HistoryScoreStore } from "./retrieval/history-score.js";
 import { ResourceType } from "./registry/models.js";
 import { toolSearchMetrics } from "./observability/metrics.js";
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { loadFeedbackState, saveFeedbackState } from "./feedback-state-persistence.js";
 import { isRegisteredSkillChatToolName } from "../../skills/skill-openai-bridge.js";
 
@@ -382,6 +384,7 @@ function recordToolCallFeedback(catalog: DeferredToolCatalog, chosen: string): v
   // （0 = top-1；-1 = 选了召回列表之外的工具，检索漏报）
   const chosenRank = ctx.lastSearchMatches.indexOf(chosen);
   toolSearchMetrics.recordRecall(chosenRank);
+  if (chosenRank < 0) recordRecallMissSample(ctx.lastSearchQuery, chosen, ctx.lastSearchMatches);
   // 阶段收口：调用成功同步驱动 rate_limited 复位 + 图边权重强化（Python
   // feedback.py 语义的进程内收敛实现）
   recordAdaptiveResourceFeedback(chosen, true);
@@ -406,6 +409,52 @@ function recordToolCallFeedback(catalog: DeferredToolCatalog, chosen: string): v
       result_quality_score: 0,
       call_timestamp: now,
     });
+  }
+}
+
+// ---- 检索漏报样本采集（改写语料回流）：chosen 不在召回列表 = 检索面真实盲区 ----
+
+const MISS_SAMPLE_MAX_BYTES = 5 * 1024 * 1024;
+
+function recordRecallMissSample(
+  query: string,
+  chosen: string,
+  matches: string[],
+): void {
+  const base = process.env.PA_DATA_DIR?.trim() || "data";
+  const path = join(base, "tool-recall-miss-samples.ndjson");
+  const line =
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      query,
+      chosen,
+      returned_top5: matches.slice(0, 5),
+    }) + "\n";
+  // fire-and-forget：样本采集任何失败都不影响检索主链路
+  void (async () => {
+    try {
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, line, "utf8");
+    } catch {
+      /* 静默 */
+    }
+  })();
+  void enforceMissSampleCap(path);
+}
+
+/** 粗放容量上限：超 5MB 截掉最旧一半（低频触发， miss 本身是稀事件）。 */
+async function enforceMissSampleCap(path: string): Promise<void> {
+  try {
+    const { stat, truncate, readFile } = await import("node:fs/promises");
+    const info = await stat(path);
+    if (info.size <= MISS_SAMPLE_MAX_BYTES) return;
+    const text = await readFile(path, "utf8");
+    const lines = text.split("\n");
+    const keep = lines.slice(Math.floor(lines.length / 2)).join("\n");
+    await truncate(path, 0);
+    if (keep) await appendFile(path, keep, "utf8");
+  } catch {
+    /* 静默 */
   }
 }
 

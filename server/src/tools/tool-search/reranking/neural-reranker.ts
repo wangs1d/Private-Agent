@@ -30,15 +30,24 @@ function rerankDocument(candidate: HybridRetrievedResource): string {
   ]
     .filter(Boolean)
     .join(" ")
-    .slice(0, 120);
+    .slice(0, NEURAL_RERANK_DOC_CHARS);
 }
 
 /**
  * 送 sidecar 的重排对数：CPU 实测 10 对 × 160 字符 ≈ 400ms+（打穿预算、熔断
  * 反复开闸）。重排的价值集中在决定最终 top-5 输出的前几名——只重排前 6 对
  * （6×120 ≈ 150-250ms），其余候选按词面序原样保留在尾部。
+ * 可经 env 调整（GPU/更强硬件可放宽：AGENT_NEURAL_RERANK_TOP_N=10、
+ * AGENT_NEURAL_RERANK_DOC_CHARS=200，CPU 标定值勿盲目调大）。
  */
-const NEURAL_RERANK_TOP_N = 6;
+const NEURAL_RERANK_TOP_N = clampEnvInt("AGENT_NEURAL_RERANK_TOP_N", 6, 1, 20);
+const NEURAL_RERANK_DOC_CHARS = clampEnvInt("AGENT_NEURAL_RERANK_DOC_CHARS", 120, 40, 1000);
+
+function clampEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const n = Number.parseInt(process.env[name] ?? "", 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
 
 /**
  * 采信门槛（2026-09-12 A/B 两次实测教训，门禁实现在 reranking-pipeline）：
@@ -86,6 +95,24 @@ export function createNeuralLlmReranker(): LlmReranker | undefined {
       }))
       .sort((a, b) => b.score - a.score)
       .map((x) => x.id);
-    return [...headOrder, ...ids.slice(topN)];
+
+    // 边界缝合：神经只重排了 head，tail 保持词面序——head 末位词面分若低于
+    // tail 首位，会把词面强候选压在分界之下。缝合规则：tail 头部词面分高于
+    // head 末位时，前移到 head 末位之前（只跨一个位置，神经对 head 内部的
+    // 定序权不受影响）；循环至边界单调。
+    const byId = new Map(candidates.map((c) => [c.resource.level1.resource_id, c] as const));
+    const headQueue = headOrder.map((id) => byId.get(id)!).filter(Boolean);
+    const tailQueue = ids
+      .slice(topN)
+      .map((id) => byId.get(id)!)
+      .filter(Boolean);
+    while (tailQueue.length > 0 && headQueue.length > 1) {
+      const tailHead = tailQueue[0]!;
+      const headLast = headQueue[headQueue.length - 1]!;
+      if (tailHead.final_score <= headLast.final_score) break;
+      tailQueue.shift();
+      headQueue.splice(headQueue.length - 1, 0, tailHead);
+    }
+    return [...headQueue, ...tailQueue].map((c) => c.resource.level1.resource_id);
   };
 }

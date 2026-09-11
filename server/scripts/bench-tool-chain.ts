@@ -14,6 +14,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { buildDeferredCatalog, type DeferredToolCatalog } from "../src/tools/tool-search/catalog.js";
 import { executeToolSearchBridge } from "../src/tools/tool-search/handlers.js";
 import { getToolSearchConfig } from "../src/tools/tool-search/env.js";
+import { toolSearchMetrics } from "../src/tools/tool-search/observability/metrics.js";
 import { getBuiltinAgentChatTools } from "../src/external-model/openai-compatible-tool-loop.js";
 import { reportChatToolDrift } from "../src/tools/chat-tool-drift.js";
 import { tryRepairTruncatedJsonObject } from "../src/external-model/openai-compatible-tool-loop.js";
@@ -169,7 +170,22 @@ async function main() {
   const repairTotal = Math.round(performance.now() - repairStart);
   console.log(`  10 万次合计=${repairTotal}ms（平均 ${(repairTotal / 100_000).toFixed(4)}ms/次），成功修复 ${repaired}/100000`);
 
-  delete process.env.AGENT_TOOL_SEARCH_BACKEND;
+  // 神经通道观测（延迟归因用）：各特性 ok/timeout/fallback/breaker_skip 计数 +
+  // 召回命中率。sidecar 未启动时这里应看到 breaker_skip 主导、timeout ≤ 熔断阈值。
+  {
+    const snap = toolSearchMetrics.snapshot();
+    console.log(`
+=== E) 神经通道与召回质量观测 ===`);
+    for (const [feature, n] of Object.entries(snap.neural)) {
+      console.log(`  neural.${feature}: ${JSON.stringify(n)}`);
+    }
+    const r = snap.recall;
+    const pct = (v: number) => (r.samples > 0 ? Math.round((v / r.samples) * 1000) / 10 : 0);
+    console.log(
+      `  recall: 样本=${r.samples}  top1=${pct(r.top1)}%  top3=${pct(r.top3)}%  top5=${pct(r.top5)}%  miss=${pct(r.miss)}%`,
+    );
+  }
+
   console.log("");
 }
 

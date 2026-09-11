@@ -46,7 +46,24 @@ function parseNeuralFeatureMode(raw: string | undefined): NeuralFeatureMode {
   return "auto";
 }
 
+let _configCache: ReturnType<typeof buildToolSearchConfig> | null = null;
+
+/**
+ * 模块级记忆化：配置是启动期 env 的纯函数，热路径（每次检索多处读取）此前每次
+ * 都全量 parse env + clamp——微秒级但高频。测试需改 env 后重读时调用
+ * {@link resetToolSearchConfigForTests}（golden/coverage 均在 import 前设 env，不受影响）。
+ */
 export function getToolSearchConfig() {
+  if (!_configCache) _configCache = buildToolSearchConfig();
+  return _configCache;
+}
+
+/** 单元测试重置配置缓存。 */
+export function resetToolSearchConfigForTests(): void {
+  _configCache = null;
+}
+
+function buildToolSearchConfig() {
   return {
     // 2026-09-11：检索管线收敛为进程内 adaptive（Python tool-router 已删除）
     enabled: parseEnabledMode(process.env.AGENT_TOOL_SEARCH_ENABLED),

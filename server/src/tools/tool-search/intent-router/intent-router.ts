@@ -49,6 +49,16 @@ const categoryIndex = new Bm25Index(
 );
 
 /**
+ * 查询的类别词面强度（top-1 类别 BM25 原始分）。
+ * routeSingle 的置信度映射为 0.62 + min(0.3, top/8)——top ≥ 2.0 即词面置信 ≥0.87，
+ * 供神经意图路由的对称门禁使用（词面有强信号就不问 sidecar，与 rerank 的
+ * lexicalDead 门禁同一设计哲学：神经只救词面失效的场景）。
+ */
+export function categoryLexicalTopScore(query: string): number {
+  return categoryIndex.search(query, 1)[0]?.score ?? 0;
+}
+
+/**
  * Phase-2 Intent Router.
  *
  * 运行顺序：

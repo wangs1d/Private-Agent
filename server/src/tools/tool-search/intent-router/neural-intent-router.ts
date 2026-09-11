@@ -15,6 +15,7 @@ import type {
   SemanticIntentRouter,
 } from "./intent-router.js";
 import {
+  categoryLexicalTopScore,
   extractParams,
   inferConstraints,
   inferCapability,
@@ -61,6 +62,13 @@ export function createNeuralIntentRouter(): SemanticIntentRouter | undefined {
     if (!query) return null;
     // 复合查询（「查天气然后定闹钟」）拆分合并逻辑在正则路径，单域分类反而更差
     if (splitCompoundQuery(query).length > 1) return null;
+    // 词面对称门禁（与 rerank 的 lexicalDead 同哲学）：类别 BM25 已有强信号
+    // （top ≥ 阈值 ≈ 词面置信 0.87+）时不问 sidecar——神经只救词面失效场景。
+    // 2026-09-12 延迟归因：150 目录合成基准上词面强信号查询占比高，全量问
+    // sidecar 把 p95 推到 200ms+；门禁后神经调用集中在真正需要的改写查询。
+    const gate = Number.parseFloat(process.env.AGENT_NEURAL_INTENT_LEXICAL_GATE ?? "");
+    const gateThreshold = Number.isFinite(gate) && gate > 0 ? gate : 2.0;
+    if (categoryLexicalTopScore(query) >= gateThreshold) return null;
 
     const result = await neuralClassifyIntent(query, DOMAIN_LABELS);
     if (!result || !result.domain) return null;

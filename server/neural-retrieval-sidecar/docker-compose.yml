@@ -1,0 +1,32 @@
+# 神经检索 sidecar 编排：docker compose up -d neural-retrieval-sidecar
+# 模型版本锁：AGNEURAL_MODEL_REVISION 建议锁 HF commit hash（与构建期一致）。
+services:
+  neural-retrieval-sidecar:
+    build:
+      context: .
+      args:
+        AGNEURAL_EMBED_MODEL: ${AGNEURAL_EMBED_MODEL:-BAAI/bge-small-zh-v1.5}
+        AGNEURAL_RERANK_MODEL: ${AGNEURAL_RERANK_MODEL:-BAAI/bge-reranker-base}
+        AGNEURAL_MODEL_REVISION: ${AGNEURAL_MODEL_REVISION:-}
+    image: neural-retrieval-sidecar:latest
+    container_name: neural-retrieval-sidecar
+    ports:
+      - "8790:8790"
+    environment:
+      - AGNEURAL_EMBED_MODEL=${AGNEURAL_EMBED_MODEL:-BAAI/bge-small-zh-v1.5}
+      - AGNEURAL_RERANK_MODEL=${AGNEURAL_RERANK_MODEL:-BAAI/bge-reranker-base}
+      - AGNEURAL_MODEL_REVISION=${AGNEURAL_MODEL_REVISION:-}
+      - AGNEURAL_MAX_BATCH=${AGNEURAL_MAX_BATCH:-64}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys,json; d=json.load(urllib.request.urlopen('http://127.0.0.1:8790/health', timeout=4)); sys.exit(0 if d.get('ok') else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3

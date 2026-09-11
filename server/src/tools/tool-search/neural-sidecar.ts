@@ -72,10 +72,16 @@ async function labelVectorsFor(modelHint: string, labels: Record<string, string>
 /**
  * 按特性独立的熔断器：连续 threshold 次失败开闸 cooldown 毫秒，
  * 开闸期 isOpen() 为 true（调用方直接走降级，零网络成本）；任何成功复位。
+ *
+ * 半开并发保护（2026-09-12 优化）：冷却期满时只放行**一个**探针请求
+ * （probing 标志），并发到达的其余请求直接按开闸处理——旧实现把失败计数
+ * 降一档放行，高并发下一波请求同时涌向已挂的 sidecar，全部超时后又集体
+ * 记失败重新开闸，形成周期性探针风暴。探针落定（成功/失败）后 probing 复位。
  */
 class NeuralBreaker {
   private consecutiveFailures = 0;
   private openedAt = 0;
+  private probing = false;
 
   constructor(
     private readonly threshold: number,
@@ -83,10 +89,13 @@ class NeuralBreaker {
   ) {}
 
   isOpen(now = Date.now()): boolean {
+    // 探针在飞：其余请求一律按开闸处理（probing 优先于计数判断，否则放行探针
+    // 后计数降档会走进 closed 分支，并发请求照样涌入）
+    if (this.probing) return true;
     if (this.consecutiveFailures < this.threshold) return false;
     if (now - this.openedAt >= this.cooldownMs) {
-      // 冷却期满：半开，放行一次试探（失败会立即重新开闸）
-      this.consecutiveFailures = this.threshold - 1;
+      // 冷却期满：半开，放行单个探针
+      this.probing = true;
       return false;
     }
     return true;
@@ -94,11 +103,13 @@ class NeuralBreaker {
 
   recordSuccess(): void {
     this.consecutiveFailures = 0;
+    this.probing = false;
   }
 
   recordFailure(now = Date.now()): void {
+    this.probing = false;
     this.consecutiveFailures += 1;
-    if (this.consecutiveFailures === this.threshold) {
+    if (this.consecutiveFailures >= this.threshold) {
       this.openedAt = now;
       console.warn(
         `[tool-search:neural] 熔断开闸：连续失败 ${this.consecutiveFailures} 次，冷却 ${this.cooldownMs}ms`,

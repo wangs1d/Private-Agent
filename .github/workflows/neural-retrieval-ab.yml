@@ -1,0 +1,32 @@
+# 神经检索 A/B 周期验收（docs/neural-retrieval-plan.md §6）：
+# 双遍（神经开/关）跑 golden + 改写集，红线：
+#   1) golden top-3 零回归（相对神经关闭基线）
+#   2) 降级路径（sidecar 不可用）p95 < 50ms
+# 依赖：sidecar 服务可达（AGENT_NEURAL_SIDECAR_URL），不可达时脚本自动退化为
+# 「双关」对照并标记 warning 而非失败——CI 机器通常无 sidecar。
+name: neural-retrieval-ab
+on:
+  schedule:
+    - cron: "0 3 * * *" # 每日 03:00 UTC
+  workflow_dispatch: {}
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci --prefix server || (cd server && npm install)
+      - name: Neural A/B comparison
+        working-directory: server
+        env:
+          AGENT_TOOL_SEARCH_EMBEDDING: "off"
+        run: npm run eval:neural-ab
+      - name: Degradation path budget (sidecar down)
+        working-directory: server
+        env:
+          AGENT_NEURAL_SIDECAR_URL: "http://127.0.0.1:9"
+        run: npm run bench:tool-chain

@@ -29,6 +29,9 @@ from pydantic import BaseModel, Field
 EMBED_MODEL = os.environ.get("AGNEURAL_EMBED_MODEL", "BAAI/bge-small-zh-v1.5")
 RERANK_MODEL = os.environ.get("AGNEURAL_RERANK_MODEL", "BAAI/bge-reranker-base")
 MAX_BATCH = int(os.environ.get("AGNEURAL_MAX_BATCH", "64"))
+# 模型版本锁（部署化）：固定 HF revision（commit/branch/tag），防止上游模型更新
+# 导致 TS 侧磁盘缓存向量与模型静默失配。生产建议锁 commit hash。
+MODEL_REVISION = os.environ.get("AGNEURAL_MODEL_REVISION") or None
 CLASSIFY_TEMPERATURE = float(os.environ.get("AGNEURAL_CLASSIFY_TEMPERATURE", "0.05"))
 
 app = FastAPI(title="neural-retrieval-sidecar", version="0.2.0")
@@ -50,10 +53,10 @@ def _lazy_load() -> None:
     from sentence_transformers import CrossEncoder, SentenceTransformer
 
     started = time.perf_counter()
-    _state["embed"] = SentenceTransformer(EMBED_MODEL)
+    _state["embed"] = SentenceTransformer(EMBED_MODEL, revision=MODEL_REVISION)
     _state["embed_dim"] = _state["embed"].get_sentence_embedding_dimension()
     try:
-        _state["rerank"] = CrossEncoder(RERANK_MODEL, max_length=512)
+        _state["rerank"] = CrossEncoder(RERANK_MODEL, max_length=512, revision=MODEL_REVISION)
     except Exception:  # rerank 可选：仅装了 embedding 模型时 /rerank 返回 503
         _state["rerank"] = None
     _state["loaded_at"] = round(time.perf_counter() - started, 2)
@@ -119,6 +122,7 @@ def health() -> dict:
         "warm": warm,
         "embed_model": EMBED_MODEL,
         "rerank_model": RERANK_MODEL if _state["rerank"] is not None else None,
+        "revision": MODEL_REVISION or "default",
         "dim": _state["embed_dim"],
         "load_seconds": _state["loaded_at"],
     }
