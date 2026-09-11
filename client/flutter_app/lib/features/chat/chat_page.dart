@@ -1,6 +1,7 @@
 import "package:flutter/foundation.dart"
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
+import "package:flutter/rendering.dart" show ScrollCacheExtent;
 import "package:flutter/services.dart";
 import "dart:async";
 import "package:url_launcher/url_launcher.dart";
@@ -253,9 +254,24 @@ class _ChatPageState extends State<ChatPage>
   bool _isRestoringPosition = false; // 恢复锁：正在恢复位置时阻止所有自动滚动
   bool _isAutoScrolling = false; // 自动滚动动画进行中标记：防止流式更新打断滚动导致底部抖动
 
-  /// 图片预览锚点：点击图片打开右侧面板前记录当前滚动位置，
-  /// 打开后列表可能因重新布局跳到最底部，用锚点把视图拉回图片所在位置。
-  double? _previewAnchor;
+  /// 图片预览锚点（内容锚点）：点击图片打开右侧面板前，记录「被点照片」
+  /// 的渲染盒及其相对视口顶边的距离；面板打开会改变聊天分栏宽度，消息
+  /// 条目重新排版后「绝对像素偏移」不再对应照片位置（长会话下漂移可达
+  /// 数千像素，表现为列表直接跳到底部），这里改为逐帧把照片拉回原视口位置。
+  RenderBox? _previewAnchorBox;
+  double? _previewAnchorTopInViewport;
+
+  /// 点击时的像素偏移：照片渲染盒被回收（条目滚出 cacheExtent）时的兜底。
+  double? _previewAnchorPixels;
+  int _previewAnchorStableFrames = 0;
+  int _previewAnchorFrames = 0;
+
+  /// 校正会话的帧数上限（约 2.5s），防止布局持续变化时永久循环。
+  static const int _previewAnchorMaxFrames = 150;
+
+  /// 锚点校正会话是否进行中（期间屏蔽自动滚动与「用户滚动」误判）。
+  bool get _isPreviewAnchorActive =>
+      _previewAnchorPixels != null || _previewAnchorBox != null;
 
   // 预定义常量 - 减少重复创建对象
   /// 聊天内容列（消息流 + 输入区）的最大宽度：宽屏下共同居中收敛，
@@ -302,6 +318,8 @@ class _ChatPageState extends State<ChatPage>
     // 已有自动滚动动画进行中时直接忽略，避免流式回答期间反复调用
     // 打断上一次动画、从当前位置重新启动，造成底部气泡上下抖动的现象。
     if (_isAutoScrolling) return;
+    // 图片预览锚点校正中不抢滚动，否则会把视图从照片位置拽回底部
+    if (_isPreviewAnchorActive) return;
     // reverse 模式下，pixels=0 就是列表底部（最新消息处）
     // instant 时直接 jumpTo(0)，非 instant 用短动画过渡
     if (instant) {
@@ -328,6 +346,9 @@ class _ChatPageState extends State<ChatPage>
 
   void _onScroll() {
     if (!_scrollController.hasClients) return;
+    // 锚点校正期间的程序性 jumpTo 不算用户滚动（否则会误亮「滚到底部」
+    // 悬浮按钮，并压制后续正常的新消息自动滚动判断）
+    if (_isPreviewAnchorActive) return;
     // reverse 模式下：pixels=0 是底部（最新消息），pixels 越大越靠近顶部（最旧消息）
     final double currentScroll = _scrollController.position.pixels;
 
@@ -343,42 +364,133 @@ class _ChatPageState extends State<ChatPage>
     }
   }
 
-  /// ====== 图片预览滚动锚点 ======
+  /// ====== 图片预览滚动锚点（内容锚点版） ======
   ///
-  /// 打开右侧图片预览面板时，列表会因重新布局（分栏宽度变化）被重置，
-  /// 可能跳到最底部。这里在「打开前」记录当前滚动位置，随后分多帧把视图
-  /// 拉回锚点，保证照片仍停留在用户原来看的那条位置。
-  void _savePreviewAnchor() {
+  /// 打开右侧图片预览面板时聊天分栏宽度变化，消息条目重新排版，「打开前
+  /// 的像素偏移」不再对应照片位置。这里改为锚定被点照片本身：
+  /// 1. 打开前：从点击处 context 校验照片确实在本聊天列表内，记录照片
+  ///    渲染盒、照片顶边相对视口顶边的距离、当前像素偏移；
+  /// 2. 打开后：逐帧读取照片当前视口位置，按差值 jumpTo(pixels - delta)
+  ///    （reverse 列表：照片视觉下移 delta 时像素应减 delta），直到连续
+  ///    3 帧稳定或超出帧数上限；照片渲染盒被回收时退回像素级兜底。
+  void _savePreviewAnchor(
+      ImagePreviewSnapshot item, BuildContext? anchorContext) {
     if (!_scrollController.hasClients) return;
-    _previewAnchor = _scrollController.position.pixels;
-    // 面板 setState 触发的重新布局在下一帧发生，分帧恢复更稳妥
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => _restorePreviewAnchor(tries: 3));
-  }
+    _previewAnchorPixels = _scrollController.position.pixels;
+    _previewAnchorBox = null;
+    _previewAnchorTopInViewport = null;
 
-  void _restorePreviewAnchor({int tries = 3}) {
-    final double? target = _previewAnchor;
-    if (target == null) return;
-    if (!_scrollController.hasClients) {
-      if (tries > 0) {
-        WidgetsBinding.instance.addPostFrameCallback(
-            (_) => _restorePreviewAnchor(tries: tries - 1));
-      } else {
-        _previewAnchor = null;
-      }
+    if (anchorContext == null) {
+      _schedulePreviewAnchorRestore();
       return;
     }
-    final double max = _scrollController.position.maxScrollExtent;
-    final double p = target.clamp(0.0, max);
-    if ((_scrollController.position.pixels - p).abs() > 2) {
-      _scrollController.jumpTo(p);
+
+    // 校验被点照片位于本聊天列表的 Scrollable 内（弹层/独立面板里的
+    // 图片不在消息流中，内容锚点无意义，走像素兜底）。向上遍历祖先时
+    // 跳过气泡内部的横向轮播等子滚动视图（controller 不匹配）。
+    ScrollableState? listScrollable;
+    anchorContext.visitAncestorElements((Element ancestor) {
+      if (ancestor is StatefulElement && ancestor.state is ScrollableState) {
+        final ScrollableState state = ancestor.state as ScrollableState;
+        if (state.widget.controller == _scrollController) {
+          listScrollable = state;
+          return false;
+        }
+      }
+      return true;
+    });
+    final RenderObject? viewportRo =
+        listScrollable?.context.findRenderObject();
+    final RenderObject? tapRo = anchorContext.findRenderObject();
+    if (viewportRo is RenderBox &&
+        viewportRo.attached &&
+        tapRo is RenderBox &&
+        tapRo.attached &&
+        tapRo.hasSize) {
+      final double tapTop = tapRo.localToGlobal(Offset.zero).dy;
+      final double vpTop = viewportRo.localToGlobal(Offset.zero).dy;
+      _previewAnchorBox = tapRo;
+      _previewAnchorTopInViewport = tapTop - vpTop;
     }
-    if (tries > 0) {
-      _previewAnchor = p;
-      WidgetsBinding.instance.addPostFrameCallback(
-          (_) => _restorePreviewAnchor(tries: tries - 1));
+    _schedulePreviewAnchorRestore();
+  }
+
+  void _schedulePreviewAnchorRestore() {
+    _previewAnchorStableFrames = 0;
+    _previewAnchorFrames = 0;
+    // 面板 setState 触发的重新布局发生在下一帧，之后逐帧校正
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _restorePreviewAnchor());
+  }
+
+  void _restorePreviewAnchor() {
+    if (!mounted || !_isPreviewAnchorActive) {
+      _endPreviewAnchorSession();
+      return;
+    }
+    if (++_previewAnchorFrames > _previewAnchorMaxFrames) {
+      _endPreviewAnchorSession();
+      return;
+    }
+    if (!_scrollController.hasClients) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _restorePreviewAnchor());
+      return;
+    }
+
+    final RenderBox? box = _previewAnchorBox;
+    final double? anchorTop = _previewAnchorTopInViewport;
+    if (box == null || !box.attached || anchorTop == null) {
+      // 内容锚点失效（弹层图片 / 渲染盒已随条目被回收）：像素级兜底恢复
+      final double? fallback = _previewAnchorPixels;
+      if (fallback != null) {
+        final double p =
+            fallback.clamp(0.0, _scrollController.position.maxScrollExtent);
+        if ((_scrollController.position.pixels - p).abs() > 2) {
+          _scrollController.jumpTo(p);
+        }
+      }
+      _endPreviewAnchorSession();
+      return;
+    }
+
+    final RenderObject? viewportRo = _scrollController
+        .position.context.storageContext.findRenderObject();
+    if (viewportRo is! RenderBox || !viewportRo.attached) {
+      _endPreviewAnchorSession();
+      return;
+    }
+
+    final double currentTop = box.localToGlobal(Offset.zero).dy -
+        viewportRo.localToGlobal(Offset.zero).dy;
+    final double delta = currentTop - anchorTop;
+    if (delta.abs() < 0.5) {
+      // 连续 3 帧无漂移 → 布局已收敛，结束校正
+      if (++_previewAnchorStableFrames >= 3) {
+        _endPreviewAnchorSession();
+        return;
+      }
     } else {
-      _previewAnchor = null;
+      _previewAnchorStableFrames = 0;
+      final double target = (_scrollController.position.pixels - delta)
+          .clamp(0.0, _scrollController.position.maxScrollExtent);
+      _scrollController.jumpTo(target);
+    }
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _restorePreviewAnchor());
+  }
+
+  /// 结束锚点校正会话；结束时按当前位置同步「用户滚动」标记，
+  /// 避免校正期间的程序性滚动让流式自动滚动误判而把视图拽回底部。
+  void _endPreviewAnchorSession() {
+    _previewAnchorBox = null;
+    _previewAnchorTopInViewport = null;
+    _previewAnchorPixels = null;
+    _previewAnchorStableFrames = 0;
+    _previewAnchorFrames = 0;
+    if (_scrollController.hasClients) {
+      _isUserScrollingNotifier.value =
+          _scrollController.position.pixels > 100;
     }
   }
 
@@ -392,7 +504,7 @@ class _ChatPageState extends State<ChatPage>
 
     // 离开对话 Tab → 保存位置
     if (wasActive && !nowActive) {
-      print(
+      debugPrint(
           '[ChatScroll] 👋 离开对话Tab: wasActive=$wasActive → nowActive=$nowActive');
       _isTabActive = false;
       _saveScrollPosition();
@@ -401,7 +513,7 @@ class _ChatPageState extends State<ChatPage>
 
     // 进入（或切回）对话 Tab → 恢复位置或滚到底部
     if (!wasActive && nowActive) {
-      print(
+      debugPrint(
           '[ChatScroll] 🏠 进入对话Tab: wasActive=$wasActive → nowActive=$nowActive, hasSaved=$_hasSavedPosition, savedPixels=$_savedScrollPosition');
       _isTabActive = true;
       _restoreOrScrollToBottom();
@@ -413,7 +525,7 @@ class _ChatPageState extends State<ChatPage>
 
     // 恢复锁：正在恢复位置时，跳过所有自动滚动逻辑，防止被后续 didUpdateWidget 调用覆盖
     if (_isRestoringPosition) {
-      print(
+      debugPrint(
           '[ChatScroll] ⛔ 恢复锁生效：跳过自动滚动 (messages=${widget.messages.length}, old=${oldWidget.messages.length})');
       return;
     }
@@ -476,16 +588,16 @@ class _ChatPageState extends State<ChatPage>
     }
     _breathingController?.dispose();
     _speechService.cancel();
+    _endPreviewAnchorSession();
     _scrollController.dispose();
     _isUserScrollingNotifier.dispose();
-    _previewAnchor = null;
     super.dispose();
   }
 
   /// ====== 滚动位置保持：保存当前滚动位置 ======
   void _saveScrollPosition() {
     if (!_scrollController.hasClients) {
-      print('[ChatScroll] 💾 保存失败: scrollController 无 client');
+      debugPrint('[ChatScroll] 💾 保存失败: scrollController 无 client');
       return;
     }
     final double pixels = _scrollController.position.pixels;
@@ -496,7 +608,7 @@ class _ChatPageState extends State<ChatPage>
 
     // 埋点：记录滚动位置保存事件（包含位置比例便于分析用户浏览深度）
     final double ratio = maxExtent > 0 ? pixels / maxExtent : 0.0;
-    print(
+    debugPrint(
         '[ChatScroll] 💾 保存位置: pixels=$pixels, maxExtent=$maxExtent, ratio=${ratio.toStringAsFixed(2)}');
     _logScrollEvent(
       action: 'save',
@@ -516,7 +628,7 @@ class _ChatPageState extends State<ChatPage>
     // 有已保存的位置 → 恢复到离开时的位置（reverse 模式下 pixels 即为距底部距离）
     if (_hasSavedPosition && _savedScrollPosition != null) {
       final double targetPixels = _savedScrollPosition!;
-      print(
+      debugPrint(
           '[ChatScroll] 🔄 开始恢复位置: targetPixels=$targetPixels, savedMaxExtent=$_savedMaxScrollExtent');
 
       // 加锁：防止后续 didUpdateWidget 调用中的自动滚动覆盖恢复位置
@@ -525,15 +637,15 @@ class _ChatPageState extends State<ChatPage>
       // IndexedStack 切换后需要等待布局完成，用双重 postFrameCallback 保证可靠
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!_scrollController.hasClients) {
-          print('[ChatScroll] ⚠️ 恢复第1帧: scrollController 无 client');
+          debugPrint('[ChatScroll] ⚠️ 恢复第1帧: scrollController 无 client');
           return;
         }
-        print(
+        debugPrint(
             '[ChatScroll] 📐 恢复第1帧: maxExtent=${_scrollController.position.maxScrollExtent}, pixels=${_scrollController.position.pixels}');
 
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_scrollController.hasClients) {
-            print('[ChatScroll] ⚠️ 恢复第2帧: scrollController 无 client');
+            debugPrint('[ChatScroll] ⚠️ 恢复第2帧: scrollController 无 client');
             _isRestoringPosition = false; // 解锁
             return;
           }
@@ -549,7 +661,7 @@ class _ChatPageState extends State<ChatPage>
             restorePixels = 0;
           }
 
-          print(
+          debugPrint(
               '[ChatScroll] ✅ 执行 jumpTo: $restorePixels (目标$targetPixels, 当前max=$currentMaxExtent)');
           _scrollController.jumpTo(restorePixels);
 
@@ -565,14 +677,14 @@ class _ChatPageState extends State<ChatPage>
 
           // 解锁：恢复完成，允许后续自动滚动
           _isRestoringPosition = false;
-          print('[ChatScroll] 🔓 恢复锁已解除');
+          debugPrint('[ChatScroll] 🔓 恢复锁已解除');
         });
       });
       return;
     }
 
     // 无保存位置（首次进入 / 应用重启后）
-    print('[ChatScroll] 🏁 无保存位置，reverse=true 天然在底部');
+    debugPrint('[ChatScroll] 🏁 无保存位置，reverse=true 天然在底部');
     // reverse=true 的 ListView 天然从底部开始渲染，无需任何滚动操作
   }
 
@@ -589,14 +701,18 @@ class _ChatPageState extends State<ChatPage>
     // 输出结构化日志供埋点系统采集
     final StringBuffer buf = StringBuffer('[ChatScroll] action=$action');
     if (pixels != null) buf.write(' | pixels=${pixels.toStringAsFixed(1)}');
-    if (savedPixels != null)
+    if (savedPixels != null) {
       buf.write(' | savedPixels=${savedPixels.toStringAsFixed(1)}');
-    if (maxExtent != null)
+    }
+    if (maxExtent != null) {
       buf.write(' | maxExtent=${maxExtent.toStringAsFixed(1)}');
-    if (savedMaxExtent != null)
+    }
+    if (savedMaxExtent != null) {
       buf.write(' | savedMaxExtent=${savedMaxExtent.toStringAsFixed(1)}');
-    if (scrollRatio != null)
+    }
+    if (scrollRatio != null) {
       buf.write(' | scrollRatio=${scrollRatio.toStringAsFixed(3)}');
+    }
     if (messageCount != null) buf.write(' | messageCount=$messageCount');
     buf.write(' | timestamp=${DateTime.now().toIso8601String()}');
     debugPrint(buf.toString());
@@ -1022,7 +1138,7 @@ class _ChatPageState extends State<ChatPage>
                           controller: _scrollController,
                           reverse: true,
                           padding: _listPadding,
-                          cacheExtent: 500,
+                          scrollCacheExtent: const ScrollCacheExtent.pixels(500),
                           itemCount: itemCount,
                           itemBuilder: (BuildContext context, int index) {
                             // reverse 模式下 index 0 = 视觉底部（最新消息）

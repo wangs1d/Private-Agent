@@ -174,7 +174,7 @@ async function preloadTopDeferredTool(
  * 激活时注入 tool_discover / tool_call 桥接工具。
  *
  * 传入 userText 时执行意图预召回：top-1 高置信度延迟工具直接注入 visibleTools，
- * 省去 LLM 的 tool_discover 发现往返（fast/complex 模式均受益）。
+ * 省去 LLM 的 tool_discover 发现往返（对话面/任务面均受益）。
  */
 export async function prepareTools(
   visibleCandidateTools: ChatCompletionTool[],

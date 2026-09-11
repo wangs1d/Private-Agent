@@ -281,8 +281,10 @@ export class AgentMemorySyncService {
     const text = `${line}`.trim();
     const lower = text.toLowerCase();
     const preferenceMatch = /(喜欢|偏好|不喜欢|讨厌|习惯|不要|别|prefer|like|hate|dislike)/i.test(text);
+    // 亲密关系陈述（老婆/对象/正主…）也是事实：旧词表漏掉关系类，导致
+    // "我的老婆是刘浩存"进不了 memory_facts 槽位、槽位内新旧值也无法互相替换
     const factMatch =
-      /(我是|我在做|我最近在|我的项目|我住在|我计划|我需要|my project|i am|i'm)/i.test(text) ||
+      /(我是|我在做|我最近在|我的项目|我住在|我计划|我需要|(?:我的|未来的?)(?:老婆|媳妇|妻子|未婚妻|未婚夫|对象|正主|女朋友|女友|男朋友|男友)|my project|i am|i'm)/i.test(text) ||
       /(?:^|\s)(?:i|user)\s+(?:live|lives|am living|am based|based)\s+(?:in|at)\s+/i.test(text);
     // 承诺匹配（2026-09-05 扩充）：原词表漏掉管家的高频口头应承表述
     // （"给你设个提醒/记下了/到点喊你"）与用户委托（"提醒我…"），这类话
@@ -391,6 +393,13 @@ export class AgentMemorySyncService {
       { slot: "identity", pattern: /(?:^|\s)(?:用户|我)\s*(?:是)\s*.+$/ },
       { slot: "need", pattern: /(?:^|\s)(?:user|i)\s+(?:need|needs|plan|plans)\s+.+$/ },
       { slot: "need", pattern: /(?:^|\s)(?:用户|我)\s*(?:需要|计划)\s*.+$/ },
+      // 亲密关系单值槽位（root fix）：新值入槽时自动替换旧值行，
+      // "我的老婆是景甜"与"我的老婆是刘浩存"（含「未来老婆」等变体）不再并存
+      {
+        slot: "relationship",
+        pattern:
+          /(?:我的|未来的?|自家的)(?:老婆|媳妇|妻子|夫人|爱人|未婚妻|未婚夫|对象|正主|女朋友|女友|男朋友|男友)|(?:老婆|媳妇|妻子|未婚妻|对象|正主)(?:是|叫|才是)/,
+      },
     ];
 
     for (const { slot, pattern } of slotPatterns) {

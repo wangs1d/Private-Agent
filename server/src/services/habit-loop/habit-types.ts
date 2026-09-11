@@ -3,17 +3,17 @@
  *
  * 闭环链路：
  *   行为观察（位置历史 / 工具调用事件）→ HabitMiner 挖掘候选习惯
- *   → 规则落库（默认 auto 授权）→ 触发器命中 → 直接执行
- *   → 执行结果反馈回灌 confidence（成功升 / 失败降，连续失败自动降权
- *   回 confirm_each）→ 用户确认成功 N 次后建议升级 auto 授权
+ *   → 规则落库（默认 confirm_each，提案等确认）→ 触发器命中 → 提案
+ *   → 执行结果反馈回灌 confidence（成功升 / 失败降，auto 连续失败自动
+ *   降权回 confirm_each）→ 用户确认成功 N 次后建议升级 auto 授权
  *
  * 安全边界：
- *   - auto 授权直接执行、不做置信度门槛（产品口径：习惯无需用户确认）
+ *   - confirm_each 提案执行需一次性 confirmationToken；auto 仅限显式授权
  *   - 金融类工具由 AgentTaskSafety / 预订层两阶段确认兜底，本层不绕过
  *   - quietHours 内静默跳过（不打扰、不提案）
  */
 
-/** 授权级别：auto = 直接执行（默认）；confirm_each = 每次先确认（失败降权 / 显式指定）。 */
+/** 授权级别：confirm_each = 每次先确认（默认）；auto = 直接执行（显式指定 / 失败降权的反向升级）。 */
 export type HabitAuthorization = "confirm_each" | "auto";
 
 /** 触发器（kind 决定字段）。 */

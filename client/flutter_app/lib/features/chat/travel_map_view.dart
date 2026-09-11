@@ -2,10 +2,10 @@ import "dart:async";
 import "dart:io" show Platform;
 
 import "package:flutter/material.dart";
-import "package:flutter/services.dart" show rootBundle;
 import "package:webview_windows/webview_windows.dart";
 
 import "../../core/config/api_config.dart";
+import "travel_map_assets.dart";
 import "travel_map_controller.dart";
 
 /// 旅游行程地图视图：全尺寸 WebView 承载 MapLibre GL JS 页面
@@ -69,10 +69,8 @@ class _TravelMapViewState extends State<TravelMapView> {
         widget.controller.handleWebMessage(message);
       });
 
-      // 加载内嵌单文件地图页（全部 JS/CSS 内联，MapLibre 走 CDN）
-      final String html = await rootBundle.loadString(
-        "assets/travel_map/map.html",
-      );
+      // 加载内嵌单文件地图页（MapLibre 已随包本地内联，零 CDN 等待）
+      final String html = await loadTravelMapHtml("assets/travel_map/map.html");
       await _webviewController.loadStringContent(html);
 
       // Dart → JS：注入脚本执行器并发送宿主配置（httpBase / maptilerKey）

@@ -1,6 +1,8 @@
 import "dart:math" as math;
 import "dart:convert";
 
+import "package:flutter/foundation.dart";
+
 /// 安全验证服务 - 管理会话令牌和安全验证
 class SecurityService {
   static final SecurityService _instance = SecurityService._internal();
@@ -33,7 +35,7 @@ class SecurityService {
     _currentUserId = userId;
     _tokenExpiry = DateTime.now().add(const Duration(hours: 1)); // 1小时过期
     
-    print("生成会话令牌 for user: $userId");
+    debugPrint("生成会话令牌 for user: $userId");
     return _sessionToken!;
   }
 
@@ -62,12 +64,12 @@ class SecurityService {
   void recordFailedAttempt(String userId) {
     _failedAttempts[userId] = (_failedAttempts[userId] ?? 0) + 1;
     
-    print("用户 $userId 失败尝试次数: ${_failedAttempts[userId]}");
+    debugPrint("用户 $userId 失败尝试次数: ${_failedAttempts[userId]}");
 
     // 如果达到最大失败次数，锁定账户
     if (_failedAttempts[userId]! >= maxFailedAttempts) {
       _lockoutTimes[userId] = DateTime.now();
-      print("用户 $userId 已被锁定 $lockoutDuration 秒");
+      debugPrint("用户 $userId 已被锁定 $lockoutDuration 秒");
     }
   }
 

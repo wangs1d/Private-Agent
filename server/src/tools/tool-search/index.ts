@@ -213,11 +213,6 @@ export {
   CORE_TOOL_LIBRARY,
   classifyToolExposureTier,
   isCoreToolRegistryName,
-  isFastLaneTool,
-  registerDynamicFastLaneName,
-  registerDynamicFastLaneNames,
-  clearDynamicFastLaneNames,
-  listDynamicFastLaneNames,
   summarizeCoreToolLibrary,
   type ToolExposureTier,
 } from "./core-tool-library.js";

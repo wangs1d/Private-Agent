@@ -30,7 +30,7 @@ const { createExternalChatProviderFromEnv } = await import(
   "../src/external-model/resolve-provider.js"
 );
 const { routeTurnByLlm } = await import("../src/agent/llm-task-router.js");
-const { streamCompletionWithTools, getFastLaneTools } = await import(
+const { streamCompletionWithTools, getBuiltinAgentChatTools } = await import(
   "../src/external-model/openai-compatible-tool-loop.js"
 );
 const OpenAI = (await import("openai")).default;
@@ -52,24 +52,24 @@ async function smokeIntentRouting() {
     console.log("⚠ 未配置外部模型 provider（OPENAI_API_KEY?），跳过");
     return;
   }
-  const cases: Array<{ text: string; expectLane: "fast" | "complex" }> = [
-    { text: "在吗", expectLane: "fast" },
-    { text: "你好呀，今天有点累", expectLane: "fast" },
-    // 新架构：realtime_lookup 按路由表走 fast（fast 已携搜索工具 + strict 出口仲裁兜底）
-    { text: "刘浩存最近的消息", expectLane: "fast" },
-    { text: "帮我搜索景甜的照片", expectLane: "fast" },
-    { text: "帮我找几张景甜最近的活动中照片", expectLane: "fast" },
-    { text: "明天早上八点提醒我开会", expectLane: "complex" },
-    { text: "在电脑上帮我打开微信给张三发个消息", expectLane: "complex" },
-    { text: "量子纠缠到底是什么原理", expectLane: "fast" },
+  const cases: Array<{ text: string; expectPlane: "chat" | "task" }> = [
+    { text: "在吗", expectPlane: "chat" },
+    { text: "你好呀，今天有点累", expectPlane: "chat" },
+    // 双面架构：realtime_lookup / media_retrieval 按路由表落任务面（搜索工具由任务面携带）
+    { text: "刘浩存最近的消息", expectPlane: "task" },
+    { text: "帮我搜索景甜的照片", expectPlane: "task" },
+    { text: "帮我找几张景甜最近的活动中照片", expectPlane: "task" },
+    { text: "明天早上八点提醒我开会", expectPlane: "task" },
+    { text: "在电脑上帮我打开微信给张三发个消息", expectPlane: "task" },
+    { text: "量子纠缠到底是什么原理", expectPlane: "chat" },
   ];
   let hit = 0;
-  for (const { text, expectLane } of cases) {
+  for (const { text, expectPlane } of cases) {
     const d = await routeTurnByLlm(provider, "smoke-intent", text);
-    const ok = d.mode === expectLane;
+    const ok = d.plane === expectPlane;
     if (ok) hit += 1;
     console.log(
-      `${ok ? "✔" : "✖"} [${d.mode}${ok ? "" : `≠期望${expectLane}`}] intent=${d.intent}@${d.confidence?.toFixed(2)} | ${text} | ${d.reasons[0] ?? ""}`,
+      `${ok ? "✔" : "✖"} [${d.plane}${ok ? "" : `≠期望${expectPlane}`}] intent=${d.intent}@${d.confidence?.toFixed(2)} | ${text} | ${d.reasons[0] ?? ""}`,
     );
   }
   console.log(`── 意图路由命中 ${hit}/${cases.length}`);
@@ -133,7 +133,7 @@ async function smokeE2E(userText: string, expectTool: string) {
     () => {},
     ctx,
     {
-      tools: getFastLaneTools(),
+      tools: getBuiltinAgentChatTools(),
       maxRounds: 2,
       extraBody: { fastProfile: true },
       audit: { sessionId: "smoke-e2e" },

@@ -250,7 +250,7 @@ export function shouldActivateToolSearch(
   if (mode === "on") return true;
 
   // 小工具集（≤15 个延迟工具）：BM25 索引极小，搜索几乎零延迟，始终激活。
-  // 这让 Fast 模式（≤12 工具，3-6 visible + 6-9 deferred）也能走 tool search 召回。
+  // 这让对话面轻量档（≤12 工具，3-6 visible + 6-9 deferred）也能走 tool search 召回。
   if (deferredTools.length <= 15) return true;
 
   // 大工具集：按 token 阈值判定（延迟工具 schema token / 上下文 token ≥ 阈值）

@@ -130,10 +130,19 @@ class _NextbotChatLayoutState extends State<NextbotChatLayout> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              if (widget.useSplit)
-                SizedBox(width: leftWidth, child: widget.child)
-              else
-                Expanded(child: widget.child),
+              // 关键：第 0 个子位必须保持同类型 Widget（Expanded）。之前
+              // split=true 时直接用 SizedBox(width: leftWidth)，useSplit
+              // 翻转（如点照片打开预览面板）时 Row 按位置/runtimeType 匹配
+              // 不到旧 Element，整个聊天子树（含 ChatPage State）被销毁
+              // 重建，滚动位置丢失、reverse 列表天然回到最底部。统一包一层
+              // Expanded、内部用 SizedBox 调宽后，模式切换只触发重新布局，
+              // State 与滚动位置得以保留（配合 chat_page 的预览滚动锚点）。
+              Expanded(
+                child: SizedBox(
+                  width: widget.useSplit ? leftWidth : null,
+                  child: widget.child,
+                ),
+              ),
               // 分割条：split 模式已写过，但渲染在 Expanded 之后；
               // side 模式现在也始终渲染常驻分割条,允许用户调整宽度
               VerticalDragDivider(

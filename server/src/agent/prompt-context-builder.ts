@@ -847,9 +847,9 @@ export class PromptContextBuilder {
       // 每轮白查一次承诺板。承诺信息仍经 KV memory_commitments 与 epitome 注入。
       ...(conversationTimeline ? { conversationTimeline } : {}),
       ...(input.semanticIntent ? { semanticIntent: input.semanticIntent } : {}),
-      // 2026-08-20 修复「fast 模式第二句说没拿到定位」：
+      // 2026-08-20 修复「对话面第二句说没拿到定位」：
       // 此前 assembleMemory 只用 input.userLocation 提取时区给 currentTime,从未把它
-      // 写进 promptMemory。LLM 在 fast 模式查天气/位置类问题时,系统 prompt 缺失
+      // 写进 promptMemory。LLM 在对话面查天气/位置类问题时,系统 prompt 缺失
       // 【用户位置】块,工具调用只能传空参,工具返回「没有拿到真实定位」错误,LLM 在
       // 第二句(正文气泡)复述工具错误为「没拿到你的定位」,与同会话前面对话
       // 矛盾。修复:在 promptMemory 顶层注入 userLocation 字段,下游 prompt-builder

@@ -1,5 +1,5 @@
 import "dart:async";
-import "dart:convert" show jsonDecode, jsonEncode;
+import "dart:convert" show jsonDecode;
 import "dart:typed_data";
 
 import "package:file_picker/file_picker.dart";
@@ -13,7 +13,7 @@ import "../../core/config/api_config.dart";
 /// 对接服务端 `/picture/*` 路由（@private-ai-agent/picture 套件）：
 /// - 网格浏览已入库照片（缩略图分页加载）
 /// - 本地图片上传入库
-/// - 点开大图后可一键美颜（自然/奶油肌/冷白皮/日系/港风），产物自动存回图库
+/// - 点开大图后可删除照片（连源文件与缩略图一并移除）
 class GalleryPage extends StatefulWidget {
   const GalleryPage({super.key, this.embedded = false});
 
@@ -40,25 +40,11 @@ class _Photo {
   final List<String> tags;
   final String thumbnailUrl;
   final String imageUrl;
-
-  bool get isBeautified => tags.contains("beautified");
-}
-
-class _BeautyStyle {
-  _BeautyStyle.fromJson(Map<String, dynamic> json)
-      : id = json["id"] as String,
-        label = (json["label"] as String?) ?? json["id"] as String,
-        description = (json["description"] as String?) ?? "";
-
-  final String id;
-  final String label;
-  final String description;
 }
 
 class _GalleryPageState extends State<GalleryPage> {
   final ScrollController _scrollController = ScrollController();
   final List<_Photo> _photos = <_Photo>[];
-  final Map<String, _BeautyStyle> _styles = <String, _BeautyStyle>{};
   bool _loading = false;
   bool _loadingMore = false;
   bool _hasMore = true;
@@ -70,7 +56,6 @@ class _GalleryPageState extends State<GalleryPage> {
     super.initState();
     _refresh();
     _scrollController.addListener(_onScroll);
-    _loadStyles();
   }
 
   @override
@@ -97,26 +82,6 @@ class _GalleryPageState extends State<GalleryPage> {
   Map<String, dynamic> _decodeBody(http.Response response) {
     final dynamic decoded = jsonDecode(response.body);
     return decoded as Map<String, dynamic>;
-  }
-
-  Future<void> _loadStyles() async {
-    try {
-      final http.Response response =
-          await http.get(_uri("/picture/styles")).timeout(const Duration(seconds: 8));
-      if (response.statusCode != 200) return;
-      final Map<String, dynamic> body = _decodeBody(response);
-      final List<dynamic> styles = (body["styles"] as List<dynamic>?) ?? const <dynamic>[];
-      if (!mounted) return;
-      setState(() {
-        for (final dynamic item in styles) {
-          final _BeautyStyle style =
-              _BeautyStyle.fromJson(item as Map<String, dynamic>);
-          _styles[style.id] = style;
-        }
-      });
-    } catch (_) {
-      // 风格列表加载失败不阻塞图库浏览
-    }
   }
 
   Future<void> _refresh() async {
@@ -219,41 +184,53 @@ class _GalleryPageState extends State<GalleryPage> {
     await _refresh();
   }
 
-  Future<void> _beautify(_Photo photo, String styleId) async {
+  Future<void> _deletePhoto(_Photo photo) async {
     final NavigatorState navigator = Navigator.of(context, rootNavigator: true);
     final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
-    showDialog<void>(
+    final String displayName =
+        photo.fileName.isEmpty ? "未命名照片" : photo.fileName;
+    final bool? confirmed = await showDialog<bool>(
       context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text("删除照片"),
+        content: Text("确定删除「$displayName」吗？删除后不可恢复。"),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text("取消"),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(dialogContext).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text("删除"),
+          ),
+        ],
+      ),
     );
+    if (confirmed != true) return;
     try {
       final http.Response response = await http
-          .post(
-            _uri("/picture/beautify"),
-            headers: <String, String>{"Content-Type": "application/json"},
-            body: jsonEncode(<String, dynamic>{
-              "assetIds": <String>[photo.id],
-              "style": styleId,
-            }),
-          )
-          .timeout(const Duration(seconds: 120));
+          .delete(_uri("/picture/assets/${photo.id}"))
+          .timeout(const Duration(seconds: 15));
       final Map<String, dynamic> body = _decodeBody(response);
-      navigator.pop(); // 关闭 loading
-      if (body["ok"] != true) {
+      if (response.statusCode == 200 && body["ok"] == true) {
         messenger.showSnackBar(
-          SnackBar(content: Text("美颜失败：${body["error"] ?? response.statusCode}")),
+          SnackBar(content: Text("已删除「$displayName」")),
         );
-        return;
+        navigator.pop(); // 关闭大图/详情
+        await _refresh();
+      } else {
+        messenger.showSnackBar(
+          SnackBar(
+            content:
+                Text("删除失败：${body["reason"] ?? body["error"] ?? response.statusCode}"),
+          ),
+        );
       }
-      messenger.showSnackBar(
-        SnackBar(content: Text("美颜完成（${_styles[styleId]?.label ?? styleId}），已存回图库")),
-      );
-      navigator.pop(); // 关闭大图/详情
-      await _refresh();
     } catch (e) {
-      navigator.pop();
-      messenger.showSnackBar(SnackBar(content: Text("美颜失败：$e")));
+      messenger.showSnackBar(SnackBar(content: Text("删除失败：$e")));
     }
   }
 
@@ -286,32 +263,17 @@ class _GalleryPageState extends State<GalleryPage> {
                   top: false,
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        const Text("一键美颜",
-                            style: TextStyle(fontWeight: FontWeight.w700)),
-                        const SizedBox(height: 8),
-                        if (_styles.isEmpty)
-                          const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 12),
-                            child: Text("美颜风格加载中…"),
-                          )
-                        else
-                          Wrap(
-                            spacing: 10,
-                            runSpacing: 10,
-                            children: <Widget>[
-                              for (final _BeautyStyle style in _styles.values)
-                                ActionChip(
-                                  label: Text(style.label),
-                                  tooltip: style.description,
-                                  onPressed: () => _beautify(photo, style.id),
-                                ),
-                            ],
-                          ),
-                      ],
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor:
+                              Theme.of(context).colorScheme.error,
+                        ),
+                        onPressed: () => _deletePhoto(photo),
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text("删除照片"),
+                      ),
                     ),
                   ),
                 ),
@@ -433,32 +395,7 @@ class _PhotoTile extends StatelessWidget {
               child: Center(child: Icon(Icons.broken_image_outlined)),
             ),
           ),
-          if (photo.isBeautified)
-            const Positioned(
-              left: 4,
-              top: 4,
-              child: _BeautyBadge(),
-            ),
         ],
-      ),
-    );
-  }
-}
-
-class _BeautyBadge extends StatelessWidget {
-  const _BeautyBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: const Text(
-        "已美颜",
-        style: TextStyle(color: Colors.white, fontSize: 10),
       ),
     );
   }

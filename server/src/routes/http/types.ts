@@ -80,6 +80,8 @@ export type HttpRouteDeps = {
   agentMemorySyncService: AgentMemorySyncService;
   weatherService: WeatherService;
   weatherPrefsService: WeatherPrefsService;
+  /** 位置协调器（客户端 GPS）：简报天气未配置城市时的优先兜底；可选 */
+  locationCoordinator?: import("../../services/location-coordinator.js").LocationCoordinator;
   virtualPhoneService: VirtualPhoneService;
   ttsService: TtsService;
   /** 语音消息落盘服务（voice.send_message 工具 + 用户上传录音共用） */
@@ -88,7 +90,7 @@ export type HttpRouteDeps = {
   voiceCapabilityService?: VoiceCapabilityService;
   /** 图像生成服务（image.generate 工具 + 静态拉流共用） */
   imageGenerationService: ImageGenerationService;
-  /** 图片能力套件(图库/美颜批图) */
+  /** 图片能力套件(图库) */
   pictureKit: PictureKit;
   /** 文件/文档处理服务（file.read_text 等工具 + 静态拉流共用） */
   fileProcessingService: FileProcessingService;

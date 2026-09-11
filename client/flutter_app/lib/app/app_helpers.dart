@@ -24,7 +24,7 @@ extension RightPanelKindDefaults on RightPanelKind {
       case RightPanelKind.imagePreview:
         return 0.52; // 图片预览：右栏显示原图，需较大空间
       case RightPanelKind.gallery:
-        return 0.45; // 图库：三列网格 + 一键美颜，需较大空间
+        return 0.45; // 图库：三列网格浏览，需较大空间
       case RightPanelKind.catalog:
         return 0.5; // 能力面板：域列表 + 明细两级视图
       case RightPanelKind.approvals:

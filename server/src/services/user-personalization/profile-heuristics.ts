@@ -1,5 +1,7 @@
 export type ProfilePatch = {
   displayName?: string;
+  /** true = 用户明确指定如何称呼（"叫我X/称呼我X"），称呼须原样使用、不得改为「姓+先生」 */
+  displayNameExplicit?: boolean;
   interest?: string;
   identity?: string;
   toneNote?: string;
@@ -18,6 +20,9 @@ const LIVELY_TONE_PREF_RE =
 
 const NAME_RE =
   /(?:我叫|叫我|称呼我|我是|你可以叫我)\s*([^\s，。！？,.]{1,16})/;
+/** 明确指定称呼的说法（"叫我X/称呼我X/你可以叫我X"）——区别于自我介绍"我叫X" */
+const REQUESTED_APPELLATION_RE =
+  /(?:叫我|称呼我|喊我|你可以叫我)\s*([^\s，。！？,.]{1,16})/;
 const INTEREST_RE =
   /(?:我喜欢|我爱|我最爱|经常|平时喜欢)\s*([^\s，。！？,.]{2,40})/;
 const IDENTITY_RE =
@@ -30,7 +35,14 @@ export function extractProfilePatches(userText: string): ProfilePatch[] {
   const patches: ProfilePatch[] = [];
 
   const name = NAME_RE.exec(t);
-  if (name?.[1]) patches.push({ displayName: name[1].trim() });
+  if (name?.[1]) {
+    // 明确指定（"叫我王哥"）→ 打用户指定标记；自我介绍（"我叫王铭川"）→ 只作事实记录
+    const requested = REQUESTED_APPELLATION_RE.exec(t);
+    patches.push({
+      displayName: name[1].trim(),
+      displayNameExplicit: Boolean(requested?.[1]),
+    });
+  }
 
   const interest = INTEREST_RE.exec(t);
   if (interest?.[1]) patches.push({ interest: interest[1].trim() });
@@ -104,8 +116,11 @@ export function applyProfilePatches(md: string, patches: ProfilePatch[]): string
 
   for (const patch of patches) {
     if (patch.displayName) {
+      // 用户明确指定的称呼附「（用户指定）」标记：问候/播报解析时原样使用，
+      // 即使它长得像大名（appellation.ts 的显式优先规则）
+      const marker = patch.displayNameExplicit ? "（用户指定）" : "";
       out = patchSection(out, "基本信息", (body) =>
-        replaceBulletPrefix(body, "称呼：", `称呼：${patch.displayName}`),
+        replaceBulletPrefix(body, "称呼：", `称呼：${patch.displayName}${marker}`),
       );
     }
     if (patch.identity) {

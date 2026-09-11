@@ -82,6 +82,10 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       schedule_floating_channel_;
 
+  // pai/daily_briefing MethodChannel —— 简报独立窗口工作区查询
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      daily_briefing_channel_;
+
   // pai/agent_profile MethodChannel —— 控制 Agent 主页弹出窗
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       agent_profile_channel_;
@@ -93,6 +97,9 @@ class FlutterWindow : public Win32Window {
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void HandleScheduleFloatingMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void HandleDailyBriefingMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void HandleAgentProfileMethodCall(

@@ -116,6 +116,15 @@ export function extractFactSubject(kind: UserFactKind, text: string): string {
   if (loc?.[1]) return "居住地";
   if (/(?:我的项目|我在做|我在开发|项目是)/.test(t)) return "项目";
   if (/(?:我的职业|我的工作是|我在).{0,6}(?:工作|上班)/.test(t)) return "职业";
+  // 亲密关系单值主题（root fix）：「我的老婆是X」「我的未来老婆是X」「X才是正主」
+  // 等表述归一到同一 subject，值变化时 latest-wins 替换，不再按字面各存一条
+  if (
+    /(?:我的|未来的?|自家的)(?:老婆|媳妇|妻子|夫人|爱人|未婚妻|未婚夫|对象|正主|女朋友|女友|男朋友|男友)|(?:老婆|媳妇|妻子|未婚妻|对象|正主)(?:是|叫|才是)/.test(
+      t,
+    )
+  ) {
+    return "配偶/伴侣";
+  }
   return normalizeSubject(t) || "其他";
 }
 

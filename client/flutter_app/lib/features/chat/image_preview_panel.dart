@@ -82,8 +82,9 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
   }
 
   String get _currentUrl {
-    if (widget.urls.isEmpty)
-      return widget.urls.isNotEmpty ? widget.urls.first : "";
+    if (widget.urls.isEmpty) {
+      return "";
+    }
     return widget.urls[_index];
   }
 

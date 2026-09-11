@@ -10,7 +10,28 @@ import { dedupeMemoryLines, normalizeMemoryLine, semanticFingerprint } from "./m
 import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
 import { GraphSqlitePersistence, resolveHumanMemoryStoreMode } from "./graph-sqlite-store.js";
 import { isPlaceholderApiKey } from "../config/api-key-validator.js";
+import {
+  classifyMemorySourceRole,
+  extractEchoQueryFromAssistantReply,
+  type MemorySourceRole,
+} from "./memory-source-role.js";
+import {
+  extractRelationshipAssertion,
+  isRelationshipHedgeLine,
+  sharedAssertionSubject,
+  type RelationshipAssertion,
+  type RelationshipSubject,
+} from "./memory-relationship-assertion.js";
 import type { InferenceNode } from "../brain/types.js";
+
+/** 读取节点来源角色：优先 metadata 打标，旧节点按文本形态即时分类（legacy 兼容）。 */
+function resolveNodeRole(node: MemoryNodeRecord): MemorySourceRole {
+  const metaRole = node.metadata?.sourceRole;
+  return typeof metaRole === "string" ? (metaRole as MemorySourceRole) : classifyMemorySourceRole(node.summary);
+}
+
+/** 助手角色节点在召回排序中的降权幅度：发言是行为记录，不是用户事实证据。 */
+const ASSISTANT_ROLE_RECALL_PENALTY = 0.22;
 
 /**
  * 真向量 cosine 相似度（方案 C）。
@@ -748,6 +769,9 @@ export class HumanLikeMemoryService {
 
     const importance = this.computeImportance(summary, source, opts?.metadata);
     const confidence = this.computeConfidence(summary, opts?.metadata);
+    // 来源角色打标（root fix）：每条记忆落库时记录谁说的，下游覆盖/召回治理都依赖它
+    const sourceRole = classifyMemorySourceRole(summary);
+    const metadata: Record<string, unknown> = { ...(opts?.metadata ?? {}), sourceRole };
 
     if (existing) {
       const versionId = this.appendVersion(existing, summary, confidence, importance);
@@ -770,9 +794,13 @@ export class HumanLikeMemoryService {
       existing.entityTags = uniqueStrings([...existing.entityTags, ...extractEntityTags(summary)], 12);
       existing.sceneTags = uniqueStrings([...existing.sceneTags, ...inferSceneTags(source, context, domainId)], 8);
       existing.emotionTags = uniqueStrings([...existing.emotionTags, ...extractEmotionTags(summary)], 8);
+      if (!existing.metadata?.sourceRole) {
+        existing.metadata = { ...(existing.metadata ?? {}), sourceRole };
+      }
       this.rebuildLinksForNode(existing);
       this.schedulePersist();
       this.recordWriteLatency(start);
+      this.applyUserAssertionSupersede(actorId, summary, sourceRole, existing.id);
       // 方案 C：re-ingest 时也异步更新 embedding（summary 可能已变）
       void this.enhanceNodeWithEmbedding(existing.id, summary);
       return existing.id;
@@ -812,17 +840,87 @@ export class HumanLikeMemoryService {
       isArchived: false,
       currentVersionId: versionId,
       versionIds: [versionId],
-      metadata: opts?.metadata,
+      metadata,
     };
     this.rebuildLinksForNode(this.store.nodes[nodeId]!);
     this.rebuildCommunities(actorId, domainId);
     this.schedulePersist();
     this.recordWriteLatency(start);
+    this.applyUserAssertionSupersede(actorId, summary, sourceRole, nodeId);
 
     // 方案 C：异步计算真 embedding 覆盖 vectorFingerprint，并重建该节点边
     // 不阻塞主流程，计算完成后增强图谱语义关联质量
     void this.enhanceNodeWithEmbedding(nodeId, summary);
     return nodeId;
+  }
+
+  /**
+   * 用户断言驱动的同主题覆盖（root fix）：
+   * 只有标记为用户的话（sourceRole=user）可以改写"用户事实"。当用户对亲密关系主题
+   * 给出明确断言（如「刘浩存才是真主 未来的老婆」）时：
+   *   1. 作废同主题但值不同的旧节点（旧值不再与最新值并列注入）；
+   *   2. 作废助手对同一主题的"摇摆/求证"发言（「到底哪位是正主」类回声源头）。
+   * 被作废节点标记 soft_deleted（召回天然过滤）+ metadata.superseded（可审计可追溯）。
+   */
+  private applyUserAssertionSupersede(
+    actorId: string,
+    summary: string,
+    role: MemorySourceRole,
+    incomingId: string,
+  ): void {
+    if (role !== "user") return;
+    const assertion = extractRelationshipAssertion(summary);
+    if (!assertion) return;
+    const superseded = this.supersedeByAssertion(actorId, assertion, incomingId);
+    if (superseded > 0) {
+      console.log(
+        `[HumanLikeMemory] 用户断言覆盖：subject=${assertion.subject} value=${assertion.value} ` +
+          `作废 ${superseded} 条旧记忆 (actorId=${actorId})`,
+      );
+    }
+  }
+
+  /** 按断言作废冲突/回声节点，返回作废数量。incomingId 传入时跳过该节点自身。 */
+  private supersedeByAssertion(
+    actorId: string,
+    assertion: RelationshipAssertion,
+    incomingId: string | null,
+  ): number {
+    let count = 0;
+    for (const node of Object.values(this.store.nodes)) {
+      if (node.actorId !== actorId || node.id === incomingId) continue;
+      if (node.deletionStage === "soft_deleted" || node.deletionStage === "hard_deleted") continue;
+      if (!this.shouldSupersedeForAssertion(node, assertion)) continue;
+      node.deletionStage = "soft_deleted";
+      node.metadata = {
+        ...(node.metadata ?? {}),
+        superseded: {
+          at: nowIso(),
+          by: incomingId,
+          subject: assertion.subject,
+          value: assertion.value,
+        },
+      };
+      count += 1;
+    }
+    if (count > 0) this.schedulePersist();
+    return count;
+  }
+
+  private shouldSupersedeForAssertion(node: MemoryNodeRecord, assertion: RelationshipAssertion): boolean {
+    // 助手对同一主题的"摇摆/求证"发言（到底哪位是正主…）：用户给出明确断言后即作废
+    if (resolveNodeRole(node) === "assistant" && isRelationshipHedgeLine(node.summary)) return true;
+    // 同主题、不同值的旧断言：latest-wins
+    const old = extractRelationshipAssertion(node.summary);
+    return !!old && old.subject === assertion.subject && !!old.value && old.value !== assertion.value;
+  }
+
+  /**
+   * 数据修复入口（离线脚本用）：以给定断言为最新事实，清理该 actor 的
+   * 冲突断言节点与助手回声节点。与运行时 ingest 走同一套 supersede 规则。
+   */
+  repairSupersedeForActor(actorId: string, assertion: RelationshipAssertion): number {
+    return this.supersedeByAssertion(actorId, assertion, null);
   }
 
   /**
@@ -1537,6 +1635,7 @@ export class HumanLikeMemoryService {
       .filter((node) => {
         if (node.actorId !== actorId) return false;
         if (node.deletionStage === "hard_deleted" || node.deletionStage === "soft_deleted") return false;
+        if (node.metadata?.superseded) return false; // 已被更新断言作废的旧值，召回侧兜底过滤
         const policy = this.policy.domains[node.domainId];
         if (!policy || !policy.enabled || policy.retired) return false;
         if (mode === "single_domain") return node.domainId === domainId;
@@ -1553,7 +1652,11 @@ export class HumanLikeMemoryService {
           node.userFeedbackScore * 0.08;
         const keywordScore =
           bigramOverlapScore(queryKeywords, node.keywords) * 0.45 +
-          queryEntities.filter((entity) => node.entityTags.includes(entity)).length * 0.12;
+          queryEntities.filter((entity) => node.entityTags.includes(entity)).length * 0.12 +
+          // 同主题词共现兜底：query 与记忆都谈"居住地/配偶"等同一断言主题时，
+          // 即便措辞词面零重叠（"搬到上海定居了" vs "住在哪个城市"）也给出
+          // 词法分，避免同主题新事实被下面的相关性下限误杀
+          (sharedAssertionSubject(query, node.summary) ? 0.18 : 0);
         // 方案 C：vectorScore 优先用真向量 cosine，无向量时降级到 cosineLikeScore
         let vectorScore: number;
         const nodeVec = parseVectorFingerprint(node.vectorFingerprint);
@@ -1590,11 +1693,21 @@ export class HumanLikeMemoryService {
         //   agent 在对话/流程回复中能够稳定召回这些记忆，而不是"想不起"
         //   通过 finalScore 加分让 confirmed 节点在排序中优先被选中
         const confirmedBoost = node.correctness === "confirmed" ? 0.25 : 0;
+        // 来源角色治理（root fix）：助手自己的历史发言是行为记录，不是用户事实证据。
+        //   - 关系主题的"摇摆/求证"发言（到底哪位是正主…）与"同一问题我上次怎么答的"
+        //     回声节点直接剔除（它们正是敷衍回复自我强化的回声源头）；
+        //   - 其余助手发言整体降权，不再与用户断言同权竞争。
+        if (resolveNodeRole(node) === "assistant") {
+          if (isRelationshipHedgeLine(node.summary)) return null;
+          if (this.isEchoReplyNode(node.summary, queryKeywords, query)) return null;
+        }
+        const assistantPenalty = resolveNodeRole(node) === "assistant" ? ASSISTANT_ROLE_RECALL_PENALTY : 0;
         const finalScore =
           structureScore +
           keywordScore +
           vectorScore +
           confirmedBoost - // confirmed 节点召回优先（流程回复能稳定记住）
+          assistantPenalty - // 助手发言降权（不是用户事实）
           inactivityPenalty - // W2 新增：未命中惩罚
           (node.correctness === "rejected" ? 0.6 : 0) -
           (node.correctness === "suspected_error" ? 0.25 : 0) -
@@ -1605,10 +1718,56 @@ export class HumanLikeMemoryService {
       .filter((candidate): candidate is HybridRetrievalCandidate => candidate !== null)
       .sort((a, b) => b.finalScore - a.finalScore);
 
+    const resolved = this.dropConflictingOldAssertions(candidates);
     if (mode === "cross_domain") {
-      return this.expandByHops(actorId, candidates.slice(0, limit), domainId);
+      return this.expandByHops(actorId, resolved.slice(0, limit), domainId);
     }
-    return candidates.slice(0, limit * 3);
+    return resolved.slice(0, limit * 3);
+  }
+
+  /**
+   * 回声节点检测：助手 EvolutionLoop 发言内嵌了当时被回答的用户原话（user="…"）。
+   * 若该原话与当前查询高度相似，说明这条节点只是"上次对同一个问题的回答"——
+   * 召回它只会让模型复读旧答案（2026-09 敷衍回复回声循环的直接根源），直接剔除。
+   */
+  private isEchoReplyNode(summary: string, queryKeywords: string[], rawQuery: string): boolean {
+    const echoQuery = extractEchoQueryFromAssistantReply(summary);
+    if (!echoQuery) return false;
+    const overlap = bigramOverlapScore(queryKeywords, extractKeywords(echoQuery));
+    if (overlap >= 0.55) return true;
+    // 无向量/关键词兜底：当前查询整体包含当时的问题（换说法的追问）
+    const q = normalizeMemoryLine(rawQuery);
+    const e = normalizeMemoryLine(echoQuery);
+    return q.length >= 6 && e.length >= 6 && (q.includes(e) || e.includes(q));
+  }
+
+  /**
+   * 同主题冲突消解（召回侧兜底）：候选里同一关系主题出现多个不同值
+   * （如旧的"老婆是X"与新值并存）时，只保留最新一条，其余当轮不注入。
+   * 覆盖的权威机制在写入侧 supersede，这里是 legacy 数据未修复时的最后防线。
+   */
+  private dropConflictingOldAssertions(candidates: HybridRetrievalCandidate[]): HybridRetrievalCandidate[] {
+    const groups = new Map<RelationshipSubject, Map<string, HybridRetrievalCandidate>>();
+    for (const candidate of candidates) {
+      const assertion = extractRelationshipAssertion(candidate.node.summary);
+      if (!assertion?.value) continue;
+      const byValue = groups.get(assertion.subject) ?? new Map<string, HybridRetrievalCandidate>();
+      const prev = byValue.get(assertion.value);
+      if (!prev || Date.parse(prev.node.timestamp) < Date.parse(candidate.node.timestamp)) {
+        byValue.set(assertion.value, candidate);
+      }
+      groups.set(assertion.subject, byValue);
+    }
+    const drop = new Set<string>();
+    for (const byValue of groups.values()) {
+      if (byValue.size < 2) continue;
+      const sorted = [...byValue.values()].sort(
+        (a, b) => Date.parse(b.node.timestamp) - Date.parse(a.node.timestamp),
+      );
+      for (const loser of sorted.slice(1)) drop.add(loser.node.id);
+    }
+    if (drop.size === 0) return candidates;
+    return candidates.filter((candidate) => !drop.has(candidate.node.id));
   }
 
   private expandByHops(

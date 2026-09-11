@@ -121,7 +121,7 @@ const CHAT_ONLY_RE =
   /^(你好|hello|hi|hey|早上好|下午好|晚上好|谢谢|thanks|thank you|bye|再见|你是谁)[!！。.，,？?\s]*$/i;
 
 /** 口头禅/应答词/情绪涂鸦（锚定全文）。 */
-const CASUAL_FAST_CHAT_RE =
+const CASUAL_CHAT_RE =
   /^(在吗|还在吗|哈哈|haha|lol|ok|okay|嗯|嗯嗯|欸|诶|哎|唉|哦|噢|喔|在|忙吗|睡了吗|吃了吗|收到|行|好|好嘞|好的|好的呀|好的呢|谢啦|谢谢啦|bye bye|晚安)[!！。.，,？?\s]*$/i;
 
 /** 高长度上限：超长文本即使形似寒暄也不短路（防拼接绕过）。 */
@@ -134,7 +134,7 @@ const CHAT_SHORT_CIRCUIT_MAX_LEN = 16;
 export function isHighPrecisionChatText(text: string): boolean {
   const t = (text ?? "").trim();
   if (!t || t.length > CHAT_SHORT_CIRCUIT_MAX_LEN) return false;
-  return CHAT_ONLY_RE.test(t) || CASUAL_FAST_CHAT_RE.test(t);
+  return CHAT_ONLY_RE.test(t) || CASUAL_CHAT_RE.test(t);
 }
 
 /**

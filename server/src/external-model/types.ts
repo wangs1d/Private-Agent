@@ -185,11 +185,12 @@ export type AgentPromptMemoryContext = {
   conversationTimeline?: string;
   modeRoleGuidance?: string;
   /**
-   * 回复风格模式（2026-09-06）：决定【回复指南】是否注入聊天基准行
-   * （平调短句 + 语感镜像 + 不客服腔）。
-   * - chat：对话面（fast/foreground），注入基准行；
-   * - task：任务面（complex/后台派发），不注入——交付内容充分展开不受短句约束，
-   *   风格由 modeRoleGuidance（COMPLEX_MODE_ROLE_GUIDANCE）自行承担。
+   * 回复风格模式（2026-09-06，2026-09-11 分层化）：决定【说话方式·伙伴面】
+   * （调子菜单 few-shot + 收放开关 + 禁句表）是否注入。
+   * - chat：对话面（fast/foreground），注入伙伴面；
+   * - task：任务面（complex/后台派发），不注入——交付内容充分展开不受闲聊调子约束，
+   *   风格由 modeRoleGuidance（TASK_PLANE_ROLE_GUIDANCE）自行承担。
+   * 【说话方式·管家底色】（定位/坦诚/称呼礼仪）与模式无关，两层都注入。
    * 未设置时按 chat 处理。由 agent-core 与 modeRoleGuidance 同点注入。
    */
   replyStyleMode?: "chat" | "task";
@@ -267,9 +268,9 @@ export type AgentStreamOptions = {
   pinnedToolNames?: string[];
   /**
    * 禁用 BM25 延迟工具目录（tool_discover→tool_call 两波召回）。
-   * fast 车道必须置 true：maxRounds=1 下"发现→执行"两波必断头，延迟目录在
-   * fast 是永远用不了的摆设。禁用后 visible 工具全量暴露（fastLane ≤ 16 个轻 schema），
-   * 超出能力范围的任务改由 agent.escalate_to_complex 升级兜底。
+   * 轻量白名单链路（对话面 explicit 档等）必须置 true：maxRounds 小时
+   * "发现→执行"两波必断头，延迟目录用不上。禁用后 visible 工具全量暴露，
+   * 超出白名单能力的请求由服务端转任务面承担。
    */
   disableToolSearch?: boolean;
   /**

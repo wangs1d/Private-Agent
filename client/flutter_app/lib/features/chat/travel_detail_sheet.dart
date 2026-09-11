@@ -150,6 +150,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                         title: entry.title,
                         gallery: entry.images,
                         index: i,
+                        anchorContext: context,
                       ),
                       child: MediaThumbnail(
                         url: entry.images[i],

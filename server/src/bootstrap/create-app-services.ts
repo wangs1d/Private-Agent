@@ -17,16 +17,9 @@ import {
 } from "@private-ai-agent/agent-world";
 import { createExternalChatProviderFromEnv } from "../external-model/index.js";
 import { createPictureKit } from "@private-ai-agent/picture";
-import type { ChatToolExecutionContext } from "../external-model/types.js";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
-import { StreamSegmenter } from "../agent/stream-segmenter.js";
-import {
-  formatAgentStylePrompt,
-  loadAgentStyleProfile,
-  validateStyleConsistency,
-} from "../agent/agent-style-profile.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
 import { AgentAccountService } from "../services/agent-account-service.js";
 import { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
@@ -74,6 +67,7 @@ import {
 } from "../config/location-env.js";
 import { LocationSensor } from "../rhythm/sensors/location-sensor.js";
 import { LocationTrigger } from "../proactivity/triggers/location-trigger.js";
+import { createProactiveOutreachExecutor } from "../proactivity/proactive-outreach-executor.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { initShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
@@ -107,7 +101,7 @@ import { SkillGenerator } from "../services/skill-generator.js";
 import { KnowledgeGapExecutor } from "../services/knowledge-gap-executor.js";
 import { KnowledgeVerificationService } from "../services/knowledge-verification-service.js";
 import { ProactiveAgentCenter } from "../services/proactive-agent-center.js";
-import { ProactiveOutboundMessageService, type ProactiveOutboundChannel } from "../services/proactive-outbound-message-service.js";
+import { ProactiveOutboundMessageService } from "../services/proactive-outbound-message-service.js";
 import {
   ArrivalMonitorService,
   JuheTrainProvider,
@@ -211,9 +205,7 @@ import {
   classifyFeatureByName,
 } from "../catalog/index.js";
 import { setFeatureCatalog } from "../agent/agent-capabilities.js";
-import { setCapabilityModuleDeps, getBuiltinAgentChatTools, setDynamicFastLaneSkillTools, invalidateBuiltinToolsCache, selectRelevantTools } from "../external-model/openai-compatible-tool-loop.js";
-import { registerDynamicFastLaneName } from "../gateway/index.js";
-import { skillManifestToChatTool } from "../skills/skill-openai-bridge.js";
+import { setCapabilityModuleDeps, getBuiltinAgentChatTools, invalidateBuiltinToolsCache, selectRelevantTools } from "../external-model/openai-compatible-tool-loop.js";
 import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
@@ -242,7 +234,7 @@ import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
 import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
 import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
-import { ToolRegistry, type ToolContext } from "../tools/tool-registry.js";
+import { ToolRegistry } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import {
   DesktopSceneWatcherService,
@@ -353,7 +345,6 @@ import {
   type BrainSignalInput,
   type BrainDecision,
   type BrainDecisionAction,
-  type MemoryRecallItem,
   type CognitiveEngine,
   type CognitiveInput,
   type CognitiveContext,
@@ -908,7 +899,7 @@ export async function createAppServices(): Promise<AppServices> {
   // 通过 setCapabilityModuleDeps 让 getBuiltinAgentChatTools 自动合并 ChatCompletionTool；
   // 通过 setExtraIntentRules 把模块意图元数据合并到 BM25 调权；
   // registerAllCapabilityModules 把 handler 注册到 ToolRegistry。
-  // 图片能力套件(图库/美颜批图/解析/缩略图/存储管理),存储根 data/pictures
+  // 图片能力套件(图库/解析/缩略图/存储管理),存储根 data/pictures
   const pictureKit = await createPictureKit({
     rootDir: join(process.cwd(), "data", "pictures"),
     batchOutputDir: join(process.cwd(), "data", "pictures", "batch"),
@@ -1342,7 +1333,7 @@ export async function createAppServices(): Promise<AppServices> {
         skillPromoValidateDeps,
         skillPromotionQueue,
         // onSkillPromoted 回调：自我进化装载 Skill 成功后触发，
-        // 把新能力同步到 CapabilityCortex + 动态 fastLane 名单 + 清缓存。
+        // 把新能力同步到 CapabilityCortex + 清缓存。
         // 闭包引用 capabilityCortex（在下方 brainEnabled 块创建），
         // 回调运行时（EvolutionCortex.execute 装载阶段）capabilityCortex 已初始化。
         ({ metadata, skillName }) => {
@@ -1365,18 +1356,7 @@ export async function createAppServices(): Promise<AppServices> {
               `[create-app-services] 注册 '${skillName}' 到 tool-router 失败: ${err instanceof Error ? err.message : err}`,
             );
           });
-          // 2. 若 Skill 标记为 fast_lane，注入动态 fastLane（让 Fast 模式可收编）
-          const tags = metadata.tags ?? [];
-          if (tags.includes("fast_lane") || tags.includes("fast")) {
-            registerDynamicFastLaneName(skillName);
-            // 收集所有 fastLane 标记的 Skill，转成 ChatCompletionTool 注入 Fast 模式
-            const fastLaneSkillTools = skillManager
-              .list(true)
-              .filter((m) => m.tags?.some((t) => t === "fast_lane" || t === "fast"))
-              .map((m) => skillManifestToChatTool({ ...m, enabled: true, trusted: true }));
-            setDynamicFastLaneSkillTools(fastLaneSkillTools);
-          }
-          // 3. 清除 builtin + fastLane 缓存，确保下次请求看到新能力
+          // 2. 清除 builtin 工具缓存，确保下次请求看到新能力
           invalidateBuiltinToolsCache();
         },
       );
@@ -1454,12 +1434,29 @@ export async function createAppServices(): Promise<AppServices> {
   let onSevereWeatherAlert:
     | ((sessionId: string, alerts: string[], scheduleCount: number) => void)
     | undefined;
+  // 简报天气定位兜底：客户端 GPS（比 IP 准）。协调器在下方才创建，这里持
+  // 延迟引用（简报每次生成时才调用，赋值必然先于首次生成）。
+  const locationCoordinatorRef: { current: LocationCoordinator | null } = { current: null };
+  const briefingClientLocation = async (
+    sessionId: string,
+  ): Promise<
+    | { latitude: number; longitude: number; label?: string; city?: string; timezone?: string }
+    | null
+  > => {
+    const coordinator = locationCoordinatorRef.current;
+    if (!coordinator) return null;
+    const live = await coordinator.requestLocation(sessionId, "morning-briefing:weather");
+    if (live) return live;
+    return coordinator.getCachedWithTime(sessionId)?.payload ?? null;
+  };
   const morningBriefingService = new MorningBriefingService({
     weatherService,
     weatherPrefsService,
     scheduleTaskService,
     notesService,
     getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
+    // 天气定位兜底：客户端 GPS（配置城市 > GPS > IP）
+    requestClientLocation: briefingClientLocation,
     // 第五源：近期重要日子（读 care.set_important_date 写入的 KV）
     agentMemorySyncService,
     onImportantDayToday: (sessionId, day) => onImportantDayToday?.(sessionId, day),
@@ -1767,8 +1764,6 @@ export async function createAppServices(): Promise<AppServices> {
   agentCore.setMoodInferenceService(moodInferenceService);
   agentCore.setLifeSignalHubService(lifeSignalHubService);
   agentCore.setWsRegistry(wsConnectionRegistry);
-  // 确定性日程执行（2026-09-09）：提醒/日程由程序层解析直建，模型只转述。
-  agentCore.setScheduleIntentService(scheduleIntentService);
 
   // task.dispatch launch 晚绑定（2026-09-05 前后台架构）：派发端接到 agentCore
   taskDispatchLauncherRef.fn = (input) =>
@@ -2290,7 +2285,7 @@ export async function createAppServices(): Promise<AppServices> {
         // 小脑未注册时（neuro 关闭）BrainCenter.scheduleProactive 直接 fire。
         void bc
           .scheduleProactive(decision, brainSignal, () =>
-            executeProactiveDecision(decision, brainSignal),
+            executeProactiveOutreach(decision, brainSignal),
           )
           .catch((err) => {
             console.log(`[BrainCenter] 主动决策执行失败: ${err}`);
@@ -2300,293 +2295,18 @@ export async function createAppServices(): Promise<AppServices> {
       });
     });
 
-    // ─── 主动决策执行器：主动做事 + LLM 话术生成 + SynapseBus 投递 ───
-    // 通用实现：基于 BrainSignalInput（kind/title/summary/importance）驱动。
-    // 职责分离：ProactionCortex 的 value/disturbance 评分是唯一 speak/silent 决策源；
-    // LLM 负责「主动做事 + 生成话术」——可以自主调用工具（查天气/搜新闻/列日程/
-    // 查行情等）把结果融入话术，实现"类人主动性"（不只说话，还做事）。
-    // 不依赖任何活动类型枚举，新场景只需发对应 LifeSignal 即可被决策与投递。
-    const PROACTIVE_SYSTEM_PROMPT = `你察觉到了一件事，需要主动联系用户。
+    // ─── 主动决策执行器：已移交 proactivity 模块（proactive-outreach-executor.ts）───
+    // bootstrap 只做接线：BrainCenter 决策 speak 后，由执行器完成「主动做事 + 话术生成 + 投递」。
+    // brainCenter / synapseBus 以 getter 传入：两者在下方装配段才赋值，执行时才取值。
+    const executeProactiveOutreach = createProactiveOutreachExecutor({
+      externalChat: () => externalChat,
+      toolRegistry,
+      brainCenter: () => brainCenter,
+      synapseBus: () => synapseBus,
+      proactiveOutbound,
+      agentMemorySyncService,
+    });
 
-你有两个任务，按顺序执行：
-1. **主动做事**：如果信号涉及需要查询或操作的内容（如天气、新闻、行情、日程等），先调用相关工具获取信息。
-2. **生成话术**：基于工具结果（如有），生成一句话主动话术。
-
-话术指导（不给示例，自行把握）：
-- 像朋友顺嘴提起一件事，不是助理汇报。
-- 带出你为什么主动开口，但别啰嗦。
-- 融入查到的关键信息，但别像在报数据。
-- 语气随场景调整，别一直一个调子。
-- 中文简短，别超过 30 字。
-
-直接给出话术正文，不要解释你的决定。`;
-
-    /** C1: 将消息按标点切成 2-3 段，用于分段发送模拟真人打字节奏 */
-    function sleep(ms: number): Promise<void> {
-      return new Promise((resolve) => setTimeout(resolve, ms));
-    }
-
-    function buildFallbackMessage(signal: BrainSignalInput): string {
-      // 通用兜底：基于 importance 和信号标题，不依赖活动类型枚举
-      const importance = signal.importance ?? "medium";
-      const title = signal.title;
-      switch (importance) {
-        case "critical": return `${title}，需要你现在处理一下。`;
-        case "high": return `${title}，提醒你看一下。`;
-        case "medium": return `刚刚察觉到：${title}。`;
-        default: return `有个小情况：${title}。`;
-      }
-    }
-
-    /**
-     * C2: 构建主动话术 prompt，注入最近主动话术记忆。
-     * 让 LLM 能引用上下文，产生"刚才那个我又看了一下"的连续感。
-     */
-    async function buildProactivePrompt(
-      signal: BrainSignalInput,
-      decision: BrainDecision,
-    ): Promise<string> {
-      const summary = signal.summary ? `\n信号摘要: ${signal.summary}` : "";
-      const importance = signal.importance ?? "medium";
-      const occurredAt = String(signal.metadata?.occurredAt ?? new Date().toISOString());
-
-      // C2: 召回最近主动话术记忆，注入 prompt 供 LLM 引用上下文。
-      // Task 5: 优先复用 decide 阶段（recallRecentMemories）已召回的 decision.recallItems，
-      // 避免对同一 LifeSignal 重复执行 MemoryCortex.recall；仅在 decide 未携带
-      // recallItems（如 fallback:no_e2e_maker 路径 / 召回失败）时降级到独立 episodic 召回。
-      const decisionRecall = decision.recallItems;
-      let recallItems: MemoryRecallItem[];
-      if (decisionRecall !== undefined) {
-        recallItems = decisionRecall;
-      } else if (brainCenter) {
-        try {
-          const recallResult = await brainCenter.recall(signal.actorId, signal.title, {
-            domain: "episodic",
-            limit: 3,
-          });
-          recallItems = recallResult.items;
-        } catch (err) {
-          console.log(`[BrainCenter] 主动话术记忆召回失败（忽略）: ${err}`);
-          recallItems = [];
-        }
-      } else {
-        recallItems = [];
-      }
-
-      let memoryContext = "";
-      if (recallItems.length > 0) {
-        const recentMsgs = recallItems
-          .map((item) => `- ${item.content}`)
-          .join("\n");
-        memoryContext = `\n你最近主动说过的话:\n${recentMsgs}\n如果与当前信号相关，可以自然引用（如"刚才那个我又看了一下"），但别生硬。`;
-      }
-
-      // 拉取用户最近实时对话，让话术生成能感知当前话题走向
-      let recentConversation = "";
-      try {
-        const chatSessionId = resolvePrimaryChatSessionId(
-          signal.actorId,
-          getAgentRuntimeConfig().masterDelegation.enabled,
-        );
-        const messages = getChatThreadStore().thread(chatSessionId, "");
-        const recent = messages.slice(-6);
-        const lines: string[] = [];
-        for (const msg of recent) {
-          const role = msg.role === "user" ? "用户" : msg.role === "assistant" ? "Agent" : null;
-          if (!role) continue;
-          const content = typeof msg.content === "string" ? msg.content : "[多模态消息]";
-          const cleaned = content.replace(/^\[ts:[^\]]+\]\n?/, "").trim();
-          if (cleaned) lines.push(`${role}：${cleaned}`);
-        }
-        recentConversation = lines.join("\n");
-      } catch {
-        // thread store 拉取失败不阻塞话术生成
-      }
-      const convContext = recentConversation.trim()
-        ? `\n用户最近实时对话：\n${recentConversation.trim().slice(0, 600)}\n（关键参考：用户当前在聊什么。话术要自然融入当前对话节奏，不要强行扯回无关的旧话题）`
-        : "";
-
-      return `信号类型：${signal.kind}
-信号标题：${signal.title}
-重要程度：${importance}
-检测时间：${occurredAt}
-决策评分：value=${decision.valueScore}, disturb=${decision.disturbScore}${summary}${memoryContext}${convContext}
-
-请基于信号内容，主动帮用户做事（调用工具）并生成主动话术。`;
-    }
-
-    async function executeProactiveDecision(
-      decision: BrainDecision,
-      signal: BrainSignalInput,
-    ): Promise<void> {
-      const traceId = `proactive-${signal.actorId}-${Date.now()}`;
-      // Task 5: 加载 Agent 自身风格指纹，注入 system prompt 供话术生成遵循
-      const styleProfile = loadAgentStyleProfile(agentMemorySyncService);
-      const proactiveSystemPrompt = `${PROACTIVE_SYSTEM_PROMPT}\n\n${formatAgentStylePrompt(styleProfile)}`;
-
-      // 1. 调 LLM 生成话术（启用 function calling，LLM 可自主调工具做事）
-      let message = "";
-      if (externalChat) {
-        try {
-          // 构建工具执行上下文：LLM 调工具 → toolRegistry.execute → 真实执行
-          const toolContext: ToolContext = {
-            sessionId: signal.actorId,
-            userId: signal.actorId,
-            agentAccessMode: "full",
-          };
-          const toolExecCtx: ChatToolExecutionContext = {
-            executeTool: (name, args) => toolRegistry.execute(name, args, toolContext),
-          };
-          await externalChat.streamCompletion(
-            `proactive:${signal.actorId}:${Date.now()}`,
-            { text: await buildProactivePrompt(signal, decision) },
-            (delta) => {
-              message += delta;
-            },
-            toolExecCtx,
-            {
-              // C2: 关闭 ephemeralTurn，让主动话术写入 provider thread
-              // 下次 buildProactivePrompt 的 recall 能召回"我之前主动说过什么"
-              ephemeralTurn: false,
-              disableThinking: true,
-              maxThreadMessages: 4,
-              systemPromptOverride: proactiveSystemPrompt,
-              toolExposureProfile: "contextual",
-              toolLoop: { maxRounds: 2 },
-            },
-          );
-          // Task 5: LLM 话术生成后做风格一致性校验（非阻塞，仅记录警告日志，不修改输出内容）
-          if (message.trim()) {
-            const consistency = validateStyleConsistency(message, styleProfile);
-            if (!consistency.passed) {
-              console.log(
-                `[BrainCenter] 话术风格偏离警告: ${consistency.reason}（偏离度=${consistency.deviation}）话术="${message.slice(0, 50)}..."`,
-              );
-            }
-          }
-        } catch (err) {
-          console.log(`[BrainCenter] LLM 话术生成失败，使用模板兜底: ${err}`);
-          message = buildFallbackMessage(signal);
-        }
-      } else {
-        message = buildFallbackMessage(signal);
-      }
-
-      // 2. LLM 输出异常（SILENT/空）时用模板兜底发送——
-      //    ProactionCortex 已决策 speak，LLM 只负责话术，不应有否决权，
-      //    否则 LLM 的保守倾向会把规则判定该发的信号压成静默。
-      if (message.trim().toUpperCase() === "SILENT" || !message.trim()) {
-        console.log(`[BrainCenter] LLM 输出异常，使用模板兜底`);
-        message = buildFallbackMessage(signal);
-      }
-
-      // 2.5 Stage 4 Task 2：输出安全过滤——检测话术中的敏感信息并替换为 [REDACTED]。
-      //     brainCenter 未注册时原文本透传（checkOutputSafety 内部已降级）。
-      //     命中时用 sanitized 覆盖 message，避免把 API key/私钥/内部路径推给用户。
-      if (brainCenter && message.trim()) {
-        const outputSafety = brainCenter.checkOutputSafety(message, {
-          actorId: signal.actorId,
-          stage: "executeProactiveDecision",
-        });
-        if (!outputSafety.safe) {
-          console.log(
-            `[BrainCenter] 主动话术输出已脱敏 actorId=${signal.actorId} reason=${outputSafety.reason}`,
-          );
-          message = outputSafety.sanitized;
-        }
-      }
-
-      // 3. 通过 SynapseBus.sendToUser 投递（WS + MessageHub 离线降级）
-      //    注意：synapseBus 可能在 brainNeuroEnabled=0 时未创建
-      //    垫词 + 分段已统一到 StreamSegmenter（与 chat 主回复同一模块）：
-      //    垫词 = 话术首个分句（interim），信息块分段 + 增量去重后逐段（stream）推送，
-      //    模拟真人"开口一句、再打一段发一段"的节奏，而不是一次性冒出完整结论。
-      const targetBus = synapseBus;
-      if (targetBus) {
-        const bubbles: Array<{ text: string; phase: "interim" | "stream" }> = [];
-        const proactiveSegmenter = new StreamSegmenter(
-          (seg, phase) => bubbles.push({ text: seg, phase }),
-          {
-            pauseMs: 400,
-            minSegmentChars: 6,
-            interimReplyGapMs: 600,
-            segmentationEnabled: true,
-            blockCharTarget: 56,
-            maxStreamSegments: 3,
-          },
-        );
-        proactiveSegmenter.feed(message.trim());
-        await proactiveSegmenter.flushFinal();
-        if (bubbles.length === 0) {
-          // 极端兜底：分段器未产出（可能全被去重），整条作为单个消息发
-          await targetBus.sendToUser(signal.actorId, {
-            type: "agent.proactive_message",
-            payload: {
-              title: "Agent 主动联系",
-              text: message.trim(),
-              channel: decision.channel ?? "websocket",
-              reason: decision.rationale,
-            },
-          });
-        } else {
-          // 逐段发送：垫词气泡先行，随后正文逐段，间隔由 StreamSegmenter 的停顿保证
-          for (let i = 0; i < bubbles.length; i++) {
-            const isLast = i === bubbles.length - 1;
-            await targetBus.sendToUser(signal.actorId, {
-              type: "agent.proactive_message",
-              payload: {
-                title: "Agent 主动联系",
-                text: bubbles[i].text,
-                channel: decision.channel ?? "websocket",
-                reason: isLast ? decision.rationale : undefined,
-                isPartial: !isLast,
-              },
-            });
-            if (!isLast) {
-              await sleep(400);
-            }
-          }
-        }
-        console.log(`[BrainCenter] 主动消息已发送给 ${signal.actorId}（${bubbles.length} 段）: ${message.slice(0, 50)}...`);
-      } else {
-        // synapseBus 不存在时降级到 proactiveOutbound
-        await proactiveOutbound.send({
-          actorId: signal.actorId,
-          title: "Agent 主动联系",
-          text: message.trim(),
-          reason: `brain:${decision.rationale}`,
-          channel: (decision.channel ?? "websocket") as ProactiveOutboundChannel,
-        });
-        console.log(`[BrainCenter] 主动消息已通过 outbound 发送给 ${signal.actorId}`);
-      }
-
-      // 4. 出行建议已合并到 function calling 阶段：
-      //    LLM 可自主调 weather.get_local 等工具查信息并融入话术，
-      //    不再需要单独的"出行建议"消息块，避免双消息打断用户。
-
-      // 5. C2: 主动话术写入记忆——下次 buildProactivePrompt 的 recall 能召回
-      //    让 LLM 能说"刚才那个我又看了一下"，产生连续感而非每次孤立开口
-      if (brainCenter && message.trim()) {
-        try {
-          await brainCenter.remember(signal.actorId, {
-            actorId: signal.actorId,
-            kind: "event",
-            domain: "episodic",
-            content: `[主动话术] ${message.trim()}`,
-            importance: signal.importance as "critical" | "high" | "medium" | "low" | undefined,
-            source: "system",
-            timestamp: new Date().toISOString(),
-            metadata: {
-              signalKind: signal.kind,
-              signalTitle: signal.title,
-              decisionRationale: decision.rationale,
-            },
-          });
-        } catch (err) {
-          console.log(`[BrainCenter] 主动话术记忆写入失败（忽略）: ${err}`);
-        }
-      }
-    }
   }
 
   // ========== Webhook 事件驱动 ==========
@@ -2667,7 +2387,7 @@ export async function createAppServices(): Promise<AppServices> {
   registerHabitLoopBuiltinSkills((skill) => skillManager.register(skill), { habitLoop: habitLoopService });
 
   // ── 图片能力套件 skill 化（PictureKit 在上方 data/pictures 根目录创建）──
-  // picture.gallery / picture.beautify 与 capability-module 工具同名接管执行；
+  // picture.gallery 与 capability-module 工具同名接管执行；
   // 注册后经工具目录导出以 resource_type="skill" 同步进 tool-router skill 库。
   registerPictureBuiltinSkills((skill) => skillManager.register(skill), { pictureKit });
 
@@ -2777,6 +2497,8 @@ export async function createAppServices(): Promise<AppServices> {
   // 按需位置协调器：Agent 需要位置（位置类工具）时向客户端请求实时 GPS。
   const locationCoordinator = new LocationCoordinator();
   agentCore.setLocationCoordinator(locationCoordinator);
+  // 简报天气定位兜底经延迟引用取到此处创建的协调器
+  locationCoordinatorRef.current = locationCoordinator;
 
   // ─── 位置能力（方案 A-D）：默认全部关闭（隐私优先），LOCATION_TRACKING_MODE=continuous 显式开启 ───
   // 方案 C 地理围栏：用户显式创建围栏才存在位置触发，独立于持续模式常驻装配。
@@ -4803,6 +4525,7 @@ export async function createAppServices(): Promise<AppServices> {
     agentMemorySyncService,
     weatherService,
     weatherPrefsService,
+    locationCoordinator,
     virtualPhoneService,
     ttsService,
     voiceMessageService,

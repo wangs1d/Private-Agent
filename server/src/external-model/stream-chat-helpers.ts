@@ -234,6 +234,10 @@ export async function consumeNormalizedStream(
   options: StreamConsumeOptions = {},
 ): Promise<StreamConsumeResult> {
   let content = "";
+  // 咽喉处的「原文累积」：只剥内联 think 块、保留 DSML 标记的文本。流末用它做
+  // DSML 工具调用提取（extractDsmlToolCalls）——提取必须看到完整标记，而流式
+  // 发射必须看不到协议原文，两者只能分开累积。
+  let rawContent = "";
   let reasoning = "";
   let finishReason: string | null = null;
   let usage: NormalUsage | undefined;
@@ -242,6 +246,12 @@ export async function consumeNormalizedStream(
   // （而非独立 reasoning 字段），在咽喉处统一剥除，保证所有 consumer 拿到的
   // content / onContentDelta 都是「正式回复文本」（见 stripInlineThinkBlocks 注释）。
   const thinkSanitizer = createStreamThinkSanitizer();
+  // DSML 协议标记滞留净化（2026-09-11 根修）：模型在无工具/工具被裁的轮次会把
+  // 工具调用按训练格式（<| | DSML | | calls/invoke/parameter…>）写进 content。
+  // 历史上这段协议原文会随 onContentDelta 逐 chunk 直推前端（剥离只发生在流末，
+  // 收不回已展示的内容）。现在 think 剥离后的文本再过一道跨 chunk 的 DSML 守卫：
+  // 协议标记及其内部内容绝不发射，正文照常透传；流末再从 rawContent 提取工具调用。
+  const dsmlSanitizer = createStreamDsmlSanitizer();
 
   const idleMs = resolveIdleTimeoutMs(options.idleTimeoutMs);
   const useIdleGuard = idleMs > 0;
@@ -289,8 +299,12 @@ export async function consumeNormalizedStream(
       if (chunk.content && chunk.content.length > 0) {
         const visibleDelta = thinkSanitizer.feed(chunk.content);
         if (visibleDelta) {
-          content += visibleDelta;
-          options.onContentDelta?.(visibleDelta);
+          rawContent += visibleDelta;
+          const emitDelta = dsmlSanitizer.feed(visibleDelta);
+          if (emitDelta) {
+            content += emitDelta;
+            options.onContentDelta?.(emitDelta);
+          }
         }
       }
       if (chunk.reasoning && chunk.reasoning.length > 0) {
@@ -330,20 +344,34 @@ export async function consumeNormalizedStream(
   // 若思考块始终未闭合，flush 返回空——整段视为思考过程丢弃。
   const thinkTail = thinkSanitizer.flush();
   if (thinkTail) {
-    content += thinkTail;
-    options.onContentDelta?.(thinkTail);
+    rawContent += thinkTail;
+    const thinkTailOut = dsmlSanitizer.feed(thinkTail);
+    if (thinkTailOut) {
+      content += thinkTailOut;
+      options.onContentDelta?.(thinkTailOut);
+    }
+  }
+  const dsmlTail = dsmlSanitizer.flush();
+  if (dsmlTail) {
+    content += dsmlTail;
+    options.onContentDelta?.(dsmlTail);
   }
 
   let toolCalls: NormalToolCall[] = [...toolAccByIndex.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, v]) => v);
-  const dsmlToolCalls = extractDsmlToolCalls(content);
+  // 提取必须用 rawContent（DSML 标记完好），发射给 consumer 的 content 已被
+  // 守卫剥掉协议原文——否则提取不到任何调用（2026-09-11 根修）。
+  const dsmlToolCalls = extractDsmlToolCalls(rawContent);
   if (dsmlToolCalls.length > 0) {
     const offset = toolCalls.length;
     toolCalls = toolCalls.concat(
       dsmlToolCalls.map((call, i) => ({ ...call, index: offset + i })),
     );
-    content = stripDsmlToolCallMarkup(content);
+    // content 已被守卫剥掉协议原文，strip 通常在此为 no-op（防守卫旁路的兜底）。
+    // 但 no-op 不带 trim——历史行为里「有 DSML 的正文」会经 strip 收尾 trim，
+    // 这里补 .trim() 保持契约（协议块被剥后正文不应残留尾随空行）。
+    content = stripDsmlToolCallMarkup(content).trim();
     finishReason = "tool_calls";
   } else {
     content = stripDsmlToolCallMarkup(content);
@@ -518,6 +546,114 @@ export function createStreamThinkSanitizer() {
       const rest = pending;
       pending = "";
       if (inThink) return "";
+      return rest;
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * DSML 协议标记滞留净化器（2026-09-11 根修）                          *
+ * ------------------------------------------------------------------ *
+ * 模型在无工具/工具被裁的轮次会把工具调用按训练格式写进 content：
+ *   `< | | DSML | | calls> … <| | DSML| | invoke name="tool_call"> …`
+ * 历史缺陷：这段协议原文随 onContentDelta 逐 chunk 直推前端（服务端剥离只在
+ * 流末，收不回已展示的气泡），客户端再拿原始流式缓冲做 done 兜底 → 协议原文
+ * 定稿在聊天气泡里（2026-09-11 01:34 实测截图）。
+ *
+ * 本净化器与 createStreamThinkSanitizer 同构：跨 chunk 识别协议标记并整段
+ * 丢弃，正文照常透传。与「流末整段 strip」的本质区别：**协议文本从一开始
+ * 就不进入流式通道**，前端永远不会看到。
+ *
+ * 状态机：
+ *   - 正常态：扫描完整 DSML 标签（开/闭，含半角 `|`、全角 `｜`、任意空白）。
+ *     开标签 → 进入协议态（depth=1）；游离闭标签 → 只剥标签本身。
+ *   - 协议态：丢弃一切内容，按深度计数嵌套（calls>invoke>parameter），
+ *     depth 归零（最外层闭合）后回到正常态继续透传后续正文；
+ *     未闭合（流被截断）则 flush 时整体丢弃。
+ *   - 边界滞留：末尾是「可能是半截 DSML 标签」的前缀（`< |`、`</ | | DSML |`…）
+ *     时滞留待下一 chunk 判定，上限 120 字符（真实标签最长约 50 字符）。
+ *
+ * 取舍：正文若恰好包含 `< |` 这类比较/管道写法会被短暂滞留（≤1 chunk），
+ * 超过 120 字符无 `>` 即放行——与 think 净化器对裸 `<` 的取舍一致：
+ * 内部信号防透出的优先级更高。
+ */
+
+/** 完整 DSML 标签（开或闭）：`<` 可选 `/`，两组竖线（间可夹空白），`DSML`，任意标签头到 `>`。 */
+const DSML_ANY_TAG_RE = /<\s*\/?\s*[|｜]+\s*[|｜]+\s*DSML[^>]*>/i;
+/** 末尾滞留判定：是否为「可能是半截 DSML 标签的前缀」。返回应滞留的字符数。 */
+function dsmlPartialTagTailLen(text: string): number {
+  const lt = text.lastIndexOf("<");
+  if (lt < 0) return 0;
+  const tail = text.slice(lt);
+  if (tail.length > 120) return 0;
+  // 已确认 `<` + 可选 `/` + 至少一条竖线：几乎必然是 DSML 标签，滞留到 `>` 或超限
+  if (/^<\s*\/?\s*[|｜]/.test(tail)) return tail.length;
+  // 尚未到竖线：`<`、`< `、`</`、`< |` 等纯前导组合，短暂滞留待判
+  if (/^<\s*\/?\s*[|｜]{0,2}$/.test(tail)) return tail.length;
+  return 0;
+}
+
+export function createStreamDsmlSanitizer() {
+  let pending = "";
+  let depth = 0;
+
+  function drain(): string {
+    let out = "";
+    while (true) {
+      const tagMatch = DSML_ANY_TAG_RE.exec(pending);
+      if (tagMatch) {
+        if (depth > 0) {
+          // 协议态：标签前的内容（参数值/工具名等协议正文）连同标签一并丢弃
+          pending = pending.slice(tagMatch.index + tagMatch[0].length);
+          if (/^<\s*\//.test(tagMatch[0])) {
+            depth -= 1;
+          } else {
+            depth += 1;
+          }
+          continue;
+        }
+        // 正常态：标签前是正常正文，放行；再处理标签本身
+        out += pending.slice(0, tagMatch.index);
+        pending = pending.slice(tagMatch.index + tagMatch[0].length);
+        if (/^<\s*\//.test(tagMatch[0])) {
+          // 游离闭标签：只剥标签，不出协议、不进协议态
+          continue;
+        }
+        depth = 1;
+        continue;
+      }
+      // 无完整标签：按状态滞留半截前缀，其余全部处理
+      const hold = dsmlPartialTagTailLen(pending);
+      if (hold > 0) {
+        if (depth > 0) {
+          // 协议态：滞留尾部可能是半截闭标签，其余协议内容丢弃
+          pending = pending.slice(pending.length - hold);
+        } else {
+          out += pending.slice(0, pending.length - hold);
+          pending = pending.slice(pending.length - hold);
+        }
+      } else if (depth > 0) {
+        pending = "";
+      } else {
+        out += pending;
+        pending = "";
+      }
+      return out;
+    }
+  }
+
+  return {
+    feed(delta: string): string {
+      pending += delta;
+      return drain();
+    },
+    flush(): string {
+      const rest = pending;
+      pending = "";
+      // 协议块未闭合（流被截断）：剩余内容全部视为协议丢弃
+      if (depth > 0) return "";
+      // 正常态残留的半截协议前缀（如结尾悬着 `< |`）：协议残渣，丢弃
+      if (dsmlPartialTagTailLen(rest) > 0) return "";
       return rest;
     },
   };
@@ -826,6 +962,43 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512) {
 /* ------------------------------------------------------------------ *
  * 4. 兜底异常                                                        *
  * ------------------------------------------------------------------ */
+
+/**
+ * 模型在**无工具轮次**（请求未携带 tools / 工具执行器缺位）用 DSML 文本形式
+ * 发起了工具调用（2026-09-11 根修）。
+ *
+ * 触发场景：模型想调的工具不在本轮可见工具集里（对话面零工具、应急重生成、
+ * 桥接离线剔除等），于是按训练格式把调用写成
+ * `<| | DSML | | invoke name="tool_call">` 这类协议文本。历史上非工具分支把
+ * consumeNormalizedStream 提取出的这些调用**静默丢弃**并返回空串——用户请求
+ * 凭空消失；协议原文还可能已被流式推出。
+ *
+ * 上抛语义：调用方（agent-core runStandardLlmPath）捕获后升级到带工具的任务面
+ * 重跑同一句用户消息——模型意图被真正执行，而不是丢给用户一句协议残渣。
+ */
+export class ToolIntentWithoutToolsError extends Error {
+  readonly providerId?: string;
+  readonly model?: string;
+  /** 从 DSML 标记提取出的工具调用（含桥接形态：name="tool_call" + name/arguments 参数） */
+  readonly toolCalls: NormalToolCall[];
+
+  constructor(params: {
+    providerId?: string;
+    model?: string;
+    toolCalls: NormalToolCall[];
+  }) {
+    const names = params.toolCalls.map((c) => c.name ?? "?").join(", ");
+    super(
+      `Tool intent on tool-less turn (provider=${params.providerId ?? "?"} ` +
+        `model=${params.model ?? "?"}): ${params.toolCalls.length} DSML-extracted ` +
+        `call(s) [${names}] cannot execute without a tool executor`,
+    );
+    this.name = "ToolIntentWithoutToolsError";
+    this.providerId = params.providerId;
+    this.model = params.model;
+    this.toolCalls = params.toolCalls;
+  }
+}
 
 export class EmptyStreamContentError extends Error {
   readonly providerId?: string;

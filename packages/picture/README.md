@@ -1,30 +1,8 @@
 # @private-ai-agent/picture
 
 图片能力套件(本地子包),将 `E:\ws-project\picture` 的摄影 Agent 能力移植进
-Private-Agent monorepo,并扩展图片生成、图像处理、图像解析、缩略图、
-图片存储管理与**人像美颜批图**。
-
-## 美颜批图(面向人像/自拍场景)
-
-`processing/beauty.ts` 实现修图师式工作流,而非全局滤镜:
-
-- **频率分离磨皮**:低频底色 + 衰减高频,皮肤细腻但五官/发丝/背景边缘不糊;
-- **肤色掩码**:YCbCr 肤色规则 + 羽化,所有皮肤类操作只落在皮肤上;
-- **皮肤修饰**:`skinBrighten` 透亮 / `whiten` 冷白皮 / `rosy` 红润气血;
-- **氛围**:`vibrance` 智能鲜艳 / `clarity` 质感 / `fade` 褪色胶片感;
-- **成品风格**:`natural` 自然美颜 / `creamy` 奶油肌 / `cool_white` 冷白皮 /
-  `japanese` 日系清透 / `hongkong` 港风复古(`listBeautyStyles()`);
-
-```ts
-import { BatchService, SharpBatchEngine, applyBeauty } from '@private-ai-agent/picture';
-
-// 一键风格
-const batch = new BatchService(new SharpBatchEngine(), 'data/batch');
-await batch.processPhotos({ photoPaths: ['a.jpg'], style: 'cool_white' });
-
-// 细粒度参数
-await applyBeauty('a.jpg', { skinSmooth: 70, whiten: 20, rosy: 12 }, 'a_beauty.webp');
-```
+Private-Agent monorepo,并扩展图片生成、图像处理、图像解析、缩略图与
+图片存储管理。
 
 ## 模块总览
 

@@ -16,20 +16,24 @@ final RegExp _lineStartFrameRe = RegExp(
   multiLine: true,
 );
 
+// 竖线字符类兼容半角 `|` (U+007C) 与全角 `｜` (U+FF5C)：不同 tokenizer 下模型
+// 两种形式都会输出（2026-09-11 对齐服务端 DSML_PIPE 的字符类，此前客户端只匹配
+// 半角，全角变体整块漏网直透气泡）。第二组竖线可选——服务端实测存在
+// `<| | DSML|tool_calls>` 这类无尾竖线的开标签变体。
 final RegExp _dsmlToolCallsBlockRe = RegExp(
-  r"<\s*/?\s*\|\s*\|\s*DSML\s*\|\s*\|\s*tool_calls\s*>[\s\S]*?<\s*/?\s*\|\s*\|\s*DSML\s*\|\s*\|\s*tool_calls\s*>",
+  r"<\s*/?\s*[|｜]\s*[|｜]?\s*DSML\s*[|｜]\s*[|｜]?\s*tool_calls\s*>[\s\S]*?<\s*/?\s*[|｜]\s*[|｜]?\s*DSML\s*[|｜]\s*[|｜]?\s*tool_calls\s*>",
   caseSensitive: false,
 );
 final RegExp _dsmlOpenToolCallsBlockRe = RegExp(
-  r"<\s*/?\s*\|\s*\|\s*DSML\s*\|\s*\|\s*tool_calls\s*>[\s\S]*$",
+  r"<\s*/?\s*[|｜]\s*[|｜]?\s*DSML\s*[|｜]\s*[|｜]?\s*tool_calls\s*>[\s\S]*$",
   caseSensitive: false,
 );
 final RegExp _dsmlInvokeOrParameterBlockRe = RegExp(
-  r"<\s*/?\s*\|\s*\|\s*DSML\s*\|\s*\|\s*(?:invoke|parameter)\b[^>]*>[\s\S]*?<\s*/?\s*\|\s*\|\s*DSML\s*\|\s*\|\s*(?:invoke|parameter)\s*>",
+  r"<\s*/?\s*[|｜]\s*[|｜]?\s*DSML\s*[|｜]\s*[|｜]?\s*(?:invoke|parameter)\b[^>]*>[\s\S]*?<\s*/?\s*[|｜]\s*[|｜]?\s*DSML\s*[|｜]\s*[|｜]?\s*(?:invoke|parameter)\s*>",
   caseSensitive: false,
 );
 final RegExp _dsmlAnyTagRe = RegExp(
-  r"<\s*/?\s*\|\s*\|\s*DSML\s*\|\s*\|\s*[^>]*>",
+  r"<\s*/?\s*[|｜]\s*[|｜]?\s*DSML\s*[|｜]\s*[|｜]?\s*[^>]*>",
   caseSensitive: false,
 );
 

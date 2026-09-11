@@ -209,6 +209,7 @@ class ImageResultMessage extends StatelessWidget {
                       title: "识图预览",
                       gallery: urls,
                       index: index,
+                      anchorContext: context,
                     ),
                     child: MediaThumbnail(
                       url: url,

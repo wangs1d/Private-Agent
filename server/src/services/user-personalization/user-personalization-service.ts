@@ -494,19 +494,38 @@ function relationshipSummaryLine(
   replyLength: ReplyLengthProfileState,
   userText?: string,
 ): string {
-  // 极端偏好才提示，默认行为交给【回复指南】基准行（平调/短句），不再重复
+  // 极端偏好才提示，默认行为交给【说话方式】稳定层（管家底色/伙伴面），不再重复。
+  // 玩笑容忍度改由 buildRegisterKnobLine 的调子旋钮承担（含情绪门控）。
   const lines: string[] = [];
   if (state.directnessPreference >= 0.68) {
     lines.push("用户偏好直接表达，先给结论。");
   }
-  if (state.humorTolerance >= 0.7) {
-    lines.push("可以带点玩笑。");
-  } else if (state.humorTolerance <= 0.35) {
-    lines.push("少玩梗少调侃。");
-  }
   const mirror = userText ? buildRegisterMirrorLine(userText, replyLength) : undefined;
   if (mirror) lines.push(mirror);
   return lines.join("\n");
+}
+
+/**
+ * 调子旋钮（2026-09-11）：【说话方式·伙伴面】调子菜单的当轮放行开关。
+ * 只在两端输出——松弛（可调侃/损/阴阳）或收起；中间态返回空串，
+ * 走【说话方式】稳定层的默认底色，不占动态 token。
+ * 情绪门控优先于容忍度：用户情绪低/压力大时即使平时爱玩梗也收起。
+ */
+function buildRegisterKnobLine(
+  relationship: RelationshipState,
+  emotion: EmotionState,
+): string {
+  const mood = dominantRecentEmotion(emotion.recent);
+  if (mood === "negative" || mood === "stressed") {
+    return "本轮调子：收着，只沉稳坦诚，不调侃不玩梗。";
+  }
+  if (relationship.humorTolerance >= 0.7 && relationship.warmth >= 0.55) {
+    return "本轮调子：松弛，可调侃、可损、可阴阳，但不冲用户本人。";
+  }
+  if (relationship.humorTolerance <= 0.35) {
+    return "本轮调子：收着，不玩梗不调侃。";
+  }
+  return "";
 }
 
 function toReplyLengthProfileState(v: unknown): ReplyLengthProfileState {
@@ -738,15 +757,19 @@ export class UserPersonalizationService {
     // 结构感知截断：超长时先丢备注/兴趣等次要 section，绝不丢【基本信息】里的姓名/所在地
     const userProfile = truncateProfileForPrompt(profile, cap);
     // 2026-09-06 瘦身：toneGuidance 只保留本轮长度控制 + 情绪语气（有显著情绪才多行）。
-    // 删除：基础回复纪律（与【回复指南】基准行重复）、触达时段/渠道/行为倾向/事实摘要
-    // （与回复风格无关或已有独立块）。风格基准单点在 prompt-assembler buildReplyStyleGuide。
+    // 删除：基础回复纪律（与【说话方式】稳定层基准重复）、触达时段/渠道/行为倾向/事实摘要
+    // （与回复风格无关或已有独立块）。风格基准单点在 prompt-assembler 的【说话方式】块。
+    // 2026-09-11：relationshipGuidance 前置调子旋钮（伙伴面调子的当轮放行开关）。
     return {
       userProfile,
       toneGuidance: [
         userText?.trim() ? buildReplyLengthGuidance(userText, replyLength) : undefined,
         buildToneGuidance(state),
       ].filter(Boolean).join("\n"),
-      relationshipGuidance: relationshipSummaryLine(relationship, replyLength, userText),
+      relationshipGuidance: [
+        buildRegisterKnobLine(relationship, state),
+        relationshipSummaryLine(relationship, replyLength, userText),
+      ].filter(Boolean).join("\n"),
     };
   }
 

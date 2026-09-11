@@ -32,12 +32,11 @@ constexpr COLORREF kBadgeGlyph  = RGB(0xEC, 0xEC, 0xF2);  // 铃铛
 constexpr COLORREF kCloseIdle   = RGB(0xB4, 0xB4, 0xBC);  // 关闭 X
 constexpr COLORREF kCloseBgHover= RGB(0x3D, 0x3D, 0x46);  // 关闭 hover 底
 
-// ── 玻璃按钮（两颗同色：半透明白底 + 细描边，随背景透出玻璃感） ──
+// ── 玻璃按钮（两颗同色：常态全透明、只留描边 + 文字，hover 才上淡底） ──
 constexpr COLORREF kGlassWhite  = RGB(0xFF, 0xFF, 0xFF);
-constexpr BYTE     kBtnFillA       = 30;  // 常态底 ≈ 白 12%
-constexpr BYTE     kBtnFillHoverA  = 56;  // hover 底 ≈ 白 22%
-constexpr BYTE     kBtnBorderA     = 70;  // 常态描边 ≈ 白 27%
-constexpr BYTE     kBtnBorderHoverA = 110; // hover 描边 ≈ 白 43%
+constexpr BYTE     kBtnFillHoverA  = 30;   // hover 淡底 ≈ 白 12%（常态无底色）
+constexpr BYTE     kBtnBorderA     = 80;   // 常态描边 ≈ 白 31%
+constexpr BYTE     kBtnBorderHoverA = 125; // hover 描边 ≈ 白 49%
 constexpr COLORREF kBtnText        = RGB(0xF2, 0xF2, 0xF5);
 
 constexpr COLORREF kAccentNormal = RGB(0x7A, 0xA2, 0xFF);  // normal → 柔蓝
@@ -601,14 +600,14 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
     g.DrawLine(&pen, cx + s, cy - s, cx - s, cy + s);
   }
 
-  // ── 按钮底（两颗同色玻璃按钮：半透明白底 + 细描边，hover 增亮） ──
+  // ── 按钮底（两颗同色：常态全透明只有描边，hover 才上一层淡底反馈） ──
   auto draw_button_base = [&](const RECT& rc, bool hovered) {
     const RectF brc(static_cast<float>(rc.left),
                     static_cast<float>(rc.top),
                     static_cast<float>(rc.right - rc.left),
                     static_cast<float>(rc.bottom - rc.top));
     FillRoundRect(g, brc, 8, kGlassWhite,
-                  hovered ? kBtnFillHoverA : kBtnFillA, kGlassWhite,
+                  hovered ? kBtnFillHoverA : 0, kGlassWhite,
                   hovered ? kBtnBorderHoverA : kBtnBorderA, true);
   };
   if (show_confirm_button_) {

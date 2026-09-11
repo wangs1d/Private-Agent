@@ -16,14 +16,14 @@ import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 
 /**
- * 本模式职责人格（fast/complex 差异化 persona，2026-08-24 引入）。
+ * 本模式职责人格（chat/task 双面差异化 persona）。
  *
- * 设计动机：fast 与 complex 是同一套基座人格的两个"脑"，但职责不同——由 agent-core
+ * 设计动机：对话面与任务面是同一套基座人格的两个"脑"，但职责不同——由 agent-core
  * 依据路由 mode 在 system prompt 中注入各自【本模式职责】块，让同一人格各有侧重：
- * - CHAT_PLANE_ROLE_GUIDANCE：偏对话流畅与活人感。负责 simple 直答、闲聊、节奏衔接；
- * - TASK_PLANE_ROLE_GUIDANCE：偏逻辑推理与工具调用。负责 complex 后台任务、多步收敛、
+ * - CHAT_PLANE_ROLE_GUIDANCE：偏对话流畅与活人感。负责闲聊、节奏衔接、轻量直答；
+ * - TASK_PLANE_ROLE_GUIDANCE：偏逻辑推理与工具调用。负责后台任务、多步收敛、
  *   产出可复述的事实结论。
- * 对应「每轮只一个脑主导」：simple→fast 直答；complex→complex 用工具办。
+ * 对应「每轮只一个脑主导」：chat 对话面直答；task 任务面用工具办。
  */
 // 2026-08-29 重写：旧版第三条"你在后台完成"在 fast 车道卸载工具执行后成了事实性
 // 指令谎言——模型没有工具却被要求装作查过，产出"我搜了下，工具没返回内容"这类
@@ -35,11 +35,14 @@ import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 // 2026-09-06 风格单一来源化：短句/平调/不客服腔等风格基准收敛到 prompt-assembler
 // 的【回复指南】基准行（chat 模式），本块不再重复；fast 只保留自身职责（搜索/升级/
 // 提问节奏/机制词）+ 展开例外（该模式携带搜索工具，是【回复指南】覆盖不到的部分）。
+// 2026-09-11 风格分层化：基准行升级为【说话方式·管家底色】（全模式）+
+// 【说话方式·伙伴面】（仅 chat，含调子菜单 few-shot 与禁句表），fast/foreground
+// 两种 chat 车道共用；本块进一步瘦身为纯职责/工具纪律，不再有任何语感类内容。
 const CHAT_PLANE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮聊天里你就是本人。
-- 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。别一上来就分类、列选项、反问三连。
+- 别一上来就分类、列选项、反问三连；有印象讲印象，有偏好讲偏好，有立场就亮立场（语感与调子见【说话方式·伙伴面】，本块不重复）。
 - 要查实时信息（新闻、某人近况、价格、热搜等）先自己调 search_web 搜真实结果再答；要找照片/图片就调 search_images。不要凭印象猜，也不要不管什么都转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
 - 例外：本轮真的调了搜索/抓取工具拿到结果、或用户明确要攻略/对比/整理/报告——可以充分展开（按主题分节、Markdown 排版，信息用足，语气仍平实，不写汇报腔）；拿不准就按短句回。
-- 搜索失败别含糊收场：先换个关键词或换 search_web 再试一次；确实办不成或要写数据（日程/提醒/发消息/下单）、要多步操作、要多来源核实深挖时，才调用 agent.escalate_to_complex（参数里写一句原因）转交后台，转交后这轮不再输出其他内容。绝不编造"我查到了/搜了下/结果是"。
+- 搜索失败别含糊收场：先换个关键词或换 search_web 再试一次；确实办不成或要写数据（日程/提醒/发消息/下单）、要多步操作、要多来源核实深挖时，不要硬答，如实说明办到哪一步即可（系统会按需转交后台处理）。绝不编造"我查到了/搜了下/结果是"。
 - 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
 - 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统，不说"工具没返回内容"这类话。用户对面是一个人，不是一套系统。`;
 
@@ -66,26 +69,19 @@ const TASK_PLANE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"�
  * - 「说话的样子」few-shot 覆盖应答/接梗/分享/吐槽/疲惫/立场/评价/收尾
  *   八类闲聊场景 + 两个极性反例（客服腔 / 瞎热情）。示例全部停在闲聊平面、零任务
  *   语义——带真实工具调用的示范会被模型当行为模板照抄，触发幻影后台任务。
+ * 2026-09-11 风格分层化：few-shot 与反例上移 prompt-assembler 的
+ * 【说话方式·伙伴面】（fast/foreground 共用，统一注入）；本块只剩工具纪律与诚实底线，
+ * 零任务语义的约束由迁移后的菜单示例继承（示例均不含工具调用）。
  */
 export const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。你手里的动作：reminder.plan 和 calendar.create_from_text（创建提醒/日程：直接调用当场办成，成功返回 nextRunAtLocal 后才算办妥）；search_web（必须立刻知道答案的快查：新闻/价格/天气/比分等时效信息，查到真实结果再答）；task.dispatch（把耗时的事派给后台：找照片视频、看位置/周边、发消息、下单支付、操作软件/设备、多步任务等，立即返回不阻塞对话，办完后结果会自动回到对话里）。
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。
-- 带时间点的提醒/日程由系统自动解析并真实创建，结果以【系统提示】注入给你：看到「创建成功」就直接用你的语气向用户确认（可带称呼），看到「需要追问重复方式」就自然问一句，看到「创建失败」就如实说没设上。没注入系统提示而用户又想设提醒时，调 reminder.plan（含糊时间用 calendar.create_from_text）当场创建。绝不在没创建成功时说"到点叫你/已设置/晚安"这类收场话。要重写的其他事（下单/支付/发消息/操作设备）用 task.dispatch 派出去：派发前先自然应一声（像"好嘞，在办了"这种分量），goal 用一句完整、自包含的话说清要办成什么。
+- 用户想设提醒/日程（含「明天8点叫我起床」这类带时间点的请求）就当场调 reminder.plan 真实创建（含糊时间用 calendar.create_from_text），工具返回 nextRunAtLocal 后才算办妥、才能向用户确认；未说明是否重复时先自然问一句再创建。绝不在没创建成功时说"到点叫你/已设置/晚安"这类收场话。要重写的其他事（下单/支付/发消息/操作设备）用 task.dispatch 派出去：派发前先自然应一声（像"好嘞，在办了"这种分量），goal 用一句完整、自包含的话说清要办成什么。
 - 要查实时信息就先调 search_web 搜真实结果再答，绝不凭训练记忆编造"最新"数据。
 - 工具失败别含糊收场：换个说法或换 search_web 再试一次；所有途径都试过仍办不成，才如实向对方说明卡点。
 - 凭常识或已有上下文就能答的（寒暄、情绪交流、观点、知识问答）直接答，不要调工具。
 - 诚实底线：本轮没真正调过工具，绝不说"已设置/已订好/已经查到/到点叫你"；把不准的事就如实说，或先问一句再办。
 - 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统。用户对面是一个人，不是一套系统。
-- 说话的样子（学语感，不抄内容；示例里的 \\n 表示分成两条发）：平调、直接、有事说事；一两小条，每条一句。
-  对方：在吗 → 你：在，说
-  对方：哈哈哈哈笑死我了 → 你：咋了，讲
-  对方：跟你说！我抢到演唱会门票了 → 你：行啊你\\n哪天的？
-  对方：烦死了，方案又被毙了 → 你：又来\\n这次给的什么理由
-  对方：今天累瘫了 → 你：那就早点歇\\n事明天说也死不了
-  对方：你说养猫好还是养狗好 → 你：养猫\\n你这作息，狗受不了
-  对方：这电影真有那么好看？ → 你：一般\\n营销吹的成分大，可看可不看
-  对方：睡了，晚安 → 你：嗯，晚安
-  反例一（禁止）：您好！很高兴为您服务，请问有什么可以帮到您的呢？
-  反例二（禁止）：哇塞真的吗！！太棒了吧！！快发照片来看看呀~`;
+- 语感、调子菜单（沉稳/坦诚/幽默/调侃/抬杠/阴阳/暗示）与破功禁句统一由【说话方式·伙伴面】承担，本块不重复。`;
 
 /** 任务面 plan-driven 工具注入开关（2026-09-05，默认开启；0/off/false 回退能力束注入）。 */
 function isTaskToolPlannerEnabled(): boolean {
@@ -217,12 +213,6 @@ import {
   TASK_TOOL_BRIDGE_NAMES,
 } from "../agent/task-router.js";
 import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
-import { buildScheduleCreateInput, formatNextRunAtLocal } from "../tools/calendar-tools.js";
-import {
-  inferRecurrenceFromUserText,
-  isRecurrenceExplicit,
-  type ScheduleIntentService,
-} from "../services/schedule-intent-service.js";
 import {
   dedupMediaCards,
   extractMediaCards,
@@ -254,7 +244,7 @@ import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-acces
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import { resolvePrimaryChatSessionId, isNotesChatSessionId } from "../agent/master-chat-session.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
-import { stripInternalControlTags } from "../external-model/stream-chat-helpers.js";
+import { stripInternalControlTags, ToolIntentWithoutToolsError } from "../external-model/stream-chat-helpers.js";
 import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
 import type { AgentTaskOrchestratorDeps, RunTaskOptions } from "./agent-task-orchestrator.js";
 import { getAgentTaskStore } from "./agent-task-store.js";
@@ -355,14 +345,6 @@ export class AgentCore {
   private frequentPlacesCache = new Map<string, { text: string | undefined; at: number }>();
   private moodInferenceService: MoodInferenceService | null = null;
   private wsRegistry: ClientPushPort | null = null;
-  /**
-   * 确定性日程执行（2026-09-09）：action_write 的提醒/日程不再赌前台模型自觉调
-   * 工具（fast 车道模型口头推脱已被实证），由程序层经 ScheduleIntentService
-   * 解析并直接创建，创建结果以【系统提示】注入本轮 prompt，模型只负责自然转述。
-   */
-  private scheduleIntentService: ScheduleIntentService | null = null;
-  /** 已向用户追问重复方式、等待答复的提醒草案（per-session，TTL 内有效） */
-  private pendingScheduleAsks = new Map<string, { goal: string; askedAt: number }>();
   private lifeSignalHubService: LifeSignalHubService | null = null;
   /** BrainCenter 引用：可用时走 cognize() 端到端认知入口替代认知层切片 */
   private brainCenter: BrainCenter | null = null;
@@ -577,12 +559,12 @@ export class AgentCore {
   }
 
   /**
-   * fast 模式（对话主链路）的轻量子孙：不激活任务（避免闲聊污染任务栈）。
+   * 对话面（chat 车道）的轻量子孙：不激活任务（避免闲聊污染任务栈）。
    * 记忆架构重构后不再构造召回 query（原 buildRecallQuery 拼接链已删除——
    * 任务/偏好/openLoops 加料是召回串台根因）；长期检索由 recall-gate 门控，
    * query 只用用户原文。
    */
-  private buildFastShortTermTurnContext(_sessionId: string, _text: string): ShortTermTurnContext {
+  private buildChatLaneShortTermTurnContext(_sessionId: string, _text: string): ShortTermTurnContext {
     return {
       resumedTask: false,
     };
@@ -655,116 +637,6 @@ export class AgentCore {
     fn: ((actorId: string) => string | null) | null,
   ): void {
     this.promptContextBuilder.setInterestListProvider(fn);
-  }
-
-  /** 注入确定性日程执行依赖（bootstrap 晚绑定：scheduleIntentService 晚于 agentCore 创建）。 */
-  setScheduleIntentService(svc: ScheduleIntentService | null): void {
-    this.scheduleIntentService = svc;
-  }
-
-  /**
-   * 确定性日程执行（2026-09-09）：提醒/日程在程序层解析并真实创建，模型只转述。
-   *
-   * 背景：fast 车道把工具交给模型自决已被两次实证为不可靠（2026-09-06 口头推脱、
-   * 2026-09-09 「2点提醒我睡觉」零工具口头承诺）——触发必须是程序层的确定动作。
-   * 返回注入本轮 prompt 的【系统提示】文本；null 表示本轮无日程语义、零注入。
-   * 路径：
-   *   1. 已追问过重复方式 + 本轮是答复（「今晚这一次」「每天」）→ 合并草案直接创建；
-   *   2. 本轮是新的提醒/日程请求且解析完整 → 直接创建；
-   *   3. 可解析但缺重复方式 → 登记草案并指示模型追问一次；
-   *   4. 解析失败 → 指示模型调 reminder.plan 兜底（未创建成功绝不确认）。
-   */
-  private async resolveProgramSchedule(
-    sessionId: string,
-    text: string,
-    routeIntent: string | undefined,
-    opts?: { clientLocation?: ClientLocationWire },
-  ): Promise<string | null> {
-    const intentService = this.scheduleIntentService;
-    const scheduleService = this.scheduleTaskService;
-    if (!intentService || !scheduleService) return null;
-    const trimmed = text.trim();
-    if (!trimmed || trimmed.length > 200) return null;
-
-    // 过期草案清理（15 分钟内有效）
-    const pendingAt = this.pendingScheduleAsks.get(sessionId)?.askedAt;
-    if (pendingAt && Date.now() - pendingAt > 15 * 60_000) {
-      this.pendingScheduleAsks.delete(sessionId);
-    }
-
-    // 路径 1：等待重复方式答复 → 合并草案直接创建。
-    // 不依赖路由判定——「今晚这一次」这类短答复常被语义路由判成 chat。
-    const liveAsk = this.pendingScheduleAsks.get(sessionId);
-    if (
-      liveAsk &&
-      trimmed.length <= 30 &&
-      (isRecurrenceExplicit(trimmed) ||
-        /^(?:对|嗯|恩|哦|好|行|要|是|是的|可以|就这样|一次|每天|每日|每周|每年|不用了|取消)/.test(trimmed))
-    ) {
-      this.pendingScheduleAsks.delete(sessionId);
-      const tz = opts?.clientLocation?.timezone?.trim() || undefined;
-      const draft = await intentService.parse(sessionId, liveAsk.goal, tz ? { userTimezone: tz } : undefined);
-      if (draft) {
-        draft.recurrence = inferRecurrenceFromUserText(trimmed);
-        return this.createProgramSchedule(sessionId, draft, opts);
-      }
-    }
-
-    // 路径 2/3/4：新一轮提醒/日程请求（路由判 write，或句式像提醒/闹钟）。
-    const looksSchedule =
-      routeIntent === "action_write" ||
-      /提醒|闹钟|叫我|喊我|起床|定时|日程/.test(trimmed);
-    if (!looksSchedule) return null;
-
-    const parsed = await intentService.parseForCreate(sessionId, trimmed, {
-      userTimezone: opts?.clientLocation?.timezone?.trim() || undefined,
-    });
-    if (parsed.matched) {
-      return this.createProgramSchedule(sessionId, parsed.draft, opts);
-    }
-    if ("needsRecurrenceConfirm" in parsed && parsed.needsRecurrenceConfirm) {
-      this.pendingScheduleAsks.set(sessionId, { goal: trimmed, askedAt: Date.now() });
-      return [
-        "【系统提示】用户想创建提醒（时间与事项已解析），但没有说明是否重复。",
-        "请用一句话自然地问用户：是一次性提醒还是每天重复（或者连续几天）。",
-        "在用户回答前绝不能创建，也绝不能说「已设置/到点叫你」这类确认话。",
-      ].join("\n");
-    }
-    return [
-      "【系统提示】自动解析器未能从这句话解析出提醒/日程。",
-      "如果用户确实想创建提醒或日程，你必须调用 reminder.plan（或 calendar.create_from_text）工具真实创建，成功后才能向用户确认；",
-      "如果这不是提醒/日程请求，忽略本提示正常聊天。",
-    ].join("\n");
-  }
-
-  /** 程序层直接创建提醒（真实落库），返回给模型的转述指令；失败时如实告知。 */
-  private async createProgramSchedule(
-    sessionId: string,
-    draft: import("../services/schedule-intent-service.js").ScheduleDraft,
-    opts?: { clientLocation?: ClientLocationWire },
-  ): Promise<string> {
-    const scheduleService = this.scheduleTaskService;
-    if (!scheduleService) return "";
-    const tz = opts?.clientLocation?.timezone?.trim() || "Asia/Shanghai";
-    try {
-      const task = await scheduleService.createTask(buildScheduleCreateInput(draft, sessionId, tz));
-      const recurrenceLabel =
-        task.recurrence === "daily"
-          ? "每天重复"
-          : task.recurrence === "weekly"
-            ? "每周重复"
-            : task.recurrence === "yearly"
-              ? "每年重复"
-              : "一次性";
-      return [
-        "【系统提示】提醒已真实创建成功，以下是系统写入日程的事实：",
-        `时间：${formatNextRunAtLocal(task.nextRunAt, tz)}（${recurrenceLabel}）；事项：${task.reminderMessage ?? task.title ?? draft.description}。`,
-        "请用一句话自然地向用户确认这件事（可用你的语气和称呼），不要再调用任何工具，也不要再追问重复方式。",
-      ].join("\n");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return `【系统提示】提醒创建失败（${msg}）。请如实告诉用户这次没设上，不要谎称已设置。`;
-    }
   }
 
   private enrichMemoryRecallQuery(baseQuery: string, text: string): string {
@@ -951,7 +823,7 @@ export class AgentCore {
           ],
           segmentable: fastRoute.segmentable,
         };
-        shortTermTurn = this.buildFastShortTermTurnContext(sessionId, text);
+        shortTermTurn = this.buildChatLaneShortTermTurnContext(sessionId, text);
         cognitiveResponse = brainCognition?.response ?? "";
         cognitiveNeedsToolLoop = true; // 强制走 streamCompletion
         cognitiveRecallItems = brainCognition?.recallItems;
@@ -977,7 +849,7 @@ export class AgentCore {
           ],
           segmentable: false,
         };
-        shortTermTurn = this.buildFastShortTermTurnContext(sessionId, text);
+        shortTermTurn = this.buildChatLaneShortTermTurnContext(sessionId, text);
         cognitiveResponse = brainCognition?.response ?? "";
         cognitiveNeedsToolLoop = true; // 强制走工具循环
         cognitiveRecallItems = brainCognition?.recallItems;
@@ -1013,7 +885,7 @@ export class AgentCore {
         getTaskHub().activeSummary(actorId),
       );
       shortTermTurn = route.plane === "chat"
-        ? this.buildFastShortTermTurnContext(sessionId, text)
+        ? this.buildChatLaneShortTermTurnContext(sessionId, text)
         : this.buildShortTermTurnContext(sessionId, text);
     }
 
@@ -1069,7 +941,7 @@ export class AgentCore {
     // 性能监控：前置准备阶段
     const prepStartTime = Date.now();
 
-    // 2026-09-05：userLocation / 常去地点改为每轮无条件注入（含 fast 模式）。
+    // 2026-09-05：userLocation / 常去地点改为每轮无条件注入（对话面同样注入）。
     // 旧的两道闸门（fast 跳过、userIsStatingData 跳过）撤销——反问 bug 的根因是注入
     // 文案没禁止反问，已在 resolveUserLocationPrompt 措辞层根治；再跳过注入只会让
     // LLM 失去位置背景、反过来向用户问"你在哪"。
@@ -1082,7 +954,7 @@ export class AgentCore {
 
     // 2026-07-29 修复 D：fast_chat 也注入 narrativeRecall（复用 cognize 召回结果），
     // 解决追问被误判 fast_chat 时 LLM 只有 thread messages、缺乏长期记忆/工作记忆导致答非所问。
-    // （原"跳过 userLocation"已于 2026-09-05 撤销，fast 模式同样注入位置/常去地点背景。）
+    // （原"跳过 userLocation"已于 2026-09-05 撤销，对话面同样注入位置/常去地点背景。）
     //
     // 2026-08-11 修复 E（思路 A）：工作记忆摘要 + 最近对话回顾不再拼入 narrativeRecall，
     // 而是作为独立字段透传给 PromptContextBuilder，作为独立块注入 system prompt。
@@ -1126,7 +998,7 @@ export class AgentCore {
     const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization, frequentPlaces] =
       route.plane === "chat"
       ? await Promise.all([
-          // Fast 模式记忆注入：
+          // 对话面记忆注入：
           // - 有 cognize 召回结果时直接复用（Complex 路径）
           // - 无 cognize 召回结果时（Fast 跳过 cognize 路径），走 prepareNarrativeRecall
           suppressNarrativeRecall
@@ -1141,7 +1013,7 @@ export class AgentCore {
           suppressNarrativeRecall
             ? Promise.resolve(undefined)
             : Promise.resolve(this.buildRecentConversationHistoryBlock(actorId)),
-          // 2026-09-05：fast 模式也注入位置背景（纯缓存/按需 RPC，零 LLM）
+          // 2026-09-05：对话面也注入位置背景（纯缓存/按需 RPC，零 LLM）
           this.resolveUserLocationForPrompt(actorId, opts),
           Promise.resolve({} as PersonalizationPromptSlice),
           Promise.resolve(this.resolveFrequentPlacesPrompt(actorId)),
@@ -1293,15 +1165,6 @@ if (route.plane === "task") {
       // fast 路径：同步执行（秒回）
       const standardStartTime = Date.now();
 
-      // 确定性日程执行（2026-09-09）：提醒/日程由程序层解析并真实创建，
-      // 创建/追问结果以【系统提示】注入本轮 prompt；纯闲聊零开销快速返回 null。
-      const programScheduleContext = await this.resolveProgramSchedule(
-        sessionId,
-        text,
-        route.intent,
-        opts,
-      );
-
       result = await this.runStandardLlmPath(actorId, text, "chat", opts, {
         narrativeRecall: enrichedNarrativeRecall,
         workingMemorySummary,
@@ -1317,7 +1180,6 @@ if (route.plane === "task") {
         cognitiveUserPattern,
         cognitiveToolPlan,
         routeIntent: route.intent,
-        ...(programScheduleContext ? { programContext: programScheduleContext } : {}),
       });
 
       const standardDuration = Date.now() - standardStartTime;
@@ -2051,11 +1913,6 @@ if (route.plane === "task") {
       /** ephemeral 执行（后台任务派发用）：不自动落 thread，由派发方显式并入 */
       ephemeralTurn?: boolean;
       /**
-       * 确定性日程执行（2026-09-09）：程序层已真实创建/待追问的提醒结果说明，
-       * 以 taskContext 注入 fast 车道 prompt，模型只负责自然转述，不再赌它调工具。
-       */
-      programContext?: string;
-      /**
        * 后台派发路径的工具结果捕获（orchestrateToolCtx 缺位时的 media 卡片数据源）：
        * dispatchBackgroundTask 用它收集 search_images/search_videos 结果，随任务
        * 结果消息投递 mediaCards（否则照片任务只有文字、卡片永远到不了客户端）。
@@ -2199,9 +2056,10 @@ if (route.plane === "task") {
             : CHAT_PLANE_ROLE_GUIDANCE
           : TASK_PLANE_ROLE_GUIDANCE;
       }
-      // 风格豁免开关（2026-09-06）：短句基准/语感镜像只属于对话面；
-      // 任务面（complex）交付不受限，【回复指南】不注入聊天基准行，
-      // 交付风格由 TASK_PLANE_ROLE_GUIDANCE 自己承担。
+      // 风格豁免开关（2026-09-06，2026-09-11 分层化后仍沿用）：
+      // 【说话方式·伙伴面】（调子菜单 few-shot/收放开关/禁句）只属于对话面；
+      // 任务面（complex）交付不受限，不注入伙伴面，交付风格由
+      // TASK_PLANE_ROLE_GUIDANCE 自己承担（管家底色两层车道都注入）。
       mem.replyStyleMode = this.isChatLane(mode) ? "chat" : "task";
     }
     const runtimeKernel = getRuntimeKernel(actorId);
@@ -2232,15 +2090,7 @@ if (route.plane === "task") {
       baseStreamOpts.promptContext?.memory,
       runtimePlan,
     );
-    // 确定性日程执行（2026-09-09）：程序层已真实创建/待追问的提醒说明以 taskContext
-    // 注入 fast 车道 prompt——模型只负责自然转述，创建事实由代码保证。
-    let effectiveMemory = sanitizedMemory;
-    if (ctx.programContext && this.isChatLane(mode)) {
-      effectiveMemory = {
-        ...(effectiveMemory ?? {}),
-        taskContext: [effectiveMemory?.taskContext, ctx.programContext].filter(Boolean).join("\n"),
-      };
-    }
+    const effectiveMemory = sanitizedMemory;
     const isMinimalMode = runtimeKernel.isMinimalMode();
     // 2026-09-05 模型路由：对话面 → Flash；任务面按 TurnPlan.tier——轻预算单点任务
     // （realtime/media，tier=fast）也走 Flash，仅多步/写操作（tier=complex）上 Pro。
@@ -2266,12 +2116,12 @@ if (route.plane === "task") {
             functionalSuffixes: runtimePlan.functionalSuffixes !== false,
           }
         : {}),
-      // 2026-08-30 修复：fast 车道不允许 RuntimeKernel 把 profile 覆盖成 scoped。
+      // 2026-08-30 修复：对话面不允许 RuntimeKernel 把 profile 覆盖成 scoped。
       // scoped 会让 buildExtraBody 丢掉 fastProfile 标志（仅 contextual/light 注入）
-      // → 工具循环里 fast 升级保底（fastProfile && 纯宣告/需联网 → 升级 complex）
-      // 整个失效、maxWaves 从 1 静默变 4，且可见工具被 filterScopedTools 砍到只剩
-      // pinned（提醒/搜索/照片关键词轮必然命中，恰是升级需求最高的轮次）。
-      // RK 的 pinned 工具已通过下方 pinnedToolNames 合并保留，fast 下无需 profile 劫持。
+      // → 工具循环里 fastProfile 的失败续波保底（失败时 maxWaves+1）整个失效、
+      // maxWaves 从 1 静默变 4，且可见工具被 filterScopedTools 砍到只剩
+      // pinned（提醒/搜索/照片关键词轮必然命中，恰是续波需求最高的轮次）。
+      // RK 的 pinned 工具已通过下方 pinnedToolNames 合并保留，对话面无需 profile 劫持。
       toolExposureProfile: this.isChatLane(mode)
         ? baseStreamOpts.toolExposureProfile
         : (runtimePlan.toolExposureProfile ?? baseStreamOpts.toolExposureProfile),
@@ -2431,13 +2281,38 @@ if (route.plane === "task") {
 
       // 前台（fast）：小工具集直答/派发（原生 tool_calls；tagProtocol 灰度时零工具 + 标签）。
       // 任务面（complex，one-shot 引擎）：工具循环 + 出口自检续波。
-      full = await provider.streamCompletion(
-        chatSessionId,
-        userTurn,
-        (delta) => opts?.onAssistantDelta?.(dispatchFilter ? dispatchFilter.feed(delta) : delta),
-        toolCtx,
-        mergedStreamOpts,
-      );
+      //
+      // 工具意图升级（2026-09-11 根修）：模型在无工具轮次用 DSML 文本形式发起
+      // 工具调用（如对话面轮次想调 desktop.visual.screenshot）时，provider 非工具
+      // 分支提取出调用但无执行器，抛 ToolIntentWithoutToolsError。此处捕获并升级
+      // 到任务面重跑同一句消息——与下方两个出口闸同构；重跑走任务面（mode=task）
+      // 不再进本 catch，天然只触发一次。
+      try {
+        full = await provider.streamCompletion(
+          chatSessionId,
+          userTurn,
+          (delta) => opts?.onAssistantDelta?.(dispatchFilter ? dispatchFilter.feed(delta) : delta),
+          toolCtx,
+          mergedStreamOpts,
+        );
+      } catch (err) {
+        if (err instanceof ToolIntentWithoutToolsError && this.isChatLane(mode)) {
+          const intentNames = err.toolCalls
+            .map((c) => c.name ?? "?")
+            .filter((n) => n && n !== "tool_call")
+            .slice(0, 3)
+            .join(", ");
+          console.info(
+            `[AgentCore] 对话面工具意图升级转任务面：${text.slice(0, 48)}` +
+              (intentNames ? `（意图工具：${intentNames}）` : ""),
+          );
+          return this.runStandardLlmPath(actorId, text, "task", opts, {
+            ...ctx,
+            turnPlan: { budget: 2, capabilities: ["full"], tier: "flash" },
+          });
+        }
+        throw err;
+      }
 
       // ── [dispatch:...] 标签出口（2026-09-05 前后台架构）──
       // 从完整回复解析派发请求 → 送后台；最终文本剥标签（流式已逐块剥离，
@@ -2464,7 +2339,7 @@ if (route.plane === "task") {
       // 实时类请求（天气/新闻/价格…）本轮既无工具动作也无派发，回复是
       // 「没实时数据/查不了/让系统去查」式闪避 → 转任务面重跑一次，让工具
       // 循环真正执行 search_web/task.dispatch 后再答。天然只触发一次：重跑走
-      // complex 车道（isFastMode=false），不会再进本闸。
+      // 任务面（mode=task），不会再进本闸。
       //
       // 历史（2026-09-08 拆除）：此处原还有「出口诚实闸」——回复含「已办妥」
       // 话术且本轮无工具时自动补派后台任务。已删除：其前提（无工具=空口承诺）

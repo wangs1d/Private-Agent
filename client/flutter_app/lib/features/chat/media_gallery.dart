@@ -157,6 +157,7 @@ class _PhotoFeedTile extends StatelessWidget {
         title: "图片预览",
         gallery: pool,
         index: index,
+        anchorContext: context,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

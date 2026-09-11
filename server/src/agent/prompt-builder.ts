@@ -49,7 +49,7 @@ export const LIFE_STEWARD_SYSTEM_SUFFIX_MARKER = "【生活管家】";
 
 /**
  * C 端生活管家能力清单（2026-08-29）：
- * - 措辞口语化、控制在一两行内：fast 模式有 900 token 输出限制与 prefix cache 考量，
+ * - 措辞口语化、控制在一两行内：对话面轻量档有 900 token 输出限制与 prefix cache 考量，
  *   system 增量必须小；纯静态文本、追加在工具描述后缀族末尾，不重排其他内容。
  * - 与 TOOL_CATEGORY_MAPPINGS 的生活域关键词召回（支付/外卖/热搜/晨报/记账/提醒）配合，
  *   让两类对话模式下这些需求都能"想到 + 找到工具 + 直接办"。
@@ -61,8 +61,8 @@ const LIFE_STEWARD_SYSTEM_SUFFIX =
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
  *
  * 2026-09-05 削减：【回复规则】【展示形式/富排版】两个固定后缀已删除——
- * - 回复风格（短句默认+检索例外+展开排版）由 fast/complex 双模式人格
- *   （agent-core 的 FAST/COMPLEX_MODE_ROLE_GUIDANCE，经【回复指南】注入）统一承担；
+ * - 回复风格（短句默认+检索例外+展开排版）由 chat/task 双面对话面职责块
+ *   （agent-core 的 CHAT/TASK_PLANE_ROLE_GUIDANCE，经【回复指南】注入）统一承担；
  * - 展示形式由服务端 display-effect-router（routeDisplayEffect）规则路由 +
  *   agent-result-formatter 服务端生成卡片标记承担，不需要在 prompt 里教 LLM 自声明标记；
  * - 记忆块使用边界由 runtime-kernel buildSessionSystem 的 Memory 段 + prompt-assembler

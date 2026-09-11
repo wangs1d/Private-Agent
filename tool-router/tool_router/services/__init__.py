@@ -9,6 +9,7 @@ from .retrieval import HybridRetrievalEngine
 from .telemetry import MetricsRegistry
 from .top_p import AdaptiveTopPSelector
 from .executor import ResourceExecutor
+from .user_store import UserStore
 
 __all__ = [
     "AdaptiveTopPSelector",
@@ -22,4 +23,5 @@ __all__ = [
     "RegistryStore",
     "RerankingPipeline",
     "ResourceExecutor",
+    "UserStore",
 ]

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+# 默认落在 tool-router/data/users.json，重启后注册信息不丢失
+_USERS_STORE_DEFAULT = str(Path(__file__).resolve().parent.parent / "data" / "users.json")
 
 
 class Settings(BaseModel):
@@ -53,6 +57,12 @@ class Settings(BaseModel):
     # ===== 滑动窗口 =====
     history_window_size: int = 50
 
+    # ===== 用户认证 =====
+    # 生产环境务必通过 TOOL_ROUTER_SECRET_KEY 覆盖默认值
+    secret_key: str = "dev-secret-change-me"
+    access_token_expire_minutes: int = 120
+    users_store_path: str | None = _USERS_STORE_DEFAULT
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -71,6 +81,9 @@ def load_settings() -> Settings:
         schema_cache_size=int(os.getenv("TOOL_ROUTER_SCHEMA_CACHE_SIZE", "256")),
         rate_limited_failure_threshold=int(os.getenv("TOOL_ROUTER_RATE_LIMITED_FAILURE_THRESHOLD", "3")),
         default_base_score=float(os.getenv("TOOL_ROUTER_DEFAULT_BASE_SCORE", "0.5")),
+        secret_key=os.getenv("TOOL_ROUTER_SECRET_KEY", "dev-secret-change-me"),
+        access_token_expire_minutes=int(os.getenv("TOOL_ROUTER_ACCESS_TOKEN_EXPIRE_MINUTES", "120")),
+        users_store_path=os.getenv("TOOL_ROUTER_USERS_PATH", _USERS_STORE_DEFAULT),
     )
 
 

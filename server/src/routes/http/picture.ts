@@ -1,16 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import { createReadStream } from "node:fs";
 import type { PictureKit, ImageAsset, ThumbnailSize } from "@private-ai-agent/picture";
-import { listBeautyStyles } from "@private-ai-agent/picture";
 
 /**
- * 图片图库/美颜批图 HTTP 路由(供客户端图库页使用):
+ * 图片图库 HTTP 路由(供客户端图库页使用):
  *   - GET    /picture/assets                      资产列表(分页/标签筛选)
  *   - GET    /picture/assets/:id/thumbnail/:size  缩略图(small/medium/large, webp)
  *   - GET    /picture/assets/:id/file             原资产文件
  *   - POST   /picture/assets                      multipart 上传入库
- *   - POST   /picture/beautify                    一键美颜批图(产物存回图库)
- *   - GET    /picture/styles                      可用美颜风格列表
+ *   - DELETE /picture/assets/:id                  删除照片(连源文件与缩略图)
  *
  * 资产路径均来自索引内存值,不存在路径穿越风险;缩略图命中即走长缓存。
  */
@@ -120,60 +118,18 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
     }
   });
 
-  app.post<{ Body: { assetIds?: string[]; style?: string; adjustments?: Record<string, number> } }>(
-    "/picture/beautify",
-    async (request, reply) => {
-      const body = request.body ?? {};
-      const style = typeof body.style === "string" && body.style ? body.style : undefined;
-      const adjustments =
-        body.adjustments && typeof body.adjustments === "object" ? body.adjustments : undefined;
-      if (!style && !adjustments) {
-        return reply.code(400).send({ ok: false, error: "请指定 style 或 adjustments" });
-      }
-      let assetIds = Array.isArray(body.assetIds) ? body.assetIds : [];
-      if (assetIds.length === 0) {
-        const latest = await pictureKit.store.query({ pageSize: 1 });
-        assetIds = latest.items.map((asset) => asset.id);
-        if (assetIds.length === 0) {
-          return reply.code(400).send({ ok: false, error: "图库为空" });
-        }
-      }
-      const sources = assetIds
-        .map((id) => pictureKit.store.get(id))
-        .filter((asset): asset is ImageAsset => asset !== null);
-      if (sources.length === 0) {
-        return reply.code(404).send({ ok: false, error: "照片不存在" });
-      }
-      try {
-        const result = await pictureKit.batch.processPhotos({
-          photoPaths: sources.map((asset) => asset.filePath),
-          style,
-          adjustments,
-        });
-        const photos: Array<Record<string, unknown>> = [];
-        for (const [index, outputPath] of result.outputPaths.entries()) {
-          const source = sources[index]!;
-          const { asset } = await pictureKit.store.ingest(outputPath, {
-            fileName: `beautified_${source.fileName.replace(/\.[^.]+$/, "")}.webp`,
-            tags: ["beautified", ...(style ? [style] : [])],
-            sceneType: source.sceneType ?? undefined,
-          });
-          photos.push({ sourceId: source.id, ...assetSummary(asset) });
-        }
-        return { ok: true, count: photos.length, style: style ?? "custom", appliedAdjustments: result.appliedAdjustments, photos };
-      } catch (error) {
-        return reply.code(500).send({
-          ok: false,
-          error: error instanceof Error ? error.message : "美颜处理失败",
-        });
-      }
-    },
-  );
-
-  app.get("/picture/styles", async () => ({
-    ok: true,
-    styles: listBeautyStyles(),
-  }));
+  app.delete<{ Params: { id: string } }>("/picture/assets/:id", async (request, reply) => {
+    const { id } = request.params;
+    const asset = pictureKit.store.get(id);
+    if (!asset) {
+      return reply.code(404).send({ ok: false, reason: "NOT_FOUND" });
+    }
+    const removed = await pictureKit.store.remove(id, { deleteFiles: true });
+    if (!removed) {
+      return reply.code(500).send({ ok: false, reason: "REMOVE_FAILED" });
+    }
+    return { ok: true, id };
+  });
 
   app.get("/picture", async () => ({
     domain: "picture",
@@ -182,8 +138,7 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
       "GET /picture/assets/:id/thumbnail/:size",
       "GET /picture/assets/:id/file",
       "POST /picture/assets (multipart: file)",
-      "POST /picture/beautify {assetIds?, style?, adjustments?}",
-      "GET /picture/styles",
+      "DELETE /picture/assets/:id",
     ],
   }));
 }

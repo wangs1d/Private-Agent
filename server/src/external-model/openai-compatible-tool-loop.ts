@@ -34,7 +34,6 @@ import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import {
   executeBridge,
-  isFastLaneTool,
   isToolSearchBridgeName,
   prepareTools,
 } from "../gateway/index.js";
@@ -517,7 +516,7 @@ function stabilizeToolOrderForSession(
 
 // 强制工具路由（forced tool choice）统一收口到 gateway/forced-tool.ts：
 //   1. 显式电话请求 → phone_call_user
-//   2. 直接时间/日期/位置问题 → clock_get_current_time（Fast 模式跳过）
+//   2. 直接时间/日期/位置问题 → clock_get_current_time（对话面轻量档跳过）
 //   3. 时效性事实查询 → search_web
 // 注：weather_get_local 已并入 tool-router 延迟目录，由检索召回，不再强制路由。
 
@@ -1556,55 +1555,6 @@ export const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/**
- * Fast 车道轻量工具集：从 builtin 全量工具集中动态筛选 fastLane 工具
- * + 合并自我进化生成的动态 fastLane Skill 工具。
- *
- * 筛选规则：{@link isFastLaneTool}（静态 CORE_TOOL_LIBRARY.fastLane + 动态名单）。
- * 新增内置工具时在 CORE_TOOL_LIBRARY.fastLane 里声明即可自动收编；
- * 自我进化生成的 Skill 通过 setDynamicFastLaneSkillTools() 注入后自动收编。
- */
-let _fastLaneToolsCache: ChatCompletionTool[] | null = null;
-
-/**
- * 动态 fastLane Skill 工具（自我进化生成的轻量查询类 Skill）。
- *
- * 由 setDynamicFastLaneSkillTools() 注入，getFastLaneTools() 会把它们合并到
- * Fast 模式工具集中。注入后自动清缓存重建。
- */
-let _dynamicFastLaneSkillTools: ChatCompletionTool[] = [];
-
-/**
- * 注入动态 fastLane Skill 工具列表（自我进化装载 Skill 后调用）。
- *
- * 调用后清除 fastLane 缓存，下次 getFastLaneTools() 会重新合并 builtin + 动态。
- */
-export function setDynamicFastLaneSkillTools(tools: ChatCompletionTool[]): void {
-  _dynamicFastLaneSkillTools = tools;
-  _fastLaneToolsCache = null;
-}
-
-export function getFastLaneTools(): ChatCompletionTool[] {
-  if (_fastLaneToolsCache) return _fastLaneToolsCache;
-  const builtinFastLane = getBuiltinAgentChatTools().filter((t) => {
-    if (!("function" in t) || !t.function?.name) return false;
-    return isFastLaneTool(t.function.name);
-  });
-  // 合并动态 fastLane Skill（去重：builtin 已有的不重复加入）
-  const seen = new Set<string>();
-  for (const t of builtinFastLane) {
-    if ("function" in t && t.function?.name) seen.add(t.function.name);
-  }
-  const dynamicUnique = _dynamicFastLaneSkillTools.filter((t) => {
-    if (!("function" in t) || !t.function?.name) return false;
-    return !seen.has(t.function.name);
-  });
-  // 2026-09-05 双面架构：escalate 逃生舱已删除（对话面零工具、任务面全量工具，
-  // 轨道内出口自检承担纠错，不再需要模型侧升级哨兵）。
-  _fastLaneToolsCache = [...builtinFastLane, ...dynamicUnique];
-  return _fastLaneToolsCache;
-}
-
 /** Agent 能力详细查询工具（Layer 3）：system prompt 已包含行为规则和路由表（Layer 2），本工具用于获取某领域的完整能力描述和运行时状态。 */
 const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -1651,7 +1601,6 @@ let _memoryChatTools: ChatCompletionTool[] = [];
 export function setMemoryChatTools(tools: ChatCompletionTool[]): void {
   _memoryChatTools = tools;
   _builtinToolsCache = null;
-  _fastLaneToolsCache = null;
 }
 
 /** 注入 MCP ChatCompletionTool 列表（启动时调用一次） */
@@ -1659,7 +1608,6 @@ export function setMcpChatTools(tools: ChatCompletionTool[]): void {
   _mcpChatTools = tools;
   // 清除缓存，下次 getBuiltinAgentChatTools 调用会重新构建
   _builtinToolsCache = null;
-  _fastLaneToolsCache = null;
 }
 
 /**
@@ -1674,7 +1622,6 @@ export function setMcpChatTools(tools: ChatCompletionTool[]): void {
 export function setCapabilityModuleDeps(deps: CapabilityModuleDeps): void {
   _capabilityModuleDeps = deps;
   _builtinToolsCache = null;
-  _fastLaneToolsCache = null;
 }
 
 /**
@@ -1686,7 +1633,6 @@ export function setCapabilityModuleDeps(deps: CapabilityModuleDeps): void {
 export function setBrainChatTools(tools: ChatCompletionTool[]): void {
   _brainChatTools = tools;
   _builtinToolsCache = null;
-  _fastLaneToolsCache = null;
 }
 
 /**
@@ -1698,7 +1644,6 @@ export function setBrainChatTools(tools: ChatCompletionTool[]): void {
 export function setBodyChatTools(tools: ChatCompletionTool[]): void {
   _bodyChatTools = tools;
   _builtinToolsCache = null;
-  _fastLaneToolsCache = null;
 }
 
 /**
@@ -1759,14 +1704,13 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
 }
 
 /**
- * 统一清除 builtin + fastLane 工具缓存。
+ * 统一清除 builtin 工具缓存。
  *
- * 自我进化装载 / 卸载 Skill 后调用，确保下次 getBuiltinAgentChatTools() /
- * getFastLaneTools() 重新构建，新能力立即可见。
+ * 自我进化装载 / 卸载 Skill 后调用，确保下次 getBuiltinAgentChatTools()
+ * 重新构建，新能力立即可见。
  */
 export function invalidateBuiltinToolsCache(): void {
   _builtinToolsCache = null;
-  _fastLaneToolsCache = null;
 }
 
 /**
@@ -1802,7 +1746,7 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   },
   {
     // 2026-08-29 C 端生活管家强化：补齐提醒类口语关键词（提醒我/别忘了/到点叫我/
-    // 定个闹钟），让 fast 模式下 reminder.plan / calendar.* 能被可靠召回。
+    // 定个闹钟），让对话面轻量档下 reminder.plan / calendar.* 能被可靠召回。
     category: 'calendar',
     keywords: ['提醒', '提醒我', '别忘了', '到点叫我', '定个闹钟', 'reminder', '日程', 'schedule', '日历', 'calendar', '任务', 'task', '定时', 'timer', '闹钟', 'alarm', '计划', 'plan', '会议', 'meeting', '预约', 'appointment', '有空', '空闲', '改期', '冲突'],
     toolNames: ['reminder.plan', 'calendar.create_from_text', 'calendar.create_task', 'calendar.list_tasks', 'calendar.update_task', 'calendar.find_free_slots']
@@ -2203,7 +2147,7 @@ function extractUserTextFromMessages(messages: ChatCompletionMessageParam[]): st
 //     token 最省路径）。
 //   - 存在失败 / 元工具（tool_search 桥接）/ 交互式工具（浏览器/桌面/代码链路）
 //     时，进入带 schema 的 replan 波次（上限 maxRounds，默认
-//     PLAN_EXECUTE_MAX_WAVES=4，fast 模式 1）：模型基于已有结果继续规划或
+//     PLAN_EXECUTE_MAX_WAVES=4，对话面轻量档 1）：模型基于已有结果继续规划或
 //     直接给出最终回答（文本回复即流式返回）。
 //   - 波次耗尽仍有未收尾的工具链 → 兜底 SUMMARIZE（失败信息已在 tool 消息中）。
 // ═══════════════════════════════════════════════════════════════════
@@ -2454,8 +2398,8 @@ export async function streamCompletionWithTools(
     const preset = getToolResultBudget(toolName);
     return preset === undefined ? undefined : Math.round(preset * toolBudgetScale);
   };
-  // 2026-08-01 性能优化：从 extraBody 推断 Fast 模式，传递给 resolveForcedToolChoice 跳过强制 tool_choice。
-  // Fast 模式 = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
+  // 2026-08-01 性能优化：从 extraBody 推断 fastProfile（对话面轻量档），传递给 resolveForcedToolChoice 跳过强制 tool_choice。
+  // fastProfile = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
   // 强制工具调用会多 1 次 round trip，徒增延迟。
   const fastProfile = Boolean(options?.extraBody?.fastProfile === true);
   const maxWaves = Math.max(

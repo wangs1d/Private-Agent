@@ -20,7 +20,6 @@ import "dart:typed_data" show Uint8List, ByteData;
 import "dart:async" show Future, StreamSubscription;
 
 import "package:flutter/material.dart";
-import "package:flutter/painting.dart" show debugNetworkImageHttpClientProvider;
 import "package:flutter/services.dart" show rootBundle, FontLoader;
 import "package:flutter_test/flutter_test.dart";
 

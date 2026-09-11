@@ -90,8 +90,24 @@ export function describeMemoryAge(timestamp: string | undefined, now = Date.now(
   return `${Math.round(days / 365)}年前`;
 }
 
+/**
+ * 亲密关系主题的覆盖键（root fix，2026-09 复盘）：
+ * "我的老婆是景甜" 与 "我的老婆是刘浩存"（含「未来老婆」「正主」等变体）是同一
+ * 字段的新旧值，必须共享同一个 overwrite key，latest-wins 替换——旧实现按整句
+ * 生成 key，新旧值各占一行并存，正是"前脚一个景甜后脚一个刘浩存"的 KV 层根源。
+ * key 只取主题类别（不含值），值不同即视为冲突、新值替换旧值。
+ */
+const RELATIONSHIP_OVERWRITE_CLASSES: Array<{ re: RegExp; cls: string }> = [
+  { re: /(?:我的|未来的?|自家的)(?:老婆|媳妇|妻子|夫人|爱人)|(?:老婆|媳妇|妻子|未婚妻|对象|正主)(?:是|叫|才是)/, cls: "spouse" },
+  { re: /(?:我的|未来的?)?(?:未婚妻|未婚夫)/, cls: "fiance" },
+  { re: /(?:我的)?(?:女朋友|女友|男朋友|男友|对象)(?:是|叫|才是)?/, cls: "partner" },
+];
+
 export function extractOverwriteKey(line: string): string | null {
   const plain = stripMemoryLineDecorators(line);
+  for (const { re, cls } of RELATIONSHIP_OVERWRITE_CLASSES) {
+    if (re.test(plain)) return `relationship:${cls}`;
+  }
   const patterns: RegExp[] = [
     /(?:喜欢|不喜欢|讨厌|偏好|习惯|总是|从不|不要|别)\s*([^，。！？\n]{2,24})/,
     /(?:生日|纪念日|住在|住址|城市|学校|公司|职业|工作是)\s*([^，。！？\n]{2,24})/,

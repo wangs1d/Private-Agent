@@ -20,7 +20,7 @@ function kimiExtraBody(streamOpts?: AgentStreamOptions): Record<string, unknown>
   if (kimiThinkingDisabled(streamOpts)) {
     out.thinking = { type: "disabled" };
   }
-  // 2026-08-01 性能优化：Fast 模式（contextual/light）跳过强制 tool_choice，
+  // 2026-08-01 性能优化：对话面轻量档（contextual/light）跳过强制 tool_choice，
   // 让 LLM 基于 system prompt 中已注入的 currentTime/userLocation 直接答。
   if (streamOpts?.toolExposureProfile === "contextual" || streamOpts?.toolExposureProfile === "light") {
     out.fastProfile = true;
@@ -35,7 +35,7 @@ function kimiExtraBody(streamOpts?: AgentStreamOptions): Record<string, unknown>
  *
  * 继承 {@link AbstractChatProvider}：防串台（foldCompletedToolChains 根源折叠）、时间戳注入、
  * thread 维护等公共逻辑由基类模板方法固化，本类只实现 Kimi 特有的 system prompt 构建、
- * thinking 开关与 fastProfile。
+ * thinking 开关与 fastProfile（对话面轻量档标志）。
  */
 export class MoonshotKimiProvider extends AbstractChatProvider {
   readonly id = "moonshot-kimi";

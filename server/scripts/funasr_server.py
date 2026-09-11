@@ -32,6 +32,7 @@ FunASR 自托管 ASR 服务（与 Node 端 funasr-asr-adapter.ts 配套）。
     #7 并发控制（信号量串行推理，避免 CPU 争抢）
     #8 WebSocket 流式接口
     #3 模型预热（消除首次推理冷启动）
+    #9 int8 动态量化（CPU 常驻内存 5GB+ → ~1.5GB，FUNASR_QUANT=0 或 --no-quant 关闭）
 
 模型加载策略：
     首次启动会从 ModelScope 下载模型到 ~/.cache/funasr/，约 1GB。
@@ -39,6 +40,7 @@ FunASR 自托管 ASR 服务（与 Node 端 funasr-asr-adapter.ts 配套）。
 """
 import argparse
 import asyncio
+import gc
 import io
 import logging
 import os
@@ -82,6 +84,86 @@ DEVICE = "cpu"
 # #7 并发控制：CPU 推理是 GIL 受限的，串行推理避免争抢反而更快
 _INFERENCE_SEMAPHORE: asyncio.Semaphore | None = None
 _MAX_CONCURRENT = 1
+
+# #9 int8 动态量化：CPU 上把 nn.Linear 权重压到 qint8（~1/4 体积），常驻内存大幅下降。
+# GPU 推理时无意义，自动跳过。可用 --no-quant 或环境变量 FUNASR_QUANT=0 关闭。
+_QUANTIZE = True
+
+
+def _process_rss_mb() -> float | None:
+    """当前进程工作集（MB），仅用于日志；取不到时返回 None。"""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(_PMC)
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            # 64 位下必须显式声明签名，否则伪句柄会被截断成 32 位导致 ERROR_INVALID_HANDLE
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            psapi.GetProcessMemoryInfo.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD,
+            ]
+            handle = kernel32.GetCurrentProcess()
+            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+                return pmc.WorkingSetSize / 1024 / 1024
+            return None
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except Exception:
+        return None
+
+
+def _format_rss() -> str:
+    mb = _process_rss_mb()
+    return f"{mb:.0f}MB" if mb is not None else "unknown"
+
+
+def quantize_models(amodel) -> None:
+    """对 AutoModel 挂载的各模型做 int8 动态量化（仅 CPU 有收益）。
+
+    注意必须 inplace=True：默认路径会先 copy.deepcopy(模型)，而 funasr 模型
+    对象上挂着不可 pickle 的属性（如 module 引用），deepcopy 会直接抛
+    TypeError: cannot pickle 'module' object。
+    """
+    import warnings
+
+    import torch
+
+    targets = [("asr", amodel.model)]
+    if getattr(amodel, "vad_model", None) is not None:
+        targets.append(("vad", amodel.vad_model))
+    if getattr(amodel, "punc_model", None) is not None:
+        targets.append(("punc", amodel.punc_model))
+
+    for name, m in targets:
+        if m is None:
+            continue
+        before = _process_rss_mb()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            torch.quantization.quantize_dynamic(
+                m, {torch.nn.Linear}, dtype=torch.qint8, inplace=True,
+            )
+        after = _process_rss_mb()
+        delta = f", RSS {before:.0f}MB -> {after:.0f}MB" if before and after else ""
+        log.info(f"  int8 量化 [{name}] 完成{delta}")
 
 
 def load_model(model_name: str, vad_model: str | None, punc_model: str | None,
@@ -167,6 +249,17 @@ def transcribe_bytes(audio_bytes: bytes, filename: str, language: str,
 async def _on_startup():
     global MODEL, MODEL_NAME, VAD_MODEL, PUNC_MODEL, DEVICE, _INFERENCE_SEMAPHORE
     MODEL = load_model(MODEL_NAME, VAD_MODEL, PUNC_MODEL, DEVICE)
+
+    # #9: int8 动态量化（默认 CPU 开启），量化后立即用下面的 warmup 验证前向可用
+    if _QUANTIZE and DEVICE.startswith("cpu"):
+        log.info(f"开始 int8 动态量化，当前 RSS {_format_rss()}")
+        quantize_models(MODEL)
+        # 量化会替换掉数 GB 的 fp32 权重模块，主动触发一次全量回收归还物理内存
+        gc.collect()
+        log.info(f"量化完成，当前 RSS {_format_rss()}")
+    else:
+        log.info("跳过 int8 量化（GPU 推理或已禁用）")
+
     log.info("模型加载完成")
 
     # #3: 模型预热 — 跑一段 1s 静音消除首次推理冷启动
@@ -326,7 +419,7 @@ async def ws_asr(ws: WebSocket):
 
 
 def main():
-    global MODEL_NAME, VAD_MODEL, PUNC_MODEL, DEVICE
+    global MODEL_NAME, VAD_MODEL, PUNC_MODEL, DEVICE, _QUANTIZE
     parser = argparse.ArgumentParser(description="FunASR ASR HTTP server")
     parser.add_argument("--host", default="0.0.0.0", help="监听地址")
     parser.add_argument("--port", type=int, default=8001, help="监听端口")
@@ -338,12 +431,16 @@ def main():
                         help="标点恢复模型名（空字符串禁用）")
     parser.add_argument("--device", default=os.environ.get("FUNASR_DEVICE", "cpu"),
                         help="推理设备（cpu / cuda:0）")
+    parser.add_argument("--no-quant", action="store_true",
+                        help="禁用 int8 动态量化（也可用环境变量 FUNASR_QUANT=0）")
     args = parser.parse_args()
 
     MODEL_NAME = args.model
     VAD_MODEL = args.vad or None
     PUNC_MODEL = args.punc or None
     DEVICE = args.device
+    _QUANTIZE = not args.no_quant and \
+        os.environ.get("FUNASR_QUANT", "1").strip().lower() not in ("0", "false", "no", "off")
 
     log.info(f"启动 FunASR Server：host={args.host}, port={args.port}, "
              f"model={MODEL_NAME}, vad={VAD_MODEL}, punc={PUNC_MODEL}, device={DEVICE}")

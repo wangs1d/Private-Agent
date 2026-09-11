@@ -173,6 +173,17 @@ export function taskEndMs(startMs: number, durationMinutes?: number): number {
   return startMs + (durationMinutes && durationMinutes > 0 ? durationMinutes : 0) * 60_000;
 }
 
+/**
+ * 同一次创建意图的 runAt 锚点容差：程序层确定性创建与模型工具调用解析的是同一句
+ * 用户原话，锚点差异只会来自毫秒级解析抖动，超过该值即视为两次独立创建。
+ */
+const DUPLICATE_RUN_AT_TOLERANCE_MS = 60_000;
+
+/** 内容归一化：去全部空白 + 小写，跨创建路径（程序层/工具/HTTP）对同一句话稳定可比。 */
+function normalizeScheduleContent(value: string | undefined): string {
+  return (value ?? "").trim().toLowerCase().replace(/\s+/g, "");
+}
+
 export class ScheduleTaskService {
   private readonly byTaskId = new Map<string, ScheduleTaskRecord>();
   private readonly runsByTaskId = new Map<string, ScheduleTaskRun[]>();
@@ -318,11 +329,56 @@ export class ScheduleTaskService {
     await this.emitTaskChange("deleted", task);
   }
 
+  /**
+   * 活动任务重复检测（幂等创建的判定核心）：同会话 + 同类型 + 同归一化内容 +
+   * 同时间签名（时区/重复规则/cron/runAt 锚点）的 active/paused 任务已存在时，
+   * 判定为同一次创建意图的多路径重放——程序层确定性创建、模型工具调用
+   * （reminder.plan / calendar.create_*）、客户端断线重发、HTTP 直写都从这里落库，
+   * 只有第一次真实创建，后续一律返回已有任务。已结束（completed/cancelled）的
+   * 任务不参与判定：用户稍后重设同名同刻的提醒必须能成功。
+   */
+  private findActiveDuplicate(
+    input: CreateScheduleTaskInput,
+    schedule: { recurrence: ScheduleRecurrence; runAt: string; cronExpression?: string },
+    timezone: string,
+  ): ScheduleTaskRecord | undefined {
+    const description = normalizeScheduleContent(input.description);
+    const reminderMessage = normalizeScheduleContent(input.reminderMessage ?? input.description);
+    const runAtMs = Date.parse(schedule.runAt);
+    for (const task of this.byTaskId.values()) {
+      if (task.sessionId !== input.sessionId || task.kind !== input.kind) continue;
+      if (task.status !== "active" && task.status !== "paused") continue;
+      if (normalizeScheduleContent(task.description) !== description) continue;
+      if (normalizeScheduleContent(task.reminderMessage ?? task.description) !== reminderMessage) {
+        continue;
+      }
+      if (task.timezone !== timezone || task.recurrence !== schedule.recurrence) continue;
+      if (schedule.recurrence === "cron") {
+        // cron 任务的签名就是表达式本身（runAt 是随创建时刻浮动的下次触发点）。
+        if ((task.cronExpression ?? "") !== (schedule.cronExpression ?? "")) continue;
+        return task;
+      }
+      const taskRunAtMs = Date.parse(task.runAt);
+      if (
+        Number.isFinite(runAtMs) &&
+        Number.isFinite(taskRunAtMs) &&
+        Math.abs(taskRunAtMs - runAtMs) <= DUPLICATE_RUN_AT_TOLERANCE_MS
+      ) {
+        return task;
+      }
+    }
+    return undefined;
+  }
+
   async createTask(input: CreateScheduleTaskInput): Promise<ScheduleTaskRecord> {
     const tz = input.timezone?.trim() || "Asia/Shanghai";
     const schedule = this.resolveSchedule(input.runAt, input.recurrence, tz, input.cronExpression);
     const now = new Date().toISOString();
     this.validateKindPayload(input.kind, input.reminderMessage, input.action, input.agentTask);
+    // 幂等创建：命中重复时直接返回已有任务，不插入、不持久化、不广播 tasks_changed
+    //（客户端本地镜像按 taskId 幂等，旧广播已存在，无需再发）。
+    const duplicate = this.findActiveDuplicate(input, schedule, tz);
+    if (duplicate) return duplicate;
     const task: ScheduleTaskRecord = {
       taskId: randomUUID(),
       sessionId: input.sessionId,

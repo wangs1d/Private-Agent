@@ -1,6 +1,8 @@
 import "dart:async";
 import "dart:math" as math;
 
+import "package:flutter/foundation.dart";
+
 import "voiceprint_service.dart";
 
 /// 声纹识别服务模拟实现 - 用于开发和测试
@@ -17,10 +19,10 @@ class MockVoiceprintService implements VoiceprintService {
   Future<bool> initialize() async {
     try {
       _isInitialized = true;
-      print("声纹识别服务初始化成功");
+      debugPrint("声纹识别服务初始化成功");
       return true;
     } catch (e) {
-      print("声纹识别服务初始化失败: $e");
+      debugPrint("声纹识别服务初始化失败: $e");
       return false;
     }
   }
@@ -36,10 +38,10 @@ class MockVoiceprintService implements VoiceprintService {
 
     try {
       _registeredVoiceprints[userId] = audioSamples;
-      print("用户 $userId 的声纹注册成功");
+      debugPrint("用户 $userId 的声纹注册成功");
       return true;
     } catch (e) {
-      print("声纹注册失败: $e");
+      debugPrint("声纹注册失败: $e");
       return false;
     }
   }
@@ -175,7 +177,7 @@ class MockVoiceprintService implements VoiceprintService {
       _eventController = null;
     }
     
-    print("声纹识别监听已停止");
+    debugPrint("声纹识别监听已停止");
   }
 
   @override

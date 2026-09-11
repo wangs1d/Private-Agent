@@ -2,9 +2,9 @@ import "dart:async";
 import "dart:io" show Platform;
 import "dart:ui" show Color;
 
-import "package:flutter/services.dart" show rootBundle;
 import "package:webview_windows/webview_windows.dart";
 
+import "travel_map_assets.dart";
 import "travel_web_panel_controller.dart";
 
 /// 整页 WebView 行程面板的进程级共享宿主（单例）。
@@ -68,8 +68,8 @@ class TravelWebPanelHost {
         controller.handleWebMessage,
       );
 
-      // 加载内嵌整页面板（MapLibre 走 CDN）
-      final String html = await rootBundle.loadString(
+      // 加载内嵌整页面板（MapLibre 已随包本地内联，零 CDN 等待）
+      final String html = await loadTravelMapHtml(
         "assets/travel_map/panel.html",
       );
       await webviewController.loadStringContent(html);

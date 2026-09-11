@@ -14,10 +14,6 @@ import {
   parseScheduleTaskCategory,
 } from "../services/schedule-task-service.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
-import {
-  checkScheduleCreateDedup,
-  setScheduleCreateDedup,
-} from "./schedule-create-dedup.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 /** 将 ISO UTC 时间字符串格式化为用户可读的本地时间描述 */
@@ -125,11 +121,8 @@ export function registerCalendarTools(
     const tz = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
     const forceCreate = input.forceCreate === true;
 
-    // 去重：同一轮 + 相同文本只创建一次
-    const roundId = context.chatUserMessageId || context.sessionId;
-    const contentKey = text.slice(0, 120);
-    const dedupHit = checkScheduleCreateDedup(roundId, contentKey);
-    if (dedupHit) return { ...dedupHit, summary: `(同轮重复调用已拦截) ${dedupHit.summary ?? ""}` };
+    // 重复创建由 ScheduleTaskService.createTask 幂等兜底（同会话同内容同时间签名
+    // 返回已有任务），工具侧不再维护独立的去重缓存。
 
     const parsed = await scheduleIntentService.parseForCreate(
       sessionId,
@@ -172,7 +165,6 @@ export function registerCalendarTools(
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage,
       };
-      setScheduleCreateDedup(roundId, contentKey, response);
       return response;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -211,12 +203,6 @@ export function registerCalendarTools(
     const durationMinutes = normalizeDurationMinutes(input.durationMinutes);
     const remindBeforeMinutes = normalizeRemindBeforeMinutes(input.remindBeforeMinutes);
     const forceCreate = input.forceCreate === true;
-
-    // 去重：同一轮 + 相同描述+时间只创建一次
-    const roundId = context.chatUserMessageId || context.sessionId;
-    const contentKey = `${description}:${runAt}`.slice(0, 120);
-    const dedupHit = checkScheduleCreateDedup(roundId, contentKey);
-    if (dedupHit) return { ...dedupHit, summary: `(同轮重复调用已拦截) ${dedupHit.summary ?? ""}` };
 
     try {
       // 冲突预检（程序层确定性检测）：有冲突且未 forceCreate → 不创建，回冲突详情
@@ -263,7 +249,6 @@ export function registerCalendarTools(
           recurrence: task.recurrence,
           reminderMessage: task.reminderMessage,
         };
-        setScheduleCreateDedup(roundId, contentKey, response);
         return response;
       }
       if (kindRaw === "weather_brief") {
@@ -291,7 +276,6 @@ export function registerCalendarTools(
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
         };
-        setScheduleCreateDedup(roundId, contentKey, response);
         return response;
       }
       if (kindRaw === "agent_task") {
@@ -325,7 +309,6 @@ export function registerCalendarTools(
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
         };
-        setScheduleCreateDedup(roundId, contentKey, response);
         return response;
       }
       const actionIn = input.action as Record<string, unknown> | undefined;
@@ -360,7 +343,6 @@ export function registerCalendarTools(
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
         recurrence: task.recurrence,
       };
-      setScheduleCreateDedup(roundId, contentKey, response);
       return response;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

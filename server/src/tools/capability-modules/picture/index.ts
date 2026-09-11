@@ -1,5 +1,5 @@
 /**
- * 图片能力模块(图库 + 美颜批图)统一出口。
+ * 图片能力模块(图库)统一出口。
  *
  * 数据源:`@private-ai-agent/picture` 的 PictureKit,
  * 存储根目录 data/pictures(assets/thumbs/index.json)。
@@ -7,7 +7,7 @@
 import type { ToolRegistry } from "../../tool-registry.js";
 import type { PictureKit } from "@private-ai-agent/picture";
 
-import { createPictureBeautifyHandler, createPictureGalleryHandler } from "./handlers.js";
+import { createPictureGalleryHandler } from "./handlers.js";
 
 export { PICTURE_INTENT_RULES } from "./intent.js";
 
@@ -17,5 +17,4 @@ export function registerPictureModuleTools(
   deps: { pictureKit: PictureKit },
 ): void {
   registry.register("picture.gallery", createPictureGalleryHandler(deps.pictureKit));
-  registry.register("picture.beautify", createPictureBeautifyHandler(deps.pictureKit));
 }

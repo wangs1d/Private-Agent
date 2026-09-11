@@ -5,7 +5,6 @@ import "package:flutter_test/flutter_test.dart";
 
 import "package:private_ai_agent/core/utils/agent_result_parser.dart";
 import "package:private_ai_agent/features/chat/intelligent_route_planner.dart";
-import "package:private_ai_agent/features/chat/travel_booking_sheet.dart";
 import "package:private_ai_agent/features/chat/travel_plan_models.dart";
 import "package:private_ai_agent/features/chat/travel_plan_panel.dart";
 
@@ -242,26 +241,6 @@ void main() {
       final Map<String, String> links = result.serviceLinks();
       expect(links["didi"], contains("lat=25.69"));
       expect(links["gaode"], contains("uri.amap.com/navigation"));
-    });
-  });
-
-  group("预订清单条目解析", () {
-    test("TravelBookingItem 折扣标签解析", () {
-      final TravelBookingItem item = TravelBookingItem.fromJson(
-        <String, dynamic>{
-          "name": "古城客栈",
-          "type": "hotel",
-          "unitPrice": 342,
-          "count": 2,
-          "originalPrice": 760,
-          "finalPrice": 684,
-          "discounts": <String>["金卡会员 9折", "Booking Genius 2 9折"],
-        },
-      );
-      expect(item.finalPrice, 684);
-      expect(item.discounts.length, 2);
-      item.checked = false;
-      expect(item.checked, isFalse);
     });
   });
 }

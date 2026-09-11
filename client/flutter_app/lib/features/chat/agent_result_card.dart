@@ -925,6 +925,7 @@ class _MediaCard extends StatelessWidget {
                 child: _compareCell(
                   i < aList.length ? aList[i] : null,
                   allPhotoUrls,
+                  context,
                 ),
               ),
               const SizedBox(width: 8),
@@ -932,6 +933,7 @@ class _MediaCard extends StatelessWidget {
                 child: _compareCell(
                   i < bList.length ? bList[i] : null,
                   allPhotoUrls,
+                  context,
                 ),
               ),
             ],
@@ -1087,6 +1089,7 @@ class _MediaCard extends StatelessWidget {
   Widget _compareCell(
     ({String url, double? aspect, String side, String? caption})? entry,
     List<String> gallery,
+    BuildContext context,
   ) {
     if (entry == null) {
       return AspectRatio(
@@ -1120,6 +1123,7 @@ class _MediaCard extends StatelessWidget {
               title: "图片预览",
               gallery: gallery,
               index: gallery.indexOf(entry.url),
+              anchorContext: context,
             );
           },
           child: AspectRatio(
@@ -1195,7 +1199,7 @@ class _TravelItineraryCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            _buildPoster(plan, gallery, posterUrl, dayCount),
+            _buildPoster(context, plan, gallery, posterUrl, dayCount),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
               child: Column(
@@ -1253,6 +1257,7 @@ class _TravelItineraryCard extends StatelessWidget {
   // ── 海报区：实拍背景 + 渐变遮罩 + 目的地徽章/天数/日期 + 标题/简介 ──
 
   Widget _buildPoster(
+    BuildContext context,
     TravelPlanData plan,
     List<String> gallery,
     String? posterUrl,
@@ -1267,6 +1272,7 @@ class _TravelItineraryCard extends StatelessWidget {
                 title: plan.destination.isEmpty ? "行程海报" : plan.destination,
                 gallery: gallery,
                 index: gallery.indexOf(posterUrl),
+                anchorContext: context,
               ),
       child: SizedBox(
         height: 200,

@@ -18,7 +18,7 @@ class TravelMapController {
   /// 沉浸式 3D 实景打开回调（url 已在 JS 侧拼接 httpBase）。
   void Function(String url)? onSplatOpen;
 
-  /// 底图样式切换回调（0 街道 1 卫星 2 暗色）。
+  /// 底图样式切换回调（0 暗色 1 卫星）。
   void Function(int index)? onStyleChanged;
 
   /// JS 页面就绪回调（供视图移除加载占位）。
@@ -148,7 +148,7 @@ class TravelMapController {
     _send("toggle3D");
   }
 
-  /// 切换底图样式：0 街道 1 卫星（ESRI 影像 hybrid）2 暗色。
+  /// 切换底图样式：0 暗色（Carto 黑底）1 卫星（ESRI 影像 hybrid）。
   void setStyle(int index) {
     _send("setStyle", index);
   }

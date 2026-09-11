@@ -1,4 +1,5 @@
 /// 虚拟电话 UI 文案（6 位号登记在 Agent 名下，即用户联络号，与 Agent 共用）。
+library;
 
 class VoiceCallUiLabels {
 

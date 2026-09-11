@@ -11,11 +11,23 @@
 import { spawn, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
 
 function envStr(env: NodeJS.ProcessEnv, key: string, fallback = ""): string {
   return env[key]?.trim() || fallback;
+}
+
+/**
+ * Paddle 数据目录默认值：存在 D 盘时落到 D:\\paddle（模型缓存大，避免挤占系统盘），
+ * 否则回退系统临时目录，保证无数据盘的机器开箱可用。
+ */
+function paddleDataDir(sub: string): string {
+  if (process.platform === "win32" && existsSync("D:\\")) {
+    return join("D:\\paddle", sub);
+  }
+  return join(tmpdir(), "paddle", sub);
 }
 
 function envInt(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
@@ -234,21 +246,21 @@ export function startPaddleOcrServer(
     ...env,
     PADDLE_OCR_HOST: host,
     PADDLE_OCR_PORT: String(port),
-    // 把所有 Paddle/pip 缓存目录透传给子进程,严禁再写 C 盘
-    PADDLE_OCR_MODEL_DIR: envStr(env, "PADDLE_OCR_MODEL_DIR", "D:\\paddle\\paddleocr"),
-    PPOCR_HOME: envStr(env, "PADDLE_OCR_MODEL_DIR", "D:\\paddle\\paddleocr"),
-    PADDLE_PDX_CACHE_HOME: envStr(env, "PADDLE_PDX_CACHE_HOME", "D:\\paddle\\paddlex"),
-    PIP_CACHE_DIR: envStr(env, "PIP_CACHE_DIR", "D:\\paddle\\pip"),
-    HF_HOME: envStr(env, "HF_HOME", "D:\\paddle\\hf"),
+    // 把所有 Paddle/pip 缓存目录透传给子进程：优先数据盘（D:），无数据盘的机器回退系统临时目录
+    PADDLE_OCR_MODEL_DIR: envStr(env, "PADDLE_OCR_MODEL_DIR", paddleDataDir("paddleocr")),
+    PPOCR_HOME: envStr(env, "PADDLE_OCR_MODEL_DIR", paddleDataDir("paddleocr")),
+    PADDLE_PDX_CACHE_HOME: envStr(env, "PADDLE_PDX_CACHE_HOME", paddleDataDir("paddlex")),
+    PIP_CACHE_DIR: envStr(env, "PIP_CACHE_DIR", paddleDataDir("pip")),
+    HF_HOME: envStr(env, "HF_HOME", paddleDataDir("hf")),
     HUGGINGFACE_HUB_CACHE: envStr(
       env,
       "HUGGINGFACE_HUB_CACHE",
-      "D:\\paddle\\hf\\hub",
+      paddleDataDir(join("hf", "hub")),
     ),
-    // Paddle inference 临时文件走 D 盘
-    TEMP: envStr(env, "PADDLE_TMP_DIR", "D:\\paddle\\tmp"),
-    TMP: envStr(env, "PADDLE_TMP_DIR", "D:\\paddle\\tmp"),
-    TMPDIR: envStr(env, "PADDLE_TMP_DIR", "D:\\paddle\\tmp"),
+    // Paddle inference 临时文件跟随数据盘
+    TEMP: envStr(env, "PADDLE_TMP_DIR", paddleDataDir("tmp")),
+    TMP: envStr(env, "PADDLE_TMP_DIR", paddleDataDir("tmp")),
+    TMPDIR: envStr(env, "PADDLE_TMP_DIR", paddleDataDir("tmp")),
     PYTHONUNBUFFERED: "1",
   };
 

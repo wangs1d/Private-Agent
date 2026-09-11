@@ -44,7 +44,7 @@ export function resolveForcedToolChoice(
   }
 
   // 2. 直接时间/日期/位置问题 → 强制 clock.get_current_time
-  //    ⚠️ 只在非 Fast 模式强制：Fast 模式 system prompt 已注入 currentTime，
+  //    ⚠️ 只在非轻量档强制：fastProfile（对话面轻量档）system prompt 已注入 currentTime，
   //    跳过强制省 1 次 round trip（LLM→tool→LLM 共 3 次网络往返）。
   if (!fastProfile && DIRECT_CLOCK_OR_LOCATION_RE.test(userText)) {
     const hasClockTool = apiTools.some(

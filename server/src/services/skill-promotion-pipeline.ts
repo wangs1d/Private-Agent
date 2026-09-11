@@ -23,8 +23,7 @@ export function parseSkillPromotionPipelineMode(): SkillPromotionPipelineMode {
  *
  * 由 bootstrap 阶段注入实现，负责把自我进化生成的新能力同步到：
  *  - CapabilityCortex（让 agent.query_capabilities 可见）
- *  - 动态 fastLane 名单（若 Skill 标记为 fast_lane，让 Fast 模式可收编）
- *  - builtin / fastLane 工具缓存清除（确保下次请求看到新能力）
+ *  - builtin 工具缓存清除（确保下次请求看到新能力）
  */
 export type OnSkillPromotedCallback = (params: {
   metadata: SkillMetadata;
@@ -44,7 +43,7 @@ export class TrajectoryPromotionPipeline {
     /**
      * Skill 装载成功后的通知回调（自我进化能力与工具收编结合的关键钩子）。
      * 装载成功后触发，把新 Skill 的 metadata + skillName 传给调用方，
-     * 由调用方决定如何同步到 CapabilityCortex / 动态 fastLane / 缓存。
+     * 由调用方决定如何同步到 CapabilityCortex / 工具缓存。
      */
     private readonly onSkillPromoted?: OnSkillPromotedCallback,
   ) {}
@@ -121,7 +120,7 @@ export class TrajectoryPromotionPipeline {
       return { ok: false, error: result.error ?? "未知错误" };
     }
 
-    // 装载成功后触发通知回调：同步 CapabilityCortex + 动态 fastLane + 缓存清除
+    // 装载成功后触发通知回调：同步 CapabilityCortex + 工具缓存清除
     // 回调失败不影响装载结果（fire-and-forget，错误静默吞掉）
     if (this.onSkillPromoted) {
       try {

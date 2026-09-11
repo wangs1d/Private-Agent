@@ -1,6 +1,7 @@
 import "dart:async";
 import "dart:convert";
 
+import "package:flutter/foundation.dart";
 import "package:web_socket_channel/web_socket_channel.dart";
 import "package:web_socket_channel/status.dart" as status;
 
@@ -207,7 +208,7 @@ class WsChatService {
       _reconnectAttempts++;
 
       final Duration currentDelay = _calculateBackoffDelay();
-      print(
+      debugPrint(
         "Attempting to reconnect ($_reconnectAttempts/$_maxReconnectAttempts) "
         "in ${currentDelay.inSeconds} seconds...",
       );
@@ -217,7 +218,7 @@ class WsChatService {
         _connectWithRetry();
       });
     } else if (_reconnectAttempts >= _maxReconnectAttempts) {
-      print(
+      debugPrint(
         "Max reconnection attempts reached. Please check your network "
         "connection and server status.",
       );

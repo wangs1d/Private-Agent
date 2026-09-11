@@ -36,6 +36,7 @@
     "@private-ai-agent/agent-world": "0.1.0",
     "@private-ai-agent/picture": "0.1.0",
     "@qdrant/js-client-rest": "^1.17.0",
+    "better-sqlite3": "^12.10.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.0.0",
     "iconv-lite": "^0.7.3",

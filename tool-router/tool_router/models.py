@@ -241,3 +241,113 @@ class ApiEnvelope(BaseModel):
     environment: str
     elapsed_ms: float
     data: Any
+
+
+# ===== 用户管理 =====
+
+USERNAME_PATTERN = r"^[A-Za-z0-9_.-]+$"
+EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+PHONE_PATTERN = r"^\+?[0-9][0-9-]{4,19}$"
+
+
+class UserRole(str, Enum):
+    admin = "admin"
+    user = "user"
+
+
+class UserStatus(str, Enum):
+    active = "active"
+    disabled = "disabled"
+
+
+class UserRecord(BaseModel):
+    """存储层完整记录（含 password_hash，禁止直接对外返回）。"""
+
+    user_id: str
+    username: str
+    email: str | None = None
+    nickname: str | None = None
+    phone: str | None = None
+    password_hash: str
+    role: UserRole = UserRole.user
+    status: UserStatus = UserStatus.active
+    tenant_id: str = "default"
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: datetime | None = None
+
+    def public(self) -> UserPublic:
+        return UserPublic(
+            user_id=self.user_id,
+            username=self.username,
+            email=self.email,
+            nickname=self.nickname,
+            phone=self.phone,
+            role=self.role,
+            status=self.status,
+            tenant_id=self.tenant_id,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            last_login_at=self.last_login_at,
+        )
+
+
+class UserPublic(BaseModel):
+    """对外返回的用户信息（不含凭据字段）。"""
+
+    user_id: str
+    username: str
+    email: str | None = None
+    nickname: str | None = None
+    phone: str | None = None
+    role: UserRole
+    status: UserStatus
+    tenant_id: str
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: datetime | None = None
+
+
+class UserRegisterRequest(BaseModel):
+    """前端注册表单提交的字段（除必填外均可选，按需提交）。"""
+
+    username: str = Field(min_length=3, max_length=32, pattern=USERNAME_PATTERN)
+    password: str = Field(min_length=8, max_length=128)
+    email: str | None = Field(default=None, max_length=254, pattern=EMAIL_PATTERN)
+    nickname: str | None = Field(default=None, min_length=1, max_length=64)
+    phone: str | None = Field(default=None, pattern=PHONE_PATTERN)
+
+
+class UserLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserUpdateRequest(BaseModel):
+    """PATCH 语义：仅更新显式传入的字段；email/phone 传 null 表示清空。"""
+
+    nickname: str | None = Field(default=None, min_length=1, max_length=64)
+    email: str | None = Field(default=None, max_length=254, pattern=EMAIL_PATTERN)
+    phone: str | None = Field(default=None, pattern=PHONE_PATTERN)
+    current_password: str | None = Field(default=None, max_length=128)
+    new_password: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class TokenPayload(BaseModel):
+    """JWT 解码后的声明。"""
+
+    sub: str
+    username: str
+    role: UserRole
+    iat: int
+    exp: int
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+class AuthSessionPayload(BaseModel):
+    user: UserPublic
+    token: TokenResponse

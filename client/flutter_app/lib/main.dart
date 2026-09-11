@@ -47,6 +47,7 @@ import "features/chat/agent_profile_page.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/travel_plan_launcher.dart";
+import "features/chat/travel_plan_window.dart";
 import "features/chat/travel_plan_panel.dart";
 import "features/chat/travel_web_panel_host.dart";
 import "features/chat/right_side_panel.dart";
@@ -61,6 +62,7 @@ import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/connected_call_launcher.dart";
 import "core/services/briefing_delivery_api.dart";
 import "core/services/desktop_notification_launcher.dart";
+import "features/briefing/daily_briefing_window.dart";
 import "core/services/incoming_call_launcher.dart";
 import "core/services/phone_call_session.dart";
 import "core/presentation/phone_call_page.dart";
@@ -88,7 +90,25 @@ void main() async {
   _installGlobalErrorHooks();
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    // 行程规划独立窗口模式：主应用 spawn 本 exe 并经环境变量传递信箱目录，
+    // 命中即只运行行程窗口，不 bootstrap 完整应用（见 travel_plan_window.dart）。
+    // 窗口进程常驻：再次打开行程时主应用只写信箱指针，不再重复 spawn。
+    final String? travelWindowMailbox =
+        Platform.environment[kTravelPlanWindowEnv];
     _writeCrashLog("[START]", "app booting", StackTrace.current);
+    if (travelWindowMailbox != null && travelWindowMailbox.isNotEmpty) {
+      await runTravelPlanWindow(travelWindowMailbox);
+      return;
+    }
+    // 今日简报独立窗口模式：主应用 spawn 本 exe 并经环境变量传递载荷文件，
+    // 命中即只运行简报悬浮窗，不 bootstrap 完整应用（见
+    // features/briefing/daily_briefing_window.dart）。
+    final String? briefingWindowPayload =
+        Platform.environment[kDailyBriefingWindowEnv];
+    if (briefingWindowPayload != null && briefingWindowPayload.isNotEmpty) {
+      await runDailyBriefingWindow(briefingWindowPayload);
+      return;
+    }
     // 预加载本机访问凭据（token），确保首次 session.init 就能带上
     await AccessCredentialStore.instance.load();
     unawaited(bootstrapWindowsWebView());
@@ -1271,9 +1291,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final String finalText = _sanitizeAssistantVisibleText(
               payload["finalText"]?.toString() ?? "");
           final String fallbackText = "抱歉，我暂时无法生成回复，请稍后重试";
+          // 2026-09-11 根修兜底：bufferedText 是逐 chunk 净化后的流式累积，但
+          // 逐 chunk 正则天然抓不住跨 chunk 切开的标记（如 DSML 协议块）。
+          // 回退渲染前对整段缓冲再净化一次，防止服务端已把正文剥成空串、客户端
+          // 却把流式缓冲里的协议原文当正文定稿（2026-09-11 01:34 实测事故）。
+          final String sanitizedBuffered = _sanitizeAssistantVisibleText(bufferedText);
           final String resolvedText = finalText.trim().isNotEmpty
               ? finalText
-              : (bufferedText.isNotEmpty ? bufferedText : fallbackText);
+              : (sanitizedBuffered.trim().isNotEmpty ? sanitizedBuffered : fallbackText);
           final String traceKey = (doneTraceId?.isNotEmpty == true)
               ? doneTraceId!
               : (messageId.startsWith("assistant-")
@@ -2897,12 +2922,22 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 行程规划入口：行程卡(travel_itinerary)点击 / autoOpen → 以独立界面
-  /// （全屏路由）打开行程规划，不再占用右侧双栏。
+  /// 行程规划入口：行程卡(travel_itinerary)点击 / autoOpen → 在独立系统
+  /// 窗口中打开行程规划（spawn 子进程，与主窗口并排，互不遮挡）。
   void _openTravelPlanPanel(AgentResultData data) {
+    unawaited(_openTravelPlanWindow(data));
+  }
+
+  Future<void> _openTravelPlanWindow(AgentResultData data) async {
+    final bool opened = await TravelPlanWindowLauncher.open(data);
+    if (opened) {
+      if (!mounted) return;
+      setState(() => _tabIndex = 0); // 主窗口聚焦时，行程卡就在聊天页眼前
+      return;
+    }
+    // 独立窗口不可用（非 Windows / spawn 失败）：退回窗口内全屏页
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null || !navCtx.mounted) return;
-    setState(() => _tabIndex = 0); // 关闭界面后回到聊天页，行程卡就在眼前
     Navigator.of(navCtx).push<void>(
       MaterialPageRoute<void>(
         builder: (BuildContext context) => TravelPlanFullscreenPage(data: data),
@@ -2911,7 +2946,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 图库入口：与好友/消息/日程一致，从右侧滑出 split 双栏面板
-  /// （照片网格浏览 / 上传 / 一键美颜）。
+  /// （照片网格浏览 / 上传 / 删除）。
   void _openGalleryPanel() {
     setState(() {
       _tabIndex = 0;
@@ -3031,7 +3066,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 按结果 messageId（assistant-task-<taskId>）定位并移除对话流内的过程回执。
+  /// 按结果 messageId（`assistant-task-<taskId>`）定位并移除对话流内的过程回执。
   void _dismissTaskReceiptForMessage(String resultMessageId) {
     if (!resultMessageId.startsWith("assistant-task-")) return;
     final String taskId = resultMessageId.substring("assistant-task-".length);
@@ -3143,7 +3178,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         _taskPlaneActiveTaskIds.clear();
         _rebuildAssistantIndex();
       });
-      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(tip)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tip)));
     }
   }
 
@@ -4590,6 +4625,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _lastDesktopBriefingAt = DateTime.now();
     }
 
+    // Windows 桌面：简报统一走「独立 WebView 悬浮窗 + 语音播报」（私人管家
+    // 形态，一比一还原 design/daily-briefing-floating.html）。窗口打开成功
+    // 即视为 desktop 渠道已投放；失败退回下方通知 / 对话框既有路径。
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.windows &&
+        !forceDialog) {
+      // 每天仅一次：今日桌面渠道已展示过则不再弹（重启应用也不重复）
+      if (await _isBriefingDeliveredOnDesktopToday()) return;
+      final bool opened = await DailyBriefingWindowLauncher.open(
+        narrationText: narrationText,
+        briefing: briefing,
+        appellation: briefing["appellation"]?.toString(),
+      );
+      if (opened) {
+        await _markBriefingDelivered("desktop");
+        return;
+      }
+    }
+    if (!mounted) return;
+
     if (mode == UserPreferencesApi.modeVoice && narrationText.isNotEmpty) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         const SnackBar(content: Text("已开始播报今日简报")),
@@ -4808,10 +4863,29 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
+  /// 今日桌面渠道已展示过简报（deliveredAt 为今天且渠道为 desktop）。
+  /// 用于简报悬浮窗「每天仅一次」判定：重启应用 / 同日多次事件不重复弹。
+  Future<bool> _isBriefingDeliveredOnDesktopToday() async {
+    try {
+      final Map<String, dynamic> status =
+          await _briefingDeliveryApi.getStatus(ApiConfig.effectiveActorId);
+      final String? deliveredAt = status["deliveredAt"]?.toString();
+      final String? deliveredChannel = status["deliveredChannel"]?.toString();
+      // 服务端按 UTC 日重置投放状态（resetMorningBriefingDeliveryIfNeeded），
+      // 这里必须用 UTC 日期对齐，否则 UTC+8 的凌晨会误判为"昨天已投放"
+      final String todayUtc =
+          DateTime.now().toUtc().toIso8601String().substring(0, 10);
+      return deliveredAt != null &&
+          deliveredAt.startsWith(todayUtc) &&
+          deliveredChannel == "desktop";
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<bool> _isBriefingDeliveredElsewhere({
     required String preferredChannel,
-  }) async {
-    try {
+  }) async {    try {
       final Map<String, dynamic> status =
           await _briefingDeliveryApi.getStatus(ApiConfig.effectiveActorId);
       final String? deliveredAt = status["deliveredAt"]?.toString();

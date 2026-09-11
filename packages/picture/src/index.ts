@@ -29,11 +29,8 @@ export {
   BatchService,
   SharpBatchEngine,
   SCENE_PRESETS,
-  listBeautyStyles,
 } from './processing/batch.js';
-export type { BatchEngine, BatchAdjustments, BeautyStyleOption } from './processing/batch.js';
-export { applyBeauty, buildSkinMask, BEAUTY_STYLES, BEAUTY_KEYS } from './processing/beauty.js';
-export type { BeautyAdjustments, BeautyStyle } from './processing/beauty.js';
+export type { BatchEngine, BatchAdjustments } from './processing/batch.js';
 
 // 缩略图
 export { ThumbnailService, THUMBNAIL_SIZES } from './thumbnails/service.js';

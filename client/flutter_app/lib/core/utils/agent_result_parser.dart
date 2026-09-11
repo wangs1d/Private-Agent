@@ -90,6 +90,24 @@ class AgentResultItem {
       height: (json["height"] as num?)?.toInt(),
     );
   }
+
+  /// 与 [fromJson] 键位对齐（独立行程窗口进程经此序列化传输）。
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        "type": type,
+        "text": text,
+        "depth": depth,
+        if (url != null) "url": url,
+        if (mediaType != null) "mediaType": mediaType,
+        if (mediaUrl != null) "mediaUrl": mediaUrl,
+        if (thumbnailUrl != null) "thumbnailUrl": thumbnailUrl,
+        if (pageUrl != null) "pageUrl": pageUrl,
+        if (source != null) "source": source,
+        if (caption != null) "caption": caption,
+        if (side != null) "side": side,
+        if (sideLabel != null) "sideLabel": sideLabel,
+        if (width != null) "width": width,
+        if (height != null) "height": height,
+      };
 }
 
 /// 单个可选的"抉择按钮"定义。
@@ -127,6 +145,14 @@ class AgentResultAction {
       payload: rawPayload ?? const <String, dynamic>{},
     );
   }
+
+  /// 与 [fromJson] 键位对齐。
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        "id": id,
+        "label": label,
+        "variant": variant,
+        "payload": payload,
+      };
 }
 
 class AgentResultData {
@@ -223,6 +249,24 @@ class AgentResultData {
       autoOpen: json["autoOpen"] == true,
     );
   }
+
+  /// 与 [fromJson] 键位对齐（独立行程窗口进程经此序列化传输）。
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        "avatar": avatar,
+        "avatarStyle": avatarStyle,
+        "title": title,
+        "items": items.map((AgentResultItem e) => e.toJson()).toList(),
+        "footer": footer,
+        "actions": actions.map((AgentResultAction e) => e.toJson()).toList(),
+        "cardId": cardId,
+        "cardType": cardType,
+        "speak": speak,
+        if (travelPlan != null) "travelPlan": travelPlan,
+        "autoOpen": autoOpen,
+        if (groupTitle != null) "groupTitle": groupTitle,
+        if (sideA != null) "sideA": sideA,
+        if (sideB != null) "sideB": sideB,
+      };
 }
 
 class AgentResultParseResult {

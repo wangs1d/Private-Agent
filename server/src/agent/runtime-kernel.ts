@@ -113,8 +113,8 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "emotionState",
   // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
   "modeRoleGuidance",
-  // 回复风格模式（chat/task）：决定【回复指南】是否注入聊天基准行；剥离会让
-  // 后台任务交付重新吃到短句约束
+  // 回复风格模式（chat/task）：决定【说话方式·伙伴面】是否注入；剥离会让
+  // 后台任务交付重新吃到闲聊调子约束
   "replyStyleMode",
 ];
 

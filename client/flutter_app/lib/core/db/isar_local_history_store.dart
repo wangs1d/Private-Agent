@@ -2,7 +2,7 @@ import "dart:convert";
 import "dart:io";
 
 import "package:crypto/crypto.dart";
-import "package:flutter/foundation.dart" show kIsWeb;
+import "package:flutter/foundation.dart" show debugPrint, kIsWeb;
 import "package:path_provider/path_provider.dart";
 
 import "../models/agent_relay_models.dart";
@@ -49,7 +49,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
         final Directory dir = await provider();
         final File? writable = await _probeWritableFile(dir);
         if (writable != null) return writable;
-        print('[IsarLocalHistoryStore] 目录不可写，尝试备用存储目录: ${dir.path}');
+        debugPrint('[IsarLocalHistoryStore] 目录不可写，尝试备用存储目录: ${dir.path}');
       } catch (_) {
         // 该 provider 失败，尝试下一个
       }
@@ -76,7 +76,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
 
     // Web 平台不支持文件系统，使用内存存储
     if (kIsWeb) {
-      print('[IsarLocalHistoryStore] Web 平台 detected, using memory storage');
+      debugPrint('[IsarLocalHistoryStore] Web 平台 detected, using memory storage');
       _storageFile = null; // Web 平台不使用文件
       // 初始化空数据结构
       _preferences = <String, dynamic>{};
@@ -86,7 +86,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     // 非 Web 平台使用文件系统（带容错处理）
     _storageFile = await _resolveWritableStorageFile();
     if (_storageFile == null) {
-      print('[IsarLocalHistoryStore] 未找到可写存储目录，使用内存存储');
+      debugPrint('[IsarLocalHistoryStore] 未找到可写存储目录，使用内存存储');
       return;
     }
 
@@ -111,14 +111,14 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       try {
         decoded = jsonDecode(raw) as Map<String, dynamic>;
       } catch (e) {
-        print('[IsarLocalHistoryStore] JSON parse error: $e');
-        print('[IsarLocalHistoryStore] Backing up corrupted file...');
+        debugPrint('[IsarLocalHistoryStore] JSON parse error: $e');
+        debugPrint('[IsarLocalHistoryStore] Backing up corrupted file...');
         try {
           final backupFile = File("${_storageFile!.path}.backup.${DateTime.now().millisecondsSinceEpoch}");
           await _storageFile!.copy(backupFile.path);
-          print('[IsarLocalHistoryStore] Backup created: ${backupFile.path}');
+          debugPrint('[IsarLocalHistoryStore] Backup created: ${backupFile.path}');
         } catch (backupError) {
-          print('[IsarLocalHistoryStore] Backup failed: $backupError');
+          debugPrint('[IsarLocalHistoryStore] Backup failed: $backupError');
         }
         // 重建空的存储文件
         await _storageFile!.writeAsString(
@@ -197,7 +197,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           ),
         );
     } catch (e) {
-      print('[IsarLocalHistoryStore] Init error: $e');
+      debugPrint('[IsarLocalHistoryStore] Init error: $e');
       // 不抛出异常，让应用继续运行
     }
   }
@@ -736,7 +736,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
   Future<void> _flush() async {
     // Web 平台不支持文件系统，跳过写入
     if (kIsWeb || _storageFile == null) {
-      print('[IsarLocalHistoryStore] Web 平台，跳过文件写入');
+      debugPrint('[IsarLocalHistoryStore] Web 平台，跳过文件写入');
       return;
     }
 
@@ -781,7 +781,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       await file.writeAsString(jsonEncode(encoded));
     } catch (e) {
       // 写入失败不抛异常，避免影响调用链（如定位缓存上报）；仅记日志。
-      print('[IsarLocalHistoryStore] 存储写入失败（已忽略）: $e');
+      debugPrint('[IsarLocalHistoryStore] 存储写入失败（已忽略）: $e');
     }
   }
 

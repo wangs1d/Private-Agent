@@ -1,6 +1,8 @@
 import "dart:async";
 import "dart:math" as math;
 
+import "package:flutter/foundation.dart";
+
 import "visual_recognition_service.dart";
 
 /// 面部识别服务模拟实现 - 用于开发和测试
@@ -17,10 +19,10 @@ class MockVisualRecognitionService implements VisualRecognitionService {
   Future<bool> initialize() async {
     try {
       _isInitialized = true;
-      print("面部识别服务初始化成功");
+      debugPrint("面部识别服务初始化成功");
       return true;
     } catch (e) {
-      print("面部识别服务初始化失败: $e");
+      debugPrint("面部识别服务初始化失败: $e");
       return false;
     }
   }
@@ -36,10 +38,10 @@ class MockVisualRecognitionService implements VisualRecognitionService {
 
     try {
       _registeredFaces[userId] = faceFeatures;
-      print("用户 $userId 的面部特征注册成功");
+      debugPrint("用户 $userId 的面部特征注册成功");
       return true;
     } catch (e) {
-      print("面部注册失败: $e");
+      debugPrint("面部注册失败: $e");
       return false;
     }
   }
@@ -175,7 +177,7 @@ class MockVisualRecognitionService implements VisualRecognitionService {
       _eventController = null;
     }
     
-    print("面部识别已停止");
+    debugPrint("面部识别已停止");
   }
 
   @override

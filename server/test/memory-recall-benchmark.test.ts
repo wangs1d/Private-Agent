@@ -225,15 +225,14 @@ test("基准 C：跨用户记忆隔离（串台防护）", async () => {
   });
 });
 
-// ── D. 冲突/时效覆盖（已知缺口，显式跟踪）───────────────────────────────────
+// ── D. 冲突/时效覆盖 ────────────────────────────────────────────────────────
 //
-// 已知缺口：2026-08 记忆架构重构移除了偏好变更检测——新旧事实作为独立节点
-// 共存（均 active/unknown），不创建 "updates" 边、不降权旧事实（见
-// human-like-memory-dreaming.test.ts 的对应用例）。
-// 因此下面的场景当前无法断言"以新事实为准"。用 test({ skip }) 显式挂账，
-// 偏好变更检测重新落地后取消 skip 即成为回归门禁。
+// 2026-08 记忆架构重构曾移除偏好变更检测，新旧事实作为独立节点共存（此处
+// 曾以 test({ skip }) 挂账）。2026-09 已补齐同主题 latest-wins 机制
+//（memory-relationship-assertion 断言识别 + supersede + 召回侧冲突消解），
+// 本基准恢复为回归门禁。
 
-test("基准 D：冲突事实应以新为准（已知缺口：偏好变更检测已移除）", { skip: "已知缺口：新设计移除偏好变更检测，新旧事实共存且旧事实不降权" }, async () => {
+test("基准 D：冲突事实应以新为准（同主题 latest-wins 覆盖）", async () => {
   await withMemoryService(async (service, store) => {
     const actor = "bench-conflict";
     await service.ingest(actor, "我住在北京", "chat:user", {

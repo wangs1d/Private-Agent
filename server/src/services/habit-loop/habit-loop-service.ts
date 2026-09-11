@@ -26,7 +26,8 @@ import type {
  *   - 提案执行需 confirmationToken（10 分钟 TTL，一次性）
  *   - quietHours 命中时 auto 规则静默跳过（不打扰、不提案）
  *   - 金融类工具的最终闸门在 AgentTaskSafety / BookingService 两阶段确认
- *   - 产品口径：习惯是 Agent 自己的动作，新建/挖掘规则默认 auto 授权
+ *   - 产品口径：新建/挖掘规则一律先 confirm_each（提案等确认），
+ *     确认成功 3 次后才建议升 auto；auto 仅限显式授权
  */
 
 const PROPOSAL_TTL_MS = 10 * 60_000;
@@ -147,7 +148,7 @@ export class HabitLoopService {
       source: draft.source ?? "manual",
       trigger: draft.trigger,
       action: draft.action,
-      authorization: draft.authorization ?? "auto",
+      authorization: draft.authorization ?? "confirm_each",
       confidence: clamp(draft.confidence ?? (draft.source === "mined" ? 0.45 : 0.5), 0.1, 0.95),
       enabled: draft.enabled ?? true,
       cooldownMinutes: DEFAULT_COOLDOWN_MIN[draft.trigger.kind],
@@ -220,7 +221,7 @@ export class HabitLoopService {
             source: "mined",
             trigger: candidate.trigger,
             action: candidate.action ?? { kind: "message", text: `习惯提醒：${candidate.name}。需要我按惯例处理什么，直接说` },
-            authorization: "auto",
+            authorization: "confirm_each",
             confidence: candidate.confidence,
           }),
         );

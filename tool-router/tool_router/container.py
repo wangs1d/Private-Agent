@@ -15,6 +15,7 @@ from tool_router.services import (
     RegistryStore,
     RerankingPipeline,
     ResourceExecutor,
+    UserStore,
 )
 
 
@@ -32,6 +33,7 @@ class Container:
     lazy_loader: LazyLoader
     executor: ResourceExecutor
     feedback: FeedbackService
+    users: UserStore
 
 
 def build_container() -> Container:
@@ -54,4 +56,5 @@ def build_container() -> Container:
         lazy_loader=lazy_loader,
         executor=ResourceExecutor(registry, lazy_loader, graph),
         feedback=FeedbackService(registry, top_p, cfg),
+        users=UserStore(cfg),
     )

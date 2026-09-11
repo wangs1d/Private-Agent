@@ -68,6 +68,7 @@ class _CompareSliderState extends State<CompareSlider> {
       title: "图片预览",
       gallery: pool,
       index: idx,
+      anchorContext: context,
     );
   }
 

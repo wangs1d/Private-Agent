@@ -9,7 +9,6 @@ import type { AgentInterface, ToolDefinition } from './registry.js';
 import type { ImageGenerationRequest, ImageProvider } from './generation/service.js';
 import { ImageGenerationService, OpenAIImageProvider } from './generation/service.js';
 import type { ImageAdjustments } from './processing/service.js';
-import { listBeautyStyles } from './processing/batch.js';
 import type { PictureKit } from './kit.js';
 
 function str(value: unknown): string {
@@ -255,13 +254,12 @@ export function registerPictureTools(iface: AgentInterface, context: ToolRegistr
   iface.registerTool(
     {
       name: 'batch',
-      description: '批图工具(支持人像美颜)。action: process(photo_paths, scene_type?, style?, adjustments?, user_habit?) / process_single(photo_path, adjustments) / match_preset(scene_type?, user_habit?) / list_beauty_styles→美颜风格列表 / compare(original, processed) / process_and_compare(photo_path, adjustments) / fine_tune(photo_path, base, overrides) / reapply_preset(photo_path, preset_id, overrides?) / create_preset / update_preset / delete_preset / get_preset / list_presets。美颜风格 style: natural自然/creamy奶油肌/cool_white冷白皮/japanese日系清透/hongkong港风;美颜参数: skinSmooth磨皮/skinBrighten透亮/whiten白皙/rosy红润/vibrance/clarity/fade(0-100)',
+      description: '批图工具。action: process(photo_paths, scene_type?, adjustments?, user_habit?) / process_single(photo_path, adjustments) / match_preset(scene_type?, user_habit?) / compare(original, processed) / process_and_compare(photo_path, adjustments) / fine_tune(photo_path, base, overrides) / reapply_preset(photo_path, preset_id, overrides?) / create_preset / update_preset / delete_preset / get_preset / list_presets。调整参数: brightness亮度/contrast对比度/saturation饱和度/sharpness锐化/temperature色温',
       inputSchema: makeSchema({
         action: { type: 'string' },
         photo_paths: { type: 'array', items: { type: 'string' } },
         photo_path: { type: 'string' },
         scene_type: { type: 'string' },
-        style: { type: 'string', enum: ['natural', 'creamy', 'cool_white', 'japanese', 'hongkong'] },
         adjustments: { type: 'object' },
         user_habit: { type: 'object' },
         base_adjustments: { type: 'object' },
@@ -282,12 +280,9 @@ export function registerPictureTools(iface: AgentInterface, context: ToolRegistr
           return await batch.processPhotos({
             photoPaths: requireArg<string[]>(args, 'photo_paths'),
             sceneType: args['scene_type'] as string | undefined,
-            style: args['style'] as string | undefined,
             adjustments: args['adjustments'] as Record<string, number> | undefined,
             userHabit: args['user_habit'] as { batchStyleAvg?: Record<string, number> } | undefined,
           });
-        case 'list_beauty_styles':
-          return { styles: listBeautyStyles() };
         case 'process_single':
           return { output_path: await batch.processSingle(str(requireArg(args, 'photo_path')), requireArg(args, 'adjustments')) };
         case 'match_preset':

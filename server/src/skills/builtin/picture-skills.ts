@@ -2,10 +2,7 @@ import type { PictureKit } from "@private-ai-agent/picture";
 
 import type { ToolHandler } from "../../tools/tool-registry.js";
 import type { SkillDefinition, SkillHandler } from "../types.js";
-import {
-  createPictureBeautifyHandler,
-  createPictureGalleryHandler,
-} from "../../tools/capability-modules/picture/handlers.js";
+import { createPictureGalleryHandler } from "../../tools/capability-modules/picture/handlers.js";
 
 /**
  * 内置 Skill：图片能力套件（PictureKit）→ skill 库 / tool-router。
@@ -13,16 +10,15 @@ import {
  * 数据源是 `@private-ai-agent/picture` 的 PictureKit（存储根 data/pictures），
  * skill 注册后经 buildSessionSkillChatTools → 延迟工具目录 →
  * exportCatalogToToolRouter 以 resource_type="skill" 同步进 tool-router，
- * 执行时 ToolRegistry 优先走 SkillManager（picture.gallery / picture.beautify
+ * 执行时 ToolRegistry 优先走 SkillManager（picture.gallery
  * 与 capability-module 工具同名，capability chatTools 已置空避免 schema 冲突）。
  *
  *   picture.gallery     图库查询 / 打标 / 评分 / 场景 / 统计
- *   picture.beautify    人像美颜批图（成品风格或细粒度参数，产物回图库）
  *   picture.generate    文生图（OpenAI 兼容 provider）
  *   picture.process     图像处理：缩放 / 裁剪 / 旋转 / 调整 / 水印 / 格式转换
  *   picture.analyze     图像解析：格式 / 尺寸 / EXIF / 色彩统计 / 自动标签
  *   picture.evaluate    照片质量评估打分（单张 / 批量 / 实时反馈）
- *   picture.store       图片存储管理：导入去重 / 查询 / 清理
+ *   picture.store       图片存储管理：导入去重 / 查询 / 删除 / 清理
  */
 
 type Deps = {
@@ -82,39 +78,6 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       timeoutMs: 10_000,
     },
     handler: adaptPictureHandler(createPictureGalleryHandler(pictureKit)),
-  };
-
-  const beautify: SkillDefinition = {
-    metadata: {
-      name: "picture.beautify",
-      version: "1.0.0",
-      displayName: "人像美颜批图",
-      description:
-        "修图师式人像美颜批图：按成品风格（natural 自然 / creamy 奶油肌 / cool_white 冷白皮 / japanese 日系清透 / hongkong 港风复古）或细粒度参数（磨皮/美白/红润/鲜艳/质感）处理照片，默认取图库最新一张，产物自动存回图库。",
-      kind: "builtin",
-      tags: [
-        "picture", "beautify", "beauty", "retouch",
-        "修图", "美颜", "磨皮", "美白", "冷白皮", "红润", "气色",
-        "批图", "p图", "自拍", "滤镜", "日系", "港风", "奶油肌",
-      ],
-      icon: "✨",
-      parameters: [
-        {
-          name: "style",
-          type: "string",
-          required: false,
-          enum: ["natural", "creamy", "cool_white", "japanese", "hongkong"],
-          description: "成品美颜风格（与 sceneType/adjustments 至少指定其一）",
-        },
-        { name: "sceneType", type: "string", required: false, description: "按场景类型自动选风格" },
-        { name: "photoIds", type: "array", required: false, description: "要处理的照片 id 列表，缺省取图库最新一张" },
-        { name: "adjustments", type: "object", required: false, description: "细粒度参数对象，如 {skinSmooth:70, whiten:20, rosy:12}" },
-      ],
-      outputSchema: { ok: "boolean", count: "处理张数", photos: "产物照片（含缩略图/原图 URL）", summary: "结果说明" },
-      permissions: ["storage:read", "storage:write", "filesystem:read", "filesystem:write"],
-      timeoutMs: 120_000,
-    },
-    handler: adaptPictureHandler(createPictureBeautifyHandler(pictureKit)),
   };
 
   const generate: SkillDefinition = {
@@ -268,7 +231,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
     handler: async (input) => invokeKitTool(pictureKit, "image_store", input),
   };
 
-  return [gallery, beautify, generate, process, analyze, evaluate, store];
+  return [gallery, generate, process, analyze, evaluate, store];
 }
 
 export function registerPictureBuiltinSkills(

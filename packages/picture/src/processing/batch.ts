@@ -8,28 +8,13 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { computeImageStats } from '../analysis/color.js';
 import type { BatchPreset, ImageStats } from '../models.js';
-import { applyBeauty, BEAUTY_KEYS, BEAUTY_STYLES } from './beauty.js';
-import type { BeautyAdjustments, BeautyStyle } from './beauty.js';
 import { ImageProcessingService } from './service.js';
 import type { ImageAdjustments } from './service.js';
 
 export type BatchAdjustments = Record<string, number | string>;
 
-/** 传统影调键(走 sharp 全局管线) */
-const TONE_KEYS = new Set(['brightness', 'contrast', 'saturation', 'sharpness', 'temperature']);
-/** 美颜专属键(出现任一即走美颜管线) */
-const BEAUTY_ONLY_KEYS = new Set<string>(BEAUTY_KEYS.filter((key) => key !== 'contrast' && key !== 'saturation'));
-/** 引擎可消费的全部数值键 */
-const NUMERIC_KEYS = new Set<string>([...TONE_KEYS, ...BEAUTY_KEYS]);
-
-export interface BeautyStyleOption extends BeautyStyle {
-  id: string;
-}
-
-/** 列出可用美颜风格(供工具/接口层展示) */
-export function listBeautyStyles(): BeautyStyleOption[] {
-  return Object.entries(BEAUTY_STYLES).map(([id, style]) => ({ id, ...style }));
-}
+/** 引擎可消费的数值键(走 sharp 全局管线) */
+const NUMERIC_KEYS = new Set(['brightness', 'contrast', 'saturation', 'sharpness', 'temperature']);
 
 /** 批图引擎抽象,支持运行时替换 */
 export interface BatchEngine {
@@ -53,26 +38,7 @@ export class SharpBatchEngine implements BatchEngine {
         numeric[key] = value;
       }
     }
-    const hasBeautyOps = Object.keys(numeric).some((key) => BEAUTY_ONLY_KEYS.has(key));
-    if (hasBeautyOps) {
-      // 美颜管线:传统键并入(exposure←brightness / warmth←temperature)
-      const beauty: BeautyAdjustments = {
-        exposure: numeric['exposure'] ?? numeric['brightness'],
-        contrast: numeric['contrast'],
-        saturation: numeric['saturation'],
-        warmth: numeric['warmth'] ?? numeric['temperature'],
-        vibrance: numeric['vibrance'],
-        clarity: numeric['clarity'],
-        skinSmooth: numeric['skinSmooth'],
-        skinBrighten: numeric['skinBrighten'],
-        whiten: numeric['whiten'],
-        rosy: numeric['rosy'],
-        fade: numeric['fade'],
-      };
-      await applyBeauty(input, beauty, target);
-    } else {
-      await this.processing.adjust(input, numeric as ImageAdjustments, target);
-    }
+    await this.processing.adjust(input, numeric as ImageAdjustments, target);
     return target;
   }
 
@@ -95,9 +61,6 @@ export const SCENE_PRESETS: Record<string, Record<string, number>> = {
   landscape: { brightness: 5, contrast: 15, saturation: 20, temperature: -3 },
   street: { contrast: 12, saturation: -5, temperature: -2 },
   night: { brightness: 8, contrast: 10, saturation: 10, temperature: -5, sharpness: 10 },
-  // 人像美颜场景:走美颜管线(参数面向女性用户高频自拍/人像场景)
-  beauty_portrait: { skinSmooth: 55, skinBrighten: 22, whiten: 14, rosy: 18, vibrance: 10, clarity: 8 },
-  selfie: { skinSmooth: 60, skinBrighten: 26, whiten: 20, rosy: 14, fade: 4 },
   default: { brightness: 0, contrast: 5, saturation: 0 },
 };
 
@@ -177,21 +140,16 @@ export class BatchService {
   async processPhotos(options: {
     photoPaths: string[];
     sceneType?: string | null;
-    /** 美颜风格 id(BEAUTY_STYLES 的键),与 adjustments 可叠加 */
-    style?: string | null;
     adjustments?: Record<string, number>;
     userHabit?: { batchStyleAvg?: Record<string, number> } | null;
   }): Promise<ProcessPhotosResult> {
     await this.ensureOutputDir();
-    const { photoPaths, sceneType, style } = options;
+    const { photoPaths, sceneType } = options;
     let applied: Record<string, number>;
     let effectiveScene: string | null | undefined;
-    if (options.adjustments || style) {
-      applied = {
-        ...(style ? BEAUTY_STYLES[style]?.adjustments ?? {} : {}),
-        ...options.adjustments,
-      };
-      effectiveScene = sceneType ?? style;
+    if (options.adjustments) {
+      applied = options.adjustments;
+      effectiveScene = sceneType;
     } else {
       applied = this.matchPreset(sceneType, options.userHabit);
       effectiveScene = sceneType ?? 'default';

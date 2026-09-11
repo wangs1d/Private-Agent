@@ -1,5 +1,6 @@
 import "dart:convert";
 
+import "package:flutter/foundation.dart";
 import "package:flutter_timezone/flutter_timezone.dart";
 import "package:geolocator/geolocator.dart";
 import "package:http/http.dart" as http;
@@ -143,7 +144,7 @@ class ClientLocationService {
       final String tz = tzInfo.identifier;
       if (tz.trim().isNotEmpty) return tz.trim();
     } catch (e) {
-      print("[ClientLocationService] 获取设备时区失败: $e");
+      debugPrint("[ClientLocationService] 获取设备时区失败: $e");
     }
     return null;
   }
@@ -156,7 +157,7 @@ class ClientLocationService {
       final LocationPermission permission = await _ensurePermission();
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        print("[ClientLocationService] 定位权限未授予，使用上次缓存");
+        debugPrint("[ClientLocationService] 定位权限未授予，使用上次缓存");
         return disk ?? _cached;
       }
 
@@ -188,7 +189,7 @@ class ClientLocationService {
       await _remember(coordsOnly);
       return coordsOnly;
     } catch (e) {
-      print("[ClientLocationService] 获取定位失败: $e");
+      debugPrint("[ClientLocationService] 获取定位失败: $e");
       return _cached ?? disk;
     }
   }
@@ -220,7 +221,7 @@ class ClientLocationService {
         .get(uri, headers: const <String, String>{"Accept": "application/json"})
         .timeout(const Duration(seconds: 12));
     if (res.statusCode != 200) {
-      print("[ClientLocationService] 逆地理失败 HTTP ${res.statusCode}");
+      debugPrint("[ClientLocationService] 逆地理失败 HTTP ${res.statusCode}");
       return null;
     }
     final Map<String, dynamic> body =
@@ -245,7 +246,7 @@ class ClientLocationService {
   static Future<void> _remember(ClientLocationPayload payload) async {
     _cached = payload;
     _cachedAt = DateTime.now();
-    print("[ClientLocationService] 定位: ${payload.label ?? payload.city}");
+    debugPrint("[ClientLocationService] 定位: ${payload.label ?? payload.city}");
     if (_writePref != null) {
       // 持久化真实定位时间戳，供下次启动判断缓存是否过期（不再重置为"现在"）。
       await _writePref!(
@@ -283,7 +284,7 @@ class ClientLocationService {
         return payload;
       }
     } catch (e) {
-      print("[ClientLocationService] 读取缓存失败: $e");
+      debugPrint("[ClientLocationService] 读取缓存失败: $e");
     }
     return null;
   }

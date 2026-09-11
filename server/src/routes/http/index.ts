@@ -141,11 +141,31 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   if (deps.webhookService && deps.hookBus) {
     registerWebhookRoutes(app, deps.webhookService, deps.hookBus);
   }
+  // 简报天气定位兜底：客户端 GPS（比 IP 准）——实时定位优先，离线回退缓存
+  const briefingClientLocation = deps.locationCoordinator
+    ? async (
+        sessionId: string,
+      ): Promise<
+        | { latitude: number; longitude: number; label?: string; city?: string; timezone?: string }
+        | null
+      > => {
+        const coordinator = deps.locationCoordinator!;
+        const live = await coordinator.requestLocation(
+          sessionId,
+          "morning-briefing:weather",
+        );
+        if (live) return live;
+        return coordinator.getCachedWithTime(sessionId)?.payload ?? null;
+      }
+    : undefined;
   registerMorningBriefingRoutes(app, {
     weatherService: deps.weatherService,
     weatherPrefsService: deps.weatherPrefsService,
     scheduleTaskService: deps.scheduleTaskService,
     notesService: deps.notesService,
+    // 用户称呼来源：记忆同步 KV 的 user_profile「称呼」行
+    agentMemorySyncService: deps.agentMemorySyncService,
+    requestClientLocation: briefingClientLocation,
   });
   registerBriefingDeliveryRoutes(app);
   if (deps.proactivitySuppressionStore) {
@@ -155,7 +175,16 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   }
   registerProactivityPipelineRoutes(app, { pipeline: deps.proactivePipeline ?? null, pushService: deps.proactivePushService ?? null });
   registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore });
-  registerBriefingTestRoutes(app, { wsConnectionRegistry: deps.wsConnectionRegistry });
+  registerBriefingTestRoutes(app, {
+    wsConnectionRegistry: deps.wsConnectionRegistry,
+    agentMemorySyncService: deps.agentMemorySyncService,
+    // 手动预览与调度路径同源：天气/日程/笔记依赖必须齐，否则预览永远全空
+    weatherService: deps.weatherService,
+    weatherPrefsService: deps.weatherPrefsService,
+    scheduleTaskService: deps.scheduleTaskService,
+    notesService: deps.notesService,
+    requestClientLocation: briefingClientLocation,
+  });
   registerBriefingTtsRoutes(app, { ttsService: deps.ttsService });
   registerUserPreferencesRoutes(app);
   if (deps.devicePairingService && deps.deviceRegistry) {

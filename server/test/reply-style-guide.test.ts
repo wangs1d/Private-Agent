@@ -1,8 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { assembleLayeredSections, GLOBAL_MEMORY_RULE } from "../src/agent/prompt-assembler.js";
-import { buildToneGuidance, defaultEmotionState } from "../src/services/user-personalization/emotion-tone.js";
+import {
+  assembleLayeredSections,
+  GLOBAL_MEMORY_RULE,
+} from "../src/agent/prompt-assembler.js";
+import {
+  buildToneGuidance,
+  defaultEmotionState,
+} from "../src/services/user-personalization/emotion-tone.js";
 import { RuntimeKernel } from "../src/agent/runtime-kernel.js";
 import type { AgentPromptMemoryContext } from "../src/external-model/types.js";
 
@@ -15,35 +21,70 @@ function chatMemory(overrides: Partial<AgentPromptMemoryContext> = {}): AgentPro
   };
 }
 
-function replyGuideOf(memory: AgentPromptMemoryContext): string {
-  const { dynamicContext } = assembleLayeredSections(memory);
-  const guide = dynamicContext.find((block) => block.startsWith("【回复指南】"));
-  assert.ok(guide, "【回复指南】 block must be present");
-  return guide;
+function sectionsOf(memory: AgentPromptMemoryContext) {
+  return assembleLayeredSections(memory);
 }
 
-test("chat 模式【回复指南】注入基准行：平调短句 + 语感镜像 + 两个反极性", () => {
-  const guide = replyGuideOf(chatMemory());
-  assert.equal(guide.includes("基准：平调、直接、有事说事"), true);
-  assert.equal(guide.includes("语感跟着对方走"), true);
-  assert.equal(guide.includes("不客服腔、不瞎热情"), true);
+test("chat 模式注入【说话方式·管家底色】+【说话方式·伙伴面】（调子菜单 few-shot + 禁句）", () => {
+  const { stablePrefix, dynamicContext } = sectionsOf(chatMemory());
+  const base = stablePrefix.find((b) => b.startsWith("【说话方式·管家底色】"));
+  const companion = stablePrefix.find((b) => b.startsWith("【说话方式·伙伴面】"));
+  assert.ok(base, "管家底色块必须注入");
+  assert.ok(companion, "伙伴面块必须注入");
+  // 底色：私人管家定位 + 称呼礼仪（指定称呼优先 + 允许起小名 + 不连名带姓）
+  assert.equal(base.includes("私人管家"), true);
+  assert.equal(base.includes("先给结论再给理由"), true);
+  assert.equal(base.includes("自然长出一个小名"), true);
+  assert.equal(base.includes("不连名带姓直呼大名"), true);
+  // 伙伴面：调子菜单 few-shot、收放开关、破功禁句
+  assert.equal(companion.includes("调子菜单"), true);
+  assert.equal(companion.includes("沉稳简洁"), true);
+  assert.equal(companion.includes("坦诚"), true);
+  assert.equal(companion.includes("幽默俏皮"), true);
+  assert.equal(companion.includes("调侃损友"), true);
+  assert.equal(companion.includes("抬杠"), true);
+  assert.equal(companion.includes("嘲讽阴阳"), true);
+  assert.equal(companion.includes("暗示"), true);
+  assert.equal(companion.includes("收放开关"), true);
+  assert.equal(companion.includes("破功禁句"), true);
+  // 动态层只承载每轮适配小节
+  const guide = dynamicContext.find((b) => b.startsWith("【本轮说话适配】"));
+  assert.ok(guide, "【本轮说话适配】 block must be present");
   assert.equal(guide.includes("模式："), true);
   assert.equal(guide.includes("语气："), true);
 });
 
-test("task 模式【回复指南】不含聊天基准行——后台任务交付不受短句约束", () => {
-  const guide = replyGuideOf(chatMemory({ replyStyleMode: "task" }));
-  assert.equal(guide.includes("基准：平调"), false);
-  assert.equal(guide.includes("语感跟着对方走"), false);
-  // 模式人格与语气/关系行保留（任务交付仍感知用户情绪与关系边界）
+test("task 模式不注入伙伴面（交付不受闲聊调子约束），管家底色保留", () => {
+  const { stablePrefix, dynamicContext } = sectionsOf(chatMemory({ replyStyleMode: "task" }));
+  assert.equal(
+    stablePrefix.some((b) => b.startsWith("【说话方式·伙伴面】")),
+    false,
+    "task 轮不得注入伙伴面",
+  );
+  const base = stablePrefix.find((b) => b.startsWith("【说话方式·管家底色】"));
+  assert.ok(base, "管家底色全模式注入");
+  // 模式人格与语气行保留（任务交付仍感知用户情绪与关系边界）
+  const guide = dynamicContext.find((b) => b.startsWith("【本轮说话适配】"));
+  assert.ok(guide);
   assert.equal(guide.includes("模式："), true);
   assert.equal(guide.includes("语气："), true);
 });
 
-test("replyStyleMode 缺省按 chat 处理（向后兼容）", () => {
+test("replyStyleMode 缺省按 chat 处理（向后兼容，注入伙伴面）", () => {
   const { replyStyleMode: _omit, ...legacy } = chatMemory();
-  const guide = replyGuideOf(legacy as AgentPromptMemoryContext);
-  assert.equal(guide.includes("基准：平调"), true);
+  const { stablePrefix } = sectionsOf(legacy as AgentPromptMemoryContext);
+  assert.equal(
+    stablePrefix.some((b) => b.startsWith("【说话方式·伙伴面】")),
+    true,
+  );
+});
+
+test("适配小节全空时不再输出空壳【本轮说话适配】块", () => {
+  const { dynamicContext } = sectionsOf({ replyStyleMode: "chat" });
+  assert.equal(
+    dynamicContext.some((b) => b.startsWith("【本轮说话适配】")),
+    false,
+  );
 });
 
 test("buildToneGuidance 默认路径静默：balanced + 中性情绪不产出重复基准的行", () => {
@@ -79,3 +120,5 @@ test("minimal 模式保留 replyStyleMode，buildSessionSystem 不再携带风�
   assert.equal(sessionSystem.includes("a close friend"), true);
   assert.equal(sessionSystem.includes("Reply style follows"), false);
 });
+
+assert.ok(GLOBAL_MEMORY_RULE.length > 0);

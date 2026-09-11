@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "desktop_screen_capture.h"
+#include "window_position_store.h"
 #include "flutter/generated_plugin_registrant.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -30,6 +31,24 @@ FlutterWindow::~FlutterWindow() {}
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
     return false;
+  }
+
+  // 今日简报子进程窗口（PAI_DAILY_BRIEFING_WINDOW 环境变量门控）：
+  //  1) 去掉 WS_THICKFRAME 可调边框——隐藏标题栏时边框仍占位，Flutter 视图
+  //     与窗口矩形错位，左侧露出一条无圆角的窗口底色残留；
+  //  2) 启用 DWM 系统圆角（DWMWCP_ROUND）——Flutter Windows 不支持逐像素
+  //     透明窗口，圆角处的不透明残留由系统按圆角裁掉。
+  // 必须在测量客户区（GetClientArea）之前生效，避免视图按旧边框尺寸创建。
+  if (GetEnvironmentVariableW(L"PAI_DAILY_BRIEFING_WINDOW", nullptr, 0) > 0) {
+    const HWND hwnd = GetHandle();
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~WS_THICKFRAME);
+    DWM_WINDOW_CORNER_PREFERENCE corner_preference = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                          &corner_preference, sizeof(corner_preference));
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE);
   }
 
   RECT frame = GetClientArea();
@@ -113,6 +132,18 @@ bool FlutterWindow::OnCreate() {
   schedule_floating_channel_->SetMethodCallHandler(
       [this](const auto& call, auto result) {
         HandleScheduleFloatingMethodCall(call, std::move(result));
+      });
+
+  // 今日简报窗口辅助通道 —— pai/daily_briefing（子进程也运行本 runner，
+  // 简报窗口用它查询主屏工作区做右下角定位）
+  daily_briefing_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/daily_briefing",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  daily_briefing_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleDailyBriefingMethodCall(call, std::move(result));
       });
 
   // Agent 主页信息弹出窗 MethodChannel —— pai/agent_profile
@@ -845,6 +876,40 @@ void FlutterWindow::HandleScheduleFloatingMethodCall(
       }
     }
     result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+void FlutterWindow::HandleDailyBriefingMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "getWorkArea") {
+    // 主屏工作区（扣除任务栏），简报独立窗口做右下角定位。
+    // 返回逻辑像素（除以 FlutterView 的 DPR），与 window_manager
+    // setPosition 的坐标系一致。
+    const RECT work = window_position_store::GetPrimaryWorkArea();
+    double dpr = 1.0;
+    if (flutter_controller_ && flutter_controller_->view()) {
+      const HWND view_hwnd = flutter_controller_->view()->GetNativeWindow();
+      if (view_hwnd) {
+        const UINT dpi = GetDpiForWindow(view_hwnd);
+        if (dpi != 0) dpr = static_cast<double>(dpi) / 96.0;
+      }
+    }
+    flutter::EncodableMap m;
+    m[flutter::EncodableValue("left")] =
+        flutter::EncodableValue(work.left / dpr);
+    m[flutter::EncodableValue("top")] =
+        flutter::EncodableValue(work.top / dpr);
+    m[flutter::EncodableValue("right")] =
+        flutter::EncodableValue(work.right / dpr);
+    m[flutter::EncodableValue("bottom")] =
+        flutter::EncodableValue(work.bottom / dpr);
+    result->Success(flutter::EncodableValue(m));
     return;
   }
 

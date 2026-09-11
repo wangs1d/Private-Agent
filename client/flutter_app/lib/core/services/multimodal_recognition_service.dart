@@ -1,5 +1,7 @@
 import "dart:async";
 
+import "package:flutter/foundation.dart";
+
 import "voiceprint_service.dart";
 import "visual_recognition_service.dart";
 import "mock_voiceprint_service.dart";
@@ -50,10 +52,10 @@ class MultimodalRecognitionService {
       
       _isInitialized = true;
       
-      print("多模态识别服务初始化成功（声纹+面部）");
+      debugPrint("多模态识别服务初始化成功（声纹+面部）");
       return true;
     } catch (e) {
-      print("多模态识别服务初始化失败: $e");
+      debugPrint("多模态识别服务初始化失败: $e");
       return false;
     }
   }

@@ -11,6 +11,14 @@ import "package:path_provider/path_provider.dart";
 /// 统一走临时文件 + DeviceFileSource 绕过。
 const bool _kWindowsSkipBytesSource = true;
 
+/// 播放进度快照（position 实时更新；duration 就绪后非空）。
+class TtsPlaybackProgress {
+  const TtsPlaybackProgress({required this.position, this.duration});
+
+  final Duration position;
+  final Duration? duration;
+}
+
 /// 后台 TTS 音频播放器。
 ///
 /// 用法：
@@ -34,6 +42,15 @@ class TtsPlayer {
 
   /// 当前是否有 TTS 正在播放
   bool get isPlaying => _player != null;
+
+  /// 播放进度广播（今日简报悬浮窗波形进度等消费方）。
+  final StreamController<TtsPlaybackProgress> _progressController =
+      StreamController<TtsPlaybackProgress>.broadcast();
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration>? _durationSub;
+  Duration? _lastDuration;
+
+  Stream<TtsPlaybackProgress> get onProgress => _progressController.stream;
 
   /// TTS 播放完成回调（正常播完 / 被 stop 都触发）
   final List<VoidCallback> _completionListeners = <VoidCallback>[];
@@ -84,6 +101,7 @@ class TtsPlayer {
         _fireCompletion();
       }
     });
+    _attachProgressListeners(player);
 
     // Windows 上 BytesSource 会触发 native 层 0xc0000005 access violation
     // 直接走临时文件 + DeviceFileSource 绕过
@@ -156,6 +174,7 @@ class TtsPlayer {
         _fireCompletion();
       }
     });
+    _attachProgressListeners(player);
 
     try {
       await player.play(UrlSource(fullUrl));
@@ -173,7 +192,30 @@ class TtsPlayer {
     _completionListeners.clear();
   }
 
+  /// 挂接 position/duration 监听 → onProgress 广播（悬浮窗波形进度）。
+  void _attachProgressListeners(AudioPlayer player) {
+    _lastDuration = null;
+    _positionSub = player.onPositionChanged.listen((Duration position) {
+      if (_progressController.isClosed) return;
+      _progressController.add(
+        TtsPlaybackProgress(position: position, duration: _lastDuration),
+      );
+    });
+    _durationSub = player.onDurationChanged.listen((Duration duration) {
+      if (duration <= Duration.zero) return;
+      _lastDuration = duration;
+      if (_progressController.isClosed) return;
+      _progressController.add(
+        TtsPlaybackProgress(position: Duration.zero, duration: duration),
+      );
+    });
+  }
+
   Future<void> _disposeCurrent({required bool silent}) async {
+    await _positionSub?.cancel();
+    await _durationSub?.cancel();
+    _positionSub = null;
+    _durationSub = null;
     if (_player != null) {
       try { await _player!.stop(); } catch (_) {}
       try { await _player!.dispose(); } catch (_) {}

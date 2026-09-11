@@ -84,6 +84,7 @@ class _CarouselEffectCardState extends State<CarouselEffectCard> {
                       title: "图片预览",
                       gallery: gallery,
                       index: i,
+                      anchorContext: context,
                     ),
                     child: Container(
                       decoration: BoxDecoration(

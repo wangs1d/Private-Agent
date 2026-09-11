@@ -38,6 +38,33 @@ TS 服务端 spawn `scripts/bridge_worker.py`（stdio JSON-Lines 子进程），
 | POST | `/api/graph/query` | 知识图谱查询 |
 | POST | `/api/intent/decompose` | 意图拆解 |
 
+## 用户管理 API（带认证）
+
+`tool_router/users_api.py` 提供独立的用户管理模块：PBKDF2-SHA256 密码哈希 + HS256 JWT（标准库实现，无新增依赖）。首个注册用户自动获得 `admin` 角色。
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| POST | `/api/users/register` | 无 | 前端注册入口：接收 `{username, password, email?, nickname?, phone?}`，落库并返回用户信息 + access_token |
+| POST | `/api/users/login` | 无 | 登录换取 access_token |
+| GET | `/api/users/me` | Bearer | 当前用户信息 |
+| PUT | `/api/users/me` | Bearer | 更新昵称/邮箱/手机号；改密码需带 `current_password` + `new_password` |
+| GET | `/api/users` | Bearer (admin) | 管理员拉取全部已注册用户（即收集到的注册信息） |
+| GET | `/api/users/{user_id}` | Bearer | 查询单个用户（本人或 admin） |
+
+注册信息默认持久化到 `data/users.json`（可用 `TOOL_ROUTER_USERS_PATH` 改路径，设为空则纯内存），服务重启后不丢失。JWT 签名密钥通过 `TOOL_ROUTER_SECRET_KEY` 配置，令牌有效期默认 120 分钟（`TOOL_ROUTER_ACCESS_TOKEN_EXPIRE_MINUTES`）。
+
+前端调用示例：
+
+```bash
+# 注册（前端表单提交）
+curl -X POST http://127.0.0.1:8787/api/users/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"alice","password":"secret123","email":"alice@example.com"}'
+
+# 后续请求携带令牌
+curl http://127.0.0.1:8787/api/users/me -H "Authorization: Bearer <access_token>"
+```
+
 ## 执行流水线
 
 1. Intent Router（意图解析 → 领域/能力候选）

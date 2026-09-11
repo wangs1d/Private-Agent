@@ -259,7 +259,41 @@ export interface POISummary {
 
 // ======================== OpenStreetMap / 高德地图 配置 ========================
 
+/**
+ * POI 名称可信度过滤（真实数据保证）：
+ * OSM/高德会返回大量非旅游 POI（事故多发段、公厕、停车场、收费站、施工段…），
+ * 这类名称混进行程会直接毁掉整份规划的可信度。命中黑名单的一律丢弃。
+ */
+const POI_NAME_BLACKLIST = [
+  '事故', '公厕', '厕所', '洗手间', '停车场', '收费站', '加油', '充电桩',
+  '垃圾', '污水', '殡仪', '火葬', '墓', '变电站', '配电', '水厂', '污水处理',
+  '施工', '工地', '限速', '测速', '监控', '红绿灯', '信号灯', '公交站',
+  '地铁站入口', '出入口', '售票处', '检票口', '充值', '营业厅', '警务',
+  '派出所', '消防', '急诊', '发热门诊', '隔离', '收费站', '养护', '道班',
+];
+
+function isPlausiblePoiName(name: string): boolean {
+  const n = (name || '').trim();
+  if (n.length < 2 || n.length > 30) return false;
+  if (POI_NAME_BLACKLIST.some((bad) => n.includes(bad))) return false;
+  // 纯数字/纯符号名（如「1号」「①」）对行程毫无意义
+  if (!/[\u4e00-\u9fa5A-Za-z]/.test(n)) return false;
+  return true;
+}
+
 const OSM_NOMINATIM_BASE = 'https://nominatim.openstreetmap.org/search';
+
+// ===== Wikimedia 图片搜索配置 =====
+// 文件名黑名单：排除地图、图标、标记等非实拍图
+const WIKI_BLOCKED_PATTERNS = [
+  /map/i, /icon/i, /logo/i, /flag/i, /\bpin\b/i, /marker/i, /symbol/i,
+  /svg$/i, /sign/i, /coat[_-]?of[_-]?arms/i, /pictogram/i, /emblem/i,
+  /blank[_-]?flag/i, /no[_-]?image/i, /placeholder/i, /locator/i,
+];
+const WIKI_MIN_WIDTH = 640;
+const WIKI_MIN_HEIGHT = 480;
+const WIKI_GPS_MAX_RADIUS_KM = 50; // EXIF GPS 校验半径
+
 /** 备用地理编码（Photon，OSM 数据的免费检索服务），Nominatim 失败时切换而非直接抛错 */
 const PHOTON_GEOCODE_BASE = 'https://photon.komoot.io/api';
 /** 地理编码超时：冷启动主要延迟来源，从 20s 压到 8s（Overpass 6s / OSRM 5s 同量级） */
@@ -469,7 +503,7 @@ export class PlanningService {
       // 3. 缓存未命中 → 实时搜索
       console.log(`[PlanningService] 缓存未命中，开始实时搜索...`);
       this.reportProgress(request.sessionId, "search", `正在搜索「${destName}」的景点/酒店/餐厅（实时数据）…`);
-      cacheEntry = await this.searchAndCache(destName, normalizedDest);
+      cacheEntry = await this.searchAndCache(destName, normalizedDest, request.sessionId);
       fromCache = false;
     } else {
       console.log(`[PlanningService] 缓存命中! (已访问${cacheEntry.accessCount}次)`);
@@ -478,6 +512,14 @@ export class PlanningService {
       // 行程级二级缓存随之自然失效，下次请求拿到新数据）
       this.refreshStaleCacheInBackground(destName, cacheEntry);
     }
+
+    // 搜索完成即播报真实统计：让用户看到规划基于多少家真实 POI，而不是黑盒转圈
+    this.reportProgress(
+      request.sessionId,
+      "search",
+      `已找到 ${cacheEntry.data.attractions.length} 个景点 · ${cacheEntry.data.hotels.length} 家酒店 · ` +
+      `${cacheEntry.data.restaurants.length} 家餐厅，开始编排行程`,
+    );
 
     // 真实数据保证（防御）：历史遗留缓存若混有合成占位 POI，拒绝编排并提示重新搜索
     if (this.deriveDataQuality(cacheEntry.data) === "synthetic") {
@@ -551,7 +593,7 @@ export class PlanningService {
       dayCount, startDate,
       ranked.attractions, ranked.hotels, ranked.restaurants,
       cacheEntry.center, preferences, travelInfo, pricingCtx,
-      weatherCtx
+      weatherCtx, request.sessionId
     );
     const tBuild = Date.now() - tBuild0;
 
@@ -559,6 +601,41 @@ export class PlanningService {
     this.reportProgress(request.sessionId, "media", "正在装配图片与点评…");
     const tMedia0 = Date.now();
     const { imageMap, mediaMeta, missing } = this.collectMediaForDays(daysRaw, cacheEntry);
+
+    // 海报保证（A6）：行程条目全缺图时，在请求路径内做一次有界的目的地封面
+    // 抓取（约 4~9s，两段网络调用），分配给每天第一个景点——保证行程卡海报区
+    // 有真实照片而不是渐变兜底；同时回写媒体库，下次规划本地直读命中。
+    if (imageMap.size === 0) {
+      this.reportProgress(request.sessionId, "media", `正在获取「${destName}」的实景照片…`);
+      const cover = await this.fetchDestinationCover(destName, cacheEntry.center);
+      if (cover.length > 0) {
+        let assigned = 0;
+        for (const day of daysRaw) {
+          const attraction = day.items.find((it) => it.type === 'attraction');
+          if (!attraction) continue;
+          imageMap.set(`attraction-${attraction.itemId}`, [cover[assigned % cover.length]!]);
+          // 封面同时挂到该景点名下持久化（下次 collectMediaForDays 本地直读命中）
+          travelMediaStore.attachBackfilledImages('attraction', attraction.name, cover, {
+            latitude: attraction.latitude,
+            longitude: attraction.longitude,
+          });
+          assigned++;
+          if (assigned >= 4) break;
+        }
+        if (assigned === 0) {
+          // 无景点条目（极端兜底日程）→ 挂到首个酒店条目，海报仍取得到图
+          const hotel = daysRaw.flatMap((d) => d.items).find((it) => it.type === 'hotel');
+          if (hotel) {
+            imageMap.set(`hotel-${hotel.itemId}`, [cover[0]!]);
+            travelMediaStore.attachBackfilledImages('hotel', hotel.name, cover, {
+              latitude: hotel.latitude,
+              longitude: hotel.longitude,
+            });
+          }
+        }
+      }
+    }
+
     const days = this.enrichDaysWithMedia(daysRaw, imageMap, mediaMeta);
     const tMedia = Date.now() - tMedia0;
 
@@ -1114,20 +1191,20 @@ export class PlanningService {
    * 调用POI搜索API并存入缓存（同 key 并发共享同一个 Promise，防缓存击穿：
    * Nominatim 有 1 req/s 使用政策，并发重复请求容易触发限流拉长所有请求）。
    */
-  private async searchAndCache(destName: string, normalizedKey: string): Promise<CacheEntry> {
+  private async searchAndCache(destName: string, normalizedKey: string, sessionId?: string): Promise<CacheEntry> {
     const inFlight = this.inFlightSearches.get(normalizedKey);
     if (inFlight) {
       console.log(`[PlanningService] 并发去重: 复用「${destName}」进行中的搜索请求`);
       return inFlight;
     }
-    const task = this.doSearchAndCache(destName, normalizedKey).finally(() => {
+    const task = this.doSearchAndCache(destName, normalizedKey, sessionId).finally(() => {
       this.inFlightSearches.delete(normalizedKey);
     });
     this.inFlightSearches.set(normalizedKey, task);
     return task;
   }
 
-  private async doSearchAndCache(destName: string, normalizedKey: string): Promise<CacheEntry> {
+  private async doSearchAndCache(destName: string, normalizedKey: string, sessionId?: string): Promise<CacheEntry> {
     console.log(`[PlanningService] 正在搜索: ${destName} ...`);
 
     // Step 1: 地理编码 → 获取中心坐标
@@ -1164,6 +1241,29 @@ export class PlanningService {
       restaurants = osmResult.restaurants;
     }
 
+    // Step 2.4: 类别缺口二次搜索（真实数据优先于知识库兜底）：
+    // 首轮半径内任一类别为空时，放宽到 60km 重查该类别（度假海岛/郊区古城的
+    // 酒店、餐厅常落在 25km 首轮半径之外）。
+    if (attractions.length === 0 || hotels.length === 0 || restaurants.length === 0) {
+      const WIDE_RADIUS = 60000;
+      const needAttr = attractions.length === 0;
+      const needHotel = hotels.length === 0;
+      const needRest = restaurants.length === 0;
+      console.warn(
+        `[PlanningService] 类别缺口(景点${attractions.length}/酒店${hotels.length}/餐厅${restaurants.length})，` +
+        `扩大到 ${WIDE_RADIUS / 1000}km 二次搜索...`,
+      );
+      this.reportProgress(sessionId, 'search', `部分类别结果不足，正在扩大范围重搜…`);
+      const [a2, h2, r2] = await Promise.all([
+        needAttr ? this.searchAttractions(center, destName, WIDE_RADIUS) : Promise.resolve<RawPOI[]>([]),
+        needHotel ? this.searchHotels(center, destName, WIDE_RADIUS) : Promise.resolve<RawPOI[]>([]),
+        needRest ? this.searchRestaurants(center, destName, WIDE_RADIUS) : Promise.resolve<RawPOI[]>([]),
+      ]);
+      if (needAttr && a2.length > 0) attractions = a2;
+      if (needHotel && h2.length > 0) hotels = h2;
+      if (needRest && r2.length > 0) restaurants = r2;
+    }
+
     console.log(
       `[PlanningService] 搜索完成: 景点${attractions.length} 酒店${hotels.length} 餐厅${restaurants.length}` +
       ` (数据源: ${domestic ? '高德' : 'OSM'})`
@@ -1195,6 +1295,7 @@ export class PlanningService {
     let knowledgeFallback = false;
     if (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0) {
       console.warn(`[PlanningService] 所有API均无结果，尝试知识库真实POI兜底`);
+      this.reportProgress(sessionId, 'search', '实时搜索暂不可用，正在改用内置真实地点库…');
       const known = this.knownPoiFallback(destName);
       if (known) {
         attractions = known.attractions;
@@ -1223,7 +1324,10 @@ export class PlanningService {
         accessCount: 0,
       };
     }
-    const entry = poiCache.set(normalizedKey, { attractions, hotels, restaurants }, center);
+    // set 第一参数是目的地原文（内部自会 normalize）；传 normalizedKey 会把
+    // hex 串当目的地再 hash 一遍，刷新结果落进永远读不到的双重 key 下，
+    // 表现为「后台刷新成功但下次请求仍用陈旧坏缓存」。
+    const entry = poiCache.set(destName, { attractions, hotels, restaurants }, center);
 
     return entry;
   }
@@ -1375,18 +1479,20 @@ export class PlanningService {
   }
 
   /**
-   * Overpass API 搜索景点（精简查询，避免超时）
+   * Overpass API 搜索景点
+   * tourism 值做白名单：OSM 的 tourism 标签庞杂（含 hotel/apartment/信息牌等），
+   * 不加约束会把旅馆、观景信息牌都当成景点排进行程。
    */
-  private async searchAttractions(center: Coordinates, cityHint: string): Promise<RawPOI[]> {
+  private async searchAttractions(center: Coordinates, cityHint: string, radius = 25000): Promise<RawPOI[]> {
     const query = `
       [out:json][timeout:15];
       (
-        node["tourism"](around:25000,${center.latitude},${center.longitude});
-        way["tourism"](around:25000,${center.latitude},${center.longitude});
-        node["historic"](around:20000,${center.latitude},${center.longitude});
-        way["historic"](around:20000,${center.latitude},${center.longitude});
-        node["leisure"~"park|garden"](around:25000,${center.latitude},${center.longitude});
-        way["leisure"~"park|garden"](around:25000,${center.latitude},${center.longitude});
+        node["tourism"~"^(attraction|museum|gallery|viewpoint|zoo|aquarium|theme_park)$"](around:${radius},${center.latitude},${center.longitude});
+        way["tourism"~"^(attraction|museum|gallery|viewpoint|zoo|aquarium|theme_park)$"](around:${radius},${center.latitude},${center.longitude});
+        node["historic"~"^(monument|castle|ruins|archaeological_site|memorial|city_gate|citywalls|fort)$"](around:${radius},${center.latitude},${center.longitude});
+        way["historic"~"^(monument|castle|ruins|archaeological_site|memorial|city_gate|citywalls|fort)$"](around:${radius},${center.latitude},${center.longitude});
+        node["leisure"~"park|garden"](around:${radius},${center.latitude},${center.longitude});
+        way["leisure"~"park|garden"](around:${radius},${center.latitude},${center.longitude});
       );
       out body center;
       (._; >;);
@@ -1409,14 +1515,16 @@ export class PlanningService {
   }
 
   /**
-   * Overpass API 搜索酒店（精简查询）
+   * Overpass API 搜索酒店
+   * 覆盖 hotel/guest_house/hostel/motel/resort 全类型：只查 tourism=hotel 时
+   * 民宿/客栈占比高的目的地（大理/丽江等）会拿到空结果。
    */
-  private async searchHotels(center: Coordinates, cityHint: string): Promise<RawPOI[]> {
+  private async searchHotels(center: Coordinates, cityHint: string, radius = 25000): Promise<RawPOI[]> {
     const query = `
       [out:json][timeout:12];
       (
-        node["tourism"="hotel"](around:25000,${center.latitude},${center.longitude});
-        way["tourism"="hotel"](around:25000,${center.latitude},${center.longitude});
+        node["tourism"~"^(hotel|guest_house|hostel|motel|resort)$"](around:${radius},${center.latitude},${center.longitude});
+        way["tourism"~"^(hotel|guest_house|hostel|motel|resort)$"](around:${radius},${center.latitude},${center.longitude});
       );
       out body center;
       (._; >;);
@@ -1431,14 +1539,16 @@ export class PlanningService {
   }
 
   /**
-   * Overpass API 搜索餐厅（精简查询）
+   * Overpass API 搜索餐厅
+   * restaurant 之外补 fast_food / food_court，并覆盖 way 元素：
+   * 只查 node 的旧查询在 restaurant 密集城区会漏掉一半以上餐馆。
    */
-  private async searchRestaurants(center: Coordinates, cityHint: string): Promise<RawPOI[]> {
+  private async searchRestaurants(center: Coordinates, cityHint: string, radius = 20000): Promise<RawPOI[]> {
     const query = `
       [out:json][timeout:12];
       (
-        node["amenity"="restaurant"](around:20000,${center.latitude},${center.longitude});
-        node["amenity"="cafe"](around:15000,${center.latitude},${center.longitude});
+        node["amenity"~"^(restaurant|cafe|fast_food|food_court)$"](around:${radius},${center.latitude},${center.longitude});
+        way["amenity"~"^(restaurant|cafe|fast_food|food_court)$"](around:${radius},${center.latitude},${center.longitude});
       );
       out body center;
       (._; >;);
@@ -1446,7 +1556,8 @@ export class PlanningService {
     `;
 
     const results = await this.overpassQuery(query);
-    return results.slice(0, 8).map(r => ({
+    // 多天行程每天午+晚两餐，候选太少会逼着同店重复；放宽到 14 家
+    return results.slice(0, 14).map(r => ({
       ...r,
       type: 'restaurant',
     }));
@@ -1504,15 +1615,11 @@ export class PlanningService {
       controller.abort();
 
       return winner.elements
-      .filter(el => {
-        if (el.lat !== undefined && el.lon !== undefined) return true;
-        // way/relation 元素：out center 输出的是 center.{lat,lon}
-        const center = el.center as { lat?: unknown; lon?: unknown } | undefined;
-        return center?.lat !== undefined && center?.lon !== undefined;
-      })
-      .map((el, idx) => {
+      .flatMap((el, idx): RawPOI[] => {
         const tags = el.tags as Record<string, string> | undefined;
-        const name = tags?.name || tags?.['name:zh'] || tags?.['name:en'] || `地点${idx + 1}`;
+        // 无名元素直接丢弃（历史上兜底生成「地点N」占位名——那是编造数据，已移除）
+        const name = tags?.name || tags?.['name:zh'] || tags?.['name:en'] || '';
+        if (!name) return [];
         const center = el.center as { lat?: unknown; lon?: unknown } | undefined;
         const lat = typeof el.lat === 'number' ? el.lat : parseFloat(String(el.lat ?? center?.lat));
         const lon = typeof el.lon === 'number' ? el.lon : parseFloat(String(el.lon ?? center?.lon));
@@ -1522,7 +1629,7 @@ export class PlanningService {
         if (tags?.['addr:city']) address += tags['addr:city'];
         if (tags?.['addr:road']) address += (address ? ', ' : '') + tags['addr:road'];
 
-        return {
+        return [{
           id: String(el.id || `osm-${idx}`),
           name,
           latitude: lat,
@@ -1531,9 +1638,10 @@ export class PlanningService {
           type: '',
           tags: Object.keys(tags || {}).slice(0, 8),
           raw: { ...el, tags },
-        };
+        }];
       })
-      .filter(poi => !isNaN(poi.latitude) && !isNaN(poi.longitude));
+      .filter(poi => !isNaN(poi.latitude) && !isNaN(poi.longitude))
+      .filter(poi => isPlausiblePoiName(poi.name));
     } finally {
       clearTimeout(timer);
     }
@@ -1607,16 +1715,19 @@ export class PlanningService {
 
       console.log(`[Amap] 找到 ${data.pois.length} 个${poiType}`);
 
-      return data.pois.map((poi, idx) => {
+      return data.pois.flatMap((poi, idx): RawPOI[] => {
         const parts = (poi.location || ',').split(',').map(Number);
         const lon: number = parts[0] ?? 0;
         const lat: number = parts[1] ?? 0;
-        return {
+        // 无名 POI 直接丢弃（历史版本兜底生成「地点N」占位名——那是编造数据，已移除）
+        const name = (poi.name || '').trim();
+        if (!name) return [];
+        return [{
           id: `amap-${poi.id || idx}`,
-          name: poi.name || `地点${idx + 1}`,
+          name,
           latitude: isNaN(lat) ? 0 : lat,
           longitude: isNaN(lon) ? 0 : lon,
-          address: poi.address || `${poi.cityname || ''}${poi.adname || ''}${poi.name}`,
+          address: poi.address || `${poi.cityname || ''}${poi.adname || ''}${name}`,
           type: poiType,
           rating: poi.rating ? parseFloat(poi.rating) : 4.0,
           tags: [
@@ -1627,7 +1738,7 @@ export class PlanningService {
             poi.adname || '',
           ].filter(Boolean),
           raw: { ...poi, source: 'amap' },
-        } as RawPOI;
+        }];
       }).filter(poi => !isNaN(poi.latitude) && !isNaN(poi.longitude) && poi.latitude !== 0);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -2030,7 +2141,8 @@ export class PlanningService {
     preferences: TripPreferences,
     travelInfo: TravelInfo,
     pricingCtx: import('./pricing-service.js').PricingContext,
-    weather?: TripWeatherCtx | null
+    weather?: TripWeatherCtx | null,
+    sessionId?: string
   ): Promise<{ days: PlannedDay[]; pois: POISummary[] }> {
     const allPois: POISummary[] = [];
 
@@ -2173,6 +2285,9 @@ export class PlanningService {
         prev = { lat: entry.poi.latitude, lon: entry.poi.longitude };
       });
     });
+    if (pendingLegs.length > 0) {
+      this.reportProgress(sessionId, 'route', `正在计算 ${pendingLegs.length} 段真实路网交通耗时（OSRM）…`);
+    }
     await Promise.all(pendingLegs.map(async (leg) => {
       legMap.set(leg.key, await this.transportLeg(leg.fromLat, leg.fromLon, leg.toLat, leg.toLon));
     }));
@@ -2251,8 +2366,39 @@ export class PlanningService {
         }
       }
 
+      // 每天以酒店收尾（住宿锚点）：
+      // - 有实质行程（≥1 个非酒店条目）→ 追加「返回酒店休整」；
+      // - 当天完全没排进行程点（POI 池不足/当天预算装不下）→ 追加酒店自由活动锚点，
+      //   保证任何一天都不会是空白，用户也能在地图/时间线上看到每天的住宿。
+      // 房费只计一次（_summarizePricing 取首个酒店报价 × 晚数），不会因逐日条目重复计价。
+      if (seq.hotel) {
+        const hasNonHotelItem = items.some(it => it.name !== seq.hotel!.name);
+        if (hasNonHotelItem) {
+          const retTimeMin = Math.min(22 * 60, currentTimeMin + 30);
+          const retItem = this.convertToItemSync(seq.hotel, 'hotel', seq.date, formatTime(retTimeMin), preferences, travelInfo, pricingCtx);
+          retItem.tips = [...(retItem.tips || []), '今日行程结束，返回酒店休整'];
+          items.push(retItem);
+        } else if (items.length === 0) {
+          const leisureItem = this.convertToItemSync(seq.hotel, 'hotel', seq.date, formatTime(10 * 60), preferences, travelInfo, pricingCtx);
+          leisureItem.tips = [
+            ...(leisureItem.tips || []),
+            '当天实时数据未覆盖足够的景点，建议酒店休闲或自由探索周边；可在行程里手动添加想去的地点',
+          ];
+          items.push(leisureItem);
+        }
+      }
+
       days.push({ date: seq.date, items });
     }
+
+    const attractionTotal = days.reduce((n, d) => n + d.items.filter(it => it.type === 'attraction').length, 0);
+    const mealTotal = days.reduce((n, d) => n + d.items.filter(it => it.type === 'restaurant').length, 0);
+    const hotelTotal = days.reduce((n, d) => n + d.items.filter(it => it.type === 'hotel').length, 0);
+    this.reportProgress(
+      sessionId,
+      'schedule',
+      `已编排完成：${dayCount} 天 · ${attractionTotal} 个景点 · ${mealTotal} 次用餐 · ${hotelTotal} 处住宿安排`,
+    );
 
     return { days, pois: allPois };
   }
@@ -2922,19 +3068,14 @@ export class PlanningService {
   private async fetchRealImages(poiName: string, type: string, lat?: number, lon?: number): Promise<string[]> {
     if (!poiName) return [];
 
-    // 文件名黑名单：排除地图、图标、标记等不相关图片
-    const BLOCKED_PATTERNS = [
-      /map/i, /icon/i, /logo/i, /flag/i, /\bpin\b/i, /marker/i, /symbol/i,
-      /svg$/i, /sign/i, /coat[_-]?of[_-]?arms/i, /pictogram/i, /emblem/i,
-      /blank[_-]?flag/i, /no[_-]?image/i, /placeholder/i, /locator/i,
-    ];
-    const MIN_WIDTH = 640;
-    const MIN_HEIGHT = 480;
-    const MAX_RADIUS_KM = 50; // GPS 校验半径
+    const MIN_WIDTH = WIKI_MIN_WIDTH;
+    const MIN_HEIGHT = WIKI_MIN_HEIGHT;
+    const MAX_RADIUS_KM = WIKI_GPS_MAX_RADIUS_KM;
     const poiNameClean = poiName.replace(/[()（）·•・]/g, '').trim();
+    const poiNameHasCJK = /[\u4e00-\u9fa5]/.test(poiNameClean);
 
     const isBlocked = (filename: string): boolean =>
-      BLOCKED_PATTERNS.some(p => p.test(filename));
+      WIKI_BLOCKED_PATTERNS.some(p => p.test(filename));
 
     /**
      * 计算字符串相似度（基于字符集合重合度）
@@ -2962,8 +3103,11 @@ export class PlanningService {
 
     /**
      * 校验图片元数据是否符合 POI
+     * [fromGeo] 候选来自 geosearch（已按坐标 1.5km 锚定地点）：中文 POI 名 vs
+     * 拉丁文件名的字符集相似度恒为 0——那是跨语言，不是不匹配；此时跳过名称
+     * 门槛（GPS 校验仍然兜底）。文本搜索候选无坐标锚定，维持严格名称校验。
      */
-    const validateImage = (imageinfo: any, fileTitle: string): boolean => {
+    const validateImage = (imageinfo: any, fileTitle: string, fromGeo = false): boolean => {
       const filename = fileTitle.replace(/^File:/i, '');
 
       // 1. 名称黑名单
@@ -2974,10 +3118,12 @@ export class PlanningService {
       const h = imageinfo?.height || 0;
       if (w > 0 && h > 0 && (w < MIN_WIDTH || h < MIN_HEIGHT)) return false;
 
-      // 3. 名称相似度（至少 30% 字符重合）
+      // 3. 名称相似度（至少 30% 字符重合；地理候选跨语言时豁免）
       const nameInTitle = extractNameFromTitle(fileTitle);
       const sim = similarity(poiNameClean, nameInTitle);
-      if (sim < 0.3) return false;
+      const titleHasCJK = /[\u4e00-\u9fa5]/.test(nameInTitle);
+      const crossLanguage = poiNameHasCJK && !titleHasCJK;
+      if (sim < 0.3 && !(fromGeo && crossLanguage)) return false;
 
       // 4. EXIF GPS 校验（如有，必须在 50km 内）
       if (lat !== undefined && lon !== undefined && imageinfo?.metadata) {
@@ -2999,11 +3145,16 @@ export class PlanningService {
 
     try {
       // ===== 阶段1：Wikimedia geosearch（按坐标）=====
+      // geosearch 返回的是百科「条目」标题，需先取条目配图清单得到 File: 标题，
+      // 再查 Commons imageinfo（旧实现把条目标题直接当 Commons File 查，必然落空）
       if (lat !== undefined && lon !== undefined) {
         const geoResults = await this.wikimediaGeosearch(poiName, lat, lon, 1500);
         if (geoResults.length > 0) {
           console.log(`[ImageSearch] ${poiName}: geosearch命中${geoResults.length}个实体`);
-          const validImages = await this.fetchImageUrlsByTitles(geoResults, validateImage);
+          const validImages = await this.fetchImagesFromWikiArticles(
+            geoResults,
+            (info, title) => validateImage(info, title, true),
+          );
           if (validImages.length >= 2) return validImages;
           // 不够则继续尝试
           if (validImages.length === 1) {
@@ -3022,6 +3173,90 @@ export class PlanningService {
       return [];
     } catch (err) {
       console.warn(`[ImageSearch] ${poiName} 失败:`, err instanceof Error ? err.message : err);
+      return [];
+    }
+  }
+
+  /**
+   * 维基百科条目 → 条目配图（两段式）：
+   * en.wikipedia prop=images 取条目内 File: 清单 → Commons imageinfo 取真实 URL。
+   * 图片经过过滤器初筛（旗帜/地图/站点图标等全站共用文件不进入校验）。
+   */
+  private async fetchImagesFromWikiArticles(
+    articleTitles: string[],
+    validate?: (info: any, fileTitle: string) => boolean,
+  ): Promise<string[]> {
+    if (articleTitles.length === 0) return [];
+    const fileTitles: string[] = [];
+    const params = new URLSearchParams({
+      action: 'query',
+      titles: articleTitles.slice(0, 10).join('|'),
+      prop: 'images',
+      imlimit: '40',
+      format: 'json',
+      origin: '*',
+    });
+    try {
+      const res = await fetch(`https://en.wikipedia.org/w/api.php?${params.toString()}`, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const data = await res.json() as {
+          query?: { pages?: Record<string, { images?: Array<{ title: string }> }> };
+        };
+        const pages = data.query?.pages || {};
+        for (const pageId in pages) {
+          for (const img of pages[pageId]?.images ?? []) {
+            const title = img.title;
+            if (!title || !/^File:/i.test(title)) continue;
+            const lower = title.toLowerCase();
+            if (
+              /flag|map|icon|logo|symbol|coat[_-]?of[_-]?arms|locator|pictogram|edit-?|ambox|question_book|padlock|commons-logo|wikipedia|wikivoyage|wikidata|osm|notice/.test(lower)
+            ) {
+              continue;
+            }
+            if (!fileTitles.includes(title)) fileTitles.push(title);
+          }
+        }
+      }
+    } catch {
+      return [];
+    }
+    if (fileTitles.length === 0) return [];
+    return await this.fetchImageUrlsByTitles(fileTitles, validate);
+  }
+
+  /**
+   * 目的地封面：以目的地中心为锚的宽松抓取（条目配图优先，Commons 文本搜索兜底）。
+   * 仅做 黑名单 + 最小尺寸 过滤——候选已地理锚定，且常为跨语言名称，不做名称相似度门槛。
+   * 供「行程条目全缺图」时的请求路径内兜底，保证行程卡海报区必有真实照片。
+   */
+  private async fetchDestinationCover(destName: string, center: Coordinates): Promise<string[]> {
+    const t0 = Date.now();
+    const permissive = (info: any, fileTitle: string): boolean => {
+      const filename = fileTitle.replace(/^File:/i, '');
+      if (WIKI_BLOCKED_PATTERNS.some(p => p.test(filename))) return false;
+      const w = info?.width || 0;
+      const h = info?.height || 0;
+      if (w > 0 && h > 0 && (w < WIKI_MIN_WIDTH || h < WIKI_MIN_HEIGHT)) return false;
+      return true;
+    };
+    try {
+      let images: string[] = [];
+      const articles = await this.wikimediaGeosearch(destName, center.latitude, center.longitude, 8000);
+      if (articles.length > 0) {
+        images = await this.fetchImagesFromWikiArticles(articles, permissive);
+      }
+      if (images.length === 0) {
+        images = await this.wikimediaTextSearch(destName, center.latitude, center.longitude, permissive);
+      }
+      console.log(
+        `[ImageSearch] 目的地封面「${destName}」: ${images.length} 张 (${Date.now() - t0}ms)`,
+      );
+      return images.slice(0, 6);
+    } catch (err) {
+      console.warn(`[ImageSearch] 目的地封面「${destName}」失败:`, err instanceof Error ? err.message : err);
       return [];
     }
   }

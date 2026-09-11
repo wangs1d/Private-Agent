@@ -317,16 +317,16 @@ test("D. 零工具 + 道歉式收场：出口自检续波后仍不满足 → 如
 
 /* ---------------- E. escalate 哨兵工具已移除 ---------------- */
 
-test("E. escalate 哨兵机制退役：fastLane 工具集与常驻列表不再包含它", async () => {
-  const { getFastLaneTools } = await import(
+test("E. escalate 哨兵机制退役：builtin 工具集与常驻列表不再包含它", async () => {
+  const { getBuiltinAgentChatTools } = await import(
     "../src/external-model/openai-compatible-tool-loop.js"
   );
-  const names = getFastLaneTools().map(
+  const names = getBuiltinAgentChatTools().map(
     (t) => (t as { function?: { name?: string } }).function?.name ?? "",
   );
   assert.equal(
     names.includes("agent.escalate_to_complex"),
     false,
-    "fastLane 工具集不得再包含 escalate 工具",
+    "builtin 工具集不得再包含 escalate 工具",
   );
 });

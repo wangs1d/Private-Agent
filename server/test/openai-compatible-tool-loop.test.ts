@@ -18,24 +18,24 @@ const SEARCH_WEB_TOOL: ChatCompletionTool = {
 };
 
 // ── escalate 哨兵退役（2026-09-05 双面架构）回归 ──
-// 旧契约：fastLane 每轮必带 agent.escalate_to_complex，模型调用后返回哨兵、
-// agent-core 删线程整轮重放 complex。新契约：对话面零工具、任务面全量工具，
+// 旧契约：对话链路每轮必带 agent.escalate_to_complex，模型调用后返回哨兵、
+// agent-core 删线程整轮重放任务面。新契约：对话面零工具、任务面全量工具，
 // 轨道内出口自检承担纠错，哨兵机制整体删除。
 
-test("fast lane toolset no longer carries the escalation escape hatch", async () => {
-  const { getFastLaneTools } = await import(
+test("builtin toolset no longer carries the escalation escape hatch", async () => {
+  const { getBuiltinAgentChatTools } = await import(
     "../src/external-model/openai-compatible-tool-loop.js"
   );
-  const names = getFastLaneTools().map((t) => ("function" in t ? t.function?.name : undefined));
+  const names = getBuiltinAgentChatTools().map((t) => ("function" in t ? t.function?.name : undefined));
   assert.equal(names.includes("agent.escalate_to_complex"), false);
 });
 
 test("selectRelevantTools never surfaces the retired escalation tool", async () => {
-  const { getFastLaneTools, selectRelevantTools } = await import(
+  const { getBuiltinAgentChatTools, selectRelevantTools } = await import(
     "../src/external-model/openai-compatible-tool-loop.js"
   );
   for (const userText of ["2分钟后提醒我睡觉", "在吗", "今天天气怎么样", "帮我搜下新闻"]) {
-    const selected = selectRelevantTools(userText, getFastLaneTools(), {
+    const selected = selectRelevantTools(userText, getBuiltinAgentChatTools(), {
       minTools: 4,
       maxTools: 15,
       includeAlwaysIncluded: true,

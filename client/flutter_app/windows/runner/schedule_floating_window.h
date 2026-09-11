@@ -234,14 +234,23 @@ class ScheduleFloatingWindow {
   // 顶栏按钮
   HWND btn_collapse_ = nullptr;
   HWND btn_close_ = nullptr;
-  HFONT font_ui_ = nullptr;
-  HFONT font_title_ = nullptr;
-  HFONT font_time_ = nullptr;
-  HFONT font_notes_ = nullptr;   // 备注小字号
-  HFONT font_caption_ = nullptr; // 焦点卡说明/刻度标签小字
-  HFONT font_strike_ = nullptr;  // 完成事项删除线
-  HFONT font_focus_time_ = nullptr; // 焦点卡时间大字
-  HFONT font_body_lg_ = nullptr; // 空态引导/按钮正文（加大加粗）
+  // 字体族/字号/字重逐项对齐 in-app right_side_panel.dart（主字体 MiSans，
+  // 与 App 内嵌字体同源，见 EnsureFonts / LoadEmbeddedMiSans）
+  HFONT font_ui_ = nullptr;          // 时间轴普通标题 / 折叠态日期（12 w400）
+  HFONT font_title_ = nullptr;       // 顶栏标题「今日安排」（13 w700）
+  HFONT font_count_ = nullptr;       // 顶栏「/总数」（10 w600）
+  HFONT font_count_bold_ = nullptr;  // 顶栏 done / 底部隐藏数（10 w700）
+  HFONT font_tick_ = nullptr;        // 日程带刻度标签（9 w500）
+  HFONT font_caption_ = nullptr;     // 焦点卡说明行「接下来·倒计时」（9 w700）
+  HFONT font_time_ = nullptr;        // 焦点卡标题 / 下一事项标题（12 w600）
+  HFONT font_time_col_ = nullptr;    // 时间轴时间列（11 w700）
+  HFONT font_notes_ = nullptr;       // 焦点卡备注（10 w400）
+  HFONT font_footer_ = nullptr;      // 底部「还有 N 项」正文（10 w500）
+  HFONT font_strike_ = nullptr;      // 完成事项删除线（12 w400）
+  HFONT font_focus_time_ = nullptr;  // 焦点卡时间大字（13 w700）
+  HFONT font_all_done_ = nullptr;    // 完成横幅文字（11 w600）
+  HFONT font_empty_title_ = nullptr; // 空态标题（12 w600）
+  HFONT font_empty_guide_ = nullptr; // 空态引导两行（10 w400）
 
   // 状态
   bool on_top_ = true;

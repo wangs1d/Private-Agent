@@ -372,7 +372,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
     },
     {
       domain: "picture",
-      label: "图片图库与人像美颜批图",
+      label: "图片图库",
       // 2026-09-06：LLM 工具 schema 已由 builtin skill picture.*（skills/builtin/picture-skills.ts）
       // 接管——同名 schema 会在 chatToolsExtra 合并时与 skill 冲突，故这里置空；
       // intentRules（BM25 调权按名字命中 skill 名）与 ToolRegistry 兜底执行器保留。
@@ -382,10 +382,8 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       category: {
         name: "picture",
         keywords: [
-          "gallery", "photo", "photos", "album", "beautify", "retouch",
-          "selfie", "skin", "whiten",
-          "照片", "相册", "图库", "修图", "美颜", "磨皮", "白皙", "冷白皮",
-          "红润", "气色", "批图", "p图", "自拍", "滤镜", "日系", "港风", "奶油肌",
+          "gallery", "photo", "photos", "album",
+          "照片", "相册", "图库",
         ],
       },
     },

@@ -17,7 +17,9 @@ import {
   createStreamMetaSentenceFilter,
   pickVisibleText,
   StreamIdleTimeoutError,
+  ToolIntentWithoutToolsError,
   stripInternalControlTags,
+  type NormalToolCall,
   type NormalUsage,
 } from "./stream-chat-helpers.js";
 import {
@@ -226,8 +228,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     const toolPlan: ToolPlan | null = tools
       ? resolveChatToolPlanForStream(userTurn.text, streamOpts)
       : null;
-    // disableToolSearch（fast 车道）：visible 全量即 searchable，不构建延迟目录。
-    // fast maxRounds=1 下 tool_discover→tool_call 两波召回必断头，目录只会造成
+    // disableToolSearch（轻量白名单链路）：visible 全量即 searchable，不构建延迟目录。
+    // 小 maxRounds 下 tool_discover→tool_call 两波召回必断头，目录只会造成
     // "发现工具说明就被截断"的断头回复。
     const searchableForTurn =
       streamOpts?.disableToolSearch === true
@@ -352,7 +354,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
           {
             onAfterToolBatch: effectiveStreamOpts.toolLoop?.onAfterToolBatch,
             tools: toolPlan.visibleTools,
-            // disableToolSearch（fast 车道）必须同样作用于循环内的延迟目录：
+            // disableToolSearch（轻量白名单链路）必须同样作用于循环内的延迟目录：
             // 此前只有 prompt 侧的 prepareTools 吃到 searchableForTurn，这里仍传
             // 全量 searchableTools → 循环内部 prepareTools 重建目录并注入
             // tool_discover/tool_call 桥，"discover→call 两波召回必断头"的死路
@@ -447,6 +449,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     let streamedVisible = "";
     // API 流末尾 chunk 返回的 prefix cache 计费数据（scope 提升供下方 token 审计采集）
     let streamUsage: NormalUsage | undefined;
+    // 流末从 DSML 原文提取出的工具调用（带出 try 作用域供下方意图升级判定）
+    let toolIntentCalls: NormalToolCall[] = [];
     try {
       const sanitizer = createStreamControlTagSanitizer();
       const metaFilter = createStreamMetaSentenceFilter();
@@ -471,6 +475,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         },
       );
       streamUsage = result.usage;
+      toolIntentCalls = result.toolCalls;
       visible = stripInternalControlTags(pickVisibleText(result.content, result.reasoning));
     } catch (e) {
       // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
@@ -494,6 +499,21 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         msgs.length = turnStartLen;
         throw e;
       }
+    }
+
+    // 2026-09-11 根修：无工具轮次的工具意图不再静默丢弃。
+    // consumeNormalizedStream 已从正文提取出 DSML 工具调用（协议原文也已从流式
+    // 通道剥离，见 createStreamDsmlSanitizer）。本分支没有工具执行器，无法兑现
+    // 模型意图——显式上抛 ToolIntentWithoutToolsError，由 agent-core 捕获后升级
+    // 到带工具的任务面重跑同一句用户消息。ephemeral 轮次（应急重生成等）保持
+    // 原行为：返回剥离后的文本（可能为空，由上层空响应兜底处理）。
+    if (!ephemeral && toolIntentCalls.length > 0) {
+      msgs.length = turnStartLen;
+      throw new ToolIntentWithoutToolsError({
+        providerId: this.id,
+        model,
+        toolCalls: toolIntentCalls,
+      });
     }
 
     if (visible.trim()) {

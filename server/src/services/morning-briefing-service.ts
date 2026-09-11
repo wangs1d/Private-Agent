@@ -19,6 +19,8 @@ import type { NotesService } from "./notes-service.js";
 import { detectSevereWeatherAlerts } from "./weather-service.js";
 import { fetchHotRankings } from "./hot-rankings.js";
 import { normalizeFp } from "../proactivity/interest-watcher.js";
+import { resolvePoliteAppellation } from "./user-personalization/appellation.js";
+import { fetchIPLocation } from "./ip-geolocation.js";
 import type { UserPreferences } from "../routes/http/user-preferences.js";
 
 export interface MorningBriefingWeather {
@@ -43,6 +45,18 @@ export interface MorningBriefingScheduleItem {
 export interface MorningBriefingPendingNote {
   id: string;
   title: string;
+}
+
+/**
+ * 待办跟进（可选块）：今日简报不只播新闻，还要回报"之前交代的事"。
+ *  - pending：记忆 KV memory_open_loops（待办/承诺槽位）里还没完成的事，
+ *    最新在前，最多 3 条（已剥掉时间戳/话题前缀）；
+ *  - doneTodayCount：今天已办结的日程/提醒数。
+ * 全空 → 省略该字段。
+ */
+export interface MorningBriefingTodoFollowups {
+  pending: string[];
+  doneTodayCount: number;
 }
 
 /**
@@ -90,8 +104,12 @@ export interface MorningBriefing {
   pendingNotes: MorningBriefingPendingNote[];
   /** 兴趣热搜命中（可选块）：无命中时省略该字段，三源结构不受影响 */
   interestHits?: MorningBriefingInterestHit[];
+  /** 待办跟进（可选块）：之前交代的未完成事项 + 今日已办结数；全空时省略 */
+  todoFollowups?: MorningBriefingTodoFollowups;
   /** 近期重要日子（可选块，7 天窗口）：无记录时省略该字段 */
   upcomingImportantDays?: MorningBriefingImportantDay[];
+  /** 用户称呼（可选）：记忆「称呼」行的得体称呼（用户指定优先，大名→「王先生」式）；问候语用 */
+  appellation?: string;
   agentGreeting: string;
 }
 
@@ -116,6 +134,23 @@ export type MorningBriefingDeps = {
   scheduleTaskService?: ScheduleTaskService;
   notesService?: NotesService;
   getSessionPrefs?: (sessionId: string) => UserPreferences;
+  /**
+   * 客户端定位（GPS，比 IP 准）：用户未配置天气城市时的优先兜底。
+   * 装配层接 LocationCoordinator（requestLocation 优先新鲜缓存，
+   * 客户端在线时按需向设备要一次实时定位，离线/拒绝 → null）。
+   */
+  requestClientLocation?: (
+    sessionId: string,
+  ) => Promise<
+    | {
+        latitude: number;
+        longitude: number;
+        label?: string;
+        city?: string;
+        timezone?: string;
+      }
+    | null
+  >;
   /** 兴趣池文件路径（第四源；默认 data/interest-watch.json，与 InterestWatcher 一致） */
   interestWatchPath?: string;
   /** 重要日子存储（第五源；读 care.set_important_date 写入的 important_dates KV） */
@@ -151,53 +186,20 @@ function greetingByHour(hour: number): string {
   return "夜深了，这是为你整理的简报。注意休息。";
 }
 
-const WEEKDAY_LABELS_ZH = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-
-function formatDateLabel(dateIso: string): string {
-  const now = new Date();
-  const hour = now.getHours();
-  let greeting = "早安";
-  if (hour >= 12 && hour < 18) greeting = "下午好";
-  else if (hour >= 18 && hour < 23) greeting = "晚上好";
-  else if (hour >= 23 || hour < 5) greeting = "夜深了";
-
-  const parts = dateIso.split("-");
-  if (parts.length !== 3) {
-    return `${greeting}，今天${dateIso}。`;
-  }
-  const [, m, d] = parts;
-  const monthNum = Number(m);
-  const dayNum = Number(d);
-  if (!Number.isFinite(monthNum) || !Number.isFinite(dayNum)) {
-    return `${greeting}，今天${dateIso}。`;
-  }
-
-  let weekdayLabel = "";
-  const probe = new Date(`${dateIso}T00:00:00Z`);
-  if (!Number.isNaN(probe.getTime())) {
-    weekdayLabel = WEEKDAY_LABELS_ZH[probe.getUTCDay()] ?? "";
-  }
-  return `${greeting}，今天${monthNum}月${dayNum}日${weekdayLabel}。`;
-}
-
 function formatWeatherBit(
   condition: string | undefined,
   temperature: number | undefined,
-  description: string | undefined,
+  _description: string | undefined,
 ): string {
   const segs: string[] = [];
   if (condition) segs.push(condition);
   if (typeof temperature === "number" && Number.isFinite(temperature)) {
     segs.push(`${Math.round(temperature)}度`);
   }
-  if (segs.length === 0) {
-    return description ? `天气：${description}。` : "";
-  }
-  let bit = `天气${segs.join("，")}。`;
-  if (description) {
-    bit = `${bit}${description}。`;
-  }
-  return bit;
+  // 用户要求：不要天气状况的文字描述（description 冗长且与卡片 meta 重复），
+  // 只播「天气晴，24度」式短句
+  if (segs.length === 0) return "";
+  return `天气${segs.join("，")}。`;
 }
 
 function buildOutfitTip(weather: MorningBriefingWeather | null): MorningBriefingOutfitTip | null {
@@ -316,6 +318,33 @@ function countChineseChars(text: string): number {
   return matches ? matches.length : 0;
 }
 
+/** 待办跟进块上限：未完成事项最多播报条数 */
+const TODO_FOLLOWUPS_MAX = 3;
+/** 单条未完成事项的展示截断长度 */
+const TODO_FOLLOWUPS_ITEM_MAX_CHARS = 30;
+
+/**
+ * 剥掉记忆槽位行的元信息前缀（「[时间戳] [话题] 」×2 段），只留正文。
+ * 没有前缀的行原样返回。
+ */
+function stripMemoryLineMeta(line: string): string {
+  return line
+    .replace(/^\[[^\]]*\]\s*/, "")
+    .replace(/^\[[^\]]*\]\s*/, "")
+    .trim();
+}
+
+function formatTodoFollowupsBit(todo: MorningBriefingTodoFollowups): string {
+  const bits: string[] = [];
+  if (todo.pending.length > 0) {
+    bits.push(`你之前交代的事还有 ${todo.pending.length} 件没办：${todo.pending.join("、")}`);
+  }
+  if (todo.doneTodayCount > 0) {
+    bits.push(`今天已完成 ${todo.doneTodayCount} 件安排`);
+  }
+  return bits.length > 0 ? `${bits.join("；")}。` : "";
+}
+
 export class MorningBriefingService {
   /** 当天命中回调去重表：sessionId|id → 最后触发日期（每日至多回调一次） */
   private readonly importantDayFired = new Map<string, string>();
@@ -371,6 +400,12 @@ export class MorningBriefingService {
       if (day.daysUntil === 0) this.fireImportantDayToday(sessionId, day);
     }
 
+    // 用户称呼（确定性读取 KV，无 LLM）：问候语用
+    const appellation = this.resolveAppellation(sessionId);
+
+    // 待办跟进（确定性读取，无 LLM）：之前交代未完成 + 今日已办结
+    const todoFollowups = this.fetchTodoFollowups(sessionId);
+
     return {
       date: todayIsoDate(),
       weather: sections.weather ? weather : null,
@@ -379,8 +414,12 @@ export class MorningBriefingService {
       pendingNotes,
       // 无命中时省略该字段，保持现有三源结构与接口签名不变
       ...(interestHits.length > 0 ? { interestHits } : {}),
+      // 待办跟进（可选块）：全空时省略
+      ...(todoFollowups ? { todoFollowups } : {}),
       // 无近期日子时省略该字段（可选块）
       ...(upcomingImportantDays.length > 0 ? { upcomingImportantDays } : {}),
+      // 用户称呼（可选）：无称呼时省略该字段
+      ...(appellation ? { appellation } : {}),
       agentGreeting: greeting,
     };
   }
@@ -393,16 +432,37 @@ export class MorningBriefingService {
 
   private async fetchWeather(sessionId: string): Promise<MorningBriefingWeather | null> {
     const { weatherService, weatherPrefsService } = this.deps;
-    if (!weatherService || !weatherPrefsService) return null;
-    const prefs = weatherPrefsService.get(sessionId);
-    if (!prefs) return null;
+    if (!weatherService) return null;
+
+    // 坐标来源优先级：用户配置的天气城市 > 客户端 GPS（实时/缓存） >
+    // 出口 IP 定位（后端直接拉取；均确定性 HTTP/WS，无 LLM）。
+    const prefs = weatherPrefsService?.get(sessionId);
+    let latitude: number;
+    let longitude: number;
+    let timezone: string;
+    let label: string | undefined;
+    const clientLocation = prefs ? null : await this.fetchClientLocation(sessionId);
+    if (prefs) {
+      latitude = prefs.latitude;
+      longitude = prefs.longitude;
+      timezone = prefs.timezone || "Asia/Shanghai";
+      label = prefs.label;
+    } else if (clientLocation) {
+      latitude = clientLocation.latitude;
+      longitude = clientLocation.longitude;
+      timezone = clientLocation.timezone || "Asia/Shanghai";
+      label = clientLocation.label || clientLocation.city || undefined;
+    } else {
+      const ipLocation = await fetchIPLocation();
+      if (!ipLocation) return null;
+      latitude = ipLocation.latitude;
+      longitude = ipLocation.longitude;
+      timezone = ipLocation.timezone;
+      label = ipLocation.label || undefined;
+    }
+
     try {
-      const brief = await weatherService.getBrief(
-        prefs.latitude,
-        prefs.longitude,
-        prefs.timezone || "Asia/Shanghai",
-        prefs.label,
-      );
+      const brief = await weatherService.getBrief(latitude, longitude, timezone, label);
       return {
         temperature: brief.currentTempC,
         condition: brief.weatherText,
@@ -413,6 +473,20 @@ export class MorningBriefingService {
         minC: brief.todayMinC,
         windKmh: brief.windKmh,
       };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 客户端定位（GPS）：失败/离线/拒绝 → null（调用方继续走 IP 兜底） */
+  private async fetchClientLocation(
+    sessionId: string,
+  ): Promise<
+    | { latitude: number; longitude: number; label?: string; city?: string; timezone?: string }
+    | null
+  > {
+    try {
+      return (await this.deps.requestClientLocation?.(sessionId)) ?? null;
     } catch {
       return null;
     }
@@ -444,6 +518,59 @@ export class MorningBriefingService {
         .map((n) => ({ id: n.id, title: n.title }));
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * 待办跟进（确定性读取，无 LLM）：
+   *  - pending：记忆 KV memory_open_loops（待办/承诺槽位，行格式
+   *    「[时间戳] [话题] 正文」，追加序尾部最新）最新 3 条，剥前缀只留正文；
+   *  - doneTodayCount：今日已办结的日程/提醒数（status=completed 且
+   *    完成时间在今天）。
+   * 两项全空 → null（省略该块）。
+   */
+  private fetchTodoFollowups(sessionId: string): MorningBriefingTodoFollowups | null {
+    const pending = this.fetchOpenLoops(sessionId);
+    const doneTodayCount = this.fetchDoneTodayCount(sessionId);
+    if (pending.length === 0 && doneTodayCount <= 0) return null;
+    return { pending, doneTodayCount };
+  }
+
+  private fetchOpenLoops(sessionId: string): string[] {
+    const { agentMemorySyncService } = this.deps;
+    if (!agentMemorySyncService) return [];
+    try {
+      const { entries } = agentMemorySyncService.getSnapshot(sessionId, [
+        "memory_open_loops",
+      ]);
+      const raw = typeof entries.memory_open_loops === "string" ? entries.memory_open_loops : "";
+      return raw
+        .split("\n")
+        .filter(Boolean)
+        .slice(-TODO_FOLLOWUPS_MAX)
+        .reverse()
+        .map((line) => stripMemoryLineMeta(line).slice(0, TODO_FOLLOWUPS_ITEM_MAX_CHARS))
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  private fetchDoneTodayCount(sessionId: string): number {
+    const { scheduleTaskService } = this.deps;
+    if (!scheduleTaskService) return 0;
+    try {
+      const today = todayIsoDate();
+      return scheduleTaskService
+        .listAllTasks()
+        .filter((t) => {
+          if (t.sessionId !== sessionId || t.status !== "completed") return false;
+          const doneAt = t.lastRunAt ?? t.runAt ?? "";
+          return doneAt.startsWith(today);
+        })
+        .length;
+    } catch {
+      return 0;
     }
   }
 
@@ -492,6 +619,29 @@ export class MorningBriefingService {
     }
   }
 
+  /**
+   * 用户称呼：读记忆同步 KV 的 user_profile「称呼」行，交给共享的
+   * resolvePoliteAppellation 做得体化（用户指定的称呼优先；大名转
+   * 「王先生」式称呼——问候绝不直呼大名）。缺失/异常 → 空串
+   * （省略该字段，问候不带称呼，也绝不回退成大名）。
+   */
+  private resolveAppellation(sessionId: string): string {
+    const { agentMemorySyncService } = this.deps;
+    if (!agentMemorySyncService) return "";
+    try {
+      const { entries } = agentMemorySyncService.getSnapshot(sessionId, [
+        "user_profile",
+      ]);
+      const profile = entries.user_profile;
+      if (typeof profile !== "string") return "";
+      const m = profile.match(/^\s*(?:[-*]\s*)?称呼[：:]\s*(.+)$/m);
+      if (!m) return "";
+      return resolvePoliteAppellation(m[1]);
+    } catch {
+      return "";
+    }
+  }
+
   /** 当天命中回调（每日去重）：sessionId|id → 今日已触发则跳过，防止多次生成简报重复打扰 */
   private fireImportantDayToday(sessionId: string, day: MorningBriefingImportantDay): void {
     const key = `${sessionId}|${day.id}`;
@@ -527,7 +677,8 @@ export class MorningBriefingService {
    * proactivity/interest-watcher.ts 的 WatchInterest；actorId 缺省时与 sessionId
    * 同值，见 agent/actor-id.ts 的回退规则），拉一次实时热搜聚合后做简单
    * includes 匹配（归一化后 title 包含兴趣名），按榜单顺序最多取 3 条。
-   * 文件不存在 / 无启用兴趣 / 热搜失败 / 无命中 → 空数组（省略该块）。
+   * 用户要求：不要今日热搜兜底——未配置兴趣/当日无命中/拉取失败 →
+   * 空数组（省略该块）。
    */
   private async fetchInterestHits(sessionId: string): Promise<MorningBriefingInterestHit[]> {
     const path =
@@ -601,8 +752,9 @@ export class MorningBriefingService {
 
   private composeNarration(briefing: MorningBriefing): string {
     const parts: string[] = [];
-    const dateLabel = formatDateLabel(briefing.date);
-    parts.push(dateLabel);
+    // 播报稿对齐设计稿（design/daily-briefing-floating.html）：问候与日期由
+    // 卡片头（greeting/meta 行）展示，正文直接从内容开始，不再重复
+    // 「下午好，今天9月10日周四」。
 
     if (briefing.weather) {
       const { condition, temperature, description } = briefing.weather;
@@ -616,6 +768,14 @@ export class MorningBriefingService {
 
     if (briefing.todaySchedule.length > 0) {
       parts.push(formatScheduleBit(briefing.todaySchedule));
+    }
+
+    // 待办跟进（可选块）：之前交代未完成 + 今日已办结——简报不只播新闻，
+    // 还要回报用户交办事宜的进展
+    const todo = briefing.todoFollowups;
+    if (todo) {
+      const todoBit = formatTodoFollowupsBit(todo);
+      if (todoBit) parts.push(todoBit);
     }
 
     if (briefing.pendingNotes.length > 0) {
@@ -632,6 +792,11 @@ export class MorningBriefingService {
     const upcomingDays = briefing.upcomingImportantDays ?? [];
     if (upcomingDays.length > 0) {
       parts.push(formatImportantDaysBit(upcomingDays));
+    }
+
+    // 全空（个人数据源都没配置/没命中）→ 明确说明，不输出空荡荡的纯问候
+    if (parts.length === 0) {
+      parts.push("今天暂无日程和待办。");
     }
 
     parts.push("祝你今天顺利。");

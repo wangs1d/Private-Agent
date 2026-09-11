@@ -107,7 +107,7 @@ class RightSidePanel extends StatefulWidget {
   final VoidCallback? onPhone;
   final VoidCallback? onMessages;
 
-  /// 「图库」工具入口（照片浏览/上传/一键美颜）。
+  /// 「图库」工具入口（照片浏览/上传/删除）。
   final VoidCallback? onGallery;
 
   /// 站内信未读总数（供「消息」工具渲染角标；0 不显示）。

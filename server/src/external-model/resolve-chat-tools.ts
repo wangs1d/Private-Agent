@@ -162,11 +162,11 @@ function pinDesktopVisualTools(
   tools: ChatCompletionTool[],
   streamOpts?: AgentStreamOptions,
 ): ChatCompletionTool[] {
-  // 2026-07-30 修复：Fast 模式（contextual 暴露策略）不注入桌面工具。
+  // 2026-07-30 修复：对话面轻量档（contextual 暴露策略）不注入桌面工具。
   // 否则 LLM 在简单查询（如"现在几点"）时会被 11 个桌面工具（截屏/shell/UIA/http_get）污染，
   // 倾向于调 desktop.visual.screenshot 等重路径工具而非 clock 轻量工具，
   // 导致响应慢 + 频繁触发"shell 被拦截""系统敏感文件不让读"等错误。
-  // 桌面工具仅在 Complex/delegate 模式或显式 scoped 暴露时由用户主动 pin 进来。
+  // 桌面工具仅在 delegate/full 档或显式 scoped 暴露时由用户主动 pin 进来。
   // 2026-09-05 双面架构：profile="none"（对话面零工具）绝对不注入——空列表 +
   // undefined accessMode（默认 full）会被误判为可注入，零工具契约被破坏。
   // 2026-09-05 前后台架构：profile="explicit"（精确白名单）同样不注入。
@@ -237,7 +237,7 @@ function pinSpecifiedTools(
  */
 function resolvePinnedToolNames(streamOpts?: AgentStreamOptions): Set<string> {
   const pinned = new Set<string>();
-  // 2026-07-30 修复：Fast 模式（contextual/light 暴露策略）不把桌面工具视为 pinned。
+  // 2026-07-30 修复：对话面轻量档（contextual/light 暴露策略）不把桌面工具视为 pinned。
   // 否则 token 预算核算会把 11 个桌面工具的 schema 优先保留，污染 LLM 视野。
   // 2026-09-05：profile="none"（对话面零工具）同样不视为 pinned，与注入条件保持一致。
   const isFastProfile =
@@ -382,10 +382,10 @@ function applyToolExposureProfile(
   if (profile === "scoped") return filterScopedTools(tools, streamOpts);
   if (!userText?.trim()) return tools;
 
-  // 2026-08-01 性能优化：Fast 模式工具集小（≤ 12 个）时跳过 contextual 过滤，
+  // 2026-08-01 性能优化：轻量档（contextual/light）工具集小（≤ 12 个）时跳过 contextual 过滤，
   // 直接全量返回。理由：contextual 过滤在 ≤12 工具时节省的 schema token 不到 500，
-  // 但每次都要跑关键词提取 + 分类匹配 + 兜底补充，徒增延迟且容易裁掉对 Fast 模式
-  // 重要的 weather/calendar 工具。Complex 模式走 delegate/full 不进此分支。
+  // 但每次都要跑关键词提取 + 分类匹配 + 兜底补充，徒增延迟且容易裁掉对话面
+  // 重要的 weather/calendar 工具。任务面走 delegate/full 档不进此分支。
   if ((profile === "contextual" || profile === "light") && tools.length <= 12) {
     const merged = mergePinnedTools(tools, streamOpts);
     const budget = resolveExposureTokenBudget(profile);
@@ -448,12 +448,12 @@ function dropOfflineDesktopTools(
 export function resolveChatToolPlanForStream(
   userText?: string,
   streamOpts?: AgentStreamOptions,
-): ResolvedChatToolPlan {  // 2026-08-01 性能优化：Fast 模式小工具集短路。
+): ResolvedChatToolPlan {  // 2026-08-01 性能优化：轻量档小工具集短路。
   // 当调用方显式传入 chatToolsBuiltin 且总工具数 ≤ 12 时，调用方明确声明
   // "我只要这 N 个工具"，跳过 access-mode 合并 + contextual 过滤 + ranking。
-  // 这些步骤是给 Complex 模式（几十上百工具）准备的，Fast 模式套用反而会：
+  // 这些步骤是给任务面（几十上百工具）准备的，轻量档套用反而会：
   //   1. 把 desktop/visual/self-programming 工具合并进来污染 LLM 视野
-  //   2. contextual 过滤误裁 weather/calendar 等对 Fast 重要的工具
+  //   2. contextual 过滤误裁 weather/calendar 等对话面重要的工具
   //   3. 跑一遍关键词提取 + 分类匹配 ≈ 2-5ms × 每请求
   const builtin = streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools();
   const extra = streamOpts?.chatToolsExtra ?? [];
@@ -465,20 +465,20 @@ export function resolveChatToolPlanForStream(
   if (streamOpts?.toolExposureProfile === "explicit") {
     return { visibleTools: builtin, searchableTools: merged };
   }
-  // Fast 模式：不全暴露，只选相关工具，其余走 tool search 延迟召回。
+  // 轻量档：不全暴露，只选相关工具，其余走 tool search 延迟召回。
   // selectRelevantTools 基于用户文本做关键词匹配 + 分类映射，微秒级。
   // 未选中的工具通过 prepareToolsWithToolSearch 进入 deferred catalog，
   // LLM 可通过 bridge tool（tool_discover）BM25 搜索即时召回。
-  const explicitFastLane =
+  const explicitSmallToolset =
     streamOpts?.chatToolsBuiltin !== undefined && merged.length <= 12;
-  if (explicitFastLane) {
+  if (explicitSmallToolset) {
     const selected = selectRelevantTools(userText ?? "", merged, {
       minTools: 3,
       maxTools: 6,
       includeAlwaysIncluded: true,
     });
     // 排序 hint（经验学习循环的 cautiousNamespaces 降权等）不参与短路：
-    // 有 hint 时仍需一次微秒级排序，否则学到的高危工具降权在 Fast 模式下失效。
+    // 有 hint 时仍需一次微秒级排序，否则学到的高危工具降权在轻量档下失效。
     const hasRankingHint =
       (streamOpts?.toolRankingHint?.preferredNamespaces?.filter(Boolean).length ?? 0) > 0 ||
       (streamOpts?.toolRankingHint?.cautiousNamespaces?.filter(Boolean).length ?? 0) > 0;

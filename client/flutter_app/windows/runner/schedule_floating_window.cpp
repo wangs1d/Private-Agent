@@ -136,6 +136,65 @@ int NowMinutes() {
   return st.wHour * 60 + st.wMinute;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// 字体：与 in-app 主字体同源（pubspec.yaml 内嵌的 MiSans）。
+// GDI 用不了 Flutter 的 asset 字体，这里从 flutter_assets 目录把
+// MiSans 各字重 OTF 以进程私有方式注册进 GDI；资源缺失时回退
+// in-app 字体回退链的 Windows 项（Microsoft YaHei，app_theme.dart）。
+// 不回退 Segoe UI：它无中文字形，中文会落到宋体，与主界面观感割裂。
+// ═══════════════════════════════════════════════════════════════════
+
+bool g_misans_ready = false;  // 至少成功注册一个 MiSans 字重
+
+void LoadEmbeddedMiSans() {
+  static bool tried = false;
+  if (tried) return;
+  tried = true;
+  wchar_t exe_path[MAX_PATH]{};
+  if (GetModuleFileNameW(nullptr, exe_path, MAX_PATH) == 0) return;
+  std::wstring dir(exe_path);
+  const size_t slash = dir.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return;
+  dir.resize(slash + 1);
+  const wchar_t* kWeightFiles[] = {
+      L"MiSans-Regular.otf", L"MiSans-Medium.otf",
+      L"MiSans-Semibold.otf", L"MiSans-Bold.otf"};
+  for (const wchar_t* name : kWeightFiles) {
+    HANDLE file = CreateFileW(
+        (dir + L"data\\flutter_assets\\assets\\fonts\\" + name).c_str(),
+        GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) continue;
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 0 &&
+        size.QuadPart < 64 * 1024 * 1024) {
+      std::vector<unsigned char> buf(static_cast<size_t>(size.QuadPart));
+      DWORD read = 0;
+      if (ReadFile(file, buf.data(), static_cast<DWORD>(buf.size()), &read,
+                   nullptr) &&
+          read == buf.size()) {
+        DWORD count = 0;
+        // 进程私有注册（无需 RemoveFontMemResourceEx，随进程退出释放）
+        if (AddFontMemResourceEx(buf.data(), read, nullptr, &count) != nullptr) {
+          g_misans_ready = true;
+        }
+      }
+    }
+    CloseHandle(file);
+  }
+}
+
+const wchar_t* UiFontFamily() {
+  return g_misans_ready ? L"MiSans" : L"Microsoft YaHei";
+}
+
+HFONT MakeFont(int size, int weight, bool strike, const wchar_t* family) {
+  return CreateFontW(size, 0, 0, 0, weight, FALSE, strike ? TRUE : FALSE,
+                     FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                     CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                     DEFAULT_PITCH | FF_SWISS, family);
+}
+
 }  // namespace
 
 ScheduleFloatingWindow::ScheduleFloatingWindow() = default;
@@ -197,54 +256,62 @@ void ScheduleFloatingWindow::EnsureClassRegistered() {
 
 void ScheduleFloatingWindow::EnsureFonts() {
   if (font_ui_ != nullptr) return;
-  font_ui_ = CreateFontW(S(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_title_ = CreateFontW(S(14), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_body_lg_ = CreateFontW(S(13), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE,
-                              FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                              DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_time_ = CreateFontW(S(12), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                           DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_notes_ = CreateFontW(S(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_caption_ = CreateFontW(S(10), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                              DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_strike_ = CreateFontW(S(12), 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_focus_time_ = CreateFontW(S(15), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+  LoadEmbeddedMiSans();
+  const wchar_t* family = UiFontFamily();
+  // 字号/字重逐项对齐 in-app right_side_panel.dart：
+  // 标题13w700 / 计数10w600·10w700 / 刻度9w500 / 说明9w700 / 焦点时间13w800(→700)
+  // / 焦点标题12w600 / 时间列11w700 / 正文12w400 / 备注·引导10w400 /
+  // 底部10w500 / 横幅11w600 / 空态标题12w600
+  font_ui_ = MakeFont(S(12), FW_NORMAL, false, family);
+  font_title_ = MakeFont(S(13), FW_BOLD, false, family);
+  font_count_ = MakeFont(S(10), FW_SEMIBOLD, false, family);
+  font_count_bold_ = MakeFont(S(10), FW_BOLD, false, family);
+  font_tick_ = MakeFont(S(9), FW_MEDIUM, false, family);
+  font_caption_ = MakeFont(S(9), FW_BOLD, false, family);
+  font_time_ = MakeFont(S(12), FW_SEMIBOLD, false, family);
+  font_time_col_ = MakeFont(S(11), FW_BOLD, false, family);
+  font_notes_ = MakeFont(S(10), FW_NORMAL, false, family);
+  font_footer_ = MakeFont(S(10), FW_MEDIUM, false, family);
+  font_strike_ = MakeFont(S(12), FW_NORMAL, true, family);
+  font_focus_time_ = MakeFont(S(13), FW_BOLD, false, family);
+  font_all_done_ = MakeFont(S(11), FW_SEMIBOLD, false, family);
+  font_empty_title_ = MakeFont(S(12), FW_SEMIBOLD, false, family);
+  font_empty_guide_ = MakeFont(S(10), FW_NORMAL, false, family);
 }
 
 void ScheduleFloatingWindow::DestroyFonts() {
   if (font_ui_) { DeleteObject(font_ui_); font_ui_ = nullptr; }
   if (font_title_) { DeleteObject(font_title_); font_title_ = nullptr; }
-  if (font_time_) { DeleteObject(font_time_); font_time_ = nullptr; }
-  if (font_notes_) { DeleteObject(font_notes_); font_notes_ = nullptr; }
+  if (font_count_) { DeleteObject(font_count_); font_count_ = nullptr; }
+  if (font_count_bold_) {
+    DeleteObject(font_count_bold_);
+    font_count_bold_ = nullptr;
+  }
+  if (font_tick_) { DeleteObject(font_tick_); font_tick_ = nullptr; }
   if (font_caption_) { DeleteObject(font_caption_); font_caption_ = nullptr; }
+  if (font_time_) { DeleteObject(font_time_); font_time_ = nullptr; }
+  if (font_time_col_) {
+    DeleteObject(font_time_col_);
+    font_time_col_ = nullptr;
+  }
+  if (font_notes_) { DeleteObject(font_notes_); font_notes_ = nullptr; }
+  if (font_footer_) { DeleteObject(font_footer_); font_footer_ = nullptr; }
   if (font_strike_) { DeleteObject(font_strike_); font_strike_ = nullptr; }
   if (font_focus_time_) {
     DeleteObject(font_focus_time_);
     font_focus_time_ = nullptr;
   }
-  if (font_body_lg_) {
-    DeleteObject(font_body_lg_);
-    font_body_lg_ = nullptr;
+  if (font_all_done_) {
+    DeleteObject(font_all_done_);
+    font_all_done_ = nullptr;
+  }
+  if (font_empty_title_) {
+    DeleteObject(font_empty_title_);
+    font_empty_title_ = nullptr;
+  }
+  if (font_empty_guide_) {
+    DeleteObject(font_empty_guide_);
+    font_empty_guide_ = nullptr;
   }
 }
 
@@ -705,7 +772,7 @@ void ScheduleFloatingWindow::DrawDayStrip(HDC hdc, int y, int width) {
     if (i == 0) cx = x0 + S(8);
     if (i == 4) cx = x1 - S(8);
     RECT lrc = {cx - S(24), label_y, cx + S(24), label_y + S(14)};
-    DrawUiText(hdc, lrc, labels[i], font_caption_, pal().tick_label,
+    DrawUiText(hdc, lrc, labels[i], font_tick_, pal().tick_label,
                DT_CENTER | DT_SINGLELINE | DT_VCENTER);
   }
 }
@@ -740,11 +807,12 @@ void ScheduleFloatingWindow::DrawFocusCard(HDC hdc, int y, int width,
   DrawUiText(hdc, cap_rc, caption, font_caption_, pal().accent_soft,
              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
-  // 时间 + 标题
-  RECT time_rc = {cx, y + S(22), cx + S(48), y + S(22) + S(19)};
-  DrawUiText(hdc, time_rc, Utf8ToWide(next.time_text), font_focus_time_,
+  // 时间 + 标题：同一矩形内垂直居中，保证大小字号中线对齐
+  // （in-app 为基线对齐；GDI 下同矩形居中的观感偏差在 1px 内）
+  RECT time_row = {cx, y + S(21), right, y + S(21) + S(19)};
+  DrawUiText(hdc, time_row, Utf8ToWide(next.time_text), font_focus_time_,
              pal().focus_time, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-  RECT title_rc = {cx + S(54), y + S(24), right, y + S(24) + S(17)};
+  RECT title_rc = {cx + S(44), time_row.top, right, time_row.bottom};
   DrawUiText(hdc, title_rc, Utf8ToWide(next.title), font_time_, pal().text_body,
              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
@@ -795,7 +863,8 @@ void ScheduleFloatingWindow::DrawAllDoneBanner(HDC hdc, int y, int width) {
   DeleteObject(pen);
 
   RECT text_rc = {cx + S(20), y, x1 - S(10), y + S(kAllDoneBannerHeight)};
-  DrawUiText(hdc, text_rc, L"今日安排已全部完成", font_notes_, pal().all_done_text,
+  DrawUiText(hdc, text_rc, L"今日安排已全部完成", font_all_done_,
+             pal().all_done_text,
              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 }
 
@@ -830,7 +899,7 @@ void ScheduleFloatingWindow::DrawTimeline(HDC hdc, int y, int width,
     // 时间
     RECT time_rc = {x0, row_y + S(3), x0 + S(kTimeColWidth),
                     row_y + S(3) + S(17)};
-    DrawUiText(hdc, time_rc, Utf8ToWide(item.time_text), font_time_,
+    DrawUiText(hdc, time_rc, Utf8ToWide(item.time_text), font_time_col_,
                item.completed ? pal().time_dim
                               : (is_next ? pal().accent : pal().text_secondary),
                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
@@ -867,12 +936,38 @@ void ScheduleFloatingWindow::DrawTimeline(HDC hdc, int y, int width,
 
 void ScheduleFloatingWindow::DrawFooter(HDC hdc, int y, int width,
                                         int hidden_count) {
-  wchar_t buf[48];
-  wsprintfW(buf, L"还有 %d 项安排 · 查看全部 ›", hidden_count);
+  // 三段富文本居中：还有 N 项安排 · 查看全部 ›
+  // （对齐 in-app 字重：正文 10 w500 / 数字 10 w700 accentSoft）
+  const std::wstring lead = L"还有 ";
+  const std::wstring num = std::to_wstring(hidden_count);
+  const std::wstring tail = L" 项安排 · 查看全部 ›";
+  HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font_footer_));
+  SIZE lead_size = {0, 0};
+  SIZE tail_size = {0, 0};
+  GetTextExtentPoint32W(hdc, lead.c_str(), static_cast<int>(lead.size()),
+                        &lead_size);
+  GetTextExtentPoint32W(hdc, tail.c_str(), static_cast<int>(tail.size()),
+                        &tail_size);
+  SelectObject(hdc, font_count_bold_);
+  SIZE num_size = {0, 0};
+  GetTextExtentPoint32W(hdc, num.c_str(), static_cast<int>(num.size()),
+                        &num_size);
+  SelectObject(hdc, old_font);
+
   RECT rc = {S(kBodyPadding), y, width - S(kBodyPadding),
              y + S(kFooterHeight)};
-  DrawUiText(hdc, rc, buf, font_notes_, pal().text_secondary,
-             DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+  const int seg_left =
+      rc.left + ((rc.right - rc.left) -
+                 (lead_size.cx + num_size.cx + tail_size.cx)) / 2;
+  RECT seg = {seg_left, rc.top, rc.right, rc.bottom};
+  DrawUiText(hdc, seg, lead, font_footer_, pal().text_secondary,
+             DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  seg = {seg_left + lead_size.cx, rc.top, rc.right, rc.bottom};
+  DrawUiText(hdc, seg, num, font_count_bold_, pal().accent_soft,
+             DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  seg = {seg_left + lead_size.cx + num_size.cx, rc.top, rc.right, rc.bottom};
+  DrawUiText(hdc, seg, tail, font_footer_, pal().text_secondary,
+             DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 }
 
 void ScheduleFloatingWindow::DrawEmptyState(HDC hdc, int y, int width) {
@@ -916,8 +1011,8 @@ void ScheduleFloatingWindow::DrawEmptyState(HDC hdc, int y, int width) {
   // 「今天还没有安排」
   int ty = y + icon + S(12);
   RECT title_rc = {0, ty, width, ty + S(22)};
-  DrawUiText(hdc, title_rc, L"今天还没有安排", font_title_, pal().text_primary,
-             DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+  DrawUiText(hdc, title_rc, L"今天还没有安排", font_empty_title_,
+             pal().text_primary, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
   // 引导文案（两行）
   int gy = ty + S(22) + S(6);
@@ -925,7 +1020,7 @@ void ScheduleFloatingWindow::DrawEmptyState(HDC hdc, int y, int width) {
                    gy + S(38)};
   DrawUiText(hdc, guide_rc,
              L"对我说「明天 9 点提醒我开会」\n我来帮你记录并到点提醒",
-             font_body_lg_, pal().text_secondary, DT_CENTER | DT_NOCLIP);
+             font_empty_guide_, pal().text_secondary, DT_CENTER | DT_NOCLIP);
 }
 
 void ScheduleFloatingWindow::Paint(HWND hwnd, HDC hdc) {
@@ -977,23 +1072,23 @@ void ScheduleFloatingWindow::Paint(HWND hwnd, HDC hdc) {
     }
     wchar_t total_buf[8];
     wsprintfW(total_buf, L"/%d", static_cast<int>(items_.size()));
-    std::wstring total_text = total_buf;
-    SIZE total_size = {0, 0};
-    GetTextExtentPoint32W(hdc, total_text.c_str(),
-                          static_cast<int>(total_text.size()), &total_size);
-    RECT total_rc = {date_right - total_size.cx, 0, date_right,
-                     S(kTitleBarHeight)};
-    DrawUiText(hdc, total_rc, total_text, font_title_, pal().text_secondary,
-               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     wchar_t done_buf[8];
     wsprintfW(done_buf, L"%d", done);
-    std::wstring done_text = done_buf;
+    // 按各自实际字体测量（done w700 / total w600，均为 10pt，同矩形垂直居中）
+    HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font_count_));
+    SIZE total_size = {0, 0};
+    GetTextExtentPoint32W(hdc, total_buf, lstrlenW(total_buf), &total_size);
+    SelectObject(hdc, font_count_bold_);
     SIZE done_size = {0, 0};
-    GetTextExtentPoint32W(hdc, done_text.c_str(),
-                          static_cast<int>(done_text.size()), &done_size);
+    GetTextExtentPoint32W(hdc, done_buf, lstrlenW(done_buf), &done_size);
+    SelectObject(hdc, old_font);
+    RECT total_rc = {date_right - total_size.cx, 0, date_right,
+                     S(kTitleBarHeight)};
+    DrawUiText(hdc, total_rc, total_buf, font_count_, pal().text_secondary,
+               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     RECT done_rc = {total_rc.left - done_size.cx, 0, total_rc.left,
                     S(kTitleBarHeight)};
-    DrawUiText(hdc, done_rc, done_text, font_title_, pal().accent_soft,
+    DrawUiText(hdc, done_rc, done_buf, font_count_bold_, pal().accent_soft,
                DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
 
@@ -1001,8 +1096,10 @@ void ScheduleFloatingWindow::Paint(HWND hwnd, HDC hdc) {
     // 折叠态顶栏有富余：右侧显示日期
     std::wstring date_label = FormatTodayLabel();
     SIZE date_size = {0, 0};
+    HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font_ui_));
     GetTextExtentPoint32W(hdc, date_label.c_str(),
                           static_cast<int>(date_label.size()), &date_size);
+    SelectObject(hdc, old_font);
     RECT date_rc = {date_right - date_size.cx, 0, date_right,
                     S(kTitleBarHeight)};
     DrawUiText(hdc, date_rc, date_label, font_ui_, pal().text_secondary,

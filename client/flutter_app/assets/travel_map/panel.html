@@ -691,12 +691,10 @@
             </button>
           </div>
 
-          <!-- 图层下拉 -->
+          <!-- 图层下拉：底图仅保留 卫星 / 暗色（黑底）两种 -->
           <div id="layer-popover">
-            <button type="button" class="lp-item style-btn" data-style="3"><span class="lp-check"></span><span>明亮</span></button>
-            <button type="button" class="lp-item style-btn" data-style="0"><span class="lp-check"></span><span>街道</span></button>
+            <button type="button" class="lp-item style-btn active" data-style="2"><span class="lp-check">✓</span><span>暗色</span></button>
             <button type="button" class="lp-item style-btn" data-style="1"><span class="lp-check"></span><span>卫星</span></button>
-            <button type="button" class="lp-item style-btn" data-style="2"><span class="lp-check"></span><span>暗色</span></button>
             <div class="lp-divider"></div>
             <button type="button" class="lp-item" id="btn-3d"><span class="lp-check" id="lp-3d-check">✓</span><span id="lp-3d-label">3D 视角</span></button>
           </div>
@@ -819,7 +817,7 @@
     map: null,
     markers: [],          // { key, poi, marker }
     waypointBadges: [],
-    styleIndex: 3,        // 明亮优先（与设计稿浅色基调一致）
+    styleIndex: 2,        // 暗色（黑底）为默认底图；卫星为唯一备选（明亮/街道已裁剪）
     is3D: true,
     currentSourceIndex: 0,
     fallbackMode: false,
@@ -918,25 +916,7 @@
       '</svg>';
   }
 
-  // ══════════════ 地图源（降级链）══════════════
-  function osmRasterStyle() {
-    return {
-      version: 8,
-      sources: {
-        'osm-tiles': {
-          type: 'raster',
-          tiles: [
-            'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
-            'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
-            'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
-          ],
-          tileSize: 256, attribution: '© OpenStreetMap', maxzoom: 19
-        }
-      },
-      layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm-tiles' }],
-      glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'
-    };
-  }
+  // ══════════════ 地图源（降级链：暗色 → 卫星 → 离线兜底）══════════════
   function satelliteStyle() {
     return {
       version: 8,
@@ -958,40 +938,29 @@
       ]
     };
   }
-  function esriStreetStyle() {
-    return {
-      version: 8,
-      sources: {
-        'esri-street': {
-          type: 'raster',
-          tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}'],
-          tileSize: 256, maxzoom: 19, attribution: '© Esri'
-        }
-      },
-      layers: [{ id: 'esri-street', type: 'raster', source: 'esri-street' }]
-    };
-  }
   function buildSources() {
+    // 底图类型只保留 暗色/卫星 两种（明亮街道源已裁剪）：
+    // 启动链先试 Carto 真黑底，失败降级 ESRI 卫星，再失败进离线兜底
     var sources = [
-      { name: 'OpenFreeMap', style: 'https://tiles.openfreemap.org/styles/liberty', terrainUrl: null },
-      { name: 'OSM Raster', style: osmRasterStyle, terrainUrl: null },
-      { name: 'Esri Street', style: esriStreetStyle, terrainUrl: null }
+      { name: 'Carto Dark', style: DARK_STYLE_URL, terrainUrl: null },
+      { name: 'Esri Satellite', style: satelliteStyle, terrainUrl: null }
     ];
     if (state.maptilerKey) {
-      sources.push({
-        name: 'MapTiler (3D 地形)',
-        style: 'https://api.maptiler.com/streets-v2/style.json?key=' + state.maptilerKey,
+      sources.unshift({
+        name: 'MapTiler Dark (3D 地形)',
+        style: 'https://api.maptiler.com/darkmatter/style.json?key=' + state.maptilerKey,
         terrainUrl: 'https://api.maptiler.com/tiles/terrain-tiles.json?key=' + state.maptilerKey
       });
     }
     return sources;
   }
   var MAP_SOURCES = [];
+  // 样式解析：1=卫星（显式选择）；2=暗色（默认）→ 用当前链上源的样式
+  // （链[0] Carto Dark、链[1] Esri Satellite —— 首源失败自动降级到卫星再兜底）
   function styleDefOf(source) {
     if (state.styleIndex === 1) return satelliteStyle();
-    if (state.styleIndex === 2) return DARK_STYLE_URL;
-    if (state.styleIndex === 0) return osmRasterStyle();
-    return typeof source.style === 'function' ? source.style() : source.style; // 3 → 当前源（明亮）
+    var def = source ? (typeof source.style === 'function' ? source.style() : source.style) : null;
+    return def || DARK_STYLE_URL;
   }
 
   // ══════════════ 启动：多源降级链 ══════════════
@@ -1421,7 +1390,7 @@
     if (state.fallbackMode || !state.map) return;
     var keepCenter = state.map.getCenter();
     var keepZoom = state.map.getZoom();
-    var source = MAP_SOURCES[state.currentSourceIndex] || { style: osmRasterStyle };
+    var source = MAP_SOURCES[state.currentSourceIndex] || { style: DARK_STYLE_URL };
     var styleDef = styleDefOf(source);
     try { state.map.setTerrain(null); } catch (e) { /* ignore */ }
     state.map.setStyle(styleDef);
@@ -1689,18 +1658,12 @@
   }
 
   // ══════════════ 面板层：载荷渲染 ══════════════
-  // 主题对齐：dark = AppPalette 深色系（body.theme-dark 令牌组）；
-  // 地图底图随主题自动明暗对齐（卫星为显式选择，不参与自动切换）
+  // 主题对齐：dark = AppPalette 深色系（body.theme-dark 令牌组）。
+  // 底图只保留 暗色/卫星 两种，均独立于 App 明暗主题，不再随主题自动切换。
   function applyTheme(mode) {
     var dark = mode === 'dark';
     state.theme = dark ? 'dark' : 'light';
     document.body.classList.toggle('theme-dark', dark);
-    if (state.fallbackMode || !state.map) return;
-    if (dark && (state.styleIndex === 3 || state.styleIndex === 0)) {
-      setStyle(2); // 明亮/街道 → 暗色
-    } else if (!dark && state.styleIndex === 2) {
-      setStyle(3); // 暗色 → 明亮
-    }
   }
 
   function loadPlan(payload) {

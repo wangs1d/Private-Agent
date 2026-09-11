@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { ServerEventType } from "../../protocol.js";
 import { MorningBriefingService } from "../../services/morning-briefing-service.js";
+import type { MorningBriefingDeps } from "../../services/morning-briefing-service.js";
 import { getUserPreferences } from "./user-preferences.js";
 import { markMorningBriefingDelivered } from "./user-preferences.js";
 import type { HttpRouteDeps } from "./types.js";
@@ -12,10 +13,22 @@ import type { HttpRouteDeps } from "./types.js";
  * 调用方式：POST /api/test/trigger-briefing，body { sessionId?: string, mode?: "voice"|"window"|"card" }
  *
  * 生产环境应通过 MorningBriefingScheduler 的 subscribe + tick 触发。
+ * 注意：必须用装配层注入的完整依赖（天气/日程/笔记/记忆）构服务——
+ * 手动预览的简报内容要与调度路径完全一致，否则卡片永远只剩问候语。
  */
 export function registerBriefingTestRoutes(
   app: FastifyInstance,
-  deps: Pick<HttpRouteDeps, "wsConnectionRegistry">,
+  deps: Pick<
+    HttpRouteDeps,
+    | "wsConnectionRegistry"
+    | "agentMemorySyncService"
+    | "weatherService"
+    | "weatherPrefsService"
+    | "scheduleTaskService"
+    | "notesService"
+  > & {
+    requestClientLocation?: MorningBriefingDeps["requestClientLocation"];
+  },
 ): void {
   app.post("/api/test/trigger-briefing", async (request, reply) => {
     const wsRegistry = deps.wsConnectionRegistry;
@@ -33,9 +46,16 @@ export function registerBriefingTestRoutes(
     }
     const mode = body.mode ?? "card";
 
-    const service = new MorningBriefingService({
+    const briefingDeps: MorningBriefingDeps = {
       getSessionPrefs: (sid) => getUserPreferences(sid),
-    });
+      agentMemorySyncService: deps.agentMemorySyncService,
+      weatherService: deps.weatherService,
+      weatherPrefsService: deps.weatherPrefsService,
+      scheduleTaskService: deps.scheduleTaskService,
+      notesService: deps.notesService,
+      requestClientLocation: deps.requestClientLocation,
+    };
+    const service = new MorningBriefingService(briefingDeps);
     const narration = await service.narrateBriefing(sessionId);
 
     const sent = wsRegistry.trySend(

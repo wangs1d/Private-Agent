@@ -1,5 +1,7 @@
 import "dart:async";
 
+import "package:flutter/foundation.dart";
+
 /// 命令回调类型
 typedef CommandCallback = void Function(String command, Map<String, dynamic> params);
 
@@ -22,37 +24,37 @@ class VoiceCommandProcessor {
   void initializeDefaultCommands() {
     // 天气查询
     registerCommand("weather", (command, params) {
-      print("执行命令: 查询天气");
+      debugPrint("执行命令: 查询天气");
       // TODO: 集成天气API
     });
 
     // 设置闹钟
     registerCommand("alarm", (command, params) {
-      print("执行命令: 设置闹钟 - ${params['time']}");
+      debugPrint("执行命令: 设置闹钟 - ${params['time']}");
       // TODO: 集成闹钟功能
     });
 
     // 发送消息
     registerCommand("message", (command, params) {
-      print("执行命令: 发送消息给 ${params['recipient']}");
+      debugPrint("执行命令: 发送消息给 ${params['recipient']}");
       // TODO: 集发消息功能
     });
 
     // 播放音乐
     registerCommand("music", (command, params) {
-      print("执行命令: 播放音乐 - ${params['song']}");
+      debugPrint("执行命令: 播放音乐 - ${params['song']}");
       // TODO: 集成音乐播放器
     });
 
     // 查询日程
     registerCommand("schedule", (command, params) {
-      print("执行命令: 查询日程");
+      debugPrint("执行命令: 查询日程");
       // TODO: 集成日程查询
     });
 
     // 打开应用
     registerCommand("open_app", (command, params) {
-      print("执行命令: 打开应用 - ${params['app_name']}");
+      debugPrint("执行命令: 打开应用 - ${params['app_name']}");
       // TODO: 集成应用启动
     });
   }
@@ -64,7 +66,7 @@ class VoiceCommandProcessor {
 
   /// 处理语音命令
   Future<void> processCommand(String recognizedText) async {
-    print("处理语音命令: $recognizedText");
+    debugPrint("处理语音命令: $recognizedText");
 
     // 简单的命令匹配逻辑（实际应用中需要使用NLP）
     final command = _parseCommand(recognizedText);
@@ -74,10 +76,10 @@ class VoiceCommandProcessor {
       if (handler != null) {
         handler(command['name']!, command['params'] ?? {});
       } else {
-        print("未找到命令处理器: ${command['name']}");
+        debugPrint("未找到命令处理器: ${command['name']}");
       }
     } else {
-      print("无法解析命令: $recognizedText");
+      debugPrint("无法解析命令: $recognizedText");
     }
   }
 

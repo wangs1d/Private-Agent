@@ -134,7 +134,7 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
   }
 
   /**
-   * 构造 extraBody：thinking 开关 + fastProfile（Fast 模式跳过强制 tool_choice）。
+   * 构造 extraBody：thinking 开关 + fastProfile（对话面轻量档跳过强制 tool_choice）。
    * 仅用于工具分支（applyExtraBodyToPlainRequest 默认 false，非工具分支不 spread）。
    */
   protected buildExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> | undefined {
