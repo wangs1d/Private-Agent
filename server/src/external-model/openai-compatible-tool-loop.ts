@@ -27,6 +27,7 @@ import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { OBS_RECALL_CHAT_TOOL } from "./builtin-chat-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
 import { getPhoneBridgeChatTools } from "../tools/phone-bridge-chat-tools.js";
+import { MESSAGE_HUB_CHAT_TOOL_DEFINITIONS } from "../tools/message-hub-chat-tools.js";
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import { INTERNET_INTELLIGENCE_CHAT_TOOLS } from "../tools/internet-intelligence-chat-tools.js";
 import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
@@ -799,6 +800,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...DEVICE_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
     ...getPhoneBridgeChatTools(),
+    ...MESSAGE_HUB_CHAT_TOOL_DEFINITIONS,
     BROWSER_SESSION_LIST_CHAT_TOOL,
     ...SELF_PROGRAMMING_CHAT_TOOLS,
     ...capabilityModuleTools,
@@ -884,8 +886,8 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   },
   {
     category: 'social',
-    keywords: ['好友', 'friend', '联系人', 'contact', '消息', 'message', '发送', 'send', '接收', 'receive', '请求', 'request', 'agent', 'peer', '中继', 'relay', '配对', 'pair'],
-    toolNames: ['agent.link.list_friends', 'agent.link.list_friend_requests', 'agent.link.send_friend_request', 'agent.link.respond_friend_request', 'agent.send_to_peer']
+    keywords: ['好友', 'friend', '联系人', 'contact', '消息', 'message', '发送', 'send', '接收', 'receive', '请求', 'request', 'agent', 'peer', '中继', 'relay', '配对', 'pair', '未读', '微信', 'wechat', 'qq', '飞书', 'feishu', '短信', 'sms', '有人找', '回消息', '看消息', '查收'],
+    toolNames: ['agent.link.list_friends', 'agent.link.list_friend_requests', 'agent.link.send_friend_request', 'agent.link.respond_friend_request', 'agent.send_to_peer', 'messages.overview', 'messages.list_conversations', 'messages.read_conversation', 'messages.reply', 'messages.mark_read', 'messages.suggest_reply']
   },
   {
     category: 'phone',
@@ -1421,10 +1423,9 @@ export function foldOldWaveToolChains(
       const lines: string[] = [];
       for (const tm of chain.slice(1)) {
         const raw = typeof tm.content === "string" ? tm.content : JSON.stringify(tm.content ?? "");
+        const callId = (tm as { tool_call_id?: unknown }).tool_call_id;
         const obsId =
-          obsIdForToolCall && typeof tm.tool_call_id === "string"
-            ? obsIdForToolCall(tm.tool_call_id)
-            : undefined;
+          obsIdForToolCall && typeof callId === "string" ? obsIdForToolCall(callId) : undefined;
         const obsSuffix = obsId ? ` [obs_recall id="${obsId}" 可分页读回原文]` : "";
         lines.push(`- ${names}[结果]: ${safeTruncateDigest(raw, digestChars)}${obsSuffix}`);
       }
@@ -2431,7 +2432,9 @@ export async function streamCompletionWithTools(
       const failureReminder = !exec.ok
         ? buildToolFailureReminder(wireToolName, fullToolContent)
         : "";
-      const appendedHints = [sufficiencyHint, failureReminder]
+      // ObservationPack：压缩点归档成功时附读回提示（排在最前，紧贴被压缩的结果原文）。
+      const obsHint = settled.status === "fulfilled" ? settled.value.obsHint : "";
+      const appendedHints = [obsHint, sufficiencyHint, failureReminder]
         .filter(Boolean)
         .join("\n");
       messages.push({

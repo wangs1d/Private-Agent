@@ -183,6 +183,9 @@ export async function compactToolOutputForLlm(
   const rawText = JSON.stringify(rawPayload);
   const rawBytes = Buffer.byteLength(rawText, "utf8");
   const maxChars = resolveMaxChars(input);
+  // 归档用完整原文（未 strip 的原始结果序列化）：stripKeys 会截短数组/丢元数据键，
+  // 作为「读回原文」必须保真，故与内部压缩管线用的 rawText 区分开。
+  const originalText = JSON.stringify(input.result);
 
   if (!isTokenJuiceEnabled()) {
     const content = buildStructuredFallback(rawText, maxChars);
@@ -191,7 +194,7 @@ export async function compactToolOutputForLlm(
       rawBytes,
       compactBytes: Buffer.byteLength(content, "utf8"),
       compacted: content.length < rawText.length,
-      rawText,
+      rawText: originalText,
     };
   }
 
@@ -221,7 +224,7 @@ export async function compactToolOutputForLlm(
       compactBytes: Buffer.byteLength(content, "utf8"),
       ruleId: result.trace?.matchedReducer ?? result.classification.matchedReducer,
       compacted: content.length < rawText.length,
-      rawText,
+      rawText: originalText,
     };
   } catch {
     const content = buildStructuredFallback(rawText, maxChars);
@@ -230,7 +233,7 @@ export async function compactToolOutputForLlm(
       rawBytes,
       compactBytes: Buffer.byteLength(content, "utf8"),
       compacted: content.length < rawText.length,
-      rawText,
+      rawText: originalText,
     };
   }
 }

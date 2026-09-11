@@ -47,6 +47,8 @@ export type ObsRecallOutcome =
   | {
       ok: true;
       result: {
+        /** 与其他工具结果一致的自报成功标志（tool 消息直接序列化 result）。 */
+        ok: true;
         id: string;
         tool: string;
         totalChars: number;
@@ -80,12 +82,14 @@ export class ObservationPack {
    */
   archive(toolName: string, toolCallId: string | undefined, rawText: string): ArchivedObservation | null {
     if (typeof rawText !== "string" || rawText.length < OBS_PACK_ARCHIVE_MIN_CHARS) return null;
+    // 单条即超总上限：放弃归档，且不为此淘汰既有条目
+    if (rawText.length > OBS_PACK_MAX_TOTAL_CHARS) return null;
     while (
       this.entries.size + 1 > OBS_PACK_MAX_ENTRIES ||
       this.totalChars + rawText.length > OBS_PACK_MAX_TOTAL_CHARS
     ) {
       const oldestId = this.entries.keys().next().value;
-      if (oldestId === undefined) return null; // 单条即超总上限等极端情况：放弃归档
+      if (oldestId === undefined) return null;
       this.dropEntry(oldestId);
     }
     const id = `obs_${++this.seq}`;
@@ -138,6 +142,7 @@ export class ObservationPack {
     return {
       ok: true,
       result: {
+        ok: true,
         id: entry.id,
         tool: entry.toolName,
         totalChars: entry.chars,

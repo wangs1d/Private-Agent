@@ -64,15 +64,15 @@ export class ToolRerankingPipeline {
       }))
       .map((candidate) => ({
         ...candidate,
-        final_score: businessScore(candidate, input.query_constraints),
+        final_score: businessScore(candidate, input.query_constraints, input.intent_capabilities),
       }))
       .sort((a, b) => b.final_score - a.final_score);
 
     const topForLlm = crossEncoded.slice(0, 10);
     // 采信门禁：词面通道还有信号（head 任一候选 keyword_score > 0）就不进外部
-    // 重排——golden 的词面+校准体系已调优，交叉编码接管是负收益（2026-09-12
-    // A/B 实测：无条件接管 golden top-1 19/20→15/16）。词面全失效（纯改写
-    // query）才交给神经重排，llm_seen_count 保持 0，调用方的 boost 照常排序。
+    // 重排——词面+校准已调优的查询上交叉编码接管是负收益（2026-09-12 A/B 实测：
+    // 无条件接管 golden top-1 19/20→15/16）。词面全失效（纯改写 query）才交给
+    // 神经重排；llm_seen_count=0 让调用方 boost 照常排序，基线路径零扰动。
     const lexicalDead =
       this.llmReranker && topForLlm.every((c) => (c.components?.keyword_score ?? 0) <= 0);
     if (!this.llmReranker || !lexicalDead || topForLlm.length <= 1) {
@@ -163,9 +163,27 @@ function crossEncoderScore(
   return round4(Math.max(0, Math.min(1, score)));
 }
 
+/** 意图动作 → 同义动作族（与 adaptive-catalog normalizeActionAliases 同源）：检出
+ * 写动词放开的查询（「提醒我开会」=schedule/create），创建动作族候选应在同分的
+ * 删除/列举候选之前——2026-09-12 golden 实证：create_from_text 与 delete_task
+ * 同分 0.491，靠数组序定名次导致 top-3 漂移。 */
+const ACTION_FAMILY: Record<string, string> = {
+  schedule: "create",
+  plan: "create",
+  add: "create",
+  set: "create",
+  fetch: "query",
+  read: "query",
+  list: "query",
+  inspect: "query",
+  dial: "call",
+  dispatch: "call",
+};
+
 function businessScore(
   candidate: HybridRetrievedResource,
   constraints: QueryConstraints,
+  intentCapabilities?: string[],
 ): number {
   // 第三层：业务规则（与 Python reranking.py:77-98 一致：只读请求偏好
   // query/search/get 能力 +0.1，base_score 偏置 (base-0.5)*0.2）。
@@ -175,6 +193,25 @@ function businessScore(
   if (constraints.read_only) {
     const caps = record.level1.capability.join(" ").toLowerCase();
     if (["query", "search", "get"].some((k) => caps.includes(k))) bonus += 0.1;
+  }
+  // 意图动作对齐：意图能力（含其同义族）与候选能力后缀相交 +0.05——只对
+  // 「检出写意图/动作明确」的查询生效，幅度小于词面分量，不扰动其他排序。
+  if (intentCapabilities?.length) {
+    const wanted = new Set<string>();
+    for (const cap of intentCapabilities) {
+      const suffix = cap.split(".")[1]?.toLowerCase();
+      if (suffix) {
+        wanted.add(suffix);
+        const family = ACTION_FAMILY[suffix];
+        if (family) wanted.add(family);
+      }
+    }
+    if (wanted.size > 0) {
+      const hit = record.level1.capability.some((cap) =>
+        wanted.has(cap.split(".")[1]?.toLowerCase() ?? ""),
+      );
+      if (hit) bonus += 0.05;
+    }
   }
   bonus += (record.level1.base_score - 0.5) * 0.2;
   if (record.level1.latency_ms > constraints.max_latency_ms) bonus -= 0.08;
