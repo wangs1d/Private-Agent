@@ -174,16 +174,21 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
       if (missing.length > 0) {
         void ensureToolEmbeddings(missing).then((stats) => {
           if (stats.computed > 0) {
-            // 补完后把新算的 vector 灌进 catalog 的索引，下一次 searchDeferredTools 立刻可用
+            // 补完后把新算的 vector 灌进 catalog 的索引，下一次 searchDeferredTools 立即可用
             const refreshed = getToolEmbeddingsForCatalog(
               missing.map((m) => m.registryName),
             );
             for (const [name, vec] of refreshed.entries()) {
               embeddingIndex.ingest(name, vec);
             }
+            // 向量集变化后 ANN 可能值得重建（千级以下自动跳过）
+            void embeddingIndex.ensureAnn();
           }
         });
       }
+    } else {
+      // N4：目录规模达标时预热 ANN（hnswlib-node 可用才有实际动作）
+      void embeddingIndex.ensureAnn();
     }
   }
 
@@ -384,11 +389,10 @@ function searchWithinTools(
 
   if (useEmbedding) {
     const cfg = getToolSearchConfig();
-    // 先全量排序，再按 entry 子集过滤 + 动态阈值
-    const allEmb = catalog.embeddingIndex.rankAll(options!.queryVector!);
-    // 只保留在子集内的
+    // 子集内余弦排序（N4）：只扫类别/过滤子集而非全目录，阈值相对子集内 max——
+    // 弱类别不再被全局 max 压制，千级目录上也是数量级的扫描量下降
     const subsetNames = new Set(entries.map((e) => e.registryName));
-    const filteredEmb = allEmb.filter((h) => subsetNames.has(h.id));
+    const filteredEmb = catalog.embeddingIndex.rankAllWithin(subsetNames, options!.queryVector!);
     const embHits = filterByDynamicThreshold(filteredEmb, {
       absoluteFloor: cfg.embeddingDynamicFloor,
       relativeRatio: cfg.embeddingDynamicRatio,

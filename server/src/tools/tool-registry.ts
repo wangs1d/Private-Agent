@@ -1,4 +1,5 @@
 import type { WorldService } from "@private-ai-agent/agent-world";
+import { UnifiedErrorCode } from "@private-ai-agent/agent-protocol";
 import {
   getToolMetadata as inferToolMetadata,
   type ToolMetadata,
@@ -234,14 +235,20 @@ export class ToolRegistry {
       desktopBridgeOnline: context.desktopBridgeOnline,
       phoneBridgeOnline: context.phoneBridgeOnline,
     })) {
-      return { ok: false, result: { error: sandboxDeniedToolMessage(registryName) } };
+      return {
+        ok: false,
+        result: { error: sandboxDeniedToolMessage(registryName), errorCode: UnifiedErrorCode.ToolDenied },
+      };
     }
 
     const availability = await this.checkAvailability(registryName, context);
     if (!availability.ok) {
       return {
         ok: false,
-        result: { error: availability.reason ?? `宸ュ叿褰撳墠涓嶅彲鐢? ${registryName}` },
+        result: {
+          error: availability.reason ?? `工具当前不可用: ${registryName}`,
+          errorCode: UnifiedErrorCode.ToolUnavailable,
+        },
       };
     }
 
@@ -256,7 +263,10 @@ export class ToolRegistry {
       ) {
         return {
           ok: false,
-          result: { error: `未拥有该社区技能，无法调用：${registryName}（请在世界商店购买后再试）` },
+          result: {
+            error: `未拥有该社区技能，无法调用：${registryName}（请在世界商店购买后再试）`,
+            errorCode: UnifiedErrorCode.ToolDenied,
+          },
         };
       }
       const skillResult = await this.skillManager.execute(registryName, input, context);
@@ -267,13 +277,24 @@ export class ToolRegistry {
       }
       // 如果 Skill 不存在，继续尝试传统工具
       if (skillResult.error?.code !== "SKILL_NOT_FOUND") {
-        return { ok: false, result: { error: skillResult.error?.message || "Skill 执行失败" } };
+        return {
+          ok: false,
+          result: {
+            error: skillResult.error?.message || "Skill 执行失败",
+            errorCode: UnifiedErrorCode.ToolExecutionFailed,
+          },
+        };
       }
     }
 
     // 回退到传统工具执行
     const tool = this.tools.get(registryName);
-    if (!tool) return { ok: false, result: { error: `未知工具: ${registryName}` } };
+    if (!tool) {
+      return {
+        ok: false,
+        result: { error: `未知工具: ${registryName}`, errorCode: UnifiedErrorCode.ToolUnknown },
+      };
+    }
 
     // 工具结果缓存：查询类工具在 TTL 内复用结果
     if (this.isCacheableTool(registryName)) {
@@ -299,7 +320,7 @@ export class ToolRegistry {
         this.toolCache.set(cacheKey, entry);
         return entry.result;
       } catch (error) {        const message = error instanceof Error ? error.message : "工具执行失败";
-        return { ok: false, result: { error: message } };
+        return { ok: false, result: { error: message, errorCode: UnifiedErrorCode.ToolExecutionFailed } };
       }
     }
 
@@ -310,7 +331,7 @@ export class ToolRegistry {
       return { ok: true, result: safeResult };
     } catch (error) {
       const message = error instanceof Error ? error.message : "工具执行失败";
-      return { ok: false, result: { error: message } };
+      return { ok: false, result: { error: message, errorCode: UnifiedErrorCode.ToolExecutionFailed } };
     }
   }
 

@@ -1,19 +1,14 @@
 /**
- * tool 召回延迟基准（2026-09-06）。
+ * tool 召回延迟基准（2026-09-06 建；2026-09-11 收口——Python tool-router 已删除，
+ * 进程内 adaptive 是唯一检索管线，原场景 2/3（死服务降级/真实 primary）随之移除；
+ * 同日补神经场景：sidecar 在线时对同一查询集再跑一遍「全开」基准，开/关双跑）。
  *
- * 量化 tool_discover 召回在三种形态下的端到端耗时，给「快速通道 2 波预算」
- * 和容量规划提供数字：
- *
- *   1. 进程内 adaptive（backend=adaptive）：冷启动（含目录/索引构建）与热查询
- *      p50/p95——这是熔断/降级后的真实路径，也是预算的下界；
- *   2. 死服务降级（backend=tool_router + HTTP 指向拒绝连接端口 + stdio 禁用）：
- *      首查代价（失败+熔断记账）与熔断后代价——量化端点守卫的价值；
- *   3. 真实 primary（TOOL_ROUTER_HTTP_URL 指向活服务时自动探测）：单查延迟分布。
+ * 量化 tool_discover 召回的端到端耗时，给「快速通道 2 波预算」和容量规划提供数字：
+ * 冷启动（含目录/索引构建）与热查询 p50/p95。
  *
  * 用法：
- *   npx tsx scripts/eval-tool-recall.ts                       # 全部场景
- *   npx tsx scripts/eval-tool-recall.ts --repeat 50           # 加大采样
- *   npx tsx scripts/eval-tool-recall.ts --scenario adaptive   # 只跑一个场景
+ *   npx tsx scripts/eval-tool-recall.ts --repeat 50
+ *   npx tsx scripts/eval-tool-recall.ts --scenario neural   # 需要 sidecar 在线，否则自动跳过
  */
 import "dotenv/config";
 import { performance } from "node:perf_hooks";
@@ -23,7 +18,6 @@ process.env.PA_DATA_DIR = process.env.PA_DATA_DIR || join(tmpdir(), "pa-eval-too
 process.env.AGENT_TOKENJUICE_ENABLED = "0";
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
 process.env.AGENT_TOOL_SEARCH_EMBEDDING = "off";
-process.env.TOOL_ROUTER_STDIO_DISABLED = "1"; // 基准里绝不 spawn Python
 
 import { join } from "node:path";
 
@@ -32,7 +26,16 @@ function arg(name: string, fallback: string): string {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1]! : fallback;
 }
 const REPEAT = Math.max(3, Number(arg("repeat", "30")));
-const SCENARIO = arg("scenario", "all");
+const SCENARIO = arg("scenario", "adaptive");
+
+// 场景 1（adaptive）要测纯降级路径：神经注入点在模块 import 时定型，
+// 必须在引入 index.js 之前把开关钉死（sidecar 在线与否都不影响本场景数字）
+if (SCENARIO === "adaptive") {
+  process.env.AGENT_NEURAL_SIDECAR_URL = "http://127.0.0.1:1";
+  process.env.AGENT_NEURAL_EMBED_ENABLED = "off";
+  process.env.AGENT_NEURAL_RERANK_ENABLED = "off";
+  process.env.AGENT_NEURAL_INTENT_ENABLED = "off";
+}
 
 function pct(samples: number[], p: number): number {
   const sorted = [...samples].sort((a, b) => a - b);
@@ -48,11 +51,6 @@ async function main(): Promise<void> {
   const { prepareToolsWithToolSearch, executeToolSearchBridge } = await import(
     "../src/tools/tool-search/index.js"
   );
-  const {
-    resetRouterEndpointGuard,
-    getRouterEndpointGuard,
-  } = await import("../src/tools/tool-search/router-endpoint-guard.js");
-
   const QUERIES = [
     "北京今天天气怎么样",
     "找几张猫的照片",
@@ -66,10 +64,8 @@ async function main(): Promise<void> {
     "今天有什么热搜",
   ];
 
-  // ── 场景 1：进程内 adaptive ──
+  // ── 进程内 adaptive（唯一检索管线；本场景 embedding/神经全关）──
   if (SCENARIO === "all" || SCENARIO === "adaptive") {
-    process.env.AGENT_TOOL_SEARCH_BACKEND = "adaptive";
-    resetRouterEndpointGuard();
     const prepared = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
     const catalog = prepared.deferredCatalog;
 
@@ -84,7 +80,7 @@ async function main(): Promise<void> {
       await executeToolSearchBridge("tool_discover", { query: `${q} #${i}`, limit: 5 }, catalog);
       samples.push(performance.now() - t);
     }
-    console.log("=== 场景 1：进程内 adaptive（降级安全路径）===");
+    console.log("=== 场景 1：进程内 adaptive（降级安全路径，神经全关）===");
     console.log(
       `  工具数: ${catalog.entries.length} | 冷启动(含索引): ${fmt(coldMs)} | 热查询 ${REPEAT} 次: p50=${fmt(pct(samples, 50))} p95=${fmt(pct(samples, 95))} max=${fmt(Math.max(...samples))}`,
     );
@@ -92,72 +88,54 @@ async function main(): Promise<void> {
     console.log("");
   }
 
-  // ── 场景 2：死服务降级（守卫价值）──
-  if (SCENARIO === "all" || SCENARIO === "dead") {
-    process.env.AGENT_TOOL_SEARCH_BACKEND = "tool_router";
-    process.env.TOOL_ROUTER_HTTP_URL = "http://127.0.0.1:9"; // 拒绝连接
-    process.env.TOOL_ROUTER_PRIMARY_FAILURES_TO_OPEN = "2";
-    process.env.TOOL_ROUTER_PRIMARY_BUDGET_MS = "1000";
-    resetRouterEndpointGuard();
+  // ── 神经全开（sidecar 在线才跑；量化 N1/N2/N3 的延迟代价）──
+  if (SCENARIO === "all" || SCENARIO === "neural") {
+    const { probeNeuralSidecar } = await import("../src/tools/tool-search/neural-sidecar.js");
+    if (!(await probeNeuralSidecar(1_000))) {
+      console.log("=== 场景 2：神经全开 —— sidecar 不可达，跳过（降级路径即场景 1）===");
+      return;
+    }
+    // 配置读取是调用时的（getToolSearchConfig 每次现读 env），此处翻转即生效；
+    // 模块级注入点（intent 神经路由 / rerank 钩子）默认 auto 已挂载，无需重启。
+    process.env.AGENT_TOOL_SEARCH_EMBEDDING = "auto";
+    process.env.AGENT_TOOL_EMBEDDING_PROVIDER = "local";
+
+    const { ensureToolEmbeddings, invalidateEmbeddingCache } = await import(
+      "../src/tools/tool-search/tool-embedding.js"
+    );
+    invalidateEmbeddingCache();
+    const first = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
+    const embStart = performance.now();
+    const stats = await ensureToolEmbeddings(
+      first.deferredCatalog.entries.map((e) => ({
+        registryName: e.registryName,
+        searchText: e.embeddingInput || e.searchText,
+      })),
+    );
+    const embMs = performance.now() - embStart;
+
     const prepared = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
     const catalog = prepared.deferredCatalog;
 
-    const perQuery: number[] = [];
-    for (let i = 0; i < Math.min(6, QUERIES.length); i++) {
+    const samples: number[] = [];
+    for (let i = 0; i < REPEAT; i++) {
+      const q = QUERIES[i % QUERIES.length]!;
       const t = performance.now();
-      await executeToolSearchBridge("tool_discover", { query: `${QUERIES[i]} #d${i}`, limit: 5 }, catalog);
-      perQuery.push(performance.now() - t);
+      await executeToolSearchBridge("tool_discover", { query: `${q} #${i}`, limit: 5 }, catalog);
+      samples.push(performance.now() - t);
     }
-    const snap = getRouterEndpointGuard().snapshot();
-    console.log("=== 场景 2：primary 服务不可用（守卫降级链）===");
-    console.log(`  逐查询耗时: ${perQuery.map(fmt).join(" → ")}`);
+    console.log("=== 场景 2：神经全开（sidecar 在线：embed + rerank + intent）===");
     console.log(
-      `  解读: 第 1-2 次含连接失败+熔断记账（无守卫时这里是 30s HTTP 超时或 Python 冷启动 60s），第 3 次起熔断打开 → 纯进程内延迟`,
+      `  工具向量: computed=${stats.computed} reused=${stats.reused}（冷启动一次性 ${fmt(embMs)}，磁盘缓存后 0）`,
     );
-    console.log(`  熔断态: ${snap.state} | 连败 ${snap.consecutiveFailures} | 预算中止 ${snap.totalBudgetAborts} 次`);
-    console.log("");
-    delete process.env.TOOL_ROUTER_HTTP_URL;
-    process.env.AGENT_TOOL_SEARCH_BACKEND = "adaptive";
-    resetRouterEndpointGuard();
-  }
-
-  // ── 场景 3：真实 primary（服务活着才跑）──
-  const httpUrl = process.env.TOOL_ROUTER_HTTP_URL?.trim();
-  if (httpUrl && (SCENARIO === "all" || SCENARIO === "live")) {
-    const alive = await Promise.race([
-      fetch(`${httpUrl.replace(/\/$/, "")}/docs`, { signal: AbortSignal.timeout(400) })
-        .then((r) => r.ok)
-        .catch(() => false),
-    ]);
-    if (alive) {
-      process.env.AGENT_TOOL_SEARCH_BACKEND = "tool_router";
-      resetRouterEndpointGuard();
-      const prepared = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
-      const catalog = prepared.deferredCatalog;
-      const samples: number[] = [];
-      for (let i = 0; i < REPEAT; i++) {
-        const q = `${QUERIES[i % QUERIES.length]} #l${i}`;
-        const t = performance.now();
-        await executeToolSearchBridge("tool_discover", { query: q, limit: 5 }, catalog);
-        samples.push(performance.now() - t);
-      }
-      console.log("=== 场景 3：真实 primary（TOOL_ROUTER_HTTP_URL）===");
-      console.log(
-        `  ${REPEAT} 次查询: p50=${fmt(pct(samples, 50))} p95=${fmt(pct(samples, 95))} max=${fmt(Math.max(...samples))}`,
-      );
-      console.log(
-        `  判定: p95 若 > 快速通道预算节拍（建议 <300ms），应考虑 ${"AGENT_TOOL_SEARCH_BACKEND=adaptive"} 或调低 TOOL_ROUTER_PRIMARY_BUDGET_MS`,
-      );
-      process.env.AGENT_TOOL_SEARCH_BACKEND = "adaptive";
-      resetRouterEndpointGuard();
-    } else {
-      console.log("=== 场景 3：真实 primary ===");
-      console.log(`  ${httpUrl} 不可达（400ms 探测超时），跳过。启动 tool-router 后可复测。`);
-    }
+    console.log(
+      `  热查询 ${REPEAT} 次: p50=${fmt(pct(samples, 50))} p95=${fmt(pct(samples, 95))} max=${fmt(Math.max(...samples))}`,
+    );
+    console.log("  验收口径（方案 §1/§2）：embedding 通道冷启动 p95 < 100ms、低置信增量 < 120ms");
     console.log("");
   }
 
-  console.log("结论模板：召回延迟预算 = 熔断后 p95（进程内）→ 场景 1 数值即下界；primary 可用性由端点守卫保证不劣化用户体验。");
+  console.log("结论模板：召回延迟预算 = 进程内 p95（上方数值）即上界——检索不再依赖任何外部服务可用性。");
 }
 
 main().catch((err) => {

@@ -16,7 +16,7 @@ import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
  * 语义分类承担，"有没有真的查"由工具循环的出口自检（风格判定）承担，
  * 不再用话题关键词在执行层预判。
  *
- * 注：weather_get_local 不强制路由，由 tool-router 检索召回。
+ * 注：weather_get_local 不强制路由，由进程内延迟目录检索召回。
  */
 
 const DIRECT_CLOCK_OR_LOCATION_RE =

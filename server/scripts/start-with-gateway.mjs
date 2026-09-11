@@ -3,7 +3,6 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as dotenvConfig } from "dotenv";
 import net from "node:net";
-import { spawnToolRouter } from "../../scripts/spawn-tool-router.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverDir = resolve(__dirname, "..");
@@ -94,11 +93,7 @@ async function main() {
     }
   }
 
-  // 2. 异步并行启动 tool-router FastAPI（未配置/端口占用时自动跳过）
-  const toolRouterChild = await spawnToolRouter();
-  if (toolRouterChild) children.push(toolRouterChild);
-
-  // 3. 启动 Node 服务
+  // 2. 启动 Node 服务（2026-09-11：Python tool-router 已删除，检索进程内完成）
   spawnProcess("node", ["--max-old-space-size=512", "dist/index.js"], { cwd: serverDir });
 
   process.once("SIGINT", killAll);

@@ -17,6 +17,47 @@ function mustBeOnline(ctx: ToolContext): string {
   return "";
 }
 
+/** 大陆与常见国际紧急号码：Agent 永远不允许代拨，误触发一律拒绝 */
+const EMERGENCY_NUMBERS = new Set([
+  "110",
+  "119",
+  "120",
+  "122",
+  "112",
+  "114",
+  "999",
+  "911",
+  "000",
+]);
+
+/**
+ * 拨号号码归一化与安全校验：仅保留数字与 `+`（国际区号前缀），
+ * 拒绝紧急号码与明显不合法的长度。返回 null 表示拒绝拨打。
+ */
+export function normalizeDialNumber(raw: string): string | null {
+  const digits = raw.trim().replace(/[^\d+]/g, "");
+  const bare = digits.replace(/\+/g, "");
+  if (!bare || EMERGENCY_NUMBERS.has(bare)) return null;
+  // 5 位下限：短号（如 10086/95588）放行；20 位上限：E.164 最长 15 位 + 冗余
+  if (bare.length < 5 || bare.length > 20) return null;
+  return digits;
+}
+
+/**
+ * `phone.dial` 同轮去重：同一轮（chatUserMessageId）+ 同一被叫只拨一次。
+ * 跨轮（用户说「再打一次」）重新放行；chatUserMessageId 缺失时退化为
+ * sessionId + 30s 短窗口，避免完全无界。模式照抄 agent-phone-tools.ts。
+ */
+const DIAL_DEDUP_TTL_MS = 30_000;
+const dialDedupCache = new Map<string, number>();
+
+function cleanDialDedupCache(): void {
+  const now = Date.now();
+  for (const [key, ts] of dialDedupCache) {
+    if (now - ts > DIAL_DEDUP_TTL_MS) dialDedupCache.delete(key);
+  }
+}
+
 export function registerPhoneBridgeTools(registry: ToolRegistry, deps: PhoneBridgeToolsDeps) {
   registry.register("phone.battery", async (_params, ctx: ToolContext) => {
     const actorId = resolveActorId(ctx);
@@ -78,4 +119,69 @@ export function registerPhoneBridgeTools(registry: ToolRegistry, deps: PhoneBrid
     if (err) return { ok: false, error: err };
     return deps.bridge.invoke(actorId, "call_log", { limit: params.limit ?? 20 });
   });
+
+  registry.register("phone.dial", async (params, ctx: ToolContext) => {
+    const actorId = resolveActorId(ctx);
+    const err = mustBeOnline(ctx);
+    if (err) return { ok: false, error: err };
+
+    const raw = String(params.number ?? params.phoneNumber ?? "").trim();
+    if (!raw) return { ok: false, error: "缺少 number（被叫号码）" };
+    const number = normalizeDialNumber(raw);
+    if (!number) {
+      return {
+        ok: false,
+        error: `号码不合法或为紧急号码，已拒绝拨打：${raw}`,
+      };
+    }
+
+    // 同轮去重：防模型一轮内重复拨打同一号码
+    cleanDialDedupCache();
+    const roundId = ctx.chatUserMessageId || ctx.sessionId;
+    const dedupKey = `${actorId}:${roundId}:${number}`;
+    const lastAt = dialDedupCache.get(dedupKey);
+    const now = Date.now();
+    if (lastAt && now - lastAt < DIAL_DEDUP_TTL_MS) {
+      return {
+        ok: true,
+        deduped: true,
+        dialed: number,
+        summary: "(同轮重复调用已拦截) 本轮已拨打过该号码。",
+      };
+    }
+
+    const result = await deps.bridge.invoke(actorId, "dial", {
+      number,
+      contactName: String(params.contactName ?? "").trim(),
+      reason: String(params.reason ?? "").trim(),
+      // direct=手机端确认弹窗后直接拨出；draft=仅预填拨号盘，用户手动按键
+      mode: params.mode === "draft" ? "draft" : "direct",
+    });
+
+    if (result.ok) {
+      dialDedupCache.set(dedupKey, now);
+    }
+    return { ...result, summary: summarizeDialState(result) };
+  });
+}
+
+/** 把手机端回执的 state 翻译成模型可直接引用的一句话结果 */
+function summarizeDialState(result: Record<string, unknown>): string {
+  const state = String(result.state ?? "");
+  if (state === "cancelled") {
+    return "手机端确认被取消（用户拒绝或超时未确认），未拨出。";
+  }
+  if (!result.ok) {
+    return `拨号未完成：${String(result.error ?? state ?? "手机端异常")}。不要回复用户「做不到」，可提示用户在手机上确认或稍后再试。`;
+  }
+  switch (state) {
+    case "dialing":
+      return "已在手机上确认并拨出，正在呼叫对方。";
+    case "dialer_opened":
+      return "已打开手机拨号盘并填好号码，等用户按下拨号键即拨出。";
+    case "no_dialer":
+      return "手机上没有可用的拨号应用，未拨出。";
+    default:
+      return "拨号请求已送达手机。";
+  }
 }

@@ -23,6 +23,7 @@ import { ToolKnowledgeGraphService } from "../../tools/tool-search/knowledge-gra
 import { ResourceLazyLoader } from "../../tools/tool-search/lazy-loader/lazy-loader.js";
 import { McpConnectionPool } from "../../tools/tool-search/lazy-loader/mcp-connection-pool.js";
 import { ToolRerankingPipeline } from "../../tools/tool-search/reranking/reranking-pipeline.js";
+import { createNeuralLlmReranker } from "../../tools/tool-search/reranking/neural-reranker.js";
 import {
   feedbackBatchSchema,
   feedbackReportSchema,
@@ -387,7 +388,8 @@ async function getRuntime(): Promise<ToolSearchRuntime> {
         graph,
         lazyLoader,
         mcpPool: new McpConnectionPool(),
-        reranker: new ToolRerankingPipeline(),
+        // 与检索主链路同构（金丝雀评估才反映生产行为）：神经重排钩子一并注入
+        reranker: new ToolRerankingPipeline({ llmReranker: createNeuralLlmReranker() }),
         learner,
         circuitBreaker: new ToolFailureCircuitBreaker(store, { historyStore: history }),
         feedbackQueue,

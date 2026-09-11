@@ -1,5 +1,8 @@
 allprojects {
     repositories {
+        // CN 镜像优先，失败回落官方源（与 settings.gradle.kts 的 pluginManagement 对应）
+        maven("https://maven.aliyun.com/repository/google")
+        maven("https://maven.aliyun.com/repository/central")
         google()
         mavenCentral()
     }

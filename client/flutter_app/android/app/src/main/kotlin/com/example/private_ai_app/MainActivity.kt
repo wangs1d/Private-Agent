@@ -8,6 +8,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.plugins.add(MobileBriefingPlugin(this))
+        flutterEngine.plugins.add(PhoneBridgePlugin())
     }
 
     override fun onNewIntent(intent: Intent) {

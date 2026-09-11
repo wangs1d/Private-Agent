@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { TurnBudget } from "../agent/turn-budget.js";
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
 import type { WorldService } from "@private-ai-agent/agent-world";
@@ -1924,9 +1925,18 @@ if (route.plane === "task") {
        * 上下文零业务 schema。默认快速起步，失败由派发方升级完整通道。
        */
       toolRecallOnly?: boolean;
+      /**
+       * 单轮 LLM 主路径预算（阶段2-1）：首次进入时自动创建并占用主调用槽位，
+       * 升级重跑（意图升级/出口闸）经 tryUpgrade 扣减，默认上限 3 次。
+       * 递归时随 {...ctx} 透传同一实例，保证整轮共享预算。
+       */
+      turnBudget?: TurnBudget;
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
+    // 预算入口：外部未携带（首次进入/后台派发）则新建并登记主调用
+    const turnBudget = ctx.turnBudget ?? new TurnBudget();
+    if (!ctx.turnBudget) turnBudget.consumeMainPath();
     /** 本轮是否执行过任何工具（出口诚实闸的「动作」一侧证据）。 */
     let toolExecutedThisTurn = false;
     /**
@@ -2297,6 +2307,10 @@ if (route.plane === "task") {
         );
       } catch (err) {
         if (err instanceof ToolIntentWithoutToolsError && this.isChatLane(mode)) {
+          // 阶段2-1：升级重跑纳入 TurnBudget，防止闸门叠加导致最坏耗时无上界
+          if (!turnBudget.tryUpgrade("tool_intent_upgrade")) {
+            throw err;
+          }
           const intentNames = err.toolCalls
             .map((c) => c.name ?? "?")
             .filter((n) => n && n !== "tool_call")
@@ -2308,6 +2322,7 @@ if (route.plane === "task") {
           );
           return this.runStandardLlmPath(actorId, text, "task", opts, {
             ...ctx,
+            turnBudget,
             turnPlan: { budget: 2, capabilities: ["full"], tier: "flash" },
           });
         }
@@ -2351,11 +2366,14 @@ if (route.plane === "task") {
         !toolExecutedThisTurn &&
         dispatchedViaTag === 0 &&
         FRESH_FACT_RE.test(text) &&
-        isDeflectionStyleFallback(full)
+        isDeflectionStyleFallback(full) &&
+        // 阶段2-1：预算耗尽时跳过升级，按现有回复正常收尾
+        turnBudget.tryUpgrade("deflection_gate")
       ) {
         console.info(`[AgentCore] 对话面闪避转任务面：${text.slice(0, 48)}`);
         return this.runStandardLlmPath(actorId, text, "task", opts, {
           ...ctx,
+          turnBudget,
           turnPlan: { budget: 2, capabilities: ["full"], tier: "flash" },
         });
       }
@@ -2368,11 +2386,14 @@ if (route.plane === "task") {
       if (
         this.isChatLane(mode) &&
         ctx.routeIntent === "knowledge_qa" &&
-        isApologyStyleFallback(full.trim())
+        isApologyStyleFallback(full.trim()) &&
+        // 阶段2-1：预算耗尽时跳过升级，按现有回复正常收尾
+        turnBudget.tryUpgrade("knowledge_qa_gate")
       ) {
         console.info(`[AgentCore] 对话面误判转任务面：${text.slice(0, 48)}`);
         return this.runStandardLlmPath(actorId, text, "task", opts, {
           ...ctx,
+          turnBudget,
           turnPlan: { budget: 2, capabilities: ["full"], tier: "flash" },
         });
       }

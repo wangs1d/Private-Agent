@@ -113,10 +113,9 @@ export class IntentRouter {
         intent: query,
         domain_candidates: domains.length ? domains : ["misc"],
         primary_capability: best.primary_capability,
-        confidence: clamp01(
-          subIntents.reduce((sum, item) => sum + item.confidence, 0) /
-            subIntents.length,
-        ),
+        // 与 Python intent_router 一比一对齐：复合任务置信度取子意图最大值、0.95
+        // 上限截断（此前是平均值，系统性低估复合任务置信度、错过高置信短路）
+        confidence: Math.min(0.95, Math.max(...subIntents.map((i) => i.confidence))),
         query_constraints: mergeConstraints(subIntents.map((i) => i.query_constraints)),
         param_extract: Object.assign({}, ...subIntents.map((i) => i.param_extract)),
         is_compound_task: true,
@@ -206,7 +205,7 @@ function cacheKey(input: IntentRouterInput): string {
   return CACHE_PREFIX + hash;
 }
 
-function splitCompoundQuery(query: string): string[] {
+export function splitCompoundQuery(query: string): string[] {
   const parts = query
     .split(/(?:，|,|；|;|然后|并且|同时|以及|\band\b|\bthen\b)/i)
     .map((p) => p.trim())
@@ -214,7 +213,7 @@ function splitCompoundQuery(query: string): string[] {
   return parts.length > 1 ? parts.slice(0, 8) : [query.trim()];
 }
 
-function inferCapability(domain: string, query: string): string {
+export function inferCapability(domain: string, query: string): string {
   const q = query.toLowerCase();
   const capabilityRules: Array<[RegExp, string]> = [
     [/电话|拨号|call|ring/, "phone.call"],
@@ -234,10 +233,16 @@ function inferCapability(domain: string, query: string): string {
   return `${domain}.general`;
 }
 
-function inferConstraints(query: string): QueryConstraints {
+export function inferConstraints(query: string): QueryConstraints {
   const q = query.toLowerCase();
-  const readOnly = /查询|查看|读取|搜索|search|read|show|list|inspect/.test(q);
-  const fast = /快|马上|立刻|快速|fast|quick|asap/.test(q);
+  // 与 Python intent_router._infer_constraints 对齐：缺省视为只读，检出写动词才
+  // 放开写工具。词表在 Python 基础上补「记住|记下|保存」（隐性写意图，Python
+  // 原型漏收导致「记住我妈生日」被当中性查询、写工具被 read_only 过滤），
+  // 以及「定个/定一个/定一下」（口语创建动作：「定个闹钟」，此前同样被当只读查询）。
+  const readOnly = !/\bcreate\b|\bupdate\b|\bdelete\b|\bsend\b|\bexecute\b|\bextract\b|\bparse\b|\bplan\b|\bschedule\b|\bset\b|创建|新建|添加|设置|删除|取消|发送|发.{0,3}短信|打个电话|拨号|呼叫|执行|提取|解析|提醒|安排|预约|计划|注册|转账|支付|下单|购买|买|订|定个|定一个|定一下|记住|记下|保存/.test(
+    q,
+  );
+  const fast = /快|马上|立刻|快速|fast|quick|asap|快点|尽快/.test(q);
   const fileTypeMatch = q.match(/\b(pdf|docx?|xlsx?|csv|json|txt|md|png|jpe?g)\b/i);
   const admin = /删除|管理|权限|系统|admin|delete|configure/.test(q);
   return {
@@ -257,7 +262,7 @@ function mergeConstraints(items: QueryConstraints[]): QueryConstraints {
   };
 }
 
-function extractParams(query: string): Record<string, unknown> {
+export function extractParams(query: string): Record<string, unknown> {
   const urls = Array.from(query.matchAll(/https?:\/\/[^\s，,；;]+/gi)).map(
     (m) => m[0],
   );

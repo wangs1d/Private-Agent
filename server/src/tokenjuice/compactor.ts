@@ -191,6 +191,7 @@ export async function compactToolOutputForLlm(
       rawBytes,
       compactBytes: Buffer.byteLength(content, "utf8"),
       compacted: content.length < rawText.length,
+      rawText,
     };
   }
 
@@ -220,6 +221,7 @@ export async function compactToolOutputForLlm(
       compactBytes: Buffer.byteLength(content, "utf8"),
       ruleId: result.trace?.matchedReducer ?? result.classification.matchedReducer,
       compacted: content.length < rawText.length,
+      rawText,
     };
   } catch {
     const content = buildStructuredFallback(rawText, maxChars);
@@ -228,6 +230,7 @@ export async function compactToolOutputForLlm(
       rawBytes,
       compactBytes: Buffer.byteLength(content, "utf8"),
       compacted: content.length < rawText.length,
+      rawText,
     };
   }
 }

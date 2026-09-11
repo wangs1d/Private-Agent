@@ -5,7 +5,11 @@
  *   - 工具 description 变化时才重新算 embedding（按 text hash 缓存）
  *   - 磁盘 JSON 缓存（data/tool-embeddings.json），避免服务重启后全量重算
  *   - 启动时按需懒加载：首次 searchDeferredTools 时尝试加载 cache，缺失的工具 background 预计算
- *   - 缺 OPENAI_API_KEY / API 失败时降级纯 BM25（不报错）
+ *   - provider 链（N1，docs/neural-retrieval-plan.md）：
+ *       AGENT_TOOL_EMBEDDING_PROVIDER = auto/local → 本地 sidecar 优先，失败回落
+ *       OpenAI API，再失败降级纯 BM25（不报错）；= openai → 跳过 sidecar（回滚开关）
+ *   - 缓存条目与 query LRU 都带模型名：本地 bge（512 维）与 openai（1536 维）
+ *     混存不污染，provider 切换自动重算
  *
  * 流程：
  *   buildDeferredCatalog → 标记每个 entry 预计算状态
@@ -21,6 +25,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { fetchOpenAiCompatibleEmbedding } from "../../services/openai-embedding-client.js";
 import { getToolSearchConfig } from "./env.js";
+import { neuralEmbedTexts, neuralEmbedTextsBulk } from "./neural-sidecar.js";
 
 /** 工具 embedding cache 项 */
 export type ToolEmbeddingCacheEntry = {
@@ -67,6 +72,19 @@ function getApiKey(): string | null {
 
 function getModel(): string {
   return getToolSearchConfig().embeddingModel;
+}
+
+/**
+ * 本地 sidecar 最近一次成功返回的模型名（query 缓存键控用）。
+ * 首次调用前用 env 提示值兜底——键写错最多导致一次 miss 重算，不会串味。
+ */
+let _lastLocalEmbedModel: string | null = null;
+
+/** 当前 provider 链期望产出向量的模型名（决定 query LRU 的键与命中判定）。 */
+function expectedQueryModel(): string {
+  const cfg = getToolSearchConfig();
+  if (cfg.embeddingProvider === "openai") return getModel();
+  return _lastLocalEmbedModel ?? cfg.neuralEmbedModel;
 }
 
 /** 工具 searchText 的内容指纹（description / aliases / examples 任何变化都会让 hash 变） */
@@ -116,25 +134,26 @@ export function getToolEmbeddingCache(): ToolEmbeddingCache {
   return _cache;
 }
 
-/** 检查是否启用了 embedding 召回（且有可用 key） */
+/** 检查是否启用了 embedding 召回（provider 链上任一 provider 可能可用即算启用） */
 export function isEmbeddingSearchEnabled(): boolean {
   const cfg = getToolSearchConfig();
   if (cfg.embedding === "off") return false;
-  if (cfg.embedding === "on") return Boolean(getApiKey());
-  // auto：有 key 就用，没有就降级
-  return Boolean(getApiKey());
+  // provider=openai 维持旧语义（必须有 key）；local/auto 视 sidecar 为可用候选，
+  // sidecar 实际不可用时由 provider 链内部熔断降级，不在这里做网络探测。
+  if (cfg.embeddingProvider === "openai") return Boolean(getApiKey());
+  return true;
 }
 
 /**
  * 为一组工具批量补全 embedding（懒加载入口）。
  *
+ * provider 链（N1）：sidecar 批量（单请求 ≤64 条）→ OpenAI API（8 并发）→ 放弃。
  * 内部对每个工具判断：
- *   - 已有 cache 且 hash 匹配 → 跳过
- *   - 没有 cache 或 hash 不匹配 → 调用 API 重算
+ *   - 已有 cache 且 hash 匹配且模型与本次产出模型一致 → 跳过
+ *   - 否则重算；sidecar 首批成功后，会把缓存里其他模型的旧条目也标记重算，
+ *     避免 openai 1536 维与本地 512 维混存互相抵消语义通道
  *
- * 并发：批量 8 个并发避免触发限流。
- *
- * 不抛错：API 失败仅记录 warning，下一次 search 仍可走纯 BM25。
+ * 不抛错：全链失败仅记录 warning，下一次 search 仍可走纯 BM25。
  */
 export async function ensureToolEmbeddings(
   tools: Array<{ registryName: string; searchText: string }>,
@@ -148,58 +167,113 @@ export async function ensureToolEmbeddings(
 
   _pendingComputePromise = (async () => {
     const cache = getToolEmbeddingCache();
-    const model = getModel();
-    const apiKey = getApiKey()!;
+    const cfg = getToolSearchConfig();
+    const openaiModel = getModel();
+    const useOpenai = Boolean(getApiKey());
+    const useSidecar = cfg.embeddingProvider !== "openai" && cfg.neuralEmbedEnabled !== "off";
+    if (!useSidecar && !useOpenai) {
+      return { computed: 0, reused: 0, failed: 0 };
+    }
+
     let computed = 0;
     let reused = 0;
     let failed = 0;
 
-    // 找出需要重算的（没有 cache 或 hash 不匹配）
+    // 找出需要重算的（没有 cache / hash 不匹配 / 模型与两个在用 provider 都不符）
+    const eligibleModels = new Set<string>([openaiModel]);
+    if (_lastLocalEmbedModel) eligibleModels.add(_lastLocalEmbedModel);
     const toCompute: typeof tools = [];
     for (const t of tools) {
       const h = hashSearchText(t.searchText);
       const existing = cache.entries[t.registryName];
-      if (existing && existing.contentHash === h && existing.model === model) {
+      if (
+        existing &&
+        existing.contentHash === h &&
+        eligibleModels.has(existing.model)
+      ) {
         reused += 1;
         continue;
       }
       toCompute.push(t);
     }
+    if (toCompute.length === 0) {
+      return { computed, reused, failed };
+    }
 
-    // 批量并发 8 个
-    const CONCURRENCY = 8;
-    for (let i = 0; i < toCompute.length; i += CONCURRENCY) {
-      const batch = toCompute.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(
-        batch.map(async (t) => {
-          const h = hashSearchText(t.searchText);
-          const { vector } = await fetchOpenAiCompatibleEmbedding({
-            apiKey,
-            model,
-            input: t.searchText.slice(0, 8000),
-          });
-          return { registryName: t.registryName, contentHash: h, vector, model };
-        }),
+    const writeEntries = (
+      entries: Array<{ registryName: string; contentHash: string; vector: number[]; model: string }>,
+    ): void => {
+      for (const e of entries) {
+        cache.entries[e.registryName] = {
+          contentHash: e.contentHash,
+          vector: e.vector,
+          model: e.model,
+          updatedAt: Date.now(),
+        };
+        computed += 1;
+      }
+    };
+
+    // ── provider 1：本地 sidecar（批量补全用独立的秒级预算，含冷启动懒加载）──
+    const remaining: typeof tools = [...toCompute];
+    if (useSidecar) {
+      const res = await neuralEmbedTextsBulk(
+        toCompute.map((t) => t.searchText.slice(0, 8000)),
       );
-      for (const r of results) {
-        if (r.status === "fulfilled") {
-          cache.entries[r.value.registryName] = {
-            contentHash: r.value.contentHash,
-            vector: r.value.vector,
-            model: r.value.model,
-            updatedAt: Date.now(),
-          };
-          computed += 1;
-        } else {
-          failed += 1;
+      if (res && res.vectors.length === toCompute.length && res.dim > 0) {
+        _lastLocalEmbedModel = res.model;
+        writeEntries(
+          toCompute.map((t, i) => ({
+            registryName: t.registryName,
+            contentHash: hashSearchText(t.searchText),
+            vector: res.vectors[i]!,
+            model: res.model,
+          })),
+        );
+        remaining.length = 0;
+        // sidecar 已确认是本环境的产出模型：缓存里其它模型的条目视为过期，
+        // 让下一次 ensure 重算（维度混存会让余弦通道静默归零）
+        for (const t of tools) {
+          const existing = cache.entries[t.registryName];
+          if (existing && existing.model !== res.model) {
+            existing.contentHash = "";
+          }
         }
       }
+    }
+
+    // ── provider 2：OpenAI 兼容 API（批量 8 并发）──
+    if (remaining.length > 0 && useOpenai) {
+      const apiKey = getApiKey()!;
+      const CONCURRENCY = 8;
+      for (let i = 0; i < remaining.length; i += CONCURRENCY) {
+        const batch = remaining.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(
+          batch.map(async (t) => {
+            const h = hashSearchText(t.searchText);
+            const { vector } = await fetchOpenAiCompatibleEmbedding({
+              apiKey,
+              model: openaiModel,
+              input: t.searchText.slice(0, 8000),
+            });
+            return { registryName: t.registryName, contentHash: h, vector, model: openaiModel };
+          }),
+        );
+        const fulfilled = [];
+        for (const r of results) {
+          if (r.status === "fulfilled") fulfilled.push(r.value);
+          else failed += 1;
+        }
+        writeEntries(fulfilled);
+      }
+    } else if (remaining.length > 0) {
+      failed += remaining.length;
     }
 
     if (computed > 0) {
       // 更新 meta
       const dim = Object.values(cache.entries)[0]?.vector.length ?? 0;
-      cache.meta = { model, dimension: dim, builtAt: Date.now() };
+      cache.meta = { model: _lastLocalEmbedModel ?? openaiModel, dimension: dim, builtAt: Date.now() };
       saveCacheToDisk(cache);
     }
 
@@ -266,11 +340,13 @@ export function invalidateEmbeddingCache(): void {
 }
 
 // === Query embedding 缓存 + 预计算 ===
-// LRU 上限 128 个 query；过期 5 分钟。
+// LRU 上限 128 个 query；过期 5 分钟。键带模型名——sidecar（512 维）与 openai
+//（1536 维）切换 provider 时旧向量自动失效，避免维度错配让语义通道静默归零。
 // 避免同一 query 重复算 embedding（LLM 多轮场景下常见）
 
 type QueryVectorEntry = {
   vector: Float32Array;
+  model: string;
   expiresAt: number;
 };
 
@@ -279,6 +355,10 @@ const QUERY_TTL_MS = 5 * 60 * 1000;
 
 const _queryVectorCache = new Map<string, QueryVectorEntry>();
 const _queryVectorInflight = new Map<string, Promise<Float32Array | null>>();
+
+function queryCacheKey(query: string, model: string): string {
+  return `${model}\0${query}`;
+}
 
 function trimQueryCache(): void {
   if (_queryVectorCache.size <= QUERY_LRU_MAX) return;
@@ -292,19 +372,33 @@ function trimQueryCache(): void {
   }
 }
 
-/** 同步查 query embedding cache；过期或 miss 返回 null */
+/** 同步查 query embedding cache；过期、miss 或模型已切换返回 null */
 export function peekQueryEmbedding(query: string): Float32Array | null {
-  const entry = _queryVectorCache.get(query);
+  const entry = _queryVectorCache.get(queryCacheKey(query, expectedQueryModel()));
   if (!entry) return null;
   if (entry.expiresAt < Date.now()) {
-    _queryVectorCache.delete(query);
+    _queryVectorCache.delete(queryCacheKey(query, expectedQueryModel()));
     return null;
   }
   return entry.vector;
 }
 
+function toUnitVector(vector: number[]): Float32Array {
+  const normalized = new Float32Array(vector.length);
+  let norm = 0;
+  for (let i = 0; i < vector.length; i++) {
+    normalized[i] = vector[i] ?? 0;
+    norm += (vector[i] ?? 0) ** 2;
+  }
+  norm = Math.sqrt(norm);
+  if (norm > 0) {
+    for (let i = 0; i < vector.length; i++) normalized[i] = normalized[i]! / norm;
+  }
+  return normalized;
+}
+
 /**
- * 异步获取 query embedding（命中 cache 直接返回，miss 则调用 API）。
+ * 异步获取 query embedding（provider 链：sidecar → openai；命中 cache 直接返回）。
  *
  * 并发安全：同 query 的多次请求会复用同一个 in-flight promise。
  */
@@ -313,34 +407,47 @@ export async function getQueryEmbedding(query: string): Promise<Float32Array | n
   if (cached) return cached;
   if (!isEmbeddingSearchEnabled()) return null;
 
-  const inflight = _queryVectorInflight.get(query);
+  const cfg = getToolSearchConfig();
+  const inflightKey = queryCacheKey(query, expectedQueryModel());
+  const inflight = _queryVectorInflight.get(inflightKey);
   if (inflight) return inflight;
 
   const promise = (async () => {
+    // provider 1：本地 sidecar（sidecar 已归一化，仍防御性归一）
+    if (cfg.embeddingProvider !== "openai" && cfg.neuralEmbedEnabled !== "off") {
+      const res = await neuralEmbedTexts([query.slice(0, 2000)]);
+      if (res && res.vectors.length === 1 && res.dim > 0) {
+        _lastLocalEmbedModel = res.model;
+        const vector = toUnitVector(res.vectors[0]!);
+        _queryVectorCache.set(queryCacheKey(query, res.model), {
+          vector,
+          model: res.model,
+          expiresAt: Date.now() + QUERY_TTL_MS,
+        });
+        trimQueryCache();
+        return vector;
+      }
+    }
+
+    // provider 2：OpenAI 兼容 API
     try {
-      const apiKey = getApiKey()!;
+      const apiKey = getApiKey();
+      if (!apiKey) return null;
       const model = getModel();
-      const { vector } = await fetchOpenAiCompatibleEmbedding({
+      const { vector: raw } = await fetchOpenAiCompatibleEmbedding({
         apiKey,
         model,
         input: query.slice(0, 2000),
+        timeoutMs: 2_000,
       });
-      const normalized = new Float32Array(vector.length);
-      let norm = 0;
-      for (let i = 0; i < vector.length; i++) {
-        normalized[i] = vector[i] ?? 0;
-        norm += (vector[i] ?? 0) ** 2;
-      }
-      norm = Math.sqrt(norm);
-      if (norm > 0) {
-        for (let i = 0; i < vector.length; i++) normalized[i] = normalized[i]! / norm;
-      }
-      _queryVectorCache.set(query, {
-        vector: normalized,
+      const vector = toUnitVector(raw);
+      _queryVectorCache.set(queryCacheKey(query, model), {
+        vector,
+        model,
         expiresAt: Date.now() + QUERY_TTL_MS,
       });
       trimQueryCache();
-      return normalized;
+      return vector;
     } catch (error) {
       console.warn(
         "[tool-embedding] query embedding failed, fall back to BM25:",
@@ -348,11 +455,11 @@ export async function getQueryEmbedding(query: string): Promise<Float32Array | n
       );
       return null;
     } finally {
-      _queryVectorInflight.delete(query);
+      _queryVectorInflight.delete(inflightKey);
     }
   })();
 
-  _queryVectorInflight.set(query, promise);
+  _queryVectorInflight.set(inflightKey, promise);
   return promise;
 }
 
@@ -361,4 +468,34 @@ export function primeQueryEmbedding(query: string): void {
   if (peekQueryEmbedding(query)) return;
   if (!isEmbeddingSearchEnabled()) return;
   void getQueryEmbedding(query);
+}
+
+/**
+ * 有界等待的 query embedding（N1 冷启动首查）：
+ * 旧路径「peek miss → 后台预取、下次生效」对改写型 query 是致命的——首查永远
+ * 吃不到语义通道，而改写 query 恰恰只有语义通道能救。sidecar 是本地毫秒级，
+ * 首查等待是值得的（预算 = sidecar 300ms + 余量）；OpenAI 慢路径超时后转入
+ * 后台继续（promise 不取消，落 LRU 供下次复用），行为与旧实现一致。
+ */
+export async function getQueryEmbeddingBounded(
+  query: string,
+  waitMs = 400,
+): Promise<Float32Array | null> {
+  const cached = peekQueryEmbedding(query);
+  if (cached) return cached;
+  if (!isEmbeddingSearchEnabled()) return null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      getQueryEmbedding(query),
+      new Promise<null>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout(null), waitMs);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

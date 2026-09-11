@@ -90,6 +90,29 @@ const toolDefinitions: { name: string; description: string; parameters: Record<s
       additionalProperties: false,
     },
   },
+  {
+    name: "phone.dial",
+    description:
+      "用用户的真实手机拨打电话给第三方。调用前必须已在对话中向用户确认被叫号码与拨打意图；" +
+      "手机端会弹出确认窗，用户可取消。紧急号码（110/119/120 等）会被服务端拒绝。" +
+      "仅负责拨出，通话由用户本人进行。",
+    parameters: {
+      type: "object",
+      properties: {
+        number: { type: "string", description: "被叫号码，支持 +86 等国际区号前缀" },
+        contactName: { type: "string", description: "联系人名，显示在手机端确认弹窗上" },
+        reason: { type: "string", description: "拨打原因（一句话），显示在确认弹窗上" },
+        mode: {
+          type: "string",
+          enum: ["direct", "draft"],
+          description:
+            "direct=用户在手机端确认后直接拨出；draft=仅打开拨号盘预填号码，由用户手动按拨号键。默认 direct",
+        },
+      },
+      required: ["number"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export function isPhoneBridgeEnvOn(env: NodeJS.ProcessEnv = process.env): boolean {

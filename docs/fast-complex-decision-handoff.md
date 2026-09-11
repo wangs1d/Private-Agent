@@ -1,3 +1,9 @@
+> **2026-09-11 状态更新**：本文描述的「外部 tool-router + Python stdio worker」
+> 架构已被进程内检索取代（tool-router 服务与 tool-router-adapter.ts 均已删除）。
+> 现行架构与移植对照见 [in-process-tool-search.md](in-process-tool-search.md)；
+> 神经级检索演进见 [neural-retrieval-plan.md](neural-retrieval-plan.md)。
+> 本文保留为设计历史与决策依据。
+
 # Fast-Complex 判定与交接架构优化设计（高保真）
 
 > 目标：保留「快慢双轨 = 类人分工」的总体形态，把优化落在两个环节——**判定**（fast 单次判定难度，并产出要交给 complex 的任务规范）与**交接**（complex 单次收敛跑完，结果交回 fast 口语化说）。同时解决真实对话中工具召回出错/卡住，并减少冗余 LLM 调用与 token 消耗。

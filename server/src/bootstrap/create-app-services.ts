@@ -169,7 +169,6 @@ import { UpstreamSearchService } from "../services/upstream-search-service.js";
 import { VideoGrabService, setVideoGrabServiceRef } from "../services/video-grab-service.js";
 import { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { SkillManager } from "../skills/index.js";
-import { registerSkillToToolRouter } from "../services/self-evolution-router-registrar.js";
 import { registerAgentWorldIdentityBuiltinSkills } from "../skills/builtin/agent-world-identity-skills.js";
 import { registerVirtualPhoneBuiltinSkills } from "../skills/builtin/virtual-phone-skills.js";
 import { registerAlipayPaymentBuiltinSkills } from "../skills/builtin/alipay-payment-skills.js";
@@ -266,6 +265,7 @@ import { registerMcpTools } from "../tools/mcp-tools.js";
 import { buildMcpChatTools } from "../tools/mcp-tools.js";
 import { McpClientService } from "../services/mcp-client-service.js";
 import { setMcpChatTools, setBrainChatTools, setBodyChatTools, setMemoryChatTools } from "../external-model/openai-compatible-tool-loop.js";
+import { warnOnChatToolDrift } from "../tools/chat-tool-drift.js";
 import { registerBrainTools, BRAIN_TOOLS } from "../tools/brain-tools.js";
 import { registerMemoryRecallTools, MEMORY_RECALL_CHAT_TOOLS } from "../tools/memory-recall-tools.js";
 import { configureMemoryConsolidation } from "../services/memory-consolidation-service.js";
@@ -1349,13 +1349,9 @@ export async function createAppServices(): Promise<AppServices> {
               registeredAt: new Date().toISOString(),
             });
           }
-          // 1b. 注册到 tool-router registry，让四级路由可搜索到新 skill
-          // 失败不影响装载结果（fire-and-forget）
-          registerSkillToToolRouter(metadata, skillName).catch((err) => {
-            console.warn(
-              `[create-app-services] 注册 '${skillName}' 到 tool-router 失败: ${err instanceof Error ? err.message : err}`,
-            );
-          });
+          // 2026-09-11：原「注册到 Python tool-router」步骤已随 router 删除——
+          // skill 已在上方注册进 SkillManager，invalidateBuiltinToolsCache 后
+          // 经进程内延迟目录即可被检索。
           // 2. 清除 builtin 工具缓存，确保下次请求看到新能力
           invalidateBuiltinToolsCache();
         },
@@ -4623,6 +4619,18 @@ export async function createAppServices(): Promise<AppServices> {
       app.log.warn(`[MoodInference] shutdown flush failed: ${e}`);
     }
   });
+
+  // 阶段1 守卫：schema ↔ 执行器双向漂移检测（全部注册与注入完成后执行一次）。
+  // 「有 schema 无执行器」= 模型调用必报未知工具；「有执行器无 schema」= 工具对
+  // LLM 永久不可见。漂移以 warn 输出，不阻断启动（豁免表见 chat-tool-drift.ts）。
+  try {
+    warnOnChatToolDrift({
+      schemas: getBuiltinAgentChatTools(),
+      registeredToolNames: toolRegistry.list(),
+    });
+  } catch (driftError) {
+    console.warn("[chat-tool-drift] 漂移检测自身异常（忽略，不影响启动）:", driftError);
+  }
 
   return {
     app,

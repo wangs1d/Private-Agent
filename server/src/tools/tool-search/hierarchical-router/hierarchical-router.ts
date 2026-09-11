@@ -5,14 +5,19 @@ import type { ResourceRecord } from "../registry/models.js";
 import type { ToolRegistryStore } from "../registry/store.js";
 import { getCurrentToolRegistryEnvironment } from "../registry/registry-service.js";
 
+// 域分组分类与 Python router registry.DOMAIN_GROUPS 一比一对齐（2026-09-11 收口）：
+// 此前这里自创 7 组（system/knowledge/world 等），域→组映射与生产管线、Python 原型
+// 两边都不一致，导致同域工具在不同链路落入不同分组。
 export type DomainGroupName =
-  | "communication"
+  | "information"
   | "productivity"
-  | "system"
-  | "knowledge"
+  | "communication"
+  | "coordination"
   | "commerce"
-  | "world"
-  | "misc";
+  | "execution"
+  | "signals"
+  | "integration"
+  | "general";
 
 export type HierarchicalRouteInput = {
   tenant_id: string;
@@ -39,13 +44,15 @@ const DEFAULT_CACHE_TTL_MS = 20_000;
 const CACHE_PREFIX = "tool:route:";
 
 const DOMAIN_GROUPS: Record<DomainGroupName, string[]> = {
-  communication: ["phone", "agent", "calendar", "reminder"],
-  productivity: ["calendar", "reminder", "file", "notes", "self"],
-  system: ["desktop", "browser", "embodiment", "clock", "aip"],
-  knowledge: ["search", "browser", "weather", "file", "notes"],
-  commerce: ["shopping", "wallet", "budget"],
-  world: ["world", "agent"],
-  misc: ["misc"],
+  information: ["search", "browser"],
+  productivity: ["calendar", "reminder", "self", "travel", "notes", "file"],
+  communication: ["phone", "agent"],
+  coordination: ["world", "aip"],
+  commerce: ["wallet", "budget", "shopping"],
+  execution: ["desktop", "embodiment", "device", "smart_home", "vision"],
+  signals: ["weather", "clock"],
+  integration: ["mcp"],
+  general: ["misc"],
 };
 
 /**
@@ -203,7 +210,7 @@ function resolveDomainGroups(domains: string[]): DomainGroupName[] {
   >) {
     if (domains.some((d) => groupDomains.includes(d))) out.push(group);
   }
-  return out.length ? out : ["misc"];
+  return out.length ? out : ["general"];
 }
 
 function resolveCapabilities(intent: ParsedIntent, domains: string[]): string[] {

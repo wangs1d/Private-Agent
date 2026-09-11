@@ -63,5 +63,8 @@
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
+  },
+  "optionalDependencies": {
+    "hnswlib-node": "^3.0.0"
   }
 }

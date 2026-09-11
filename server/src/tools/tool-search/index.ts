@@ -9,7 +9,6 @@ import {
   type DeferredToolSearchMatch,
 } from "./catalog.js";
 import { getToolSearchConfig } from "./env.js";
-import { prewarmToolRouterCatalog } from "./tool-router-adapter.js";
 import { getPromotableCoreTools } from "./handlers.js";
 
 export type ToolSearchPreparedTurn = {
@@ -64,15 +63,6 @@ function computeToolsSignature(tools: ChatCompletionTool[]): string {
     .filter(Boolean)
     .sort();
   return names.join(",");
-}
-
-function isExpectedToolRouterPrewarmError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return (
-    message.includes("tool-router worker shutdown") ||
-    message.includes("tool-router worker is not writable") ||
-    message.includes("tool-router worker exited")
-  );
 }
 
 /**
@@ -189,12 +179,6 @@ export function prepareToolsWithToolSearch(
   }
 
   const bridgeTools = buildToolSearchBridgeTools(deferredCatalog.entries.length, cfg.bridgeMode);
-  if (cfg.backend === "tool_router" && deferredCatalog.entries.length > 0) {
-    void prewarmToolRouterCatalog(deferredCatalog, { tenantId: "default" }).catch((error) => {
-      if (isExpectedToolRouterPrewarmError(error)) return;
-      console.warn("[tool-search:tool-router] prewarm failed", error);
-    });
-  }
   return {
     visibleTools: uniqueTools([...visibleTools, ...bridgeTools]),
     deferredCatalog,

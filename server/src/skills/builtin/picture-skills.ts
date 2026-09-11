@@ -5,11 +5,11 @@ import type { SkillDefinition, SkillHandler } from "../types.js";
 import { createPictureGalleryHandler } from "../../tools/capability-modules/picture/handlers.js";
 
 /**
- * 内置 Skill：图片能力套件（PictureKit）→ skill 库 / tool-router。
+ * 内置 Skill：图片能力套件（PictureKit）→ skill 库（进程内检索）。
  *
  * 数据源是 `@private-ai-agent/picture` 的 PictureKit（存储根 data/pictures），
  * skill 注册后经 buildSessionSkillChatTools → 延迟工具目录 →
- * exportCatalogToToolRouter 以 resource_type="skill" 同步进 tool-router，
+ * 检索进程内化后，skill schema 直接进入进程内延迟目录，
  * 执行时 ToolRegistry 优先走 SkillManager（picture.gallery
  * 与 capability-module 工具同名，capability chatTools 已置空避免 schema 冲突）。
  *

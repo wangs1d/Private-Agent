@@ -31,6 +31,9 @@
     <uses-permission android:name="android.permission.READ_CALL_LOG"/>
     <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
 
+    <!-- 手机桥接拨号（phone.dial）：确认窗确认后直接拨出 -->
+    <uses-permission android:name="android.permission.CALL_PHONE"/>
+
     <!-- 前台服务与电池优化白名单 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
@@ -59,6 +62,17 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <!-- 手机桥接拨号确认窗：Agent 发起 phone.dial 时弹出的全屏半透明窗 -->
+        <activity
+            android:name=".DialConfirmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/DialConfirmTheme"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"/>
 
         <meta-data
             android:name="flutterEmbedding"

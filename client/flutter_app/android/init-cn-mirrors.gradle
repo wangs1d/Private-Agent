@@ -1,0 +1,30 @@
+// 一次性构建脚本：dl.google.com / mavenCentral 直连超时的网络环境下使用。
+// 用法：./gradlew <task> --console=plain --init-script init-cn-mirrors.gradle
+//
+// 只替换各项目 buildscript classpath 仓库（如 record_android 钉死的
+// AGP 9.2.1，走 buildscript，不受 settings 的 dependencyResolutionManagement
+// 管理）。不碰项目级依赖仓库——Flutter plugin loader 以 PREFER_SETTINGS
+// 模式管理它们，注入项目仓库会直接报错。
+def MIRROR_GOOGLE = 'https://maven.aliyun.com/repository/google'
+def MIRROR_CENTRAL = 'https://maven.aliyun.com/repository/central'
+def MIRROR_PLUGIN = 'https://maven.aliyun.com/repository/gradle-plugin'
+
+allprojects {
+    buildscript {
+        repositories.clear()
+        repositories {
+            maven { url MIRROR_GOOGLE }
+            maven { url MIRROR_CENTRAL }
+            maven { url MIRROR_PLUGIN }
+        }
+    }
+}
+
+settingsEvaluated { settings ->
+    settings.pluginManagement.repositories.clear()
+    settings.pluginManagement.repositories {
+        maven { url MIRROR_GOOGLE }
+        maven { url MIRROR_CENTRAL }
+        maven { url MIRROR_PLUGIN }
+    }
+}

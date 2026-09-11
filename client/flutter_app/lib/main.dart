@@ -31,6 +31,7 @@ import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
+import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
@@ -559,6 +560,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
     } catch (e) {
       debugPrint("[schedule] cleanOrphanScheduleEvents failed: $e");
+    }
+
+    // 手机桥接（phone.dial 等）：存储就绪后恢复开关并按需连接桥接 WS。
+    // 仅 Android 真机有意义；默认开启，可在设置页关闭。
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      PhoneBridgeService.instance.bindPreferences(
+        read: _store.getPreference,
+        write: _store.savePreference,
+      );
+      unawaited(PhoneBridgeService.instance.restoreAndStart());
     }
 
     try {

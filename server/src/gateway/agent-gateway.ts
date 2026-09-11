@@ -29,7 +29,7 @@ import {
   type ToolSearchBridgeResult,
   type ToolSearchPreparedTurn,
 } from "../tools/tool-search/index.js";
-import { searchDeferredToolsViaToolRouter } from "../tools/tool-search/tool-router-adapter.js";
+import { adaptiveSearchDeferredTools, type AdaptiveDeferredToolSearchMatch } from "../tools/tool-search/adaptive-catalog.js";
 import { resolveForcedToolChoice, type ForcedToolChoice } from "./forced-tool.js";
 import { recordGatewayTrace } from "./gateway-trace.js";
 
@@ -146,7 +146,7 @@ async function preloadTopDeferredTool(
 ): Promise<string | null> {
   try {
     const matches = await withTimeout(
-      searchDeferredToolsViaToolRouter(prepared.deferredCatalog, userText, 1, {
+      adaptiveSearchDeferredTools(prepared.deferredCatalog, userText, 1, {
         includeSchema: true,
       }),
       parsePrerecallTimeoutMs(),
@@ -262,12 +262,12 @@ export function searchResources(
   query: string,
   limit: number,
   options?: { includeSchema?: boolean; tenantId?: string; agentContextHash?: string },
-): Promise<Awaited<ReturnType<typeof searchDeferredToolsViaToolRouter>>> {
+): Promise<AdaptiveDeferredToolSearchMatch[]> {
   return tracedAsync(
     "resource_search",
     `query=${query.slice(0, 40)} limit=${limit}`,
     ["tool-router 混合检索"],
-    () => searchDeferredToolsViaToolRouter(catalog, query, limit, options),
+    () => adaptiveSearchDeferredTools(catalog, query, limit, options),
   );
 }
 

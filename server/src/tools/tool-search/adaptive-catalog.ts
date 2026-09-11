@@ -23,7 +23,7 @@ import {
   ResourceType,
   type ResourceRecord,
 } from "./registry/models.js";
-import { getToolEmbeddingsForCatalog } from "./tool-embedding.js";
+import { getToolEmbeddingCache, getToolEmbeddingsForCatalog } from "./tool-embedding.js";
 import { getEntryCategoryNames, TOOL_CATEGORIES } from "./tool-category.js";
 import { ToolKnowledgeGraphService } from "./knowledge-graph/neo4j-client.js";
 import { ToolGraphRelation } from "./knowledge-graph/graph-relations.js";
@@ -34,7 +34,13 @@ import {
 } from "./retrieval/hybrid-retrieval.js";
 import { AdaptiveTopPSelector } from "./top-p-selector/top-p-selector.js";
 import { ToolRerankingPipeline } from "./reranking/reranking-pipeline.js";
+import { createNeuralLlmReranker } from "./reranking/neural-reranker.js";
+import { createNeuralIntentRouter } from "./intent-router/neural-intent-router.js";
 import { sharedHistoryStore } from "./retrieval/history-score.js";
+import {
+  getCompiledRecallBoosts,
+  getToolClassification,
+} from "./classification-overrides.js";
 
 export type AdaptiveDeferredToolSearchMatch = DeferredToolSearchMatch & {
   resource_type: ResourceType;
@@ -110,16 +116,177 @@ const INTENT_CACHE_TTL_MS = 300_000; // 意图分解缓存 5 分钟
 const MAX_INDEX_CACHE = 32;
 /** 路由-召回融合时并入候选集的全量词面 top-N（99 个工具下 BM25 毫秒级，取 12 足够覆盖同义簇）。 */
 const GLOBAL_LEXICAL_FLOOR_N = 12;
-const intentRouter = new IntentRouter({ redisUrl: undefined });
+// 神经注入点（N2/N3）：重排钩子 = sidecar /rerank（失败管线自动回退词面序）；
+// 意图分类 = sidecar /classify-intent（低置信采纳，正则 fast-path 与降级路径保留）。
+// env 各自一键关闭（AGENT_NEURAL_RERANK_ENABLED / AGENT_NEURAL_INTENT_ENABLED=off）。
+const intentRouter = new IntentRouter({
+  redisUrl: undefined,
+  semanticRouter: createNeuralIntentRouter(),
+});
 const retrievalEngine = new HybridRetrievalEngine({ historyStore: sharedHistoryStore });
 const topPSelector = new AdaptiveTopPSelector();
-const rerankingPipeline = new ToolRerankingPipeline();
+const rerankingPipeline = new ToolRerankingPipeline({ llmReranker: createNeuralLlmReranker() });
 const indexCache = new Map<string, { index: AdaptiveCatalogIndex; createdAt: number }>();
 const intentCache = new Map<string, { intent: ParsedIntent; expiresAt: number }>();
 const graphServiceCache = new Map<
   string,
   Promise<{ store: ToolRegistryStore; graph: ToolKnowledgeGraphService }>
 >();
+
+// ===== 反馈学习状态（与 Python feedback.py / top_p.py 一比一收敛）=====
+// Python 原型把这些状态放在 registry record 与 selector 实例上；检索进程内化后
+// 与索引缓存同生命周期，收敛为模块级状态。
+// 持久化（阶段优化③）：配置 AGENT_REDIS_URL 时经 feedback-state-persistence 落
+// redis（fire-and-forget，失败静默），重启恢复、多实例共享；未配置时纯内存。
+
+import { loadFeedbackState, saveFeedbackState } from "./feedback-state-persistence.js";
+
+const TOPP_STATE_KEY = "topp-overrides";
+const FAILURE_STATE_KEY = "resource-failures";
+
+// top_p 自适应升档：检索选中的候选调用失败后抬升该意图的 top-p 阈值，
+// 下一次召回扩大候选面（Python AdaptiveTopPSelector.increase_for_intent）。
+const TOPP_OVERRIDE_TTL_MS = 10 * 60_000;
+const TOPP_OVERRIDE_MAX = 0.99;
+const TOPP_OVERRIDE_STEP = 0.02;
+const topPIntentOverrides = new Map<string, { value: number; expiresAt: number }>();
+const resourceFailureState = new Map<string, { consecutive: number; limitedUntil: number }>();
+
+let feedbackStateHydrated = false;
+/** 懒恢复：首次触达反馈状态时从 redis 读一次（无 redis/失败 → 空表，静默）。 */
+function hydrateFeedbackStateOnce(): void {
+  if (feedbackStateHydrated) return;
+  feedbackStateHydrated = true;
+  void loadFeedbackState<[string, { value: number; expiresAt: number }][]>(TOPP_STATE_KEY).then(
+    (restored) => {
+      if (!restored) return;
+      const now = Date.now();
+      for (const [key, entry] of restored) {
+        if (entry?.expiresAt > now) topPIntentOverrides.set(key, entry);
+      }
+    },
+  );
+  void loadFeedbackState<[string, { consecutive: number; limitedUntil: number }][]>(
+    FAILURE_STATE_KEY,
+  ).then((restored) => {
+    if (!restored) return;
+    const now = Date.now();
+    for (const [key, entry] of restored) {
+      if (entry?.limitedUntil > now) resourceFailureState.set(key, entry);
+    }
+  });
+}
+
+function persistTopPOverrides(): void {
+  saveFeedbackState(TOPP_STATE_KEY, [...topPIntentOverrides.entries()]);
+}
+
+function persistResourceFailures(): void {
+  saveFeedbackState(FAILURE_STATE_KEY, [...resourceFailureState.entries()]);
+}
+
+function topPIntentKey(intent: ParsedIntent): string {
+  return `${intent.domain_candidates[0] ?? "misc"}::${intent.primary_capability}`;
+}
+
+function getTopPOverride(intent: ParsedIntent): number | null {
+  const entry = topPIntentOverrides.get(topPIntentKey(intent));
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    topPIntentOverrides.delete(topPIntentKey(intent));
+    return null;
+  }
+  return entry.value;
+}
+
+// rate_limited 翻转：连续 3 次失败后资源在路由/召回中被旁路 60s（Python
+// feedback.py 的 status=rate_limited），成功即复位。
+const RATE_LIMIT_FAILURE_THRESHOLD = 3;
+const RATE_LIMIT_COOLDOWN_MS = 60_000;
+// （resourceFailureState 声明在上方反馈状态块，与 top-p 表共享持久化）
+
+/** 记录一次资源反馈（工具真实执行成功/失败后调用，驱动 rate_limited 翻转）。 */
+export function recordAdaptiveResourceFeedback(resourceId: string, success: boolean): void {
+  hydrateFeedbackStateOnce();
+  if (success) {
+    if (resourceFailureState.delete(resourceId)) persistResourceFailures();
+    return;
+  }
+  const state = resourceFailureState.get(resourceId) ?? { consecutive: 0, limitedUntil: 0 };
+  state.consecutive += 1;
+  if (state.consecutive >= RATE_LIMIT_FAILURE_THRESHOLD) {
+    state.limitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+    state.consecutive = 0;
+    console.warn(`[tool-search:adaptive] ${resourceId} 连续失败 ${RATE_LIMIT_FAILURE_THRESHOLD} 次，旁路 ${RATE_LIMIT_COOLDOWN_MS}ms`);
+  }
+  resourceFailureState.set(resourceId, state);
+  persistResourceFailures();
+}
+
+function isResourceRateLimited(resourceId: string): boolean {
+  const state = resourceFailureState.get(resourceId);
+  if (!state) return false;
+  if (state.limitedUntil > Date.now()) return true;
+  if (state.limitedUntil > 0) resourceFailureState.delete(resourceId);
+  return false;
+}
+
+/**
+ * 失败反馈驱动的 top-p 升档入口：传入召回时的 query，复用意图缓存解析意图
+ * （零额外 LLM 成本），将该意图的 top-p 抬升一个步长（0.99 封顶）。
+ */
+export async function reinforceAdaptiveTopPForQuery(query: string): Promise<void> {
+  hydrateFeedbackStateOnce();
+  const trimmed = query.trim();
+  if (!trimmed) return;
+  let intent = tryFastPathIntent(trimmed);
+  if (!intent) {
+    const cached = intentCache.get(`${trimmed}|${DEFAULT_CONTEXT_HASH}`);
+    if (cached && cached.expiresAt > Date.now()) intent = cached.intent;
+  }
+  if (!intent) return;
+  const key = topPIntentKey(intent);
+  const base = topPForIntent(intent);
+  const prev = topPIntentOverrides.get(key);
+  const current = prev && prev.expiresAt > Date.now() ? prev.value : base;
+  topPIntentOverrides.set(key, {
+    value: Math.min(TOPP_OVERRIDE_MAX, current + TOPP_OVERRIDE_STEP),
+    expiresAt: Date.now() + TOPP_OVERRIDE_TTL_MS,
+  });
+  persistTopPOverrides();
+}
+
+/**
+ * 图边使用强化：资源被真实调用后，增强其 similar_to 边权重（与 Python
+ * knowledge_graph.record_edge_usage + feedback._boost_similar_edges 对齐），
+ * 让「与好工具相似的候选」在后续图扩展中排序更高。
+ */
+export async function reinforceAdaptiveGraphEdges(
+  catalog: DeferredToolCatalog,
+  resourceId: string,
+  delta = 0.05,
+): Promise<void> {
+  try {
+    const index = getOrCreateAdaptiveCatalogIndex(catalog);
+    if (!index.recordsById.has(resourceId)) return;
+    const { store } = await getOrCreateGraphService(index);
+    const edges = await store.queryGraphEdges({
+      source_resource_id: resourceId,
+      relation_type: ToolGraphRelation.SimilarTo,
+      limit: 50,
+    });
+    for (const edge of edges) {
+      await store.upsertGraphEdge({
+        source_resource_id: edge.source_resource_id,
+        relation_type: edge.relation_type,
+        target_resource_id: edge.target_resource_id,
+        weight: Math.min(1, edge.weight + delta),
+      });
+    }
+  } catch (e) {
+    console.warn("[tool-search:adaptive] reinforceAdaptiveGraphEdges failed (ignored)", e);
+  }
+}
 
 export async function adaptiveSearchDeferredTools(
   catalog: DeferredToolCatalog,
@@ -181,10 +348,12 @@ export async function adaptiveSearchDeferredTools(
   // 这里用全量 BM25（含别名扩展）取词面最相关的 top-N 与路由候选取并集，
   // 保证词面上最明显的工具永远在场——与 legacy 通道的 Level-3 全量兜底对齐。
   const lexicalFloor = globalLexicalCandidates(index, catalog, trimmedQuery, GLOBAL_LEXICAL_FLOOR_N);
+  // 全量词面兜底同样旁路 rate_limited 资源（与路由过滤一致）
+  const onlineLexicalFloor = lexicalFloor.filter((r) => !isResourceRateLimited(r.level1.resource_id));
 
   await Promise.all(
     intentRoutes.map(async ({ intent, route }) => {
-      const candidates = mergeCandidateRecords(route.resources, lexicalFloor);
+      const candidates = mergeCandidateRecords(route.resources, onlineLexicalFloor);
       if (candidates.length === 0) {
         routingParts.push({ intent, route, topP: topPForIntent(intent) });
         return;
@@ -200,11 +369,13 @@ export async function adaptiveSearchDeferredTools(
         limit: Math.min(50, Math.max(10, limit * 4)),
         prebuiltIndex: index.bm25Index,
         aliasEntries: catalog.entries,
+        intentDomains: route.domains,
+        intentCapabilities: route.capabilities,
       });
       const boostedRetrieved = applyAdaptiveIntentBoost(index, retrieved, intent.intent || trimmedQuery);
       const topP = topPSelector.select(
         boostedRetrieved.map((item) => ({ item, score: item.final_score })),
-        { confidence: intent.confidence },
+        { confidence: intent.confidence, topPOverride: getTopPOverride(intent) },
       );
       routingParts.push({ intent, route, topP: topP.top_p });
 
@@ -252,6 +423,8 @@ export async function adaptiveSearchDeferredTools(
     limit: 25,
     prebuiltIndex: index.bm25Index,
     aliasEntries: catalog.entries,
+    intentDomains: primaryRoute?.route.domains,
+    intentCapabilities: primaryRoute?.route.capabilities,
   });
   const reranked = await rerankingPipeline.rerank({
     raw_query: trimmedQuery,
@@ -260,9 +433,18 @@ export async function adaptiveSearchDeferredTools(
     query_constraints: parsedIntent.query_constraints,
     candidates: expandedRetrieved,
     blacklist_resource_ids: options?.blacklistResourceIds,
+    intent_domains: subIntents.flatMap((i) => i.domain_candidates),
+    intent_capabilities: [...new Set(subIntents.map((i) => i.primary_capability).filter(Boolean))],
   });
 
-  const boosted = applyAdaptiveIntentBoost(index, reranked.candidates, trimmedQuery);
+  // llm_seen_count > 0 = 神经重排已定序：boost 只校正展示分、不再重排（否则会
+  // 推翻神经顺序——2026-09-12 A/B 实证）；= 0 时维持基线行为（boost 排序）。
+  const boosted = applyAdaptiveIntentBoost(
+    index,
+    reranked.candidates,
+    trimmedQuery,
+    reranked.llm_seen_count === 0,
+  );
 
   return boosted
     .slice(0, Math.max(1, limit))
@@ -554,10 +736,36 @@ async function seedGraphEdges(
   store: ToolRegistryStore,
   index: AdaptiveCatalogIndex,
 ): Promise<void> {
-  // depends_on：显式声明的依赖
+  // depends_on：显式声明的依赖（与 Python registry._assert_no_circular_dependency
+  // 对齐：成环的依赖边不灌入并告警，避免图扩展在环上循环放大）
+  const dependencyAdjacency = new Map<string, string[]>();
+  for (const record of index.recordsById.values()) {
+    dependencyAdjacency.set(
+      record.level1.resource_id,
+      record.level2.dependencies.filter((dep) => index.recordsById.has(dep)),
+    );
+  }
+  const reaches = (from: string, target: string): boolean => {
+    const seen = new Set<string>();
+    const stack = [from];
+    while (stack.length > 0) {
+      const current = stack.pop() as string;
+      if (current === target) return true;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      for (const next of dependencyAdjacency.get(current) ?? []) stack.push(next);
+    }
+    return false;
+  };
   for (const record of index.recordsById.values()) {
     for (const dep of record.level2.dependencies) {
       if (!index.recordsById.has(dep)) continue;
+      if (reaches(dep, record.level1.resource_id)) {
+        console.warn(
+          `[tool-search:adaptive] 依赖环检测：跳过 ${record.level1.resource_id} -> ${dep}（会闭合依赖环）`,
+        );
+        continue;
+      }
       await store.upsertGraphEdge({
         source_resource_id: record.level1.resource_id,
         relation_type: ToolGraphRelation.DependsOn,
@@ -636,54 +844,29 @@ function applyAdaptiveIntentBoost(
   index: AdaptiveCatalogIndex,
   candidates: HybridRetrievedResource[],
   query: string,
+  resort = true,
 ): HybridRetrievedResource[] {
   const q = query.toLowerCase();
   const qTokens = new Set(tokenize(q));
-  // 预编译 query 匹配模式，避免逐候选重复 regex 测试
-  const has = (pattern: RegExp): boolean => pattern.test(q);
-  const specialBoostCache = new Map<string, number>();
-  const getSpecialBoost = (resourceId: string): number => {
-    const cached = specialBoostCache.get(resourceId);
-    if (cached !== undefined) return cached;
-    let boost = 0;
-    if (resourceId === "calendar.list_tasks" && has(/\btasks?\b|\btodo\b/)) boost += 0.32;
-    if (resourceId === "search_web" && has(/\bsearch\b|\bnews\b|\blatest\b|搜(?:索|一下|一搜)|查一下|查询|行情|价格|新闻|最新/)) boost += 0.42;
-    if (resourceId === "fetch_web" && has(/\bread\b|\bfetch\b|\bpage\b|\bcontent\b|\burl\b|网页|网址|链接|读一下|说了什么|读了什么/)) boost += 0.42;
-    if (resourceId === "search_videos" && has(/视频|影片|录像/)) boost += 0.35;
-    if (resourceId === "search_images" && has(/照片|图片|壁纸|表情包|头像|找图/)) boost += 0.35;
-    if (resourceId === "clock.get_current_time" && has(/几点|现在时间|什么时间|当前时间/)) boost += 0.3;
-    if (resourceId === "smart_home.control_device" && has(/开灯|关灯|灯打开|打开灯|灯光|调亮|调暗|空调|窗帘|插座/)) boost += 0.35;
-    if (resourceId === "vision.see_device" && has(/摄像头|监控|看家|门口/)) boost += 0.35;
-    if (resourceId === "geofence.create" && has(/到家|回到家|离家|出门|离开公司|到达.*提醒|位置提醒/)) boost += 0.35;
-    if (resourceId === "care.rhythm_reminder" && has(/每天提醒|定期提醒|天天提醒|周期提醒|规律/)) boost += 0.3;
-    if (resourceId === "info.inspect_webpage" && has(/\bsearch\b|\bnews\b|\blatest\b/)) boost -= 0.1;
-    if (resourceId === "info.inspect_webpage" && has(/\bread\b|\bfetch\b|\bcontent\b/) && !has(/\binspect\b/)) boost -= 0.08;
-    if (resourceId === "agent.query_capabilities" && has(/\bcapabilit(?:y|ies)\b|\btools?\b|\bcan you\b/)) boost += 0.3;
-    if (resourceId === "self.list_custom_skills" && has(/\bcustom\b|\bskills?\b/)) boost += 0.34;
-    if (resourceId === "wallet.get_transactions" && has(/\btransactions?\b|\brecent\b|\bhistory\b/)) boost += 0.32;
-    if (resourceId === "embodiment.roam" && has(/\broam\b|\baround\b/) && !has(/\bwindow\b/)) boost += 0.2;
-    if (resourceId === "embodiment.window_roam" && has(/\broam\b|\baround\b/) && !has(/\bwindow\b/)) boost -= 0.12;
-    if (resourceId === "desktop.run_automation" && has(/\bautomation\b|\bscript\b|\btask\b/)) boost += 0.22;
-    if (resourceId === "desktop.visual.run_task" && has(/\bautomation\b|\bscript\b/) && !has(/\bvisual\b|\bscreenshot\b/)) boost -= 0.12;
-    specialBoostCache.set(resourceId, boost);
-    return boost;
-  };
-  return candidates
+  const mapped = candidates
     .map((candidate) => {
       const id = candidate.resource.level1.resource_id;
       const entry = index.entriesById.get(id);
-      const boost = clamp(
-        lexicalToolBoost(id, q, qTokens, entry) + getSpecialBoost(id),
-        -0.25,
-        0.45,
-      );
+      // 召回校准已声明化（classification-overrides.recallBoost）：校准词条跟着
+      // 工具声明走，不再堆在本函数的硬编码 switch 里
+      let boost = lexicalToolBoost(id, q, qTokens, entry);
+      for (const rule of getCompiledRecallBoosts(id)) {
+        if (rule.regex.test(q)) boost += rule.weight;
+      }
+      boost = clamp(boost, -0.25, 0.45);
       if (boost === 0) return candidate;
       return {
         ...candidate,
         final_score: round4(clamp(candidate.final_score + boost, 0, 1)),
       };
-    })
-    .sort((a, b) => b.final_score - a.final_score);
+    });
+  if (!resort) return mapped;
+  return mapped.sort((a, b) => b.final_score - a.final_score);
 }
 
 function lexicalToolBoost(
@@ -773,6 +956,7 @@ function resourceRecordFromEntry(
       status: ResourceStatus.Online,
       base_score: resourceType === ResourceType.McpServer ? 0.5 : 0.55,
       embedding: cachedEmbedding ?? hashTextToVector(entry.embeddingInput || entry.searchText, 64),
+      latency_ms: inferLatencyMs(domains[0] ?? "misc", resourceType),
     },
     level2: {
       resource_id: name,
@@ -813,6 +997,35 @@ function inferResourceType(entry: DeferredToolEntry): ResourceType {
   return ResourceType.Tool;
 }
 
+/**
+ * 声明时延估算表（与 Python tool-router-export.inferLatencyMs 一比一移植）。
+ * 仅用于重排阶段的超时软惩罚排序信号，不代表真实执行时延。
+ */
+function inferLatencyMs(domain: string, resourceType: ResourceType): number {
+  if (resourceType === ResourceType.McpServer) return 30;
+  const map: Record<string, number> = {
+    clock: 10,
+    weather: 18,
+    calendar: 15,
+    search: 24,
+    browser: 20,
+    phone: 32,
+    budget: 14,
+    shopping: 18,
+    self: 12,
+    reminder: 16,
+    agent: 19,
+    wallet: 13,
+    aip: 26,
+    embodiment: 23,
+    desktop: 27,
+    world: 28,
+    travel: 22,
+    mcp: 30,
+  };
+  return map[cleanDomain(domain)] ?? 20;
+}
+
 function looksLikeSessionSkill(entry: DeferredToolEntry): boolean {
   const name = entry.registryName;
   if (name.startsWith("self.")) return false;
@@ -824,7 +1037,10 @@ function looksLikeSessionSkill(entry: DeferredToolEntry): boolean {
 }
 
 function inferDomains(name: string, resourceType: ResourceType): string[] {
-  const domains = new Set<string>(getEntryCategoryNames(name, TOOL_CATEGORIES));
+  // 声明优先（classification-overrides）：声明的域排在最前并参与去重，
+  // 推断域保留为长尾信号——错分类从此有一处可修的声明入口
+  const domains = new Set<string>(getToolClassification(name)?.domains ?? []);
+  for (const inferred of getEntryCategoryNames(name, TOOL_CATEGORIES)) domains.add(inferred);
   const namespace = firstNamespace(name);
 
   if (name === "search_web") domains.add("search");
@@ -857,6 +1073,10 @@ function inferCapabilities(
   resourceType: ResourceType,
 ): string[] {
   const capabilities = new Set<string>();
+  // 声明优先：声明的能力标签排最前（推断值保留为长尾，二者取并集）
+  for (const declared of getToolClassification(name)?.capabilities ?? []) {
+    capabilities.add(declared);
+  }
   const dotParts = name.split(".").filter(Boolean);
   const leaf = dotParts[dotParts.length - 1] ?? name;
   const leafParts = leaf.split("_").filter(Boolean);
@@ -972,6 +1192,8 @@ function passesRouteFilters(
   tenantId?: string,
 ): boolean {
   if (record.level1.status !== ResourceStatus.Online) return false;
+  // 连续失败触发的 rate_limited 旁路（Python feedback.py 语义，进程内收敛实现）
+  if (isResourceRateLimited(record.level1.resource_id)) return false;
   if (
     tenantId &&
     tenantId !== DEFAULT_TENANT_ID &&
@@ -1099,6 +1321,9 @@ function domainGroupsFromQuery(query: string): string[] {
 }
 
 function inferDomainGroups(domains: string[], resourceType: ResourceType): string[] {
+  // 与 Python router registry.DOMAIN_GROUPS 一比一对齐（2026-09-11 移植收口）：
+  // productivity 组补齐 travel/notes/file 三个域（此前落到 general，行程/笔记/文件
+  // 类工具在域路由层丢失分组倾向）。
   const groups = new Set<string>();
   if (resourceType === ResourceType.McpServer) groups.add("integration");
   for (const domain of domains) {
@@ -1110,6 +1335,9 @@ function inferDomainGroups(domains: string[], resourceType: ResourceType): strin
       case "calendar":
       case "reminder":
       case "self":
+      case "travel":
+      case "notes":
+      case "file":
         groups.add("productivity");
         break;
       case "phone":
@@ -1293,6 +1521,11 @@ function tryFastPathIntent(query: string): ParsedIntent | null {
   if (/\bweather\b|\b天气\b|\bforecast\b|\b温度\b|\btemperature\b/.test(q)) {
     return { intent: "天气查询", domain_candidates: ["weather"], primary_capability: "weather.query", confidence: 0.95, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
   }
+  // 热搜/热点：BM25 类别表对这类词弱（"热搜"不在任何 prefix/alias 强信号里），
+  // 曾被路由到 clock/shopping——意图层显式收编（2026-09-11 golden 实证）
+  if (/热搜|热点|热榜| trending|\btrending\b|大家都在看/.test(q)) {
+    return { intent: "热搜查询", domain_candidates: ["search"], primary_capability: "search.query", confidence: 0.9, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
   if (/\btime\b|\bdate\b|\b时间\b|\b日期\b|\bclock\b/.test(q)) {
     return { intent: "时间查询", domain_candidates: ["clock"], primary_capability: "clock.query", confidence: 0.95, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
   }
@@ -1327,7 +1560,15 @@ function topPForIntent(intent: ParsedIntent): number {
   return 0.95;
 }
 
+// 目录签名按对象记忆化：deferred 目录每轮由全量目录派生（对象内容不可变），
+// 同一对象内的多次取签名（索引缓存/图服务/边强化各有 key）只算一次排序+sha1。
+// 每轮首次仍 O(N log N)——101 工具无感；数千工具时如成为热点，应由
+// deriveDeferredCatalog 直接携带全量签名+子集指纹来增量化。
+const catalogSignatureMemo = new WeakMap<DeferredToolCatalog, string>();
+
 function catalogSignature(catalog: DeferredToolCatalog): string {
+  const memoed = catalogSignatureMemo.get(catalog);
+  if (memoed) return memoed;
   const hash = createHash("sha1");
   for (const entry of [...catalog.entries].sort((a, b) =>
     a.registryName.localeCompare(b.registryName),
@@ -1339,7 +1580,14 @@ function catalogSignature(catalog: DeferredToolCatalog): string {
     hash.update(String(entry.requiredParameters.length));
     hash.update("\0");
   }
-  return hash.digest("hex");
+  // embedding 缓存指纹：后台补全的向量落盘后 builtAt/模型变化 → 新目录对象
+  // 换签名 → 索引重建带上真向量。没有它，语义通道要等工具集变化或重启才生效
+  //（2026-09-11 N1 落地时实证：同签名索引缓存复用会一直持有 hash 占位向量）。
+  const emb = getToolEmbeddingCache();
+  hash.update(`|emb:${emb.meta.model}:${emb.meta.builtAt}:${Object.keys(emb.entries).length}`);
+  const signature = hash.digest("hex");
+  catalogSignatureMemo.set(catalog, signature);
+  return signature;
 }
 
 function hashTextToVector(text: string, dim: number): number[] {

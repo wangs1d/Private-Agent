@@ -72,6 +72,7 @@ export const PHONE_BRIDGE_TOOL_NAMES = new Set<string>([
   "phone.ring",
   "phone.sms_list",
   "phone.call_log",
+  "phone.dial",
 ]);
 
 export function isPhoneBridgeToolName(toolName: string): boolean {
@@ -153,6 +154,7 @@ export function buildAgentAccessModeSystemSuffix(
 ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 电脑桥接 + 手机桥接（均在线）
 Agent 已开启完全访问，可调用 desktop.visual.screenshot / desktop.visual.run_task、视觉巡检、自我编程、远程控制真实手机（phone.*）等高权限工具。
 电脑桥接与手机桥接均已在线，涉及用户手机的操作（查电量、定位、响铃、同步短信/通话记录等）请优先调用 phone.* 工具。
+远程拨打电话（phone.dial）属敏感操作：拨打前必须在对话中向用户确认被叫号码与意图，未经确认不得调用。
 执行转账、真实消费、桌面自动化、远程拍照等敏感操作前仍须征得用户明确同意。`;
   }
 
@@ -171,6 +173,7 @@ ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 电脑桥接（在线）
 ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 手机桥接（在线）
 Agent 已开启完全访问，可调用 desktop.visual.*、视觉巡检、自我编程、phone.* 等高权限工具。
 用户真实手机已连接，涉及用户手机的操作请优先调用 phone.* 工具（电量、通知、定位、响铃、短信、通话记录等）。
+远程拨打电话（phone.dial）属敏感操作：拨打前必须在对话中向用户确认被叫号码与意图，未经确认不得调用。
 执行转账、真实消费、远程拍照等敏感操作前仍须征得用户明确同意。`;
   }
 

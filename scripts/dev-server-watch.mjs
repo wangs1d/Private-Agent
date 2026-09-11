@@ -6,7 +6,6 @@ import { config } from "dotenv";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTcpPortInUse } from "./port-in-use.mjs";
-import { spawnToolRouter } from "./spawn-tool-router.mjs";
 import {
   readGatewayPort,
   spawnOpenClawGateway,
@@ -59,9 +58,6 @@ if (!(await isTcpPortInUse(gatewayPort))) {
     }
   }
 }
-
-// tool-router FastAPI：与 TS 服务异步并行拉起（端口占用时自动跳过）
-const toolRouterChild = await spawnToolRouter();
 
 const child = spawn("npx", ["tsx", "watch", "--clear-screen=false", ...WATCH_EXCLUDES, entry], {
   cwd: serverDir,

@@ -2,13 +2,17 @@ import type { DeferredToolCatalog } from "./catalog.js";
 import { describeDeferredTool, resolveCatalogToolName, searchDeferredTools } from "./catalog.js";
 import {
   adaptiveSearchDeferredTools,
+  recordAdaptiveResourceFeedback,
+  reinforceAdaptiveGraphEdges,
+  reinforceAdaptiveTopPForQuery,
   type AdaptiveDeferredToolSearchMatch,
 } from "./adaptive-catalog.js";
 import { getToolSearchConfig } from "./env.js";
-import { searchDeferredToolsViaToolRouter } from "./tool-router-adapter.js";
-import { getQueryEmbedding, peekQueryEmbedding } from "./tool-embedding.js";
+import { getQueryEmbedding, getQueryEmbeddingBounded, peekQueryEmbedding } from "./tool-embedding.js";
 import { sharedHistoryStore, type HistoryScoreStore } from "./retrieval/history-score.js";
 import { ResourceType } from "./registry/models.js";
+import { toolSearchMetrics } from "./observability/metrics.js";
+import { loadFeedbackState, saveFeedbackState } from "./feedback-state-persistence.js";
 import { isRegisteredSkillChatToolName } from "../../skills/skill-openai-bridge.js";
 
 const historyStore: HistoryScoreStore = sharedHistoryStore;
@@ -284,13 +288,17 @@ async function searchAdaptiveAgentPath(
     agentContextHash?: string;
   },
 ): Promise<AdaptiveDeferredToolSearchMatch[]> {
-  // 不阻塞等待 embedding：先查缓存，miss 则 fire-and-forget 异步预取
-  // 搜索使用本地 hash embedding 实时计算，API embedding 预取后供后续同 query 复用
-  const queryVector = peekQueryEmbedding(query) ?? undefined;
+  // 首查有界等待（N1 冷启动）：sidecar 本地毫秒级，等 400ms 换「首查即语义」；
+  // 超时/慢 provider 转入后台继续（下次同 query 命中 LRU），搜索不被阻塞
+  let queryVector = peekQueryEmbedding(query) ?? undefined;
   if (!queryVector && catalog.embeddingIndex.size > 0) {
-    safeQueryEmbedding(query, catalog).catch(() => {
-      // 静默失败，不影响主搜索
-    });
+    const warmed = await getQueryEmbeddingBounded(query).catch(() => null);
+    queryVector = warmed ?? undefined;
+    if (!warmed) {
+      safeQueryEmbedding(query, catalog).catch(() => {
+        // 静默失败，不影响主搜索
+      });
+    }
   }
   const matches = await searchWithAdaptiveFallback(catalog, query, limit, {
     includeSchema: options.includeSchema,
@@ -319,11 +327,31 @@ function recordSearchContext(
 
 const _toolCallFrequency = new Map<string, number>();
 const PROMOTE_THRESHOLD = 3; // 累计调用 >= 3 次自动晋升 core
+const PROMOTION_STATE_KEY = "promotion-counts";
+let promotionHydrated = false;
+let promotionSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** 记录一次工具调用（用于晋升统计）。 */
+/** 记录一次工具调用（用于晋升统计）。计数经 redis 持久化（可选），重启不丢晋升进度。 */
 export function recordToolCallForPromotion(toolName: string): void {
+  if (!promotionHydrated) {
+    promotionHydrated = true;
+    void loadFeedbackState<[string, number][]>(PROMOTION_STATE_KEY).then((restored) => {
+      if (!restored) return;
+      for (const [name, count] of restored) {
+        const existing = _toolCallFrequency.get(name) ?? 0;
+        if (count > existing) _toolCallFrequency.set(name, count);
+      }
+    });
+  }
   const count = (_toolCallFrequency.get(toolName) ?? 0) + 1;
   _toolCallFrequency.set(toolName, count);
+  // 节流持久化：10s 窗口内合并写（晋升计数是低频热数据，无需每次落盘）
+  if (promotionSaveTimer) return;
+  promotionSaveTimer = setTimeout(() => {
+    promotionSaveTimer = null;
+    saveFeedbackState(PROMOTION_STATE_KEY, [..._toolCallFrequency.entries()]);
+  }, 10_000);
+  promotionSaveTimer.unref?.();
 }
 
 /** 获取当前应晋升到 core 的 deferred 工具名列表。 */
@@ -346,10 +374,18 @@ function recordToolCallFeedback(catalog: DeferredToolCatalog, chosen: string): v
     lastSearchQuery?: string;
     lastSearchMatches?: string[];
   };
-  if (!ctx.lastSearchQuery || !ctx.lastSearchMatches || ctx.lastSearchMatches.length === 0) {
+  if (!ctx.lastSearchQuery || !ctx.lastSearchMatches || !ctx.lastSearchMatches.includes(chosen)) {
     return;
   }
   const now = new Date().toISOString();
+  // 召回质量观测（阶段优化⑤）：模型实际选中的工具在召回列表中的排名
+  // （0 = top-1；-1 = 选了召回列表之外的工具，检索漏报）
+  const chosenRank = ctx.lastSearchMatches.indexOf(chosen);
+  toolSearchMetrics.recordRecall(chosenRank);
+  // 阶段收口：调用成功同步驱动 rate_limited 复位 + 图边权重强化（Python
+  // feedback.py 语义的进程内收敛实现）
+  recordAdaptiveResourceFeedback(chosen, true);
+  void reinforceAdaptiveGraphEdges(catalog, chosen).catch(() => {});
   void historyStore.record({
     resource_id: chosen,
     success: true,
@@ -358,7 +394,11 @@ function recordToolCallFeedback(catalog: DeferredToolCatalog, chosen: string): v
     call_timestamp: now,
   });
   const top1 = ctx.lastSearchMatches[0];
-  if (top1 && top1 !== chosen && ctx.lastSearchMatches.includes(chosen)) {
+  if (top1 && top1 !== chosen) {
+    // 实际选中的工具不是检索 top-1：记 top-1 一次失败反馈——连续失败触发
+    // rate_limited 旁路，并抬升该意图的 top-p 阈值（下次召回扩候选面）。
+    recordAdaptiveResourceFeedback(top1, false);
+    void reinforceAdaptiveTopPForQuery(ctx.lastSearchQuery).catch(() => {});
     void historyStore.record({
       resource_id: top1,
       success: false,
@@ -386,49 +426,8 @@ async function searchWithAdaptiveFallback(
     agentContextHash?: string;
   },
 ): Promise<AdaptiveDeferredToolSearchMatch[]> {
-  const cfg = getToolSearchConfig();
-  if (cfg.backend === "tool_router") {
-    // 冷备降级：tool-router primary，TS adaptive 兜底，不再并行
-    try {
-      return await searchDeferredToolsViaToolRouter(catalog, query, limit, {
-        includeSchema: options.includeSchema,
-        tenantId: options.tenantId,
-        agentContextHash: options.agentContextHash,
-      });
-    } catch (toolRouterError) {
-      console.warn("[tool-search:bridge] tool-router primary failed, cold standby → adaptive TS path", toolRouterError);
-    }
-    try {
-      return await adaptiveSearchDeferredTools(catalog, query, limit, options);
-    } catch (adaptiveError) {
-      console.warn("[tool-search:bridge] adaptive cold standby also failed, final fallback → legacy BM25", adaptiveError);
-    }
-    // 终极兜底：纯 BM25
-    const fallback = searchDeferredTools(catalog, query, limit, {
-      includeSchema: options.includeSchema,
-      queryVector: options.queryVector,
-    });
-    return fallback.map((match) => {
-      const resourceType = inferFallbackResourceType(match.name);
-      const domain = inferFallbackDomain(match.name, resourceType);
-      const domainGroups = inferFallbackDomainGroups(domain, resourceType);
-      return {
-        ...match,
-        resource_type: resourceType,
-        domain,
-        capability: domain.map((item) => `${item}.general`),
-        routing: {
-          intent: query,
-          confidence: 0.5,
-          top_p: 0.95,
-          domain_groups: domainGroups,
-          domain_candidates: domain,
-          primary_capability: `${domain[0] ?? "misc"}.general`,
-        },
-      } satisfies AdaptiveDeferredToolSearchMatch;
-    });
-  }
-  // backend === "adaptive"：TS adaptive primary，异常时降级 BM25
+  // 2026-09-11 检索收口：Python tool-router 已删除，进程内 adaptive 是唯一检索管线
+  //（意图路由 → 分层路由 → 混合召回 → 自适应 top-p → 图扩展 → 重排），异常时降级纯 BM25。
   try {
     return await adaptiveSearchDeferredTools(catalog, query, limit, options);
   } catch (e) {

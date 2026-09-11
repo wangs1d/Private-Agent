@@ -7,8 +7,9 @@
  * 防止目录/分词/路由表改动后召回静默退化。
  *
  * 契约：
- *   - 纯进程内 adaptive 管线（AGENT_TOOL_SEARCH_BACKEND=adaptive），不碰外部 tool-router；
- *   - embedding 关闭（离线可跑、结果确定）；
+ *   - 纯进程内 adaptive 管线（唯一检索管线）；
+ *   - embedding 关闭 + 神经通道全关（离线可跑、结果确定——本机起过 sidecar
+ *     也不能让结果漂移；神经路径的在线验收归 tool-discover-neural-recall.test.ts）；
  *   - 用真实内置工具集（getBuiltinAgentChatTools，~99 个）建目录，与线上 catalog 同源。
  */
 import assert from "node:assert/strict";
@@ -22,6 +23,12 @@ process.env.AGENT_TOKENJUICE_ENABLED = "0";
 process.env.AGENT_TOOL_SEARCH_BACKEND = "adaptive";
 process.env.AGENT_TOOL_SEARCH_EMBEDDING = "off";
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
+// 神经通道钉死关闭：URL 指向不可达端口 + 特性开关 off（双保险，保证确定性）
+process.env.AGENT_TOOL_EMBEDDING_PROVIDER = "openai";
+process.env.AGENT_NEURAL_SIDECAR_URL = "http://127.0.0.1:1";
+process.env.AGENT_NEURAL_EMBED_ENABLED = "off";
+process.env.AGENT_NEURAL_RERANK_ENABLED = "off";
+process.env.AGENT_NEURAL_INTENT_ENABLED = "off";
 
 const { getBuiltinAgentChatTools } = await import(
   "../src/external-model/openai-compatible-tool-loop.js"

@@ -10,6 +10,10 @@ export type HybridScoreComponents = {
   latency_score: number;
   failure_penalty: number;
   base_score: number;
+  /** 意图域与候选域的重合度（Python retrieval.py 的 domain_match，1:1 移植） */
+  domain_match: number;
+  /** 意图能力与候选能力的重合度（Python retrieval.py 的 capability_match） */
+  capability_match: number;
 };
 
 export type HybridRetrievedResource = {
@@ -37,6 +41,10 @@ export type HybridRetrievalInput = {
   prebuiltIndex?: Bm25Index; // 预构建 BM25 索引，复用避免每次新建
   /** 传给 BM25 的别名条目（缺省则退化为纯词面匹配，中文召回明显变差） */
   aliasEntries?: HybridAliasEntry[];
+  /** 意图解析出的候选域（驱动 domain_match 打分，来自分层路由结果） */
+  intentDomains?: string[];
+  /** 意图解析出的候选能力（驱动 capability_match 打分） */
+  intentCapabilities?: string[];
 };
 
 export type HybridRetrievalWeights = {
@@ -45,6 +53,8 @@ export type HybridRetrievalWeights = {
   history: number;
   latency: number;
   failure: number;
+  domain: number;
+  capability: number;
 };
 
 export type HybridRetrievalOptions = {
@@ -91,12 +101,16 @@ export class HybridRetrievalEngine {
         latency_score: history.latency_score,
         failure_penalty: history.failure_penalty,
         base_score: record.level1.base_score,
+        domain_match: overlapRatio(record.level1.domain, input.intentDomains),
+        capability_match: overlapRatio(record.level1.capability, input.intentCapabilities),
       };
       const raw =
         components.embedding_score * weights.embedding +
         components.keyword_score * weights.keyword +
         components.history_success_score * weights.history +
-        components.latency_score * weights.latency -
+        components.latency_score * weights.latency +
+        components.domain_match * weights.domain +
+        components.capability_match * weights.capability -
         components.failure_penalty * weights.failure;
       out.push({
         resource: record,
@@ -127,6 +141,12 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
   const history = envFloat("AGENT_TOOL_SEARCH_HISTORY_WEIGHT", 0.2, 0, 1);
   const latency = envFloat("AGENT_TOOL_SEARCH_LATENCY_WEIGHT", 0.1, 0, 1);
   const failure = envFloat("AGENT_TOOL_SEARCH_FAILURE_WEIGHT", 0.2, 0, 1);
+  // 域/能力匹配分量（Python retrieval.py 的 domain_match/capability_match 移植）。
+  // Python 原值 0.15/0.25 是在其自身权重体系（embedding 0.3 + bm25 0.3 + …）里定的；
+  // TS 通道的 keyword/embedding 分值分布更尖，等权照搬会把结构信号放大到盖过词面
+  // 相关性（实测把 commitment.list 顶到「今天有什么热搜」top-1），按 TS 分布校准。
+  const domain = envFloat("AGENT_TOOL_SEARCH_DOMAIN_WEIGHT", 0.06, 0, 1);
+  const capability = envFloat("AGENT_TOOL_SEARCH_CAPABILITY_WEIGHT", 0.1, 0, 1);
   if (!hasQueryVector) {
     return normalizeWeights({
       embedding: 0,
@@ -134,6 +154,8 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
       history,
       latency,
       failure,
+      domain,
+      capability,
     });
   }
   const tokenCount = tokenize(query).length;
@@ -145,6 +167,8 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
       history,
       latency,
       failure,
+      domain,
+      capability,
     });
   }
   return normalizeWeights({
@@ -153,6 +177,8 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
     history,
     latency,
     failure,
+    domain,
+    capability,
   });
 }
 
@@ -226,15 +252,30 @@ function applyColdStartBase(
 }
 
 function normalizeWeights(weights: HybridRetrievalWeights): HybridRetrievalWeights {
-  const positive = weights.embedding + weights.keyword + weights.history + weights.latency;
+  const positive =
+    weights.embedding + weights.keyword + weights.history + weights.latency +
+    weights.domain + weights.capability;
   if (positive <= 0) return weights;
   return {
     embedding: weights.embedding / positive,
     keyword: weights.keyword / positive,
     history: weights.history / positive,
     latency: weights.latency / positive,
+    domain: weights.domain / positive,
+    capability: weights.capability / positive,
     failure: weights.failure,
   };
+}
+
+/** 意图集合与候选集合的重合度：|交| / |意图集|（意图集为空返回 0，不参与打分）。 */
+function overlapRatio(candidateValues: string[], intentValues?: string[]): number {
+  if (!intentValues || intentValues.length === 0) return 0;
+  const candidateSet = new Set(candidateValues.map((v) => v.toLowerCase()));
+  let hits = 0;
+  for (const value of intentValues) {
+    if (candidateSet.has(value.toLowerCase())) hits += 1;
+  }
+  return hits / intentValues.length;
 }
 
 function envFloat(name: string, fallback: number, min: number, max: number): number {

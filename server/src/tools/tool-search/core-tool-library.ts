@@ -28,6 +28,9 @@ export const CORE_TOOL_LIBRARY = {
       "search_videos",
       "fetch_web",
       "browser.session.list",
+      // ObservationPack 读回工具（SoL-Pi 借鉴）：压缩/折叠损失的原文按句柄分页读回，
+      // 常驻 core 档——它服务的正是「其他工具结果被压缩」的每轮场景，进延迟目录会失效。
+      "obs_recall",
     ],
   },
   dialogue: {

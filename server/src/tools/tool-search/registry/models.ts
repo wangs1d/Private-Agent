@@ -71,6 +71,8 @@ export type Level1IndexMeta = {
   base_score: number;
   /** 用于 Qdrant 余弦检索的稠密向量 */
   embedding: number[];
+  /** 声明时延（毫秒，按域估算，与 Python models 对齐）；重排阶段用作超时软惩罚 */
+  latency_ms: number;
 };
 
 // ===== Level-2 能力描述元数据 =====

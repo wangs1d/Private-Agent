@@ -178,6 +178,9 @@ export class RegistryService {
       status: "online" as ResourceStatus,
       base_score: baseScore,
       embedding: input.embedding,
+      // HTTP 注册面（管理/查询用途）无真实时延数据，用域无关默认值；生产检索
+      // 路径的 adaptive-catalog 会按域估算（inferLatencyMs）
+      latency_ms: 20,
     };
 
     // 5. 版本记录（首个版本即激活版本）

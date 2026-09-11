@@ -1,9 +1,11 @@
 import "dart:async";
 
+import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/services/access_auth_api.dart";
+import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/user_preferences_api.dart";
 
 /// 「设置」页 —— 嵌入右侧面板（面板顶栏已提供标题，本页不渲染 AppBar）。
@@ -245,15 +247,91 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final bool showPhoneBridge =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       children: <Widget>[
         _buildBriefingCard(),
         const SizedBox(height: 16),
         _buildSecurityCard(),
+        if (showPhoneBridge) ...<Widget>[
+          const SizedBox(height: 16),
+          _buildPhoneBridgeCard(),
+        ],
         const SizedBox(height: 16),
         _buildAboutCard(),
       ],
+    );
+  }
+
+  // ------------------------------------------------------------------ //
+  // 手机桥接
+  // ------------------------------------------------------------------ //
+
+  /// 手机桥接卡：仅 Android 显示。开启后本机作为该用户的「手机执行器」
+  /// 接收 Agent 的远程指令（当前支持拨号，拨号前必弹确认窗）。
+  Widget _buildPhoneBridgeCard() {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.smartphone_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("手机桥接", style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                ValueListenableBuilder<PhoneBridgeStatus>(
+                  valueListenable: PhoneBridgeService.instance.status,
+                  builder: (BuildContext context, PhoneBridgeStatus st, _) {
+                    final (String text, Color color) = switch (st) {
+                      PhoneBridgeStatus.online => ("已连接", const Color(0xFF22C55E)),
+                      PhoneBridgeStatus.connecting => ("连接中", const Color(0xFFF59E0B)),
+                      PhoneBridgeStatus.offline => ("未连接", const Color(0xFF9E9E9E)),
+                      PhoneBridgeStatus.disabled => ("已关闭", const Color(0xFF9E9E9E)),
+                    };
+                    return Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: color,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(text, style: Theme.of(context).textTheme.bodySmall),
+                      ],
+                    );
+                  },
+                ),
+              ],
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text("允许 Agent 远程访问本机"),
+              subtitle: const Text(
+                "开启后 Agent 可查询本机信息；远程拨打电话前会先弹出确认窗，由你最终决定是否拨打。",
+              ),
+              value: PhoneBridgeService.instance.isEnabled,
+              onChanged: (bool v) {
+                setState(() {});
+                unawaited(
+                  v
+                      ? PhoneBridgeService.instance.enable()
+                      : PhoneBridgeService.instance.disable(),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 

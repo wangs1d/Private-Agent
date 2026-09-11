@@ -114,15 +114,35 @@ export function filterByDynamicThreshold(
 /**
  * 工具向量索引：在 catalog 构建时一次性预归一化所有工具向量。
  * 搜索时直接 dot product，省去 sqrt。
+ *
+ * N4 规模化（docs/neural-retrieval-plan.md §4）：目录 ≥ ANN_MIN_TOOLS（缺省 2000）
+ * 且 hnswlib-node 可加载时，全量 top-K 检索走进程内 HNSW（~50k 向量 p99 <5ms）；
+ * 未安装/加载失败/规模未到 → 暴力扫描（当前百级目录是亚毫秒，零损失）。
+ * hnswlib-node 是 optionalDependencies 成员：原生模块装不上不应阻断安装。
  */
+import { getToolSearchConfig } from "./env.js";
+
+/** hnswlib-node 的结构化最小接口（动态加载，避免硬类型依赖） */
+type HnswIndex = {
+  initIndex(maxElements: number, m?: number, efConstruction?: number): unknown;
+  addPoint(vector: number[], idx: number): unknown;
+  searchKnn(vector: number[], k: number): { distances: number[]; neighbors: number[] };
+};
+
 export class ToolEmbeddingIndex {
   private readonly vectors = new Map<string, Float32Array>();
   private dimension = 0;
+  // ANN 层（惰性构建）：ids 与 addPoint 的整数 label 一一对应
+  private annIndex: HnswIndex | null = null;
+  private annIds: string[] = [];
+  private annBuilding: Promise<void> | null = null;
+  private annFailed = false;
 
   ingest(registryName: string, vector: number[]): void {
     if (vector.length === 0) return;
     this.dimension = vector.length;
     this.vectors.set(registryName, preNormalizeVector(vector));
+    this.annIndex = null; // 增量写入使 ANN 失效，下次 ensureAnn 重建
   }
 
   ingestMany(entries: Iterable<[string, number[] | undefined | null]>): void {
@@ -141,6 +161,110 @@ export class ToolEmbeddingIndex {
   ): Array<{ id: string; score: number }> {
     const all = rankAllByEmbedding(queryVector, this.vectors);
     return filterByDynamicThreshold(all, threshold);
+  }
+
+  /**
+   * 子集内余弦排序（只扫传入的 id 集合）：类别内搜索（Level 2）用——
+   * 全量排序后过滤会把整个目录扫一遍，子集直接扫在千级目录上是数量级差。
+   * 阈值语义随之变为「相对子集内 max」，弱类别不再被全局 max 压制。
+   */
+  rankAllWithin(
+    ids: Set<string>,
+    queryVector: number[] | Float32Array,
+  ): Array<{ id: string; score: number }> {
+    if (queryVector.length === 0 || ids.size === 0) return [];
+    const q =
+      queryVector instanceof Float32Array ? queryVector : preNormalizeVector(queryVector);
+    const hits: Array<{ id: string; score: number }> = [];
+    for (const id of ids) {
+      const vec = this.vectors.get(id);
+      if (!vec || vec.length !== q.length) continue;
+      let dot = 0;
+      for (let i = 0; i < q.length; i++) dot += q[i]! * vec[i]!;
+      hits.push({ id, score: dot });
+    }
+    hits.sort((a, b) => b.score - a.score);
+    return hits;
+  }
+
+  /**
+   * 全目录 top-K 检索（N4）：ANN 就绪走 HNSW，否则暴力扫描后取前 K。
+   * 注意 HNSW 是近邻检索，尾部排序不保证精确——top-K 场景（K ≪ N）足够。
+   */
+  async searchTopK(
+    queryVector: number[] | Float32Array,
+    k: number,
+  ): Promise<Array<{ id: string; score: number }>> {
+    if (queryVector.length === 0 || this.vectors.size === 0) return [];
+    if (this.annIndex) {
+      try {
+        const q = Array.from(queryVector);
+        const raw = this.annIndex.searchKnn(q, Math.min(k, this.vectors.size));
+        const out: Array<{ id: string; score: number }> = [];
+        for (let i = 0; i < raw.neighbors.length; i++) {
+          const label = raw.neighbors[i];
+          const distance = raw.distances[i];
+          const id = label !== undefined ? this.annIds[label] : undefined;
+          if (id !== undefined && distance !== undefined) {
+            out.push({ id, score: 1 - distance }); // cosine 距离 → 相似度
+          }
+        }
+        out.sort((a, b) => b.score - a.score);
+        return out;
+      } catch {
+        this.annIndex = null; // ANN 异常一次性回落，下次 ensureAnn 重建
+      }
+    }
+    return rankAllByEmbedding(queryVector, this.vectors).slice(0, Math.max(0, k));
+  }
+
+  /** ANN 是否该建（auto：规模达标；on：强制；off：永不）。 */
+  private shouldBuildAnn(): boolean {
+    const cfg = getToolSearchConfig();
+    if (cfg.annMode === "off") return false;
+    if (cfg.annMode === "on") return true;
+    return this.vectors.size >= cfg.annMinTools;
+  }
+
+  /**
+   * 惰性构建 ANN 索引（fire-and-forget 安全，重复调用幂等）。
+   * hnswlib-node 未安装 / 原生模块加载失败 → 标记 failed 永久回落暴力扫描。
+   */
+  async ensureAnn(): Promise<boolean> {
+    if (this.annIndex || this.annFailed || !this.shouldBuildAnn()) return this.annIndex !== null;
+    if (!this.annBuilding) {
+      this.annBuilding = (async () => {
+        try {
+          const mod = (await import("hnswlib-node")) as unknown as {
+            default?: { HierarchicalNSW: new (space: string, dim: number) => HnswIndex };
+            HierarchicalNSW?: new (space: string, dim: number) => HnswIndex;
+          };
+          const ids = [...this.vectors.keys()];
+          if (ids.length === 0 || this.dimension === 0) return;
+          // ESM 互操作：类挂在 default 下（ESM/CJS 混合包，顶层无具名导出）
+          const Ctor = mod.default?.HierarchicalNSW ?? mod.HierarchicalNSW;
+          if (typeof Ctor !== "function") throw new Error("HierarchicalNSW constructor not found");
+          const index = new Ctor("cosine", this.dimension);
+          index.initIndex(ids.length, 16, 200);
+          let i = 0;
+          for (const id of ids) {
+            index.addPoint(Array.from(this.vectors.get(id)!), i++);
+          }
+          this.annIds = ids;
+          this.annIndex = index;
+        } catch (error) {
+          this.annFailed = true;
+          console.warn(
+            "[tool-embedding-index] hnswlib-node 不可用，embedding 检索保持暴力扫描（规模化前无损失）:",
+            error instanceof Error ? error.message : String(error),
+          );
+        } finally {
+          this.annBuilding = null;
+        }
+      })();
+    }
+    await this.annBuilding;
+    return this.annIndex !== null;
   }
 
   /**
