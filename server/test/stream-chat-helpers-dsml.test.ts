@@ -5,6 +5,7 @@ import {
   consumeNormalizedStream,
   createStreamDsmlSanitizer,
   extractDsmlToolCalls,
+  pickVisibleText,
   stripDsmlToolCallMarkup,
   ToolIntentWithoutToolsError,
   type NormalChatChunk,
@@ -182,4 +183,42 @@ test("ToolIntentWithoutToolsError carries extracted calls for escalation", () =>
   assert.equal(err.toolCalls.length, 1);
   assert.equal(err.message.includes("desktop"), false);
   assert.equal(err.message.includes("tool_call"), true);
+});
+
+// 2026-09-12 回归锁：全角竖线版泄漏原文（「我桌面的抖音」任务实测，
+// dist 未重建时旧代码整段透出）。extract + sanitize 必须双兜底。
+const dsmlFullwidthLeak =
+  '<｜｜DSML｜｜ calls>\n' +
+  '<｜｜DSML｜｜ invoke name="tool_call">\n' +
+  '<｜｜DSML｜｜ parameter name="arguments" string="false">{"mode": "full"}</｜｜DSML｜｜ parameter>\n' +
+  '<｜｜DSML｜｜ parameter name="name" string="true">desktop.visual.screenshot</｜｜DSML｜｜ parameter>\n' +
+  '</｜｜DSML｜｜ invoke>\n' +
+  '</｜｜DSML｜｜ calls>';
+
+test("extractDsmlToolCalls parses fullwidth-pipe calls variant (2026-09-12 task leak)", () => {
+  const calls = extractDsmlToolCalls(dsmlFullwidthLeak);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "tool_call");
+  assert.equal(
+    JSON.parse(calls[0]?.argumentsChunk ?? "{}").name,
+    "desktop.visual.screenshot",
+  );
+});
+
+test("pickVisibleText reasoning fallback strips DSML markup (reasoner draft leak)", () => {
+  // 思考模型把工具调用草稿写进 reasoning、content 为空：回退路径此前只剥 think，
+  // 协议原文会整段泄漏进正式回复。
+  const reasoning =
+    "<think>用户想截图，我需要调用工具</think>\n" + dsmlFullwidthLeak;
+  const visible = pickVisibleText("", reasoning);
+
+  assert.equal(visible.includes("DSML"), false);
+  assert.equal(visible.includes("desktop.visual.screenshot"), false);
+  assert.equal(visible.includes("invoke"), false);
+});
+
+test("pickVisibleText still prefers non-empty content untouched", () => {
+  const visible = pickVisibleText("正式回答", dsmlFullwidthLeak);
+  assert.equal(visible, "正式回答");
 });

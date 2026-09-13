@@ -110,7 +110,7 @@ async function llmRerankScores(
     .map((t, i) => `${i + 1}. ${t.length > 200 ? `${t.slice(0, 200)}…` : t}`)
     .join("\n");
   try {
-    const client = opts.client ?? new OpenAI({ apiKey });
+    const client = opts.client ?? new OpenAI({ apiKey, maxRetries: 1 });
     const response = await client.chat.completions.create({
       // llm 档是 chat.completions 调用，默认必须用对话模型（AGENT_AGENTIC_MEMORY_LLM_MODEL
       // → OPENAI_MODEL）；AGENT_MEMORY_RERANKER_MODEL 是 api 档的 rerank 模型名，

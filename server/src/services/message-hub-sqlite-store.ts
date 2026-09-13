@@ -43,6 +43,32 @@ function toJsonColumn(value: unknown): string | null {
   return JSON.stringify(value);
 }
 
+export type MessageHubGlobalStats = {
+  conversations: number;
+  messages: number;
+  outbound: number;
+  inbound: number;
+  today: number;
+  series: Array<{ day: string; count: number }>;
+};
+
+export type MessageHubPlatformStat = {
+  platform: string;
+  conversations: number;
+  messages: number;
+};
+
+export type MessageHubRecentMessage = {
+  messageId: string;
+  actorId: string;
+  platform: string;
+  conversationId: string;
+  direction: string;
+  senderName: string | null;
+  text: string;
+  createdAt: string;
+};
+
 function fromJsonColumn<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -50,6 +76,16 @@ function fromJsonColumn<T>(raw: string | null | undefined, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+/** legacy JSON 记录运行时可迁移性：NOT NULL 列（platform/channelId）非空字符串。 */
+function legacyRecordMigratable(record: Pick<MessageHubConversation, "platform" | "channelId">): boolean {
+  return (
+    typeof record.platform === "string" &&
+    record.platform.length > 0 &&
+    typeof record.channelId === "string" &&
+    record.channelId.length > 0
+  );
 }
 
 type ConversationRow = {
@@ -400,6 +436,101 @@ export class MessageHubSqliteStore {
   }
 
   /**
+   * 全库消息统计（管理概览）：总量、收/发、今日、近 N 天逐日量。
+   * created_at 是 ISO 字符串，SQLite 的 date()/datetime() 可直接解析。
+   */
+  globalStats(days = 14): MessageHubGlobalStats {
+    const span = Math.max(1, Math.min(Math.trunc(days), 90));
+    const one = <T>(sql: string): T => this.db.prepare(sql).get() as T;
+    const conversations = one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM mh_conversations`,
+    ).n;
+    const messages = one<{ n: number }>(`SELECT COUNT(*) AS n FROM mh_messages`).n;
+    const directions = one<{ outbound: number; inbound: number }>(`
+      SELECT COALESCE(SUM(direction = 'outbound'), 0) AS outbound,
+             COALESCE(SUM(direction = 'inbound'), 0) AS inbound
+      FROM mh_messages
+    `);
+    const today = one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM mh_messages WHERE date(created_at, 'localtime') = date('now', 'localtime')`,
+    ).n;
+    const rows = this.db
+      .prepare(
+        `SELECT date(created_at, 'localtime') AS day, COUNT(*) AS n
+         FROM mh_messages
+         WHERE created_at >= datetime('now', 'localtime', ?)
+         GROUP BY day`,
+      )
+      .all(`-${span - 1} days`) as Array<{ day: string; n: number }>;
+    const byDay = new Map(rows.map((r) => [r.day, r.n]));
+    const series: Array<{ day: string; count: number }> = [];
+    for (let i = span - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86_400_000);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      series.push({ day: key, count: byDay.get(key) ?? 0 });
+    }
+    return {
+      conversations,
+      messages,
+      outbound: directions.outbound,
+      inbound: directions.inbound,
+      today,
+      series,
+    };
+  }
+
+  /** 按平台聚合会话/消息量（管理后台站内信页）。 */
+  platformStats(): MessageHubPlatformStat[] {
+    const rows = this.db
+      .prepare(`
+        SELECT c.platform AS platform,
+               COUNT(DISTINCT c.conversation_id) AS conversations,
+               (SELECT COUNT(*) FROM mh_messages m WHERE m.platform = c.platform) AS messages
+        FROM mh_conversations c
+        GROUP BY c.platform
+        ORDER BY messages DESC
+      `)
+      .all() as Array<{ platform: string; conversations: number; messages: number }>;
+    return rows.map((r) => ({
+      platform: r.platform,
+      conversations: r.conversations,
+      messages: r.messages,
+    }));
+  }
+
+  /** 跨身份的最近消息（管理后台站内信页）。 */
+  recentMessages(limit = 30): MessageHubRecentMessage[] {
+    const rows = this.db
+      .prepare(`
+        SELECT message_id, actor_id, platform, conversation_id, direction,
+               sender_name, text, created_at
+        FROM mh_messages
+        ORDER BY created_at DESC
+        LIMIT ?
+      `)
+      .all(Math.max(1, Math.min(Math.trunc(limit), 200))) as Array<{
+        message_id: string;
+        actor_id: string;
+        platform: string;
+        conversation_id: string;
+        direction: string;
+        sender_name: string | null;
+        text: string;
+        created_at: string;
+      }>;
+    return rows.map((r) => ({
+      messageId: r.message_id,
+      actorId: r.actor_id,
+      platform: r.platform,
+      conversationId: r.conversation_id,
+      direction: r.direction,
+      senderName: r.sender_name,
+      text: r.text,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /**
    * 清理：删除 created_at 早于保留期的消息 + 每会话只留最近 cap 条。
    * SQLite 窗口函数做每会话保留（better-sqlite3 内置现代 SQLite 支持窗口函数）。
    */
@@ -418,10 +549,27 @@ export class MessageHubSqliteStore {
     `).run(perConversationCap);
   }
 
-  /** 旧 JSON 全量导入（一次性迁移）：INSERT OR IGNORE 尊重去重索引。 */
+  /**
+   * 旧 JSON 全量导入（一次性迁移）：INSERT OR IGNORE 尊重去重索引。
+   * legacy JSON 是 JSON.parse 直接 cast 的，历史上 platform/channelId 未必填时
+   * 产生的记录会带 null，撞 NOT NULL 约束会把启动打崩——这里运行时跳过脏记录
+   * （及其孤儿消息），只导入可迁移的部分。
+   */
   importLegacy(conversations: MessageHubConversation[], messages: MessageHubMessage[]): void {
+    const validConversations = conversations.filter(legacyRecordMigratable);
+    const conversationIds = new Set(validConversations.map((c) => c.conversationId));
+    const validMessages = messages.filter(
+      (m) => legacyRecordMigratable(m) && conversationIds.has(m.conversationId),
+    );
+    const skippedConv = conversations.length - validConversations.length;
+    const skippedMsg = messages.length - validMessages.length;
+    if (skippedConv > 0 || skippedMsg > 0) {
+      console.warn(
+        `[message-hub] legacy 迁移跳过脏记录：会话 ${skippedConv} 条、消息 ${skippedMsg} 条（platform/channelId 缺失或所属会话已跳过）`,
+      );
+    }
     const tx = this.db.transaction(() => {
-      for (const c of conversations) {
+      for (const c of validConversations) {
         this.upsertConversation({
           actorId: c.actorId,
           conversationId: c.conversationId,
@@ -442,7 +590,7 @@ export class MessageHubSqliteStore {
           WHERE actor_id = ? AND conversation_id = ?
         `).run(c.unreadCount, c.createdAt, c.updatedAt, c.lastMessageAt, c.actorId, c.conversationId);
       }
-      for (const m of messages) {
+      for (const m of validMessages) {
         this.insertMessage({
           messageId: m.messageId,
           actorId: m.actorId,

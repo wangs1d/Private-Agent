@@ -6,7 +6,7 @@ import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import { formatScheduleToolResultForUser } from "../tools/schedule-user-reply.js";
 import { getToolResultProcessor } from "./tool-result-processor.js";
 import { AssistantRewriterService } from "./assistant-rewriter.js";
-import { dedupeAdjacentLines } from "../utils/text.js";
+import { dedupeAdjacentLines, normalizeDashTypos } from "../utils/text.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
 import { isApologyStyleFallback } from "../external-model/fallback-texts.js";
 
@@ -154,6 +154,7 @@ export async function runChatTurnForActor(
       userText: text,
     });
     finalText = await rewriter.rewriteIfNeeded(text, finalText);
+    finalText = normalizeDashTypos(finalText);
     finalText = dedupeAdjacentLines(finalText);
     finalText = getToolResultProcessor().processAssistantText(finalText, {
       plainTextMode: true,

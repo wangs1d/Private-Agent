@@ -1,0 +1,364 @@
+// 五层主动性架构单测：传感内核 / 屏幕分类 / 评估器链 / 仲裁 V2 / 模板 / 直达车道。
+// 全部零 LLM 断言——LLM 不参与这五层中的任何决策。
+import assert from "node:assert/strict";
+import { test, beforeEach } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { SensorKernel, registerFeeder } from "../src/proactivity/sensors/kernel.js";
+import { ScreenSensor, classifyWindow, screenFocusLabel } from "../src/proactivity/sensors/screen-sensor.js";
+import { ScheduleSensor } from "../src/proactivity/sensors/schedule-sensor.js";
+import { EvaluatorChain } from "../src/proactivity/evaluators/evaluator-chain.js";
+import { buildBuiltinEvaluators } from "../src/proactivity/evaluators/builtin-evaluators.js";
+import { ArbiterV2, interruptCost } from "../src/proactivity/arbiter-v2.js";
+import { GoalBoard } from "../src/proactivity/goal-board.js";
+import { renderProactiveText, renderDigestCard } from "../src/proactivity/voice-templates.js";
+import { ProactivityHub } from "../src/proactivity/proactivity-hub.js";
+import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
+import type { Signal } from "../src/proactivity/sensors/types.js";
+
+function tmpDir(): string {
+  return mkdtempSync(join(tmpdir(), "fabric-test-"));
+}
+
+class MockClock {
+  t: number;
+  constructor(t = Date.UTC(2026, 8, 14, 8, 0, 0)) {
+    this.t = t;
+  }
+  now(): number {
+    return this.t;
+  }
+  advance(ms: number): void {
+    this.t += ms;
+  }
+  /** 本地时区的今天某时刻 */
+  static localAt(h: number, m = 0): number {
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    return d.getTime();
+  }
+}
+
+// ─── L1 传感内核 ───
+
+test("SensorKernel: 指纹去重 + 健康记账 + feeder", () => {
+  const kernel = new SensorKernel({ dataPath: tmpDir(), disablePersist: true });
+  const emit = registerFeeder(kernel, "test_feeder", "goal");
+  const got: Signal[] = [];
+  kernel.onSignal((s) => got.push(s));
+  const base = { at: 1, fingerprint: "fp1", salience: "low" as const };
+  emit({ ...base });
+  emit({ ...base }); // 同指纹：去重
+  emit({ at: 2, fingerprint: "fp2", salience: "medium" });
+  assert.equal(got.length, 2);
+  const health = kernel.health();
+  assert.equal(health.length, 1);
+  assert.equal(health[0].mode, "feeder");
+  assert.equal(health[0].emitted, 2);
+  assert.equal(health[0].tripped, false);
+});
+
+test("SensorKernel: 连续失败熔断 + 半开恢复", async () => {
+  const kernel = new SensorKernel({ dataPath: tmpDir(), disablePersist: true });
+  let fails = true;
+  kernel.register({
+    id: "flaky",
+    stream: "device",
+    pollIntervalMs: 1000,
+    collect: () => {
+      if (fails) throw new Error("device offline");
+      return [];
+    },
+  });
+  await kernel.pollOnce();
+  await kernel.pollOnce();
+  await kernel.pollOnce();
+  const h = kernel.health()[0];
+  assert.equal(h.tripped, true);
+  assert.equal(h.consecutiveFails, 3);
+  fails = false;
+  await kernel.pollOnce(); // 冷却期内不重试
+  assert.equal(kernel.health()[0].tripped, true);
+});
+
+test("ScreenSensor: 零 LLM app 分类", () => {
+  assert.equal(classifyWindow({ processName: "Code.exe", title: "main.ts - VS Code" }), "coding");
+  assert.equal(classifyWindow({ processName: "Weixin.exe", title: "微信" }), "chat");
+  assert.equal(classifyWindow({ processName: "msedge", title: "Bilibili - 搜索" }), "video");
+  assert.equal(classifyWindow({ processName: "unknown.exe", title: "" }), "idle");
+  assert.equal(screenFocusLabel("coding"), "写代码");
+});
+
+test("ScheduleSensor: 只在 24h 日程集变化时产出，nextEventMin 可读", () => {
+  const clock = new MockClock();
+  const task = { title: "牙医复诊", runAt: clock.t + 30 * 60_000, status: "scheduled" };
+  const sensor = new ScheduleSensor({
+    listTasks: () => [task] as never[],
+    nowFn: () => clock.t,
+  });
+  const first = sensor.collect(0);
+  assert.equal(first.length, 1);
+  assert.equal(sensor.latest()?.min, 30);
+  // 日程没变：不产出
+  assert.equal(sensor.collect(0).length, 0);
+  // 日程变了：产出
+  task.runAt += 3600_000;
+  assert.equal(sensor.collect(0).length, 1);
+});
+
+// ─── L2 评估器链 ───
+
+function makeChain(clock: MockClock, services: Record<string, unknown> = {}) {
+  const chain = new EvaluatorChain({
+    defaultActorId: () => "user-1",
+    flushIntervalMs: 60_000,
+    services,
+    nowFn: () => clock.t,
+  });
+  const events: unknown[] = [];
+  chain.onEvent((e) => events.push(e));
+  return { chain, events };
+}
+
+test("评估器: away_return —— 离开4h后回归才问候", async () => {
+  const clock = new MockClock(MockClock.localAt(15, 0));
+  const { chain, events } = makeChain(clock);
+  chain.register(buildBuiltinEvaluators({})[0]);
+  const sig = (state: string): Signal => ({
+    stream: "presence",
+    at: clock.t,
+    fingerprint: `p:${state}:${clock.t}`,
+    salience: "low",
+    payload: { state },
+  });
+  chain.handleSignal(sig("idle"));
+  clock.advance(30 * 60_000);
+  await chain.flush();
+  assert.equal(events.length, 0); // 短暂离开不问候
+  chain.handleSignal(sig("active"));
+  clock.advance(5 * 3600_000); // 5h 后回归
+  chain.handleSignal(sig("idle"));
+  clock.advance(60_000);
+  chain.handleSignal(sig("active"));
+  await chain.flush();
+  assert.equal(events.length, 1);
+  assert.equal((events[0] as { kind: string }).kind, "away_return");
+  assert.ok(((events[0] as { body: string }).body.length > 0), "模板正文非空");
+});
+
+test("评估器: work_marathon —— 连续编码3h 触发休息干预", async () => {
+  const clock = new MockClock(MockClock.localAt(10, 0));
+  const { chain, events } = makeChain(clock);
+  chain.register(buildBuiltinEvaluators({}).find((e) => e.id === "work_marathon")!);
+  const sig = (): Signal => ({
+    stream: "screen",
+    at: clock.t,
+    fingerprint: `screen:beat:${clock.t}`,
+    salience: "low",
+    payload: { kind: "coding" },
+  });
+  chain.handleSignal(sig());
+  await chain.flush();
+  assert.equal(events.length, 0);
+  clock.advance(181 * 60_000);
+  chain.handleSignal(sig());
+  await chain.flush();
+  assert.equal(events.length, 1);
+  const ev = events[0] as { kind: string; body: string };
+  assert.equal(ev.kind, "work_marathon");
+  assert.ok(ev.body.includes("小时"), `正文含时长: ${ev.body}`);
+});
+
+test("评估器: morning_brief + digest 数据拼接，全缺数据也非空", async () => {
+  const clock = new MockClock(MockClock.localAt(7, 30));
+  const { chain, events } = makeChain(clock, {
+    listTodayTasks: () => [{ title: "10点站会" }, { title: "14点评审" }],
+    weatherLine: () => "小雨，18-24°C",
+    commitmentsDue: () => [{ id: "c1", title: "给小李发报价", dueAt: clock.t + 3600_000 }],
+  });
+  chain.register(buildBuiltinEvaluators({
+    listTodayTasks: () => [{ title: "10点站会" }, { title: "14点评审" }],
+    weatherLine: () => "小雨，18-24°C",
+    commitmentsDue: () => [{ id: "c1", title: "给小李发报价", dueAt: clock.t + 3600_000 }],
+  }).find((e) => e.id === "morning_brief")!);
+  chain.handleSignal({ stream: "presence", at: clock.t, fingerprint: "p:active", salience: "low", payload: { state: "active" } });
+  await chain.flush();
+  assert.equal(events.length, 1);
+  const body = (events[0] as { body: string }).body;
+  assert.ok(body.includes("10点站会"), `简报含日程: ${body}`);
+  assert.ok(body.includes("给小李发报价"), `简报含承诺: ${body}`);
+  assert.ok(body.includes("小雨"), `简报含天气: ${body}`);
+});
+
+test("评估器: commitment_chain —— 承诺2h内到期产出 ask_first 代催事件", async () => {
+  const clock = new MockClock(MockClock.localAt(12, 0));
+  const { chain, events } = makeChain(clock, {
+    commitmentsDue: () => [{ id: "c9", title: "回复张总邮件", dueAt: clock.t + 90 * 60_000 }],
+  });
+  chain.register(buildBuiltinEvaluators({
+    commitmentsDue: () => [{ id: "c9", title: "回复张总邮件", dueAt: clock.t + 90 * 60_000 }],
+  }).find((e) => e.id === "commitment_chain")!);
+  await chain.flush();
+  assert.equal(events.length, 1);
+  const ev = events[0] as { kind: string; confirmLabel?: string; urgency: string };
+  assert.equal(ev.kind, "commitment_chain");
+  assert.equal(ev.confirmLabel, "帮我催一下");
+  assert.equal(ev.urgency, "alert");
+});
+
+// ─── L3 仲裁 ───
+
+function baseSnapshot(over: Partial<Parameters<typeof interruptCost>[0]> = {}) {
+  return {
+    now: new Date(MockClock.localAt(15, 0)),
+    presence: "active" as const,
+    inConversation: false,
+    screenFocus: null,
+    nextEventMin: null,
+    quietHours: false,
+    receptivity: 0.5,
+    recentBurst: 0,
+    ...over,
+  };
+}
+
+test("仲裁: 打断成本公式 —— 会议/对话/深夜叠加", () => {
+  assert.equal(interruptCost(baseSnapshot()), 1); // receptivity 0.5 → +1
+  assert.ok(interruptCost(baseSnapshot({ screenFocus: "meeting" })) >= 5);
+  assert.ok(interruptCost(baseSnapshot({ inConversation: true, screenFocus: "coding" })) >= 7);
+  assert.equal(interruptCost(baseSnapshot({ presence: "offline" })), 10);
+  assert.ok(interruptCost(baseSnapshot({ quietHours: true })) >= 4);
+});
+
+test("仲裁: 低成本直投 / 高成本挂起 / pause 后放行", () => {
+  const clock = new MockClock();
+  const delivered: string[] = [];
+  const arbiter = new ArbiterV2({
+    presence: { getPresence: () => "active", listOnline: () => ["user-1"], lastActivityAt: () => null } as never,
+    lastConversationAt: () => null,
+    screenFocus: () => null,
+    nextEventMin: () => null,
+    receptivity: () => 0.9,
+    primaryActorId: () => "user-1",
+    nowFn: () => clock.t,
+  });
+  // 空闲 + 高接受度 → 立即投递
+  let r = arbiter.admit({ actorId: "user-1", urgency: "normal", label: "t1", deliver: () => delivered.push("t1") });
+  assert.equal(r.action, "deliver_now");
+  // 屏幕会议 + 对话中 → 挂起
+  const deps = {
+    presence: { getPresence: () => "active", listOnline: () => ["user-1"], lastActivityAt: () => clock.t } as never,
+    lastConversationAt: (): number | null => clock.t - 10_000, // 对话中
+    screenFocus: (): string => "meeting",
+    nextEventMin: (): number | null => 5,
+    receptivity: () => 0.5,
+    primaryActorId: () => "user-1",
+    nowFn: () => clock.t,
+  };
+  const busy = new ArbiterV2(deps as never);
+  r = busy.admit({ actorId: "user-1", urgency: "alert", label: "t2", deliver: () => delivered.push("t2") });
+  assert.equal(r.action, "wait_for_pause");
+  assert.equal(delivered.length, 1);
+  // 用户从会议中走出来（会议散场 + 无临近日程）→ pause 检测放行队首
+  deps.screenFocus = () => "idle";
+  deps.nextEventMin = () => null;
+  clock.advance(31_000);
+  busy.forceTick();
+  assert.equal(delivered.length, 2);
+  assert.equal(busy.parkedEntries().length, 0);
+});
+
+// ─── L4 目标板 ───
+
+test("GoalBoard: 会前准备包预执行 → ready 进托盘 → goal 信号", async () => {
+  const clock = new MockClock();
+  const dir = tmpDir();
+  const goalSignals: string[] = [];
+  const board = new GoalBoard({
+    dataPath: dir,
+    nowFn: () => clock.t,
+    emitGoal: (g) => goalSignals.push(`${g.goalId}:${g.status}`),
+    recallMemory: () => ["上周和小王对过需求范围"],
+  });
+  const goal = board.maybeStartMeetingPrep("user-1", { title: "项目周会", runAtMin: 30 });
+  assert.ok(goal, "25-40min 窗口内启动");
+  await new Promise((r) => setTimeout(r, 20)); // 异步准备
+  assert.equal(goal.status, "ready");
+  assert.ok(String(goal.payload?.body).includes("小王"), "预执行材料含召回内容");
+  assert.equal(board.readyTray().length, 1);
+  assert.ok(goalSignals.includes(`${goal.goalId}:ready`));
+  // 幂等：同会议不重复备
+  assert.equal(board.maybeStartMeetingPrep("user-1", { title: "项目周会", runAtMin: 30 }), null);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ─── L5 表达层 ───
+
+test("模板: 各 kind 渲染非空且带上下文", () => {
+  const now = new Date(MockClock.localAt(8, 0));
+  assert.ok(renderProactiveText("greeting", { now }).includes("早"));
+  assert.ok(renderProactiveText("interest_alert", { name: "刘浩存", excerpt: "新电影开机" }).includes("刘浩存"));
+  assert.ok(renderProactiveText("overwork_care", { hours: 4 }).includes("4"));
+  assert.ok(renderProactiveText("unknown_kind_xyz", { title: "测试" }).length > 0, "未知 kind 有兜底");
+  assert.ok(renderProactiveText("anything", { body: "自定义正文" }) === "自定义正文");
+  const card = renderDigestCard({ slot: "morning", tasks: ["站会"], weather: "晴" });
+  assert.ok(card.includes("站会") && card.includes("晴"));
+  assert.ok(renderDigestCard({ slot: "evening" }).length > 0, "空数据也非空");
+});
+
+// ─── 直达车道（hub → 管道，全程零 LLM）────
+
+test("直达车道: hub.submitIntent → 模板直投管道（带 directText，不触 LLM）", async () => {
+  const delivered: Array<{ kind: string; text: string; hasDeliveryId: boolean }> = [];
+  const hub = new ProactivityHub({
+    publishSignal: () => assert.fail("直达车道开启时 speak 不应再走 LifeSignal 路径"),
+    executeTool: async () => ({ ok: true, result: {} }),
+    // 测试确定性：禁用静默时段（否则 23-7 点 importance<high 全被频控拦截）
+    frequencyGovernor: new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true }),
+  });
+  hub.setDirectLane((p) => {
+    assert.ok(p.directText && p.directText.length > 0, "提案带模板文案");
+    // 模拟管道投递（真实 ProactiveDeliveryService 的 payload 契约）
+    delivered.push({ kind: p.kind, text: p.directText ?? "", hasDeliveryId: true });
+  });
+  hub.submitIntent({
+    actorId: "user-1",
+    kind: "interest_alert",
+    importance: "medium",
+    title: "你关注的「刘浩存」有新动态",
+    summary: "热搜：新电影开机",
+    mode: "speak",
+    source: "interest_watch",
+    templateData: { name: "刘浩存", excerpt: "新电影开机" },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(delivered.length, 1);
+  assert.ok(delivered[0].text.includes("刘浩存"));
+  assert.equal(hub.isDirectLaneEnabled(), true);
+});
+
+test("直达车道关闭时回退 LifeSignal 路径（向后兼容）", async () => {
+  process.env.PROACTIVITY_DIRECT_LANE = "0";
+  let published = 0;
+  const hub = new ProactivityHub({
+    publishSignal: () => {
+      published += 1;
+    },
+    executeTool: async () => ({ ok: true, result: {} }),
+    frequencyGovernor: new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true }),
+  });
+  hub.submitIntent({
+    actorId: "user-1",
+    kind: "greeting",
+    importance: "low",
+    title: "t",
+    summary: "s",
+    mode: "speak",
+    source: "time",
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(published, 1);
+  delete process.env.PROACTIVITY_DIRECT_LANE;
+});

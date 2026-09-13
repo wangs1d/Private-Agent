@@ -47,6 +47,8 @@ export type LlmAuditStage =
   | "task_plane_fast"
   /** 任务面后台任务（升级段/完整通道） */
   | "task_plane_complex"
+  /** 夜间单遍巩固器（P1：事实提升 + 新行留存评分一次调用） */
+  | "nightly_unified"
   /** 其他（外部科技扫描等低频旁路） */
   | "other";
 

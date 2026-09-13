@@ -233,7 +233,9 @@ export class UpstreamSearchService {
       notes: [
         providerUsed === "domestic-bing-cn"
           ? "必应中国 RSS + 国内科技 RSS"
-          : `搜索 API(${providerUsed}) 优先 + 必应/国内爬虫补全`,
+          : providerUsed.startsWith("api:")
+            ? `搜索 API(${providerUsed}) 直出（API 结果不与爬虫混排）`
+            : `搜索 API(${providerUsed}) + 国内引擎兜底（相关性过滤）`,
         formatSearchFreshnessNote({ anchor, droppedStale: fresh.droppedStale, maxAgeDays }),
       ],
     };

@@ -151,6 +151,13 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "embodiment.set_state": "embodiment",
   "embodiment.excite": "embodiment",
   "embodiment.window_roam": "embodiment",
+  // social / messages（消息聚合中心：两级获取，reply 为短信代发写操作）
+  "messages.overview": "social",
+  "messages.list_conversations": "social",
+  "messages.read_conversation": "social",
+  "messages.reply": "social",
+  "messages.mark_read": "social",
+  "messages.suggest_reply": "social",
 };
 
 // ────────────────────────────────────────────────────────────

@@ -413,6 +413,7 @@ import {
   type EmotionState,
 } from "../services/user-personalization/emotion-tone.js";
 import { runPlanExecuteLoop, type PlanExecuteLoopResult } from "../agent/plan-execute-loop.js";
+import { InboxService } from "../services/inbox-service.js";
 import { ProactiveContactPolicyService } from "../services/proactive-contact-policy.js";
 import { setCapabilityCortex } from "../agent/agent-capabilities.js";
 // 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）+ 统一主动性管道
@@ -426,7 +427,16 @@ import { AgentActivityStore } from "../proactivity/activity-store.js";
 import { AttentionStore } from "../proactivity/attention-store.js";
 import { ReachRouter, type ReachChannelDeps } from "../proactivity/reach-router.js";
 import { OutcomeStore } from "../proactivity/outcome-store.js";
-import { UpcomingScheduleWatcher } from "../proactivity/upcoming-schedule-watcher.js";
+// ─── 五层主动性架构（传感→评估→仲裁→目标→表达）───
+import { SensorKernel, registerFeeder } from "../proactivity/sensors/kernel.js";
+import { ScreenSensor } from "../proactivity/sensors/screen-sensor.js";
+import { ScheduleSensor } from "../proactivity/sensors/schedule-sensor.js";
+import { ArbiterV2 } from "../proactivity/arbiter-v2.js";
+import { EvaluatorChain, appendEventAudit, type EventAuditRecord } from "../proactivity/evaluators/evaluator-chain.js";
+import { buildBuiltinEvaluators } from "../proactivity/evaluators/builtin-evaluators.js";
+import { GoalBoard } from "../proactivity/goal-board.js";
+import { fabricSelftest } from "../proactivity/selftest.js";
+import { CostCalibrator } from "../proactivity/cost-calibrator.js";
 import { MessageWatchTrigger } from "../proactivity/triggers/message-watch-trigger.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { ProactivePipeline } from "../proactivity/proactive-pipeline.js";
@@ -752,6 +762,11 @@ export async function createAppServices(): Promise<AppServices> {
     },
   });
   registerPhoneBridgeTools(toolRegistry, { bridge: phoneBridgeCoordinator });
+  // messages.reply 的 sms 平台经手机桥真发（SmsManager + 手机确认窗）
+  messagePlatformGateway.setPhoneBridgeSender({
+    hasExecutor: (actorId) => phoneBridgeCoordinator.hasExecutor(actorId),
+    invoke: (actorId, action, params) => phoneBridgeCoordinator.invoke(actorId, action, params),
+  });
 
   // 初始化智能提醒系统（弹窗 → TTS闹钟 → 电话呼叫 三级升级链）
   const intelligentReminder = createIntelligentReminderSystem({
@@ -1458,6 +1473,28 @@ export async function createAppServices(): Promise<AppServices> {
     onImportantDayToday: (sessionId, day) => onImportantDayToday?.(sessionId, day),
     onSevereWeatherAlert: (sessionId, alerts, scheduleCount) =>
       onSevereWeatherAlert?.(sessionId, alerts, scheduleCount),
+    // 播报稿口语润色（单次小 LLM 调用，与 finance-report 同模式，克制调用）；
+    // LLM 未启用/失败时服务内部回退确定性模板，不阻塞简报
+    llmComplete: externalChat?.isEnabled()
+      ? async (prompt) => {
+          let full = "";
+          await externalChat!.streamCompletion(
+            `morning-briefing-${Date.now()}`,
+            { text: prompt },
+            (delta: string) => {
+              full += delta;
+            },
+            undefined,
+            {
+              systemPromptOverride: prompt,
+              ephemeralTurn: true,
+              disableThinking: true,
+              maxThreadMessages: 0,
+            },
+          );
+          return full;
+        }
+      : undefined,
   });
 
   const morningBriefingScheduler = new MorningBriefingScheduler({
@@ -3978,6 +4015,183 @@ export async function createAppServices(): Promise<AppServices> {
   proactivityHub.start();
   console.log("[Bootstrap] ProactivityHub 已装配（多元触发 + 频控 + speak/act/advise）");
 
+  // ─── 五层主动性架构装配（L1 传感 → L2 评估 → L3 仲裁 → L4 目标）───
+  // 全部零 LLM：传感层持续追踪状态 delta，评估器把 delta 变成事件，
+  // 仲裁层按"打断成本 × 紧迫度"裁决何时说，目标板后台预执行备结果。
+  // LLM 只在两个点出现：InitiativeEngine 开放评估（有熔断上限）+ 可选话术。
+  const proactivityFabricPath = join(process.cwd(), "data", "proactivity");
+  /** 管道 outcome 存储（提升为命名引用：CostCalibrator 定时读取） */
+  let outcomesStoreForCalibrator: InstanceType<typeof OutcomeStore> | null = null;
+  const sensorKernel = new SensorKernel({ dataPath: proactivityFabricPath });
+  const screenSensor = new ScreenSensor({ visualPort: desktopVisual });
+  const scheduleSensor = new ScheduleSensor({ listTasks: () => scheduleTaskService.listAllTasks() });
+  sensorKernel.register(screenSensor);
+  sensorKernel.register(scheduleSensor);
+  const goalFeeder = registerFeeder(sensorKernel, "goal_board", "goal");
+  /** 物理设备 feeder 缓存（sensorId → emit；device-signal 上行入口用） */
+  const deviceFeeders = new Map<string, (signal: { actorId?: string; at: number; fingerprint: string; salience: "high" | "medium" | "low"; payload?: Record<string, unknown> }) => void>();
+  const primaryActor = (): string | null => {
+    const actors = proactivityHub.exportActors();
+    return actors.sort((a, b) => b.lastInteractionAt - a.lastInteractionAt)[0]?.actorId ?? null;
+  };
+  // presence 追踪传感器：轮询在场状态，变化才产出信号（away_return 的数据源）
+  let lastPresenceState = "";
+  sensorKernel.register({
+    id: "presence_tracker",
+    stream: "presence",
+    pollIntervalMs: 60_000,
+    collect: () => {
+      const actorId = primaryActor();
+      if (!actorId) return [];
+      const state = proactivityPresence.getPresence(actorId, Date.now());
+      if (state === lastPresenceState) return [];
+      lastPresenceState = state;
+      return [
+        {
+          stream: "presence",
+          at: Date.now(),
+          fingerprint: `presence:${state}:${Math.floor(Date.now() / 60_000)}`,
+          salience: "low",
+          delta: `用户当前状态：${state}`,
+          payload: { state },
+        },
+      ];
+    },
+  });
+  sensorKernel.start();
+
+  // 天气一行话缓存（30min 刷新；天气服务需要用户位置偏好，缺省跳过）
+  let weatherLineCache: string | null = null;
+  const refreshWeatherLine = async (): Promise<void> => {
+    try {
+      const actorId = primaryActor();
+      const prefs = actorId ? weatherPrefsService.get(actorId) : undefined;
+      if (!prefs?.latitude || !prefs?.longitude) return;
+      const brief = await weatherService.getBrief(
+        prefs.latitude,
+        prefs.longitude,
+        process.env.TZ ?? "Asia/Shanghai",
+      );
+      weatherLineCache =
+        brief.summaryLine ||
+        `${brief.weatherText}，${Math.round(brief.todayMinC)}-${Math.round(brief.todayMaxC)}°C${brief.peakRainPct >= 50 ? "，有雨记得带伞" : ""}`;
+    } catch {
+      weatherLineCache = null;
+    }
+  };
+  void refreshWeatherLine();
+  const weatherTimer = setInterval(() => void refreshWeatherLine(), 30 * 60_000);
+  if (typeof weatherTimer.unref === "function") weatherTimer.unref();
+
+  // 目标板（L4 预执行）：会前准备包等后台预执行，就绪结果经 goal 流进评估器
+  const goalBoard = new GoalBoard({
+    dataPath: proactivityFabricPath,
+    emitGoal: (goal) => {
+      goalFeeder({
+        at: Date.now(),
+        fingerprint: `goal:${goal.goalId}:${goal.status}`,
+        salience: goal.status === "ready" ? "medium" : "low",
+        delta: `目标「${goal.title}」状态 → ${goal.status}`,
+        payload: {
+          goalId: goal.goalId,
+          title: goal.title,
+          status: goal.status,
+          type: goal.type,
+          body: String(goal.payload?.body ?? ""),
+        },
+      });
+    },
+    recallMemory: async (query, limit) => {
+      const actorId = primaryActor();
+      if (!brainCenter || !actorId) return [];
+      const result = await brainCenter.recall(actorId, query, { domain: "episodic", limit });
+      return (result?.items ?? []).map((item) => item.content);
+    },
+  });
+
+  // 成本自校准器（P1）：outcome 接受率 EWMA 驱动 alert 档阈值呼吸（零 LLM）
+  const costCalibrator = new CostCalibrator(proactivityFabricPath);
+  const costFeedTimer = setInterval(() => {
+    // 定时回灌历史触达结果（OutcomeStore 是唯一事实源；30min 一次足够）
+    const outcomes = outcomesStoreForCalibrator?.recent(100) ?? [];
+    const fresh = outcomes.filter((o) => o.outcome !== "delivered").map((o) => o.outcome);
+    if (fresh.length > 0) costCalibrator.observeAll(fresh);
+  }, 30 * 60_000);
+  if (typeof costFeedTimer.unref === "function") costFeedTimer.unref();
+
+  // 注意力仲裁器（L3）：打断成本 = 屏幕上下文 × 对话占用 × 日程临近 × 接受度
+  const arbiterV2 = new ArbiterV2({
+    presence: proactivityPresence,
+    lastConversationAt: () => {
+      const actorId = primaryActor();
+      return actorId ? proactivityHub.lastInteractionAtOf(actorId) : null;
+    },
+    screenFocus: () => screenSensor.latest(),
+    nextEventMin: () => scheduleSensor.latest()?.min ?? null,
+    receptivity: (actorId) => {
+      try {
+        const hour = new Date().getHours();
+        const byHour = rhythmEngine?.getProfile(actorId)?.dimensions?.receptivity?.byHour;
+        const v = byHour?.[hour];
+        return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.5;
+      } catch {
+        return 0.5;
+      }
+    },
+    primaryActorId: primaryActor,
+    alertMidThreshold: () => costCalibrator.alertMidThreshold(),
+  });
+
+  // 评估器链（L2）：信号 delta → AttentionEvent（正文模板直出，零 LLM）
+  const builtinServices = {
+      listTodayTasks: () => {
+        const now = Date.now();
+        const horizon = now + 24 * 3600_000;
+        return scheduleTaskService
+          .listAllTasks()
+          .filter((t) => t.status !== "cancelled")
+          .map((t) => ({ title: t.title ?? "", runAt: t.runAt }))
+        .filter((t) => {
+          const at = typeof t.runAt === "number" ? t.runAt : Date.parse(String(t.runAt));
+          return Number.isFinite(at) && at > now && at <= horizon;
+        })
+        .sort((a, b) => {
+          const at = (v: { runAt?: number | string }) =>
+            typeof v.runAt === "number" ? v.runAt : Date.parse(String(v.runAt));
+          return at(a) - at(b);
+        })
+        .slice(0, 6);
+    },
+    commitmentsDue: (withinMs: number) => {
+      const now = Date.now();
+      return (commitmentBoard?.list({ status: "active", limit: 100 }) ?? [])
+        .map((c) => ({ id: c.id, title: c.text, ...(c.deadline ? { dueAt: Date.parse(c.deadline) } : {}) }))
+        .filter((c) => Number.isFinite(c.dueAt) && (c.dueAt as number) > now && (c.dueAt as number) <= now + withinMs)
+        .sort((a, b) => (a.dueAt as number) - (b.dueAt as number));
+    },
+    weatherLine: () => weatherLineCache,
+    readyGoals: () =>
+      goalBoard.readyTray().map((g) => ({ title: g.title, body: String(g.payload?.body ?? g.title) })),
+    interestLines: () => {
+      const actorId = primaryActor();
+      return actorId ? [interestWatcher.listForPrompt(actorId, 3) ?? ""] : [];
+    },
+    recallMemory: async (query: string, limit: number) => {
+      const actorId = primaryActor();
+      if (!brainCenter || !actorId) return [];
+      const result = await brainCenter.recall(actorId, query, { domain: "episodic", limit });
+      return (result?.items ?? []).map((item) => item.content);
+    },
+  };
+  const evaluatorChain = new EvaluatorChain({
+    defaultActorId: primaryActor,
+    services: builtinServices,
+  });
+  for (const evaluator of buildBuiltinEvaluators(builtinServices)) {
+    evaluatorChain.register(evaluator);
+  }
+  console.log("[Bootstrap] 主动性五层架构已装配（传感/评估/仲裁/目标，零 LLM）");
+
   // ─── 购物降价监控装配（复用 InterestWatcher 轮询模式，tick=PRICE_WATCH_TICK_MS 默认 60min）───
   // shopping.compare.watch 工具入库 → 后台定时复查价格 → 到价且为新低价 →
   // submitIntent（life_reminder kind，走 FrequencyGovernor 频控）speak 闭环主动推。
@@ -4169,6 +4383,11 @@ export async function createAppServices(): Promise<AppServices> {
   const agentActivityStore = new AgentActivityStore(
     join(process.cwd(), "data", "proactivity", "activities.json"),
   );
+  // 站内信：平台/运营侧 → 用户收件箱（data/inbox/{actorId}.json 持久化 + 在线 WS 直推）
+  const inboxService = new InboxService({
+    rootDir: join(process.cwd(), "data", "inbox"),
+    wsRegistry: wsConnectionRegistry,
+  });
   // 分级触达通道补齐：离线推送（push 服务刚创建）+ 静默执行台账（晚绑定闭包）
   reachChannels.sendPush = (input) =>
     Promise.resolve(proactivePushService.push(input))
@@ -4273,7 +4492,7 @@ export async function createAppServices(): Promise<AppServices> {
           }),
       },
     }),
-    outcomes: new OutcomeStore(join(process.cwd(), "data", "proactivity", "outcomes.json")),
+    outcomes: outcomesStoreForCalibrator ?? (outcomesStoreForCalibrator = new OutcomeStore(join(process.cwd(), "data", "proactivity", "outcomes.json"))),
     // 无 directText 的提案走 speak 闭环（现有 ProactionCortex 话术——管道唯一 LLM 调用点）
     speak: (p) =>
       proactivityHub.submitIntent({
@@ -4324,6 +4543,88 @@ export async function createAppServices(): Promise<AppServices> {
   proactivityHub.setPipelineConfirmationResolver((entry, approved) =>
     proactivePipeline.resolveProposalConfirmation(entry, approved),
   );
+  // ─── 五层主动性架构接线（L3 仲裁 + L5 直达车道 + 启动）───
+  // 直达车道：hub 的 speak/advise（模板直出）→ ArbiterV2 仲裁（连发统计口径
+  // 与评估器事件归一）→ 统一管道（deliveryId/outcome/离线挂起继承）
+  proactivityHub.setDirectLane((p) => {
+    const urgency =
+      p.importance === "high" || p.importance === "critical"
+        ? ("alert" as const)
+        : ("normal" as const);
+    arbiterV2.admit({
+      actorId: p.actorId,
+      urgency,
+      label: p.title,
+      deliver: () => {
+        const decision = proactivePipeline.submitProposal(p);
+        proactivityHub.noteInitiative(p.actorId, p.kind, p.title);
+        console.log(
+          `[ArbiterV2] 直达车道投递 kind=${p.kind} verdict=${decision.verdict} urgency=${urgency}`,
+        );
+      },
+    });
+  });
+  // 评估器事件 → 观察流（喂 LLM 通用路径）+ 仲裁裁决 → 管道投递
+  evaluatorChain.onEvent((event) => {
+    const actorId = event.actorId ?? "local_user";
+    proactivityHub.getFeed().pushObservation(actorId, event.kind, event.title, event.salience);
+    // 事件审计：每一次主动事件的仲裁动作与管道 verdict 全链留痕（events.ndjson）
+    const audit: EventAuditRecord = {
+      at: Date.now(),
+      eventId: event.id,
+      kind: event.kind,
+      urgency: event.urgency,
+      actorId,
+      action: "pending",
+      title: event.title,
+    };
+    const action = arbiterV2.admit({
+      actorId,
+      urgency: event.urgency,
+      label: event.title,
+      deliver: () => {
+        const decision = proactivePipeline.submitProposal({
+          proposalId: event.id,
+          actorId,
+          kind: event.proposalKind,
+          tier: event.tier,
+          importance: event.importance,
+          dedupKey: event.dedupKey,
+          title: event.title,
+          summary: event.body.slice(0, 120),
+          directText: event.body,
+          evidence: [`evaluator:${event.kind}`],
+          createdAt: Date.now(),
+          source: `evaluator:${event.kind}`,
+          ...(event.expiresAt !== undefined ? { expiresAt: event.expiresAt } : {}),
+          ...(event.confirmLabel ? { confirmAction: { label: event.confirmLabel } } : {}),
+        });
+        audit.verdict = decision.verdict;
+        // 投递成功记入防重复记忆：同一事件不再被 LLM 通用路径重复表达
+        if (decision.verdict === "delivered") proactivityHub.noteInitiative(actorId, event.kind, event.title);
+        console.log(
+          `[ArbiterV2] 事件投递 kind=${event.kind} verdict=${decision.verdict} urgency=${event.urgency}`,
+        );
+      },
+    });
+    audit.action = action.action;
+    audit.cost = action.cost;
+    appendEventAudit(join(process.cwd(), "data", "proactivity", "events.ndjson"), audit);
+  });
+  // 会前准备包触发：60s 检查下一个日程，25-40min 窗口内启动后台预执行（幂等）
+  const meetingPrepTimer = setInterval(() => {
+    const actorId = primaryActor();
+    const next = scheduleSensor.latest();
+    if (!actorId || !next || next.min <= 0) return;
+    goalBoard.maybeStartMeetingPrep(actorId, {
+      title: next.title,
+      runAtMin: next.min,
+    });
+  }, 60_000);
+  if (typeof meetingPrepTimer.unref === "function") meetingPrepTimer.unref();
+  evaluatorChain.start();
+  arbiterV2.start();
+
   // 方案 E 回填：统一管道就绪后，偏好变更触发的提案开始进入仲裁链
   proactiveSubmitRef.current = (p) => {
     proactivePipeline.submitProposal(p);
@@ -4374,34 +4675,8 @@ export async function createAppServices(): Promise<AppServices> {
       source: "schedule",
     });
   };
-  // 临近日程感知：itinerary 提醒任务 nextRunAt 前 15min 产出提前提案（零 LLM，must 层必达）
-  const upcomingScheduleWatcher = new UpcomingScheduleWatcher({
-    listTasks: () => scheduleTaskService.listAllTasks(),
-    submit: (p) => {
-      // 分级触达：临近日程（T-15min chat 已由管道投递）挂注意力记录，
-      // T-10min 未读升级语音播报；popup 跳过（chat 已覆盖）、phone 仅 interrupt 不触发
-      if (p.kind === "schedule_upcoming") {
-        void reachRouter
-          .route({
-            actorId: p.actorId,
-            kind: p.kind,
-            title: p.title,
-            summary: p.summary,
-            urgency: "alert",
-            decision: "fyi",
-            deadlineAt: p.expiresAt ?? null,
-            assumeDelivered: "chat",
-            skipChannels: ["popup"],
-            meta: { dedupKey: p.dedupKey },
-          })
-          .catch(() => {});
-      }
-      proactivePipeline.submitProposal(p);
-    },
-  });
-  upcomingScheduleWatcher.start();
   console.log(
-    "[Bootstrap] 统一主动性管道已装配（提案→仲裁→投递→反馈 + 临近日程提前感知 + known actor 持久化）",
+    "[Bootstrap] 统一主动性管道已装配（提案→仲裁→投递→反馈 + known actor 持久化；临会提醒由 meeting_soon 评估器统一承担）",
   );
   // 任务状态可查询："我还有什么待办" → agent.tasks.list 工具（只读查
   // agent-task-store，确定性状态列表，LLM 只负责措辞）
@@ -4500,12 +4775,61 @@ export async function createAppServices(): Promise<AppServices> {
     travelPlanningService,
     skillMetadataValidator,
     realFundsWallet,
+    paymentService,
     scheduleTaskService,
     scheduleIntentService,
     proactivitySuppressionStore,
     proactivePipeline,
     proactivePushService,
+    proactivityFabric: {
+      sensorHealth: () => sensorKernel.health(),
+      arbiterPreview: () => {
+        const actorId = primaryActor() ?? "local_user";
+        return {
+          snapshot: arbiterV2.snapshot(actorId),
+          preview: {
+            interrupt: arbiterV2.previewDecision("interrupt", actorId),
+            alert: arbiterV2.previewDecision("alert", actorId),
+            normal: arbiterV2.previewDecision("normal", actorId),
+          },
+          parked: arbiterV2.parkedEntries(),
+        };
+      },
+      goalStats: () => goalBoard.stats(),
+      calibration: () => costCalibrator.snapshot(),
+      evaluatorProbes: () => evaluatorChain.probes(),
+      observeOutcome: (outcome) => costCalibrator.observe(outcome),
+      emitDeviceSignal: (input) => {
+        // 每个物理设备 sensorId 一个推送型 feeder（重复注册自动覆盖），信号进
+        // 统一内核：去重/落盘/面板计数与内置传感器完全同权
+        let emit = deviceFeeders.get(input.sensorId);
+        if (!emit) {
+          emit = registerFeeder(sensorKernel, input.sensorId, "device");
+          deviceFeeders.set(input.sensorId, emit);
+        }
+        const at = input.at ?? Date.now();
+        emit({
+          actorId: input.actorId,
+          at,
+          fingerprint: input.fingerprint ?? `device:${input.sensorId}:${input.kind}:${at}`,
+          salience: input.salience ?? "low",
+          payload: { kind: input.kind, ...(input.payload ?? {}) },
+        });
+        return { ok: true };
+      },
+      selftest: (fire) =>
+        fabricSelftest({
+          fire,
+          pipeline: proactivePipeline,
+          primaryActor,
+          arbiterV2,
+          sensorKernel,
+          evaluatorProbes: () => evaluatorChain.probes(),
+          calibration: () => costCalibrator.snapshot(),
+        }),
+    },
     agentActivityStore,
+    inboxService,
     infoHubService,
     upstreamSearchService,
     worldService,
@@ -4576,6 +4900,7 @@ export async function createAppServices(): Promise<AppServices> {
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
+    messageHubService,
     locationCoordinator,
     locationIngest,
     virtualPhoneService,
@@ -4597,7 +4922,6 @@ export async function createAppServices(): Promise<AppServices> {
 
   app.addHook("onClose", async () => {
     proactivePipeline.stop();
-    upcomingScheduleWatcher.stop();
     proactivityHub.stop();
     interestWatcher.stop();
     shoppingCompareService.stop();

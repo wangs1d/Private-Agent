@@ -38,9 +38,11 @@ import "core/services/image_preview_launcher.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/window_bounds_preference.dart";
 import "core/services/ws_chat_service.dart";
+import "core/services/inbox_api.dart";
 import "core/services/schedule_floating_launcher.dart";
 import "core/utils/play_url_utils.dart";
 import "features/catalog/catalog_page.dart";
+import "features/help/feedback_page.dart";
 import "features/gallery/gallery_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
@@ -69,6 +71,7 @@ import "core/services/phone_call_session.dart";
 import "core/presentation/phone_call_page.dart";
 import "core/services/local_notification_service.dart";
 import "core/services/mobile_briefing_launcher.dart";
+import "core/services/presence_gate_service.dart";
 import "core/services/mobile_push_service.dart";
 import "core/services/outgoing_call_launcher.dart";
 import "core/services/tts_player.dart";
@@ -217,6 +220,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       IsarLocalHistoryStore(userPin: ApiConfig.localPin);
   final WsChatService _ws = WsChatService(url: ApiConfig.wsUrl);
   final WorldApiClient _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
+  // 站内信：拉取/已读（列表 UI 在邮箱页，这里负责收到 inbox.message 的提醒与已读回执）
+  final InboxApi _inboxApi = InboxApi();
   final ScheduleApiClient _scheduleApi =
       ScheduleApiClient(baseUrl: ApiConfig.httpBase);
   final CatalogApiClient _catalogApi =
@@ -1550,6 +1555,37 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 );
               }
             });
+          }
+        }
+        // ====== 站内信：平台/运营侧推送（服务端已落盘必达，此处只做即时提醒） ======
+        if (type == "inbox.message") {
+          final String inboxTitle = payload["title"]?.toString() ?? "新消息";
+          final String inboxBody = payload["body"]?.toString() ?? "";
+          final String inboxId = payload["messageId"]?.toString() ?? "";
+          final String inboxImportance =
+              payload["importance"]?.toString() ?? "normal";
+          final bool inboxImportant =
+              inboxImportance == "high" || inboxImportance == "critical";
+          // 手机后台（类微信常在线）：系统通知触达，点开回前台后到邮箱-消息 Tab 查看
+          if (_isMobile && _appBackgrounded && inboxImportant) {
+            unawaited(LocalNotificationService.show(
+              title: inboxTitle, body: inboxBody,
+            ));
+          } else if (mounted) {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(
+                content: Text("$inboxTitle\n$inboxBody"),
+                duration: const Duration(seconds: 6),
+                action: inboxId.isEmpty
+                    ? null
+                    : SnackBarAction(
+                        label: "知道了",
+                        onPressed: () {
+                          unawaited(_inboxApi.markRead(ids: [inboxId]));
+                        },
+                      ),
+              ),
+            );
           }
         }
         if (type == "agent.proactive_voice") {
@@ -4186,10 +4222,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                     label: Text(
                       totalUnread > 99 ? "99+" : totalUnread.toString(),
                     ),
-                    child: Icon(
-                      Icons.notifications_outlined,
-                      size: 22,
-                      color: Theme.of(context).colorScheme.onSurface,
+                    // State.context 在 MaterialApp 之上，用子树 context 取主题色。
+                    child: Builder(
+                      builder: (BuildContext context) => Icon(
+                        Icons.notifications_outlined,
+                        size: 22,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
                     ),
                   ),
                 ),
@@ -4208,85 +4247,93 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   Widget _buildPlatformPopup() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final List<MapEntry<String, int>> entries = _unreadByPlatform.entries
-        .map((e) => MapEntry<String, int>(platformDisplayName(e.key), e.value))
-        .toList();
+    // State.context 在 MaterialApp 之上，需用子树 context 才能拿到应用主题。
+    return Builder(
+      builder: (BuildContext context) {
+        final ColorScheme cs = Theme.of(context).colorScheme;
+        final List<MapEntry<String, int>> entries = _unreadByPlatform.entries
+            .map(
+              (MapEntry<String, int> e) =>
+                  MapEntry<String, int>(platformDisplayName(e.key), e.value),
+            )
+            .toList();
 
-    return Material(
-      elevation: 8,
-      borderRadius: BorderRadius.circular(12),
-      color: cs.surface,
-      surfaceTintColor: cs.surfaceTint,
-      child: Container(
-        constraints: const BoxConstraints(minWidth: 180),
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Text(
-                "未读消息",
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: cs.onSurfaceVariant,
-                ),
-              ),
-            ),
-            const Divider(height: 8),
-            ...entries.map(
-              (entry) => Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 6,
-                ),
-                child: Row(
-                  children: <Widget>[
-                    _platformIcon(entry.key),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        entry.key,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: cs.onSurface,
-                        ),
-                      ),
+        return Material(
+          elevation: 8,
+          borderRadius: BorderRadius.circular(12),
+          color: cs.surface,
+          surfaceTintColor: cs.surfaceTint,
+          child: Container(
+            constraints: const BoxConstraints(minWidth: 180),
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: Text(
+                    "未读消息",
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: cs.onSurfaceVariant,
                     ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: cs.primaryContainer,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(
-                        entry.value > 99 ? "99+" : entry.value.toString(),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: cs.onPrimaryContainer,
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
+                const Divider(height: 8),
+                ...entries.map(
+                  (MapEntry<String, int> entry) => Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 6,
+                    ),
+                    child: Row(
+                      children: <Widget>[
+                        _platformIcon(entry.key),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            entry.key,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: cs.onSurface,
+                            ),
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: cs.primaryContainer,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            entry.value > 99 ? "99+" : entry.value.toString(),
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: cs.onPrimaryContainer,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
   Widget _platformIcon(String displayName) {
     IconData icon;
-    Color color;
+    Color? color;
     switch (displayName) {
       case "微信":
         icon = Icons.wechat;
@@ -4302,9 +4349,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         break;
       default:
         icon = Icons.message;
-        color = Theme.of(context).colorScheme.primary;
+        color = null; // 主题色：由下方子树 context 解析
     }
-    return Icon(icon, size: 20, color: color);
+    if (color != null) {
+      return Icon(icon, size: 20, color: color);
+    }
+    return Builder(
+      builder: (BuildContext context) => Icon(
+        icon,
+        size: 20,
+        color: Theme.of(context).colorScheme.primary,
+      ),
+    );
   }
 
   @override
@@ -4391,7 +4447,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                           onSetDarkTheme: _setDarkTheme,
                           onSetSystemTheme: _setSystemTheme,
                           onOpenMessages: _openMessagesPanel,
-                          onOpenUserMenuSettings: _openUserMenuSettings,
+                          onOpenSettings: _openSettings,
                           onOpenUserMenuHelp: _openUserMenuHelp,
                           onOpenDevices: _openDevicesPage,
                           onLogout: _logout,
@@ -4551,23 +4607,24 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 用户菜单「设置」:右侧面板展示设置页（简报 / 设备绑定 / 关于）
-  void _openUserMenuSettings() {
-    setState(() {
-      _tabIndex = 0;
-      _rightPanel = RightPanelKind.settings;
-      _previousSplitRatio = _splitRatio;
-      _previousRightPanelWidth = _rightPanelWidth;
-      _splitRatio = RightPanelKind.settings.defaultSplitRatio;
-    });
+  /// 侧栏底部「设置」按钮:全屏打开设置页（左侧分区侧栏 + 右侧内容区）
+  void _openSettings() {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    Navigator.of(navCtx).push<void>(
+      MaterialPageRoute<void>(
+        builder: (BuildContext ctx) => SettingsPage(
+          onCredentialsChanged: _onAccessCredentialsChanged,
+        ),
+      ),
+    );
   }
 
-  /// 用户菜单「帮助与反馈」:暂未实现,先弹个 SnackBar 留位
+  /// 用户菜单「帮助与反馈」:打开反馈页(提交反馈 + 我的反馈记录)
   void _openUserMenuHelp() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("帮助与反馈:暂未开放"),
-        duration: Duration(seconds: 2),
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext ctx) => const FeedbackPage(),
       ),
     );
   }
@@ -4769,6 +4826,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   Future<void> _tryShowDesktopLaunchBriefing() async {
     try {
+      // 每日简报只在早上固定时段（05:00–12:00）主动播报，其余时间启动不弹
+      final DateTime gateNow = DateTime.now();
+      if (gateNow.hour < 5 || gateNow.hour >= 12) return;
       final Map<String, dynamic> prefs =
           await _preferencesApi.getPreferences(ApiConfig.effectiveActorId);
       final Object? rawMb = prefs["morningBriefing"];
@@ -4784,6 +4844,25 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
       if (await _isBriefingDeliveredElsewhere(preferredChannel: "desktop")) {
         return;
+      }
+      // 开机在座门禁：开启摄像头检测时，等用户坐到电脑前再播（简报不播给空房间）。
+      // 无摄像头/未授权/服务不可用 → 直接放行（等价「没有摄像头开机即播」）；
+      // 等满 10 分钟仍无人 → 兜底放行（不漏报），但播报前重查时段与投递状态。
+      final bool? camConsent = await _store.getVisionCameraConsent();
+      if (camConsent != false) {
+        final bool present = await PresenceGateService.waitUntilPresent(
+          sessionId: ApiConfig.effectiveActorId,
+          maxWait: const Duration(minutes: 10),
+          shouldAbort: () async =>
+              await _isBriefingDeliveredElsewhere(preferredChannel: "desktop"),
+        );
+        if (!present) {
+          final DateTime afterWait = DateTime.now();
+          if (afterWait.hour < 5 || afterWait.hour >= 12) return;
+          if (await _isBriefingDeliveredElsewhere(preferredChannel: "desktop")) {
+            return;
+          }
+        }
       }
       final Uri uri = Uri.parse(
         "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&format=narration",
@@ -4811,6 +4890,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Future<void> _tryShowMobileLaunchBriefing() async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
     try {
+      // 每日简报只在早上固定时段（05:00–12:00）主动播报，其余时间启动不弹
+      final DateTime gateNow = DateTime.now();
+      if (gateNow.hour < 5 || gateNow.hour >= 12) return;
       final Map<String, dynamic> prefs =
           await _preferencesApi.getPreferences(ApiConfig.effectiveActorId);
       final Object? rawMb = prefs["morningBriefing"];
@@ -5027,74 +5109,85 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// Dock 功能面板：顶栏（标题 + 关闭按钮）+ 自定义内容。
   /// 背景使用 cs.surface 跟随主题（黑/白）。
   Widget _buildSplitPanel() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return Material(
-      color: cs.surface,
-      surfaceTintColor: Colors.transparent,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          _buildSplitPanelHeader(cs),
-          Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                color: cs.surface,
-                border: Border(
-                  top: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
+    // State.context 位于 MaterialApp 之上，Theme.of 只能拿到 fallback 浅色主题；
+    // 必须用子树内的 context 解析，颜色才跟随亮/暗主题。
+    return Builder(
+      builder: (BuildContext context) {
+        final ColorScheme cs = Theme.of(context).colorScheme;
+        return Material(
+          color: cs.surface,
+          surfaceTintColor: Colors.transparent,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              _buildSplitPanelHeader(cs),
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: cs.surface,
+                    border: Border(
+                      top: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
+                    ),
+                  ),
+                  child: _buildRightPanelContent(),
                 ),
               ),
-              child: _buildRightPanelContent(),
-            ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
   /// Dock 功能面板顶栏：拖拽指示 + 标题 + 关闭按钮。
   Widget _buildSplitPanelHeader(ColorScheme cs) {
-    // 背景与自绘标题栏同色(resolveSidebar)，
-    // 文字/图标在暗色下用纯白保证可读性，暖色下用主题前景色。
-    final bool isDark = Theme.of(context).brightness == Brightness.dark;
-    final Color fg = isDark ? Colors.white : cs.onSurface;
-    final Color fgMuted = isDark ? Colors.white : cs.onSurfaceVariant;
-    return Container(
-      height: 40,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        // 与自绘标题栏/左侧 AppBar 同色(resolveSidebar #131313)，
-        // 保证顶部整条横带无缝衔接；面板主体用 cs.surface 区分层次。
-        color: AppPalette.resolveSidebar(AppThemeController.instance.value),
-        border: Border(
-          left: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
-          bottom: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
-        ),
-      ),
-      child: Row(
-        children: <Widget>[
-          // 图片预览面板：隐藏左侧拖拽图标与标题，仅保留关闭按钮
-          // （面板组件内部自带完整顶栏：图片大图区）
-          if (_rightPanel != RightPanelKind.imagePreview) ...<Widget>[
-            Icon(Icons.drag_indicator, size: 16, color: fgMuted),
-            const SizedBox(width: 8),
-            Text(
-              _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: fg,
-              ),
+    // 同 _buildSplitPanel：用子树内 context 判别亮暗，State.context 拿不到应用主题。
+    return Builder(
+      builder: (BuildContext context) {
+        // 背景与自绘标题栏同色(resolveSidebar)，
+        // 文字/图标在暗色下用纯白保证可读性，暖色下用主题前景色。
+        final bool isDark = Theme.of(context).brightness == Brightness.dark;
+        final Color fg = isDark ? Colors.white : cs.onSurface;
+        final Color fgMuted = isDark ? Colors.white : cs.onSurfaceVariant;
+        return Container(
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            // 与自绘标题栏/左侧 AppBar 同色(resolveSidebar #131313)，
+            // 保证顶部整条横带无缝衔接；面板主体用 cs.surface 区分层次。
+            color: AppPalette.resolveSidebar(AppThemeController.instance.value),
+            border: Border(
+              left: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
+              bottom: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
             ),
-          ],
-          const Spacer(),
-          IconButton(
-            icon: Icon(Icons.close, size: 18, color: fgMuted),
-            tooltip: "关闭面板",
-            visualDensity: VisualDensity.compact,
-            onPressed: _closeRightPanel,
           ),
-        ],
-      ),
+          child: Row(
+            children: <Widget>[
+              // 图片预览面板：隐藏左侧拖拽图标与标题，仅保留关闭按钮
+              // （面板组件内部自带完整顶栏：图片大图区）
+              if (_rightPanel != RightPanelKind.imagePreview) ...<Widget>[
+                Icon(Icons.drag_indicator, size: 16, color: fgMuted),
+                const SizedBox(width: 8),
+                Text(
+                  _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: fg,
+                  ),
+                ),
+              ],
+              const Spacer(),
+              IconButton(
+                icon: Icon(Icons.close, size: 18, color: fgMuted),
+                tooltip: "关闭面板",
+                visualDensity: VisualDensity.compact,
+                onPressed: _closeRightPanel,
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -5135,8 +5228,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         return CatalogPage(apiClient: _catalogApi);
       case RightPanelKind.approvals:
         return const ApprovalsPanel();
-      case RightPanelKind.settings:
-        return SettingsPage(onCredentialsChanged: _onAccessCredentialsChanged);
       case null:
         return const SizedBox.shrink();
     }

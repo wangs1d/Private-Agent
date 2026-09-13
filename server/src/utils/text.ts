@@ -119,3 +119,23 @@ export function formatStatusForDisplay(rawLine: string): string {
   // 其他长文本：截断处理，避免展示大段内容
   return t.slice(0, 30) + "…";
 }
+
+/**
+ * 错字归一化：单个破折号「—」冒充量词「一」。
+ *
+ * deepseek 系模型中文输出偶发把量词「一」打成「—」（2026-09-12 实测
+ * 「在成都有—场品牌活动」）。合法破折号是双写「——」（前后不限汉字），
+ * 单写「—」紧跟量词字的场景几乎只有这一种错字形态。
+ * 只处理「汉字 + 单个— + 量词字」的窄模式，不动合法的「——」与表格/列表符号。
+ */
+const DASH_TYPO_MEASURE_CHARS =
+  "场个次条只位名块件轮番步页篇部台趟遍圈顿口批位点列行排组串滴颗棵艘架节段份则首曲阵班杯片朵张辆栋座间家封道项笔句声";
+const DASH_TYPO_RE = new RegExp(
+  `([\\u4e00-\\u9fff])—(?!—)([${DASH_TYPO_MEASURE_CHARS}])`,
+  "g",
+);
+
+export function normalizeDashTypos(text: string): string {
+  if (!text || !text.includes("—")) return text;
+  return text.replace(DASH_TYPO_RE, "$1一$2");
+}

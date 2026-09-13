@@ -419,7 +419,10 @@ async function searchJina(query: string, limit: number, jinaKey: string): Promis
       }
     }
     return toItems(items, "Jina", limit);
-  } catch {
+  } catch (e) {
+    console.warn(
+      `[SearchApi] Jina 请求异常/超时(${SEARCH_API_TIMEOUT_MS}ms) -> query  err=${(e as Error)?.message ?? e}`,
+    );
     return [];
   } finally {
     clearTimeout(timer);
@@ -494,11 +497,17 @@ async function searchAnySearch(
         title: str(r.title),
         url: str(r.url),
         snippet: snippet || content,
-        date: "",
+        // 尽力取发布时间：时效排序与证据块日期标注都依赖它；缺省保持空串
+        date: str(r.publish_time) || str(r.publishedAt) || str(r.date) || str(r.publishTime) || str(r.time),
       };
     });
     return toItems(mapped, "AnySearch", limit);
-  } catch {
+  } catch (e) {
+    // 静默吞异常曾让「API 实际不可达/超时」无任何日志，表现为 Agent 静默
+    // 退到爬虫兜底、用户以为是没配 API（2026-09-12）。失败必须留痕。
+    console.warn(
+      `[SearchApi] AnySearch 请求异常/超时(${SEARCH_API_TIMEOUT_MS}ms) -> query="${query.slice(0, 40)}"  err=${(e as Error)?.message ?? e}`,
+    );
     return [];
   } finally {
     clearTimeout(timer);

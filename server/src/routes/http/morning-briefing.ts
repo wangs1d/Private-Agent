@@ -15,6 +15,8 @@ export function registerMorningBriefingRoutes(
     if (!sessionId) {
       return reply.code(400).send({ ok: false, error: "sessionId required" });
     }
+    // llmComplete（口语润色）必须注入，客户端启动简报走本路由，
+    // 播报稿口径要与调度推送路径一致
     const service = new MorningBriefingService(deps);
     if (format === "narration") {
       const narration = await service.narrateBriefing(sessionId);

@@ -110,6 +110,7 @@ function platformLabel(platform: string): string {
     case "wechat": return "微信";
     case "qq": return "QQ";
     case "feishu": return "飞书";
+    case "sms": return "短信";
     default: return "手机消息";
   }
 }

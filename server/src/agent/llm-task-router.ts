@@ -49,7 +49,7 @@ function buildRoutePrompt(
     const lines: string[] = [
       "你是双面架构的意图路由器。对话面对话直答（零工具）；任务面在后台真正调用工具把事办完。你的任务只有一个：判断这条用户消息的意图标签。",
       "",
-      '只输出一个 JSON 对象，格式：{"intent":"标签","confidence":0.0到1.0,"sentiment":<-1到1的小数，用户情绪>,"tags":[<最多3个情绪标签>],"topics":[<1-3个话题关键词>]}。不要输出任何其他字符。',
+      '只输出一个 JSON 对象，格式：{"intent":"标签","confidence":0.0到1.0,"sentiment":<-1到1的小数，用户情绪>,"tags":[<最多3个情绪标签>],"topics":[<1-3个话题关键词>],"search_query":"<搜索词>"}。不要输出任何其他字符。',
       "intent 必须且只能取以下封闭集之一：",
       "- chat：纯对话。寒暄、情绪、观点交流、评价、闲聊追问，凭常识或已有上下文就能答的内容。问你的近况/想法/感受也是 chat。",
       "- knowledge_qa：常识/知识问答（不依赖实时信息，如原理、历史、解释）。",
@@ -61,8 +61,10 @@ function buildRoutePrompt(
       "",
       "判定要点：",
       "- 实时信息类哪怕没有「查/搜」字样（如「刘浩存最近的消息」「今天A股怎么样」「比特币现在什么价」）也是 realtime_lookup。",
+      "- 问人「最近在哪/在那/在哪个城市/去哪了/行踪」这类位置近况是 realtime_lookup，不是 chat：答准必须现查。search_query 要把「她/他」还原成最近对话里的具体人名再搜（如「她最近在那」→「<人名> 近期 行程」）。",
       "- 天气查询是 realtime_lookup（需要实时数据）；感叹天气（「今天天气真好」）是 chat。",
       "- confidence 表达你对标签判断的把握；判不准就给低分（<0.5），系统会自动走保守平面，不会出错。",
+      "- intent=realtime_lookup 时 search_query 必填：结合最近对话解决指代（如「我老婆」指代哪个具体人名、「那家店」是哪家），生成一句完整、具体、可直接搜索的中文查询词；其他 intent 一律给空字符串。",
       "- 短追问（如「娱乐圈的」「新鲜的」）按它继承的话题判——语境见最近对话与后台任务。",
       "- sentiment/tags/topics 是顺带分析（情绪与话题），省略不报错，但尽量都给。",
       "",
@@ -116,6 +118,25 @@ function chatDecision(reason: string): RouteDecision {
     budget: 0,
     tier: "flash",
   };
+}
+
+
+/** 提取路由 JSON 里的 search_query（realtime_lookup 专用；缺省返回 undefined）。导出供回归测试。 */
+export function extractRouteSearchQuery(raw: string | undefined | null): string | undefined {
+  if (!raw) return undefined;
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end <= start) return undefined;
+  try {
+    const obj = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
+    const q = typeof obj.search_query === "string" ? obj.search_query.trim() : "";
+    if (!q) return undefined;
+    // 超长查询截断采用而非整体丢弃（2026-09-13）：丢弃 = realtime 轮整个失去
+    // 前置检索（死点），截断 60 字对搜索引擎足够表达「人名+事件/地点」。
+    return q.length <= 60 ? q : q.slice(0, 60);
+  } catch {
+    return undefined;
+  }
 }
 
 /* ── 保守降级 ──
@@ -260,6 +281,7 @@ export async function routeTurnByLlm(
       reasons,
       segmentable: plane === "chat",
       intent: parsed.intent,
+      searchQuery: extractRouteSearchQuery(result),
       confidence: parsed.confidence,
       plane,
       capabilities,

@@ -414,7 +414,7 @@ export class AgenticMemoryLifecycleService {
 
     let forgetIdx: number[] = [];
     try {
-      const openai = new OpenAI({ apiKey, baseURL: llmConfig.baseURL });
+      const openai = new OpenAI({ apiKey, baseURL: llmConfig.baseURL, maxRetries: 1 });
       const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         { role: "system", content: LLM_REVIEW_SYSTEM_PROMPT },
         {

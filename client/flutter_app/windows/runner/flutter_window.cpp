@@ -1,6 +1,7 @@
 #include "flutter_window.h"
 
 #include <dwmapi.h>
+#include <winreg.h>
 
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
@@ -166,6 +167,17 @@ bool FlutterWindow::OnCreate() {
   window_titlebar_channel_->SetMethodCallHandler(
       [this](const auto& call, auto result) {
         HandleWindowTitleBarMethodCall(call, std::move(result));
+      });
+
+  // pai/app_lifecycle —— 开机自动启动（简报随开机播报的前提）
+  app_lifecycle_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/app_lifecycle",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  app_lifecycle_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleAppLifecycleMethodCall(call, std::move(result));
       });
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -1218,6 +1230,95 @@ void FlutterWindow::HandleWindowTitleBarMethodCall(
                             sizeof(text_color));
     }
     result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+// ---- pai/app_lifecycle：开机自动启动 ----
+//
+// 写 HKCU\Software\Microsoft\Windows\CurrentVersion\Run 注册表值（当前用户
+// 登录即启动，无需管理员权限），值名为固定应用标识，值为当前 exe 完整路径。
+// 开机自启是「简报随开机播报」的前提：应用随系统启动 → WS 连上 → 触发
+// 启动简报（在座检测通过后播报）。
+
+namespace {
+constexpr wchar_t kAutoStartRunKey[] =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kAutoStartValueName[] = L"PrivateAIAgent";
+
+std::wstring GetAutoStartExePath() {
+  wchar_t path[MAX_PATH] = {0};
+  const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+  if (len == 0 || len >= MAX_PATH) return std::wstring();
+  // 带引号包裹，兼容路径中的空格
+  return L"\"" + std::wstring(path) + L"\"";
+}
+}  // namespace
+
+void FlutterWindow::HandleAppLifecycleMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "setAutoStart") {
+    bool enable = false;
+    if (auto* args = std::get_if<bool>(call.arguments())) {
+      enable = *args;
+    } else if (auto* map = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      auto it = map->find(flutter::EncodableValue("enable"));
+      if (it != map->end()) {
+        if (auto* v = std::get_if<bool>(&it->second)) enable = *v;
+      }
+    }
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kAutoStartRunKey, 0, KEY_SET_VALUE,
+                      &key) != ERROR_SUCCESS) {
+      result->Error("registry_error", "open HKCU Run key failed");
+      return;
+    }
+    LONG res;
+    if (enable) {
+      const std::wstring exe = GetAutoStartExePath();
+      if (exe.empty()) {
+        RegCloseKey(key);
+        result->Error("exe_path_error", "GetModuleFileNameW failed");
+        return;
+      }
+      res = RegSetValueExW(key, kAutoStartValueName, 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(exe.c_str()),
+                           static_cast<DWORD>((exe.size() + 1) * sizeof(wchar_t)));
+    } else {
+      res = RegDeleteValueW(key, kAutoStartValueName);
+      // 值本就不存在视为成功（幂等）
+      if (res == ERROR_FILE_NOT_FOUND) res = ERROR_SUCCESS;
+    }
+    RegCloseKey(key);
+    if (res != ERROR_SUCCESS) {
+      result->Error("registry_error", "write/delete Run value failed");
+      return;
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "getAutoStart") {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kAutoStartRunKey, 0, KEY_QUERY_VALUE,
+                      &key) != ERROR_SUCCESS) {
+      result->Success(flutter::EncodableValue(false));
+      return;
+    }
+    DWORD type = 0;
+    BYTE buffer[MAX_PATH * 2] = {0};
+    DWORD size = sizeof(buffer);
+    const LONG res = RegQueryValueExW(key, kAutoStartValueName, nullptr, &type,
+                                      buffer, &size);
+    RegCloseKey(key);
+    const bool enabled =
+        res == ERROR_SUCCESS && type == REG_SZ && size > sizeof(wchar_t);
+    result->Success(flutter::EncodableValue(enabled));
     return;
   }
 

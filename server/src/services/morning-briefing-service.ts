@@ -12,6 +12,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { isTriviaTask } from "./schedule-task-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { WeatherService } from "./weather-service.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
@@ -167,23 +168,49 @@ export type MorningBriefingDeps = {
    * （内部按日去重）。装配层接 ProactivityHub weather_alert kind 合并提醒。
    */
   onSevereWeatherAlert?: (sessionId: string, alerts: string[], scheduleCount: number) => void;
+  /**
+   * 播报稿口语润色（单次小 LLM 调用，ephemeral 不污染会话）：把确定性事实
+   * 重写成有温度的口语稿。未注入/失败/超长 → 回退确定性模板（composeNarration），
+   * 绝不阻塞简报主链路。装配层用 externalChat.streamCompletion 薄包装。
+   */
+  llmComplete?: (prompt: string) => Promise<string>;
 };
 
 function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function greetingByHour(hour: number): string {
-  if (hour >= 5 && hour < 12) {
-    return "早上好！新的一天开始了，这是你的早间简报。";
-  }
-  if (hour >= 12 && hour < 18) {
-    return "下午好！这是你的最新简报。";
-  }
-  if (hour >= 18 && hour < 23) {
-    return "晚上好！这是今晚的简报回顾。";
-  }
-  return "夜深了，这是为你整理的简报。注意休息。";
+/** 早间播报固定时段（服务器本地时间）：[05:00, 12:00)，窗口外一律不播报 */
+export const BRIEFING_WINDOW_START_MIN = 5 * 60;
+export const BRIEFING_WINDOW_END_MIN = 12 * 60;
+
+/** HH:mm 是否落在早间播报时段内 */
+export function isWithinBriefingWindow(hhmm: string): boolean {
+  const m = hhmm.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return false;
+  const mins = Number(m[1]) * 60 + Number(m[2]);
+  return mins >= BRIEFING_WINDOW_START_MIN && mins < BRIEFING_WINDOW_END_MIN;
+}
+
+/** 简报只在早上播报，问候语固定为早安（不再按小时切换下午/晚间问候） */
+const MORNING_GREETING = "早上好！新的一天开始了，这是你的早间简报。";
+
+/** 今日本地区间（00:00 至次日 00:00），供日程「今日」过滤，与 /api/schedule today 对齐 */
+function todayLocalRange(): { from: string; to: string } {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { from: start.toISOString(), to: end.toISOString() };
+}
+
+/** ISO 时间 → 本地 HH:mm（24 小时制，播报稿与卡片共用）；非法输入返回空串 */
+function formatHhmm(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "";
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function formatWeatherBit(
@@ -246,7 +273,7 @@ function formatScheduleBit(items: MorningBriefingScheduleItem[]): string {
     }
     return item.title;
   });
-  let sentence = `今天有${top.length}件事比较重要：${bits.join("、")}。`;
+  let sentence = `今天有${top.length}个安排：${bits.join("、")}。`;
   if (rest > 0) {
     sentence = `${sentence}另外还有${rest}项可以晚点再看。`;
   }
@@ -255,7 +282,7 @@ function formatScheduleBit(items: MorningBriefingScheduleItem[]): string {
 
 function formatNotesBit(items: MorningBriefingPendingNote[]): string {
   const titles = items.slice(0, 3).map((n) => n.title);
-  return `还有${items.length}条笔记没复习，比如${titles.join("、")}，可以抽空看一下。`;
+  return `还有${items.length}条笔记没看过：${titles.join("、")}，有空可以翻翻。`;
 }
 
 /** 兴趣热搜块最多呈现条数（无命中则整块省略） */
@@ -319,8 +346,7 @@ function countChineseChars(text: string): number {
 }
 
 /** 待办跟进块上限：未完成事项最多播报条数 */
-const TODO_FOLLOWUPS_MAX = 3;
-/** 单条未完成事项的展示截断长度 */
+const TODO_FOLLOWUPS_MAX = 3;/** 单条未完成事项的展示截断长度 */
 const TODO_FOLLOWUPS_ITEM_MAX_CHARS = 30;
 
 /**
@@ -345,6 +371,102 @@ function formatTodoFollowupsBit(todo: MorningBriefingTodoFollowups): string {
   return bits.length > 0 ? `${bits.join("；")}。` : "";
 }
 
+/**
+ * 把简报结构化事实压成润色 prompt 的「事实材料」块（每行一条，只含真实数据，
+ * 不含任何措辞润色——语气交给 LLM，事实只来自这里）。
+ */
+export function buildNarrationFacts(briefing: MorningBriefing): string {
+  const lines: string[] = [];
+  if (briefing.weather) {
+    const segs: string[] = [];
+    if (briefing.weather.condition) segs.push(briefing.weather.condition);
+    if (typeof briefing.weather.temperature === "number") {
+      segs.push(`${Math.round(briefing.weather.temperature)}度`);
+    }
+    if (
+      typeof briefing.weather.maxC === "number" &&
+      typeof briefing.weather.minC === "number"
+    ) {
+      segs.push(`最高${Math.round(briefing.weather.maxC)}度`);
+      segs.push(`最低${Math.round(briefing.weather.minC)}度`);
+    }
+    if (segs.length > 0) lines.push(`天气：${segs.join("，")}`);
+  }
+  if (briefing.outfitTip) lines.push(`穿衣：${briefing.outfitTip.suggestion}`);
+  if (briefing.todaySchedule.length > 0) {
+    lines.push(
+      `今日日程：${briefing.todaySchedule
+        .slice(0, 5)
+        .map((s) => (s.time ? `${s.time} ${s.title}` : s.title))
+        .join("；")}`,
+    );
+  }
+  const todo = briefing.todoFollowups;
+  if (todo) {
+    if (todo.pending.length > 0) {
+      lines.push(`之前交代还没办的事：${todo.pending.join("；")}`);
+    }
+    if (todo.doneTodayCount > 0) lines.push(`今天已完成安排：${todo.doneTodayCount}件`);
+  }
+  if (briefing.pendingNotes.length > 0) {
+    lines.push(
+      `未复习笔记：${briefing.pendingNotes.length}条（${briefing.pendingNotes
+        .slice(0, 3)
+        .map((n) => n.title)
+        .join("、")}）`,
+    );
+  }
+  const hits = briefing.interestHits ?? [];
+  if (hits.length > 0) {
+    lines.push(`关注话题上热搜：${hits.map((h) => h.title).join("、")}`);
+  }
+  const days = briefing.upcomingImportantDays ?? [];
+  if (days.length > 0) {
+    lines.push(
+      `近期重要日子：${days
+        .slice(0, 3)
+        .map(
+          (d) =>
+            `${d.name}的${importantDayTypeLabel(d.type)}` +
+            (d.daysUntil === 0 ? "（就是今天）" : d.daysUntil === 1 ? "（明天）" : `（还剩${d.daysUntil}天）`),
+        )
+        .join("；")}`,
+    );
+  }
+  if (briefing.appellation) lines.push(`对用户的称呼：${briefing.appellation}`);
+  return lines.length > 0 ? lines.join("\n") : "（今天没有任何日程、待办或资讯）";
+}
+
+/** 润色 prompt：小而克制的单次调用——事实只来自材料，语气口语化、有温度 */
+export function buildNarrationPrompt(briefing: MorningBriefing): string {
+  return [
+    "你是用户的私人智能管家。写一段今早的简报播报稿，像熟人的贴心助手随口在耳边说几句，不是新闻播音。",
+    "",
+    "事实材料（只能用这些信息，禁止编造任何日程、数字或事件）：",
+    buildNarrationFacts(briefing),
+    "",
+    "要求：",
+    "1. 口语、自然、有点温度，可以贴合内容带一句贴心话（比如下雨记得带伞、晚上有聚餐少喝点）。",
+    "2. 禁止官方腔和播音腔：不要「为您播报」「请注意」「以下是今日」这类词。",
+    "3. 不要问候语、不要日期星期（卡片抬头已有）；直接从内容说起。",
+    "4. 时间一律原样保留 HH:mm 写法（如 09:30）。",
+    "5. 材料里没有的板块不要提；材料为空就轻松地打个招呼说今天没什么安排。",
+    "6. 全文 60~140 字，1~4 句。",
+    "7. 直接输出播报稿正文，不要引号、前缀或任何解释。",
+  ].join("\n");
+}
+
+/** 清洗 LLM 输出：去围栏/引号/换行，只留正文一行 */
+export function sanitizeNarrationText(raw: string): string {
+  let text = (raw ?? "").trim();
+  const fenced = text.match(/```(?:[a-z]*)?\s*([\s\S]*?)```/i);
+  if (fenced) text = fenced[1].trim();
+  text = text.replace(/\s*\n+\s*/g, " ").trim();
+  // 去掉成对包裹引号
+  text = text.replace(/^[「"'“”]+/, "").replace(/[」"'“”]+$/, "").trim();
+  return text;
+}
+
 export class MorningBriefingService {
   /** 当天命中回调去重表：sessionId|id → 最后触发日期（每日至多回调一次） */
   private readonly importantDayFired = new Map<string, string>();
@@ -354,8 +476,6 @@ export class MorningBriefingService {
   constructor(private readonly deps: MorningBriefingDeps = {}) {}
 
   async generateBriefing(sessionId: string): Promise<MorningBriefing> {
-    const now = new Date();
-    const greeting = greetingByHour(now.getHours());
     const prefs = this.deps.getSessionPrefs?.(sessionId);
     const sections = prefs?.morningBriefing.sections ?? {
       weather: true,
@@ -420,14 +540,36 @@ export class MorningBriefingService {
       ...(upcomingImportantDays.length > 0 ? { upcomingImportantDays } : {}),
       // 用户称呼（可选）：无称呼时省略该字段
       ...(appellation ? { appellation } : {}),
-      agentGreeting: greeting,
+      agentGreeting: MORNING_GREETING,
     };
   }
 
   async narrateBriefing(sessionId: string): Promise<MorningBriefingNarration> {
     const briefing = await this.generateBriefing(sessionId);
-    const narrationText = this.composeNarration(briefing);
+    const narrationText =
+      (await this.polishNarration(briefing)) ?? this.composeNarration(briefing);
     return { narrationText, briefing };
+  }
+
+  /**
+   * 播报稿口语润色（单次小 LLM 调用）：输入确定性事实材料，输出有温度的
+   * 口语稿。失败/输出为空/中文字数超 200（预算失控视为不可信）→ 返回 null，
+   * 调用方回退确定性模板（composeNarration），绝不阻塞简报。
+   */
+  private async polishNarration(briefing: MorningBriefing): Promise<string | null> {
+    const llmComplete = this.deps.llmComplete;
+    if (!llmComplete) return null;
+    try {
+      const text = sanitizeNarrationText(await llmComplete(buildNarrationPrompt(briefing)));
+      if (!text) return null;
+      const cn = countChineseChars(text);
+      if (cn > 200) return null;
+      if (cn < 80) return `${text} 祝你今天顺利。`;
+      return text;
+    } catch (err) {
+      console.log(`[MorningBriefing] 播报稿 LLM 润色失败（回退模板）: ${err}`);
+      return null;
+    }
   }
 
   private async fetchWeather(sessionId: string): Promise<MorningBriefingWeather | null> {
@@ -492,15 +634,26 @@ export class MorningBriefingService {
     }
   }
 
+  /**
+   * 今日日程（真实当日数据）：按本日 00:00–24:00 区间过滤（与 /api/schedule
+   * today 一致），只播报今天确有实例的任务；时间格式化为本地 HH:mm
+   * （此前直接拼 nextRunAt 原始 ISO 串，播报稿/卡片会读出整串时间戳）。
+   * 与「今日安排」展示同规则剔除琐事类任务（睡觉/喝水等 trivia 分类、
+   * 节律标记旧数据）——简报只播开会、通知这类正经日程。
+   */
   private async fetchTodaySchedule(sessionId: string): Promise<MorningBriefingScheduleItem[]> {
     const { scheduleTaskService } = this.deps;
     if (!scheduleTaskService) return [];
     try {
-      const tasks = scheduleTaskService.listTasksBySession(sessionId);
+      const tasks = scheduleTaskService
+        .listTasksBySession(sessionId, todayLocalRange())
+        .filter((t) => !isTriviaTask(t));
       return tasks.slice(0, 10).map((t) => ({
         id: t.taskId,
         title: t.reminderMessage || t.title || "",
-        time: t.nextRunAt ?? t.runAt,
+        time: formatHhmm(
+          t.status === "completed" ? (t.lastRunAt ?? t.runAt) : (t.nextRunAt ?? t.runAt),
+        ),
       }));
     } catch {
       return [];
@@ -560,13 +713,22 @@ export class MorningBriefingService {
     const { scheduleTaskService } = this.deps;
     if (!scheduleTaskService) return 0;
     try {
-      const today = todayIsoDate();
+      // 本地当日区间比对（ISO 串是 UTC，按 UTC 日期前缀比对会漏计早晨完成的）
+      const now = new Date();
+      const dayStart = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+      ).getTime();
+      const dayEnd = dayStart + 86_400_000;
       return scheduleTaskService
         .listAllTasks()
         .filter((t) => {
           if (t.sessionId !== sessionId || t.status !== "completed") return false;
-          const doneAt = t.lastRunAt ?? t.runAt ?? "";
-          return doneAt.startsWith(today);
+          // 与「今日安排」同口径：琐事提醒（睡觉/喝水等）不算进"已完成安排"
+          if (isTriviaTask(t)) return false;
+          const doneAtMs = new Date(t.lastRunAt ?? t.runAt ?? "").getTime();
+          return Number.isFinite(doneAtMs) && doneAtMs >= dayStart && doneAtMs < dayEnd;
         })
         .length;
     } catch {
@@ -796,7 +958,7 @@ export class MorningBriefingService {
 
     // 全空（个人数据源都没配置/没命中）→ 明确说明，不输出空荡荡的纯问候
     if (parts.length === 0) {
-      parts.push("今天暂无日程和待办。");
+      parts.push("今天日程空空的，可以轻松点过。");
     }
 
     parts.push("祝你今天顺利。");

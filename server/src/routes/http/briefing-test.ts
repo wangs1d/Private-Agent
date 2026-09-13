@@ -28,6 +28,8 @@ export function registerBriefingTestRoutes(
     | "notesService"
   > & {
     requestClientLocation?: MorningBriefingDeps["requestClientLocation"];
+    /** 口语润色（与调度/启动简报路径同源，保证预览口径一致） */
+    llmComplete?: MorningBriefingDeps["llmComplete"];
   },
 ): void {
   app.post("/api/test/trigger-briefing", async (request, reply) => {
@@ -54,6 +56,7 @@ export function registerBriefingTestRoutes(
       scheduleTaskService: deps.scheduleTaskService,
       notesService: deps.notesService,
       requestClientLocation: deps.requestClientLocation,
+      llmComplete: deps.llmComplete,
     };
     const service = new MorningBriefingService(briefingDeps);
     const narration = await service.narrateBriefing(sessionId);

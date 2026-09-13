@@ -74,21 +74,22 @@ test("默认开启：未设 PROACTIVITY_LLM_INITIATIVE 时通用路径仍生效"
   assert.equal(signals[0].kind, "care");
 });
 
-test("预算耗尽：跳过 LLM 评估且观察流不被消费（预算重置后仍可评估）", async () => {
+test("预算耗尽：评估照常（预算与评估解耦），发送由频控拦截", async () => {
   let llmCalls = 0;
   const llmComplete: LlmCompleteFn = async () => {
     llmCalls += 1;
     return speakDecision();
   };
   const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: 0 });
-  const { deps } = makeDeps({ llmComplete, frequencyGovernor: governor });
+  const { deps, signals } = makeDeps({ llmComplete, frequencyGovernor: governor });
   const hub = new ProactivityHub(deps);
   hub.getFeed().pushObservation(ACTOR, "conversation_turn", OBS_TEXT, "low");
 
   await hub.onTick(ACTOR, new Date());
 
-  assert.equal(llmCalls, 0, "预算耗尽时不应白调 LLM");
-  assert.equal(hub.getFeed().pendingCount(ACTOR), 1, "观察不应被消费，留待预算重置后评估");
+  assert.equal(llmCalls, 1, "预算只约束发送，不拦评估（agent 保持有想法，表达被节制）");
+  assert.equal(signals.length, 0, "预算耗尽时 speak 决策应被频控拦截，不发布信号");
+  assert.equal(hub.getFeed().pendingCount(ACTOR), 0, "观察已被消费（评估真实发生）");
 });
 
 test("LLM 决策被负反馈抑制拦截后，同指纹窗口重复到达不再调 LLM", async () => {

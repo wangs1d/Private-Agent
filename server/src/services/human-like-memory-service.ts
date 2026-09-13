@@ -1,4 +1,5 @@
 import { watch, type FSWatcher } from "node:fs";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
@@ -584,12 +585,43 @@ function cosineLikeScore(queryTokens: string[], targetTokens: string[]): number 
   return overlap / Math.sqrt(q.size * t.size);
 }
 
+/**
+ * Sleep agent 每晚 LLM 预算闸（2026-09-12 token 治理，P0-C）：一次 runSleepCycle
+ * 内允许的 LLM 调用上限（community 提炼 + planner + merge 合计，env
+ * AGENT_MEMORY_SLEEP_LLM_BUDGET，默认 12）。community 提炼预留 1 个槽位给
+ * planner；超出预算后剩余环节走确定性路径——merge 已有 dedupe fallback，
+ * 提炼/planner 直接跳过，图的规则清理（衰减/冷存/去重）不受影响。
+ */
+class SleepLlmBudget {
+  private remaining: number;
+  spent = 0;
+  constructor(limit: number) {
+    this.remaining = limit;
+  }
+  trySpend(reserve = 0): boolean {
+    if (this.remaining - reserve <= 0) return false;
+    this.remaining -= 1;
+    this.spent += 1;
+    return true;
+  }
+}
+
+function resolveSleepLlmBudgetLimit(): number {
+  const raw = Number.parseInt(process.env.AGENT_MEMORY_SLEEP_LLM_BUDGET ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 12;
+}
+
+/** community 内容指纹：成员摘要集合未变化的 community 不值得再次提炼经验 */
+function communityContentFingerprint(label: string, summaries: string[]): string {
+  return createHash("sha1").update(`${label}|${[...summaries].sort().join("§")}`).digest("hex").slice(0, 16);
+}
+
 async function llmMergeLines(lines: string[]): Promise<string[] | null> {
   const llm = resolvePrimaryLlmClientConfig();
   if (!llm || lines.length < 2) return null;
 
   try {
-    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
     const response = await openai.chat.completions.create({
       model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0.2,
@@ -619,7 +651,7 @@ async function llmExtractExperience(lines: string[]): Promise<string | null> {
   if (!llm || lines.length < 3) return null;
 
   try {
-    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
     const response = await openai.chat.completions.create({
       model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0.2,
@@ -652,7 +684,7 @@ async function llmPlanSleepActions(
   if (!llm || !policy.sleepAgent.llmPlannerEnabled || nodes.length === 0) return null;
 
   try {
-    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
     const response = await openai.chat.completions.create({
       model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0.1,
@@ -703,6 +735,13 @@ export class HumanLikeMemoryService {
   private graphPersist: GraphSqlitePersistence | null = null;
   private policyWatcher: FSWatcher | null = null;
   private reloadTimer: NodeJS.Timeout | null = null;
+  /** P0-C：每晚 sleep LLM 预算（runSleepCycle 期间有效；actor 循环串行，实例字段安全） */
+  private activeSleepLlmBudget: SleepLlmBudget | null = null;
+  /** P0-C：本轮计划中的 community 提炼（action.reason → 内容指纹），提升成功后标记已处理 */
+  private pendingCommunityFps = new Map<string, string>();
+  /** P0-C：已提升 community 指纹状态（actorId → fp → 首次提升日期），持久化到 data/ */
+  private sleepCommunityState = new Map<string, Map<string, string>>();
+  private sleepCommunityStateLoadPromise: Promise<void> | null = null;
   private readonly telemetry = {
     recallHits: 0,
     recallMisses: 0,
@@ -1915,6 +1954,11 @@ export class HumanLikeMemoryService {
     };
     if (!this.policy.sleepAgent.enabled || nodes.length === 0) return report;
 
+    // P0-C：每晚 LLM 预算闸 + community 内容门控（见 SleepLlmBudget 注释）
+    this.activeSleepLlmBudget = new SleepLlmBudget(resolveSleepLlmBudgetLimit());
+    this.pendingCommunityFps.clear();
+    await this.loadSleepCommunityState();
+
     const actions: SleepAction[] = [];
     const now = Date.now();
 
@@ -1993,8 +2037,15 @@ export class HumanLikeMemoryService {
     for (const community of communityGroups) {
       if (community.nodeIds.length >= 3) {
         const summaries = community.nodeIds.map((id) => this.store.nodes[id]?.summary).filter((value): value is string => Boolean(value));
+        // P0-C：内容未变化的 community 不再重复提炼（上次成功提升后指纹相同即跳过，
+        // 原实现每夜对同一批 community 重复调 LLM 产出相同经验）
+        const fp = communityContentFingerprint(community.label, summaries);
+        if (this.sleepCommunityState.get(actorId)?.has(fp)) continue;
+        // 预留 1 个槽位给 planner（planner 的合并/冲突动作优先级更高）
+        if (!this.activeSleepLlmBudget?.trySpend(1)) continue;
         const experience = await llmExtractExperience(summaries);
         if (experience) {
+          this.pendingCommunityFps.set(`community:${community.label}`, fp);
           actions.push({
             type: "promote_knowledge",
             nodeIds: community.nodeIds.slice(0, 5),
@@ -2006,7 +2057,9 @@ export class HumanLikeMemoryService {
       }
     }
 
-    const llmActions = await llmPlanSleepActions(actorId, this.llmPlannerWindow(actorId, nodes), this.policy);
+    const llmActions = this.activeSleepLlmBudget.trySpend()
+      ? await llmPlanSleepActions(actorId, this.llmPlannerWindow(actorId, nodes), this.policy)
+      : null;
     if (llmActions) actions.push(...llmActions);
 
     report.plannedActions = Math.min(actions.length, this.policy.sleepAgent.maxActionsPerRun);
@@ -2035,7 +2088,37 @@ export class HumanLikeMemoryService {
       ).toFixed(3),
     );
     this.schedulePersist();
+    this.activeSleepLlmBudget = null;
+    this.pendingCommunityFps.clear();
     return report;
+  }
+
+  private get sleepCommunityStatePath(): string {
+    return join(process.cwd(), "data", "sleep-agent-state.json");
+  }
+
+  private loadSleepCommunityState(): Promise<void> {
+    if (this.sleepCommunityStateLoadPromise) return this.sleepCommunityStateLoadPromise;
+    this.sleepCommunityStateLoadPromise = (async () => {
+      try {
+        const raw = await readFile(this.sleepCommunityStatePath, "utf8");
+        const parsed = JSON.parse(raw) as { actors?: Record<string, [string, string][]> };
+        for (const [actorId, entries] of Object.entries(parsed.actors ?? {})) {
+          this.sleepCommunityState.set(actorId, new Map(entries));
+        }
+      } catch {
+        // 首次运行/文件缺失：空状态启动
+      }
+    })();
+    return this.sleepCommunityStateLoadPromise;
+  }
+
+  private persistSleepCommunityState(): void {
+    const actors: Record<string, [string, string][]> = {};
+    for (const [actorId, entries] of this.sleepCommunityState) {
+      actors[actorId] = [...entries].slice(-200);
+    }
+    void writeJsonAtomic(this.sleepCommunityStatePath, { version: 1, actors }).catch(() => {});
   }
 
   private async executeSleepAction(action: SleepAction, report: HumanLikeMemorySleepReport): Promise<boolean> {
@@ -2116,7 +2199,12 @@ export class HumanLikeMemoryService {
     if (bucket.length < 2) return false;
 
     if (action.type === "merge") {
-      const merged = action.summary ? [action.summary] : await llmMergeLines(bucket.map((node) => node.summary));
+      // P0-C：merge 受每晚预算闸；超预算时走确定性 dedupe fallback（原 null 分支）
+      const merged = action.summary
+        ? [action.summary]
+        : this.activeSleepLlmBudget?.trySpend()
+          ? await llmMergeLines(bucket.map((node) => node.summary))
+          : null;
       const fallback = dedupeMemoryLines(bucket.map((node) => node.summary), { preferLatest: true }).slice(-1);
       const mergedLines = merged && merged.length > 0 ? merged : fallback;
       const keeper = bucket.sort((a, b) => b.importance - a.importance || b.confidence - a.confidence)[0]!;
@@ -2144,6 +2232,18 @@ export class HumanLikeMemoryService {
     });
     report.knowledgePromotedCount += 1;
     report.monthlyAbstractedCount += 1;
+    // P0-C：提升成功后把 community 内容指纹标记为已处理（下次内容未变化则跳过提炼，
+    // 避免 action 上限截断导致永久丢失——只在真实落库后标记）
+    const communityFp = this.pendingCommunityFps.get(action.reason);
+    if (communityFp) {
+      let seen = this.sleepCommunityState.get(targetActor);
+      if (!seen) {
+        seen = new Map();
+        this.sleepCommunityState.set(targetActor, seen);
+      }
+      seen.set(communityFp, new Date().toISOString().slice(0, 10));
+      this.persistSleepCommunityState();
+    }
     this.bumpStageReport(report, action.stage, action.reason);
     return true;
   }

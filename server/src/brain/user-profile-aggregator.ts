@@ -29,6 +29,7 @@ import { dirname, join } from "node:path";
 import OpenAI from "openai";
 
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
+import { getModelForTask, TaskTier } from "../config/model-routing.js";
 import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
 
 /** 规则画像的最小接口（OnlineLearningCortex 子集，避免硬依赖） */
@@ -74,8 +75,9 @@ function envFlag(raw: string | undefined, fallback: boolean): boolean {
 }
 
 export function loadProfileAggregatorConfig(): ProfileAggregatorConfig {
-  const primaryModel =
-    resolvePrimaryLlmClientConfig()?.model || "gpt-4.1-mini";
+  // 抽取/合成默认走 MINI 档（默认跟随主模型，MODEL_MINI env 可统一切小模型）
+  const miniModel = getModelForTask(TaskTier.MINI) || resolvePrimaryLlmClientConfig()?.model || "gpt-4.1-mini";
+  const primaryModel = miniModel;
   return {
     enabled: envFlag(process.env.MEMORY_PROFILE_AGGREGATOR_ENABLED, true),
     extractEnabled: envFlag(process.env.MEMORY_PROFILE_EXTRACT_ENABLED, true),
@@ -413,7 +415,13 @@ export class UserProfileAggregator {
     this.config = { ...loadProfileAggregatorConfig(), ...config };
     const llm = resolvePrimaryLlmClientConfig();
     const key = apiKey?.trim() || llm?.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim();
-    this.client = key ? new OpenAI(llm?.baseURL?.trim() ? { apiKey: key, baseURL: llm.baseURL.trim() } : { apiKey: key }) : null;
+    this.client = key
+      ? new OpenAI(
+          llm?.baseURL?.trim()
+            ? { apiKey: key, baseURL: llm.baseURL.trim(), maxRetries: 1 }
+            : { apiKey: key, maxRetries: 1 },
+        )
+      : null;
   }
 
   /** 是否具备 LLM 能力（无 key 时 observeTurn 只排队不落画像） */

@@ -66,6 +66,11 @@ export class AgentAccountService {
     return this.byActorId.get(actorId.trim());
   }
 
+  /** 全部账号（管理统计用）。 */
+  listAll(): AgentAccountRecord[] {
+    return [...this.byActorId.values()];
+  }
+
   /** 按绑定的验证邮箱反查账号（财务入站邮件记账：收件人 → actorId）。 */
   getByEmail(email: string): AgentAccountRecord | undefined {
     const e = email.trim().toLowerCase();

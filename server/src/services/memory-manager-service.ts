@@ -3,10 +3,13 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
 import { getDailyJournalService, DailyJournalService } from "./daily-journal-service.js";
 import OpenAI from "openai";
+import { join } from "node:path";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
+import { getModelForTask, TaskTier } from "../config/model-routing.js";
 
 /**
  * 真向量 cosine 相似度（替代 human-like-memory 里的假 cosineLikeScore）。
@@ -31,6 +34,8 @@ export type MemoryManagerConfig = {
   profileUpdateThreshold: number;
   /** 单窗口在线固化阈值：白天 pending queue 积累到该条数时立即触发整理 */
   onlineConsolidationThreshold: number;
+  /** 日间在线巩固开关：默认 false，LLM 评分只留夜间 dreaming 一次（env: AGENT_MEMORY_DAY_CONSOLIDATION） */
+  dayConsolidationEnabled: boolean;
 };
 
 export type MemoryConsolidationResult = {
@@ -86,14 +91,23 @@ const DEFAULT_CONFIG: MemoryManagerConfig = {
   profileUpdateThreshold: 3,
   // 单窗口长会话在线固化：白天 pending queue 积累 ≥15 条立即触发整理
   onlineConsolidationThreshold: 15,
+  // 日间在线巩固开关（2026-09-12 token 治理）：默认关闭——LLM 评分（scoreLinesWithLlm）
+  // 只在夜间 dreaming（consolidateNow 由 nightly-memory-task 触发）执行一次。
+  // 白天 journal 行持续累积，当日事实由 journalRecall/STM 直接进 prompt，不依赖
+  // memory_summary 刷新；日间整理对 agent 当天可见性没有增量收益，只产生
+  // 全量 16k 字符重复评分开销。置 1 恢复旧的日间在线巩固行为。
+  dayConsolidationEnabled: false,
 };
 
 function loadConfig(): MemoryManagerConfig {
   const raw = process.env.MEMORY_MANAGER_ENABLED;
   const enabled = raw !== undefined ? !(raw === "0" || raw.toLowerCase() === "false") : true;
+  const dayRaw = process.env.AGENT_MEMORY_DAY_CONSOLIDATION?.trim().toLowerCase();
+  const dayConsolidationEnabled = dayRaw ? ["1", "true", "yes", "on"].includes(dayRaw) : DEFAULT_CONFIG.dayConsolidationEnabled;
   return {
     ...DEFAULT_CONFIG,
     enabled,
+    dayConsolidationEnabled,
     consolidationIntervalMs:
       Number.parseInt(process.env.MEMORY_MANAGER_CONSOLIDATION_INTERVAL_MS ?? "", 10) ||
       DEFAULT_CONFIG.consolidationIntervalMs,
@@ -187,8 +201,10 @@ export class MemoryManagerService {
       // 新策略：当日轮数超过 onlineConsolidationThreshold（默认 15 轮）
       //   时立即触发一次在线整理（LLM 评分 + 去重 + 写回 memory_summary），
       //   长会话每 ~15 轮巩固一次，"整理记忆能力"在会话中真实被使用。
+      // 2026-09-12 token 治理：日间在线巩固默认关闭（dayConsolidationEnabled），
+      //   整理/评分收敛到夜间 dreaming 一次；当日事实仍经 journalRecall/STM 进 prompt。
       const pendingCount = this.getTodayTurnCount(actorId);
-      if (pendingCount >= this.config.onlineConsolidationThreshold) {
+      if (this.config.dayConsolidationEnabled && pendingCount >= this.config.onlineConsolidationThreshold) {
         console.log(
           `[MemoryManager] Day mode: today turns ${pendingCount} ≥ ${this.config.onlineConsolidationThreshold}，触发单窗口在线固化 for ${actorId}`,
         );
@@ -201,7 +217,11 @@ export class MemoryManagerService {
       return;
     }
 
-    if (next >= this.config.profileUpdateThreshold && !this.consolidationTimers.has(actorId)) {
+    if (
+      this.config.dayConsolidationEnabled &&
+      next >= this.config.profileUpdateThreshold &&
+      !this.consolidationTimers.has(actorId)
+    ) {
       this.scheduleConsolidation(actorId);
     }
   }
@@ -370,7 +390,7 @@ export class MemoryManagerService {
       if (topTopics.length > 0) {
         console.log(`[MemoryManager] consolidateNow: 当天高频话题加分 ${topTopics.length} 词 → ${actorId}`);
       }
-      const retention = await this.evaluateMemoryRetention(consolidated, forgottenRaw, topTopics);
+      const retention = await this.evaluateMemoryRetention(consolidated, forgottenRaw, topTopics, actorId);
       lastRetention = retention;
       result.entriesRemoved = retention.forgotten.length;
       result.rememberedCount = retention.remembered.length;
@@ -578,7 +598,7 @@ export class MemoryManagerService {
     const timeoutRaw = Number(process.env.MEMORY_FORGOTTEN_LLM_TIMEOUT_MS);
     const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 2500;
     try {
-      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, timeout: timeoutMs });
+      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, timeout: timeoutMs, maxRetries: 1 });
       const response = await openai.chat.completions.create({
         model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
         temperature: 0,
@@ -805,6 +825,10 @@ export class MemoryManagerService {
    * 以当日 journal 实际内容为门槛（轮数计数器只是触发启发），无可整理内容直接跳过。
    */
   async tryIdleConsolidation(actorId: string): Promise<boolean> {
+    // 2026-09-12 token 治理：日间 idle 整理默认关闭（brain-stem idle sweep 等
+    // 调用方在此统一被拦），LLM 评分只留夜间 dreaming。置
+    // AGENT_MEMORY_DAY_CONSOLIDATION=1 恢复日间整理。
+    if (!this.config.dayConsolidationEnabled) return false;
     const hits =
       (await this.resolveJournal()?.readTodayLines(actorId).catch(() => [])) ?? [];
     if (hits.length === 0) return false;
@@ -837,14 +861,19 @@ export class MemoryManagerService {
     return highValuePatterns.some((pattern) => pattern.test(line));
   }
 
-  private async evaluateMemoryRetention(lines: string[], forgottenRaw: string, topTopics: string[] = []): Promise<{
+  private async evaluateMemoryRetention(
+    lines: string[],
+    forgottenRaw: string,
+    topTopics: string[] = [],
+    actorId = "default",
+  ): Promise<{
     remembered: string[];
     faded: string[];
     forgotten: string[];
     forgottenArchive: string[];
   }> {
     const now = Date.now();
-    const semanticScores = await this.scoreLinesWithLlm(lines);
+    const semanticScores = await this.scoreLinesWithLlm(lines, actorId);
     const scored = lines.map((line, index) => ({
       line,
       ...this.scoreMemoryLine(line, now, semanticScores[index] ?? 0.5, topTopics),
@@ -1019,38 +1048,108 @@ export class MemoryManagerService {
       forgottenArchive: string[];
     },
   ): Promise<void> {
+    // 2026-09-12 token 治理：rehearsal 行跨夜去重。memory_summary 的 remembered/faded
+    // 集合夜间之间高度重叠，原实现每晚把同一批 dream 行重新 ingest（每行一次
+    // extractUnified LLM 调用，且在 Mem0 侧产生重复记忆再靠生命周期审查清理）。
+    // 现按行指纹只强化一次，跨夜零重复开销；新进入 remembered/faded 的行仍正常强化。
+    await this.loadDreamRehearsalState();
     const replayLines = [...retention.remembered.slice(0, 6), ...retention.faded.slice(0, 3)];
     const reinforcedLines = this.pickReinforcedLines(replayLines, retention.faded);
     const mergedThemes = [...new Set(replayLines.map((line) => this.extractTopic(line)).filter(Boolean))];
     const fadedNoise = retention.forgotten.slice(0, 4);
 
     for (const line of replayLines) {
-      await this.narrativeMemory
-        ?.ingest(actorId, `dream:replay | ${line}`, "memory:dream_replay", { highSignal: true })
-        .catch(() => {});
+      await this.ingestDreamLineOnce(actorId, `dream:replay | ${line}`, "memory:dream_replay", true);
     }
 
     for (const line of reinforcedLines) {
-      await this.narrativeMemory
-        ?.ingest(actorId, `dream:reinforce | ${line}`, "memory:dream_reinforce", { highSignal: true })
-        .catch(() => {});
+      await this.ingestDreamLineOnce(actorId, `dream:reinforce | ${line}`, "memory:dream_reinforce", true);
     }
 
     if (mergedThemes.length > 0) {
-      await this.narrativeMemory
-        ?.ingest(
-          actorId,
-          `dream:theme_merge | ${mergedThemes.slice(0, 6).join(" | ")}`,
-          "memory:dream_theme_merge",
-          { highSignal: true },
-        )
-        .catch(() => {});
+      await this.ingestDreamLineOnce(
+        actorId,
+        `dream:theme_merge | ${mergedThemes.slice(0, 6).join(" | ")}`,
+        "memory:dream_theme_merge",
+        true,
+      );
     }
 
     for (const line of fadedNoise) {
-      await this.narrativeMemory
-        ?.ingest(actorId, `dream:fade | ${line}`, "memory:dream_fade", { highSignal: false })
-        .catch(() => {});
+      await this.ingestDreamLineOnce(actorId, `dream:fade | ${line}`, "memory:dream_fade", false);
+    }
+
+    void this.persistDreamRehearsalState();
+  }
+
+  /** dream rehearsal 已强化行状态（actorId → 行指纹 → 首次强化日期），持久化到 data/ */
+  private dreamRehearsed = new Map<string, Map<string, string>>();
+  private dreamRehearsedLoadPromise: Promise<void> | null = null;
+
+  private get dreamRehearsalStatePath(): string {
+    return join(process.cwd(), "data", "dream-rehearsal-state.json");
+  }
+
+  /** 每 actor 保留的已强化指纹上限（Map 保插入序，超限裁最旧） */
+  private static readonly DREAM_REHEARSAL_MAX_FINGERPRINTS = 400;
+
+  private loadDreamRehearsalState(): Promise<void> {
+    if (this.dreamRehearsedLoadPromise) return this.dreamRehearsedLoadPromise;
+    this.dreamRehearsedLoadPromise = (async () => {
+      try {
+        const { readFile } = await import("node:fs/promises");
+        const raw = await readFile(this.dreamRehearsalStatePath, "utf8");
+        const parsed = JSON.parse(raw) as { actors?: Record<string, [string, string][]> };
+        for (const [id, entries] of Object.entries(parsed.actors ?? {})) {
+          this.dreamRehearsed.set(id, new Map(entries));
+        }
+      } catch {
+        // 首次运行/文件缺失：空状态启动
+      }
+    })();
+    return this.dreamRehearsedLoadPromise;
+  }
+
+  private async persistDreamRehearsalState(): Promise<void> {
+    try {
+      const actors: Record<string, [string, string][]> = {};
+      for (const [actorId, entries] of this.dreamRehearsed) {
+        actors[actorId] = [...entries];
+      }
+      await writeJsonAtomic(this.dreamRehearsalStatePath, { version: 1, actors });
+    } catch (err) {
+      console.warn("[MemoryManager] dream rehearsal state persist failed:", err);
+    }
+  }
+
+  /** 单行 dream ingest：同一行（指纹相同）跨夜只 ingest 一次，之后的夜晚静默跳过。 */
+  private async ingestDreamLineOnce(
+    actorId: string,
+    text: string,
+    kind: "memory:dream_replay" | "memory:dream_reinforce" | "memory:dream_theme_merge" | "memory:dream_fade",
+    highSignal: boolean,
+  ): Promise<void> {
+    const fp = semanticFingerprint(text) || text.slice(0, 64);
+    if (this.dreamRehearsed.get(actorId)?.has(fp)) return;
+
+    await this.narrativeMemory
+      ?.ingest(actorId, text, kind, { highSignal })
+      .catch(() => {});
+
+    let seen = this.dreamRehearsed.get(actorId);
+    if (!seen) {
+      seen = new Map();
+      this.dreamRehearsed.set(actorId, seen);
+    }
+    seen.set(fp, this.getTodayDayKey());
+    const max = MemoryManagerService.DREAM_REHEARSAL_MAX_FINGERPRINTS;
+    if (seen.size > max) {
+      const excess = seen.size - max;
+      let removed = 0;
+      for (const key of seen.keys()) {
+        seen.delete(key);
+        if (++removed >= excess) break;
+      }
     }
   }
 
@@ -1078,25 +1177,48 @@ export class MemoryManagerService {
     }
   }
 
-  private async scoreLinesWithLlm(lines: string[]): Promise<number[]> {
+  private async scoreLinesWithLlm(lines: string[], actorId: string): Promise<number[]> {
+    if (lines.length === 0) return [];
+    await this.loadScoreCacheState();
+
+    const today = this.getTodayDayKey();
+    const cache = this.scoreCache.get(actorId);
+    const fps = lines.map((line) => semanticFingerprint(line) || line.slice(0, 64));
+    const cached = fps.map((fp) => cache?.get(fp)?.score);
+    const missingIdx = lines.map((_, i) => i).filter((i) => cached[i] === undefined);
+    // 全部命中缓存：0 次 LLM 调用（unified 预通道种子/旧行重复评分时的常态）
+    if (missingIdx.length === 0) return cached as number[];
+
     const llm = resolvePrimaryLlmClientConfig();
-    if (!llm || lines.length === 0) {
-      return lines.map((line) => this.heuristicSemanticScore(line));
-    }
+    if (!llm) return lines.map((line, i) => cached[i] ?? this.heuristicSemanticScore(line));
+
+    // 2026-09-12 token 治理（P0-B）增量评分：只评缓存未命中的新行。行文本稳定，
+    // LLM 语义分不会过期（时间衰减由 scoreMemoryLine 的确定性部分承担）；缺失占比
+    // 过高或距上次全量重评 ≥7 天时才整批刷一遍并刷新缓存。
+    const fullRescore =
+      missingIdx.length / lines.length > 0.6 || this.isScoreFullRescoreDue(actorId, today);
+    const targetIdx = fullRescore ? lines.map((_, i) => i) : missingIdx;
+
+    // 评分模型走 MINI 档（默认跟随主模型，MODEL_MINI env 可统一切小模型）
+    const scoringModel =
+      process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || getModelForTask(TaskTier.MINI);
 
     try {
-      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+      // maxRetries:1：SDK 默认 2 次静默重试会让瞬时失败双倍烧 token，后台评分失败
+      // 本就有启发式兜底，1 次重试足够。
+      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
+      const targetLines = targetIdx.map((i) => lines[i]!);
       const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         {
           role: "system",
           content:
             "You score memory lines for long-term retention. Return JSON only: {\"scores\":[0..1]}. Higher means more durable preference, fact, commitment, risk, or action relevance.",
         },
-        { role: "user", content: JSON.stringify({ lines }) },
+        { role: "user", content: JSON.stringify({ lines: targetLines }) },
       ];
       const auditInputChars = JSON.stringify(messages).length;
       const response = await openai.chat.completions.create({
-        model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
+        model: scoringModel,
         temperature: 0,
         response_format: { type: "json_object" },
         messages,
@@ -1104,25 +1226,127 @@ export class MemoryManagerService {
       });
       const content = response.choices[0]?.message?.content?.trim();
       if (!content) throw new Error("empty memory score response");
-      // Token 审计：记忆批次评分（consolidate/flush），低频但输入较大
+      // Token 审计：记忆批次评分（夜间 consolidate），增量后输入大幅缩小
       const { recordLlmUsageByChars } = await import("./llm-token-audit.js");
       recordLlmUsageByChars({
         stage: "memory_flush_summarize",
         inputChars: auditInputChars,
         outputChars: content.length,
-        model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
+        model: scoringModel,
       });
       const parsed = JSON.parse(content) as { scores?: number[] };
       if (!Array.isArray(parsed.scores)) throw new Error("invalid memory score payload");
-      return lines.map((line, index) => {
-        const value = parsed.scores?.[index];
-        return typeof value === "number" && Number.isFinite(value)
-          ? Math.max(0, Math.min(1, value))
-          : this.heuristicSemanticScore(line);
+
+      const targetScores = new Map<number, number>();
+      targetIdx.forEach((lineIdx, pos) => {
+        const value = parsed.scores?.[pos];
+        if (typeof value === "number" && Number.isFinite(value)) {
+          const clamped = Math.max(0, Math.min(1, value));
+          targetScores.set(lineIdx, clamped);
+          this.putScoreCacheEntry(actorId, fps[lineIdx]!, clamped, today);
+        }
+      });
+      if (fullRescore) this.scoreCacheFullRescoreDay.set(actorId, today);
+      void this.persistScoreCacheState();
+
+      return lines.map((_, i) => {
+        const scored = targetScores.get(i);
+        if (scored !== undefined) return scored;
+        return cached[i] ?? this.heuristicSemanticScore(lines[i]!);
       });
     } catch {
-      return lines.map((line) => this.heuristicSemanticScore(line));
+      // 失败：缓存命中行用缓存分（不重评），缺失行走启发式（不缓存）
+      return lines.map((line, i) => cached[i] ?? this.heuristicSemanticScore(line));
     }
+  }
+
+  // ---- P0-B 行分数缓存：actorId → 行指纹 → { score, day }，持久化到 data/ ----
+
+  private scoreCache = new Map<string, Map<string, { score: number; day: string }>>();
+  private scoreCacheFullRescoreDay = new Map<string, string>();
+  private scoreCacheLoadPromise: Promise<void> | null = null;
+
+  private get scoreCachePath(): string {
+    return join(process.cwd(), "data", "memory-score-cache.json");
+  }
+
+  private static readonly SCORE_CACHE_MAX_PER_ACTOR = 800;
+  private static readonly SCORE_FULL_RESCORE_INTERVAL_DAYS = 7;
+
+  private loadScoreCacheState(): Promise<void> {
+    if (this.scoreCacheLoadPromise) return this.scoreCacheLoadPromise;
+    this.scoreCacheLoadPromise = (async () => {
+      try {
+        const { readFile } = await import("node:fs/promises");
+        const raw = await readFile(this.scoreCachePath, "utf8");
+        const parsed = JSON.parse(raw) as {
+          actors?: Record<string, { scores?: [string, number, string][]; fullRescoreDay?: string }>;
+        };
+        for (const [actorId, entry] of Object.entries(parsed.actors ?? {})) {
+          this.scoreCache.set(actorId, new Map((entry.scores ?? []).map(([fp, score, day]) => [fp, { score, day }])));
+          if (entry.fullRescoreDay) this.scoreCacheFullRescoreDay.set(actorId, entry.fullRescoreDay);
+        }
+      } catch {
+        // 首次运行/文件缺失：空状态启动
+      }
+    })();
+    return this.scoreCacheLoadPromise;
+  }
+
+  private async persistScoreCacheState(): Promise<void> {
+    try {
+      const actors: Record<string, { scores: [string, number, string][]; fullRescoreDay?: string }> = {};
+      for (const [actorId, entries] of this.scoreCache) {
+        actors[actorId] = {
+          scores: [...entries].map(([fp, v]) => [fp, v.score, v.day] as [string, number, string]),
+          ...(this.scoreCacheFullRescoreDay.has(actorId)
+            ? { fullRescoreDay: this.scoreCacheFullRescoreDay.get(actorId) }
+            : {}),
+        };
+      }
+      await writeJsonAtomic(this.scoreCachePath, { version: 1, actors });
+    } catch (err) {
+      console.warn("[MemoryManager] score cache persist failed:", err);
+    }
+  }
+
+  private putScoreCacheEntry(actorId: string, fp: string, score: number, day: string): void {
+    let cache = this.scoreCache.get(actorId);
+    if (!cache) {
+      cache = new Map();
+      this.scoreCache.set(actorId, cache);
+    }
+    cache.set(fp, { score, day });
+    const max = MemoryManagerService.SCORE_CACHE_MAX_PER_ACTOR;
+    if (cache.size > max) {
+      const excess = cache.size - max;
+      let removed = 0;
+      for (const key of cache.keys()) {
+        cache.delete(key);
+        if (++removed >= excess) break;
+      }
+    }
+  }
+
+  private isScoreFullRescoreDue(actorId: string, today: string): boolean {
+    const last = this.scoreCacheFullRescoreDay.get(actorId);
+    if (!last) return false;
+    const days = (Date.parse(today) - Date.parse(last)) / 86_400_000;
+    return Number.isFinite(days) && days >= MemoryManagerService.SCORE_FULL_RESCORE_INTERVAL_DAYS;
+  }
+
+  /**
+   * P1 unified 预通道种子：夜间单遍巩固器把当日新行的留存分直接写入缓存，
+   * consolidateNow 的增量评分即可全部命中（0 次 LLM 调用）。
+   */
+  seedScoreCache(actorId: string, entries: Array<{ fp: string; score: number }>): void {
+    if (entries.length === 0) return;
+    const today = this.getTodayDayKey();
+    for (const entry of entries) {
+      if (!Number.isFinite(entry.score)) continue;
+      this.putScoreCacheEntry(actorId, entry.fp, Math.max(0, Math.min(1, entry.score)), today);
+    }
+    void this.persistScoreCacheState();
   }
 
   private heuristicSemanticScore(line: string): number {

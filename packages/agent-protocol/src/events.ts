@@ -38,6 +38,17 @@ export const ClientEventType = {
   PhoneBridgeRegister: "phone.bridge.register",
   /** 手机桥接：执行完成后回传结果（与 phone.bridge.invoke 的 jobId 对应）。 */
   PhoneBridgeResult: "phone.bridge.result",
+  /**
+   * 手机桥接：消息捕捉批量上报（通知监听/短信等 → 服务端消息聚合中心）。
+   * payload.messages 为消息数组，每条带 externalMessageId 供服务端去重；
+   * 服务端落库后回 phone.msg.report_ack（按 batchId），手机端凭 ack 出队。
+   */
+  PhoneMsgReport: "phone.msg.report",
+  /**
+   * 手机桥接：定位低频回传（前台服务定时上报；与 phone.locate 按需定位分离）。
+   * 服务端落入 location-history（location.db）。
+   */
+  PhoneLocReport: "phone.loc.report",
   /** 用户发起虚拟电话呼叫Agent */
   VirtualPhoneUserCall: "phone.user_call_agent",
   /** 用户直接呼叫自己的Agent（无需输入ID，服务端从session推断） */
@@ -189,6 +200,8 @@ export const ServerEventType = {
   PhoneBridgeInvoke: "phone.bridge.invoke",
   /** 手机桥接状态同步 */
   PhoneBridgeSync: "phone.bridge.sync",
+  /** 发往手机端：消息捕捉批量上报已落库（payload.batchId + accepted/duplicate 计数），手机端凭此出队 */
+  PhoneMsgReportAck: "phone.msg.report_ack",
   /** 球形 Agent 权威视觉状态（mood/energy/caption/委派 phase） */
   AgentEmbodimentPatch: "agent.embodiment.patch",
   /** 主 Agent 具身控制：3D 漫游、移动、停驻等（球形机器人身体） */
@@ -297,7 +310,27 @@ export const ServerEventType = {
    * payload: { surface?: string, jobId?: string }
    */
   SurfaceDismiss: "surface.dismiss",
+  /**
+   * 站内信：平台/运营侧经 POST /api/inbox/send 推送给用户的消息。
+   * 必达语义：服务端先落盘（data/inbox/{actorId}.json，客户端随时经
+   * GET /api/inbox/messages 拉取补齐），在线设备再收到本事件做即时提醒。
+   * payload: { messageId, title, body, kind?, importance?, fromActorId?, createdAt }
+   */
+  InboxMessage: "inbox.message",
 } as const;
+
+/** inbox.message 载荷：站内信（平台→用户收件箱） */
+export type InboxMessagePayload = {
+  messageId: string;
+  title: string;
+  body: string;
+  /** system / announcement / friend / ... */
+  kind?: string;
+  importance?: "low" | "normal" | "high" | "critical";
+  fromActorId?: string;
+  /** ISO 时间戳 */
+  createdAt: string;
+};
 
 // ============================================================
 // 「分阶段异步对话交互 v2」事件载荷类型

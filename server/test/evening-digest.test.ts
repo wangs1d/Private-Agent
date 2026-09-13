@@ -220,8 +220,8 @@ test("晨报预警联动：预警 + 当日有日程 → 回调一次（同日去
   };
   const scheduleTaskService = {
     listTasksBySession: () => [
-      { taskId: "task-1", title: "外出办事", nextRunAt: new Date().toISOString(), runAt: "" },
-      { taskId: "task-2", title: "晚上聚餐", nextRunAt: new Date().toISOString(), runAt: "" },
+      { taskId: "task-1", title: "外出办事", description: "", nextRunAt: new Date().toISOString(), runAt: "" },
+      { taskId: "task-2", title: "晚上聚餐", description: "", nextRunAt: new Date().toISOString(), runAt: "" },
     ],
   };
 
@@ -276,7 +276,7 @@ test("晨报预警联动：无预警或无日程 → 不触发", async () => {
         get: (sessionId: string) => ({ sessionId, latitude: 39.9, longitude: 116.4, timezone: "Asia/Shanghai" }),
       } as never,
       scheduleTaskService: {
-        listTasksBySession: () => (hasSchedule ? [{ taskId: "t", title: "事", nextRunAt: new Date().toISOString(), runAt: "" }] : []),
+        listTasksBySession: () => (hasSchedule ? [{ taskId: "t", title: "事", description: "", nextRunAt: new Date().toISOString(), runAt: "" }] : []),
       } as never,
       onSevereWeatherAlert: () => {
         fired.push("hit");

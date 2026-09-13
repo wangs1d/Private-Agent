@@ -391,7 +391,7 @@ export async function extractUnified(
   const nowIso = new Date(now.getTime() - tzMin * 60_000).toISOString().replace("Z", tzStr);
 
   try {
-    const openai = opts?.client ?? new OpenAI({ apiKey });
+    const openai = opts?.client ?? new OpenAI({ apiKey, maxRetries: 1 });
     const response = await openai.chat.completions.create({
       model: opts?.model ?? getAgenticMemoryLlmModel(),
       temperature: 0,

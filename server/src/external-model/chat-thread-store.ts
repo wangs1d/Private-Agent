@@ -750,6 +750,24 @@ function annotateMessageIfNeeded(
 }
 
 /**
+ * 恢复/落盘补帧专用：只用消息自身携带的时间戳刷新 ts 帧。
+ *
+ * 没有时间戳的历史消息（客户端桥灌入的存量、极旧数据）宁可不打帧，也**不能**
+ * 兜底打 `now`——打上 now 等于把历史伪装成「刚刚」，模型会把旧对话当现事承接：
+ * 实测（2026-09-13）昨天的错误回答被整体盖成 just now 后，模型把「刘浩存在成都」
+ * 当成当前对话已确立的事实复读，连 search_web 都不调。与 recap 块的修法同哲学：
+ * 未知时间 ≠ 当前时间。
+ */
+function annotateMessageWithOwnTimeOrKeep(
+  msg: ChatCompletionMessageParam,
+  now: Date = new Date(),
+): ChatCompletionMessageParam {
+  const at = extractMessageTimestamp(msg);
+  if (!at) return msg;
+  return annotateMessageIfNeeded(msg, at, now);
+}
+
+/**
  * 从根源折叠「已完成的 tool_call 链」，防止串台。
  *
  * 根源问题：OpenAI 协议里 tool 消息没有「轮次边界」。一轮工具调用完成后，thread 里留下
@@ -1083,7 +1101,7 @@ export class ChatThreadStore {
           { role: "system", content: sessionSys ?? defaultSystemPrompt },
           ...repairKimiAssistantToolCallReasoning(
             compactValidChatMessages(
-              restored.map((msg) => annotateMessageIfNeeded(msg, extractMessageTimestamp(msg) ?? now, now)),
+              restored.map((msg) => annotateMessageWithOwnTimeOrKeep(msg, now)),
             ),
           ),
         ];
@@ -1099,7 +1117,7 @@ export class ChatThreadStore {
           { role: "system", content: sessionSys ?? defaultSystemPrompt },
           ...repairKimiAssistantToolCallReasoning(
             compactValidChatMessages(
-              masterRestored.map((msg) => annotateMessageIfNeeded(msg, extractMessageTimestamp(msg) ?? now, now)),
+              masterRestored.map((msg) => annotateMessageWithOwnTimeOrKeep(msg, now)),
             ),
           ),
         ];
@@ -1490,7 +1508,7 @@ export class ChatThreadStore {
         typeof msg.content === "string"
       ) {
         if (readMessageTimestampPrefix(msg.content)) return msg; // 已有时间戳 → 冻结
-        return annotateMessageIfNeeded(msg, extractMessageTimestamp(msg) ?? now, now);
+        return annotateMessageWithOwnTimeOrKeep(msg, now);
       }
       return msg;
     });

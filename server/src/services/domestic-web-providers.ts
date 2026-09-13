@@ -186,7 +186,6 @@ export async function searchBingChinaRelaxed(
 
 const BAIDU_SEARCH = "https://www.baidu.com/s";
 const SOGOU_SEARCH = "https://www.sogou.com/web";
-const DUCKDUCKGO_SEARCH = "https://html.duckduckgo.com/html";
 
 /** 百度网页搜索：解析 c-container / result 结果块中的标题链接与摘要。 */
 export async function searchBaiduChina(
@@ -217,20 +216,8 @@ export async function searchSogouChina(
   return extractSearchLinks(html, "搜狗").slice(0, limit);
 }
 
-/** DuckDuckGo HTML 端点：专门面向纯 HTML 抓取设计，结果结构稳定。 */
-export async function searchDuckDuckGo(
-  query: string,
-  limit: number,
-  opts: DomesticFetchOptions,
-): Promise<InfoSearchItem[]> {
-  const keyword = query.trim();
-  if (!keyword) return [];
-  const url = `${DUCKDUCKGO_SEARCH}/?q=${encodeURIComponent(keyword)}&kl=cn-zh`;
-  const html = await fetchText(url, opts);
-  if (!html) return [];
-  const out = extractSearchLinks(html, "DuckDuckGo");
-  return out.slice(0, limit);
-}
+/* DuckDuckGo HTML 端点已删除（2026-09-12）：从部署网络实测恒返回 0 条
+ * （该端点在境内网络不可达），只贡献超时延迟，无任何结果价值。 */
 
 /**
  * 从搜索结果 HTML 中兜底提取「标题 + 链接」对（面向多引擎统一解析）。
@@ -268,6 +255,65 @@ function extractSearchLinks(
  * 关键修复：API 只要有结果就不再整体丢弃（旧逻辑要求 >=need 才采用，少了就白查），
  * 用「API 结果 + 爬虫增量」混合拼接，避免 API 少数几条也被浪费。
  */
+/**
+ * query 匹配片段（CJK 二元切片 + 英文词级）。用于判定引擎返回条目与 query
+ * 是否语义相关：必应中国 RSS 对多词中文 query（人名+地点等）经常只按首字
+ * 匹配返回「刘姓起源」类垃圾，垃圾条目凑满 limit 会提前终结引擎链，导致
+ * 百度/搜狗的真实结果永远没机会出场（2026-09-12 实测「刘浩存 泰国」）。
+ * 二元切片下「刘姓起源」不包含「刘浩/浩存」片段，可被正确判为不相关。
+ */
+function extractEngineMatchFragments(query: string): string[] {
+  const words = query
+    .split(/[\s,，、。；;:：/|?？!！]+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 2);
+  const cjkBigrams: string[] = [];
+  for (const run of query.matchAll(/[\u4e00-\u9fff]{2,}/gu)) {
+    const text = run[0];
+    for (let i = 0; i + 2 <= text.length; i++) {
+      cjkBigrams.push(text.slice(i, i + 2));
+    }
+  }
+  const enWords = [...query.matchAll(/\b[a-z0-9]{2,}\b/gi)].map((m) => m[0].toLowerCase());
+  return [...new Set([...words, ...cjkBigrams, ...enWords])].map((w) => w.toLowerCase());
+}
+
+function itemMatchesQueryFragments(
+  item: { title: string; snippet?: string; url?: string },
+  fragments: string[],
+): boolean {
+  if (fragments.length === 0) return true;
+  const hay = `${item.title}\n${item.snippet ?? ""}\n${item.url ?? ""}`.toLowerCase();
+  return fragments.some((f) => hay.includes(f));
+}
+
+/**
+ * 必应主路相关性达标率：标题/摘要/URL 至少命中一个 query 片段的条目占比。
+ * 返回 null 表示 query 无可用片段（纯符号），视为达标（保持原行为不过滤）。
+ * 导出供回归测试使用（必应多词中文 query 降级为「刘姓」类垃圾的防线）。
+ */
+export function primaryRelevanceRatio(items: InfoSearchItem[], query: string): number | null {
+  const fragments = extractEngineMatchFragments(query);
+  if (fragments.length === 0) return null;
+  if (items.length === 0) return 0;
+  const relevant = items.filter((item) => itemMatchesQueryFragments(item, fragments)).length;
+  return relevant / items.length;
+}
+
+/**
+ * 兜底结果相关性过滤（导出供回归测试）：只保留标题/摘要/URL 与 query
+ * 关键词片段（CJK 二元切片/英文词）命中的条目。query 无可用片段（纯符号）
+ * 时不过滤原样返回。
+ */
+export function filterByQueryFragments<T extends { title: string; snippet?: string; url?: string }>(
+  items: T[],
+  query: string,
+): T[] {
+  const fragments = extractEngineMatchFragments(query);
+  if (fragments.length === 0) return items;
+  return items.filter((item) => itemMatchesQueryFragments(item, fragments));
+}
+
 export async function searchWebMultiEngine(
   query: string,
   limit: number,
@@ -277,34 +323,43 @@ export async function searchWebMultiEngine(
   if (!keyword) return [];
   const boundedLimit = clampInt(limit, 1, 25);
 
-  // 第一步：优先走稳定搜索 API。未配置(null)/失败([])都会无缝降级到爬虫链。
+  // 主路：稳定搜索 API（AnySearch 等）。只要返回了真实结果就原样返回——
+  // 爬虫不再「数量不足补足」：必应对多词中文 query（人名+地点）会返回
+  // 「刘姓起源」类垃圾凑满 limit，混进结果集后在下游 quality 排序里还会
+  // 挤到真实结果前面（2026-09-12 实测「刘浩存 泰国」）。API 结果少比结果
+  // 脏好：模型可对已有结果 fetch_web 深读，拿到垃圾却会自信地答错。
   const apiResults = await searchViaSearchApi(keyword, boundedLimit);
   const apiItems = apiResults
     ? applySearchFreshness(apiResults, { query: keyword }).items.slice(0, boundedLimit)
     : [];
-  // API 已经够数，直接返回（最省算力）
-  if (apiItems.length >= boundedLimit) return apiItems;
-  // 记录了「API 命中但数量不足」这一信息，日志便于定位混合策略是否生效
-  if (apiItems.length > 0) {
-    console.log(`[SearchApi] API 命中 ${apiItems.length} 条 < ${boundedLimit}，用爬虫继续补足`);
-  }
+  if (apiItems.length > 0) return apiItems;
 
-  // 第二步：必须用时用必应补足（API 结果保留在基础集中）
-  const primary = await searchBingChina(keyword, boundedLimit, opts);
-  const afterBing = dedupeByUrl([...apiItems, ...primary]);
-  if (afterBing.length >= boundedLimit) return afterBing.slice(0, boundedLimit);
-
-  // 第三步：必应仍不够，并行调百度/搜狗/DDG 兜底
-  const missing = boundedLimit - afterBing.length;
-  const [baidu, sogou, ddg] = await Promise.all([
-    searchBaiduChina(keyword, missing + 2, opts),
-    searchSogouChina(keyword, missing + 2, opts),
-    searchDuckDuckGo(keyword, missing + 2, opts),
+  // 应急兜底：仅当 API 未配置/失败/空结果时才走国内引擎爬虫。每条必须过
+  // 相关性闸门，全部不相关时返回空——宁可爱模型如实说「没查到」，也不要
+  // 整页垃圾被模型当成搜索结果复述给用户。必应与 DDG 已从兜底链删除：
+  // 前者是多词中文 query 的系统性垃圾源（RSS 只按首字匹配），后者从部署
+  // 网络恒返回 0 条（白付超时）。兜底阶段加软上限：反爬限流时个别引擎会
+  // 拖满自身超时，不能让整段搜索无上界。
+  const fallbackDeadlineMs = Math.max(4_000, Math.min(8_000, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS));
+  const [baidu, sogou] = await Promise.race([
+    Promise.all([
+      searchBaiduChina(keyword, boundedLimit, opts),
+      searchSogouChina(keyword, boundedLimit, opts),
+    ]),
+    new Promise<[InfoSearchItem[], InfoSearchItem[]]>((resolve) =>
+      setTimeout(() => resolve([[], []]), fallbackDeadlineMs),
+    ),
   ]);
-  const fallback = [...baidu, ...sogou, ...ddg].filter((x) => x.url && /^https?:\/\//i.test(x.url));
-  // 引擎结果原样返回，不做关键词锚点过滤（引擎已按完整 query 匹配，锚点砍只会误删）
-  const merged = dedupeByUrl([...afterBing, ...fallback]);
-  return merged.slice(0, boundedLimit);
+  const fallback = [...baidu, ...sogou].filter((x) => x.url && /^https?:\/\//i.test(x.url));
+  const relevant = filterByQueryFragments(dedupeByUrl(fallback), keyword);
+  if (relevant.length > 0) {
+    console.log(
+      `[Search] API 不可用，国内引擎兜底 ${fallback.length} 条中保留相关 ${relevant.length} 条 -> query="${keyword.slice(0, 30)}"`,
+    );
+    return relevant.slice(0, boundedLimit);
+  }
+  console.log(`[Search] API 不可用且兜底引擎无相关结果，返回空 -> query="${keyword.slice(0, 30)}"`);
+  return [];
 }
 
 function clampInt(input: number, min: number, max: number): number {

@@ -15,6 +15,9 @@ class DesktopBridgeService {
   static final DesktopBridgeService instance = DesktopBridgeService._();
 
   static const String _bridgeSessionSuffix = "-flutter-bridge";
+  static const String _bridgeTokenFromEnv = String.fromEnvironment(
+    "DESKTOP_BRIDGE_TOKEN",
+  );
   static const Duration _reconnectDelay = Duration(seconds: 4);
   static const Duration _heartbeatInterval = Duration(seconds: 20);
   static const Duration _heartbeatTimeout = Duration(seconds: 45);
@@ -78,6 +81,13 @@ class DesktopBridgeService {
           bridgeConnected.value = true;
           _startHeartbeat(ch);
           _sendSessionInit();
+          // 口令模式（服务端配置 DESKTOP_BRIDGE_TOKEN≥8）下，session.init 不会自动
+          // 绑定执行器，必须显式发 register 携带 token；无口令模式下这条消息幂等
+          // （服务端直接回 ack）。缺这一步服务端 hasExecutor 恒为 false，desktop.*
+          // 工具会被当成「桥离线」从规划目录/可见集剔除，"打开XX应用"类任务失能。
+          _send("desktop.bridge.register", <String, dynamic>{
+            if (_bridgeTokenFromEnv.isNotEmpty) "token": _bridgeTokenFromEnv,
+          });
         }).catchError((_) {
           if (!identical(_channel, ch)) return;
           _handleDisconnect(ch);

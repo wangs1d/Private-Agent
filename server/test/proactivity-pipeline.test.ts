@@ -14,7 +14,6 @@ import { OutcomeStore } from "../src/proactivity/outcome-store.js";
 import { PresenceService } from "../src/proactivity/presence-service.js";
 import { ProposalStore } from "../src/proactivity/proposal-store.js";
 import { PendingConfirmationStore } from "../src/proactivity/pending-confirmation-store.js";
-import { UpcomingScheduleWatcher } from "../src/proactivity/upcoming-schedule-watcher.js";
 import { WsConnectionRegistry } from "../src/services/ws-connection-registry.js";
 import type { ScheduleTaskRecord } from "../src/services/schedule-task-service.js";
 
@@ -443,32 +442,6 @@ test("governor: 自适应冷却上下界（负反馈×1.5 上限 48h，正反馈
   assert.ok(g.snapshot().cooldowns.care <= 48 * 60 * 60 * 1000);
   for (let i = 0; i < 30; i++) g.noteOutcome("care", true);
   assert.equal(g.snapshot().cooldowns.care, base);
-});
-
-// ─── 临近日程扫描 ───
-
-test("watcher: itinerary 提醒在提前量窗口内产出提案；trivia/agent_task/已开始/还早 不产", () => {
-  const submitted: ProactiveProposal[] = [];
-  const watcher = new UpcomingScheduleWatcher({
-    listTasks: () => [
-      task({ taskId: "t-in", runAt: new Date(NOON + 10 * 60_000).toISOString(), nextRunAt: new Date(NOON + 10 * 60_000).toISOString() }),
-      task({ taskId: "t-trivia", category: "trivia", description: "[节律提醒:water] 喝水" }),
-      task({ taskId: "t-agent", kind: "agent_task", description: "自动化" }),
-      task({ taskId: "t-early", runAt: new Date(NOON + 40 * 60_000).toISOString(), nextRunAt: new Date(NOON + 40 * 60_000).toISOString() }),
-      task({ taskId: "t-past", runAt: new Date(NOON - 10 * 60_000).toISOString(), nextRunAt: new Date(NOON - 10 * 60_000).toISOString() }),
-    ],
-    submit: (p) => submitted.push(p),
-  });
-  watcher.scan(NOON);
-  assert.equal(submitted.length, 1);
-  assert.equal(submitted[0].kind, "schedule_upcoming");
-  assert.equal(submitted[0].tier, "must");
-  assert.equal(submitted[0].importance, "high");
-  assert.equal(submitted[0].expiresAt, NOON + 10 * 60_000);
-  assert.ok(submitted[0].directText?.includes("分钟"));
-  // 二次扫描不重复提案
-  watcher.scan(NOON);
-  assert.equal(submitted.length, 1);
 });
 
 // ─── 助手动态台账（action.* 提案投递成功落库）───

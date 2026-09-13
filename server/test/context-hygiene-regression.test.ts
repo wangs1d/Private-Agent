@@ -1,14 +1,16 @@
 /**
- * 2026-09-06 P0/P1/P2/P3 根源修复回归测试。
+ * 2026-09-06 P1/P2/P3 根源修复回归测试。
  *
  * 背景（turn-wal 2026-09-06 实录）：
  *  - "今天天气怎么样" → 前台零工具，模型闪避"没实时数据/让系统去查"，无任何工具调用；
  *  - "小弟"（两字称呼）→ 模型把悬空天气旧话题当最新消息重新回答（串台）。
- * 本文件锁定四类修复的行为契约：
- *  - P0 闪避式兜底（commitment-gate.isDeflectionStyleFallback）；
+ * 本文件锁定三类修复的行为契约：
  *  - P1 渠道会话隔离（master-chat-session）；
  *  - P2 短期记忆卫生（TTL/结清/承诺收紧/使命失效/短 ping 防带跑）；
  *  - P3 主会话线程持久化（chat-thread-persist.shouldPersistChatThread）。
+ * 原 P0 闪避闸（commitment-gate.isDeflectionStyleFallback）随该模块删除而移除
+ * （2026-09-13：「要不要工具」收敛到 L1 语义前置路由 + 程序化前置检索，
+ *  词面闪避闸退出历史；「她最近在那」类轮次由 routeSearchQuery 先搜后答承接）。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -16,9 +18,6 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { isDeflectionStyleFallback } = await import(
-  "../src/agent/commitment-gate.js"
-);
 const {
   isChannelScopedSessionId,
   isChannelSessionIsolationEnabled,
@@ -32,40 +31,6 @@ const { ShortTermMemoryGatewayService } = await import(
 function tempFile(name: string): string {
   return join(mkdtempSync(join(tmpdir(), "stm-hygiene-")), name);
 }
-
-/* ── P0：出口闪避闸 ─────────────────────────────────────────────── */
-
-test("P0 闪避闸：turn-wal 实录的两条闪避回复必须命中", () => {
-  for (const text of [
-    // 2026-09-06 10:25 "今天天气怎么样" 的真实回复
-    "兴义这天气，我手头没实时数据，不好瞎报给你。要不下个能查天气的工具，我直接给你拉最新的？",
-    // 2026-09-06 10:26 "小弟" 的真实回复
-    "兴义今天啥天气，我手上没实时数据，没法瞎报。\n\n你要是想知道，让系统去查一下当场给你准信，行不？",
-  ]) {
-    assert.equal(isDeflectionStyleFallback(text), true, `应识别为闪避：${text.slice(0, 20)}`);
-  }
-});
-
-test("P0 闪避闸：正常闲聊与直答不命中（不误伤）", () => {
-  for (const text of [
-    "哈哈笑死我了",
-    "北京今天挺冷的，多穿点",
-    "今天吃火锅还是烤肉？我选火锅",
-    "我叫大帅，你刚才取的名字",
-  ]) {
-    assert.equal(isDeflectionStyleFallback(text), false, `不应识别为闪避：${text}`);
-  }
-});
-
-test("P0 闪避闸独立生效：闪避命中、完成承诺话术不误伤", () => {
-  const deflection = "我手上没实时数据，没法瞎报，让系统去查一下吧";
-  const commitment = "已经帮你设置好了提醒";
-  assert.equal(isDeflectionStyleFallback(deflection), true);
-  assert.equal(isDeflectionStyleFallback(commitment), false);
-  // 2026-09-08：原「承诺闸」hasCommitmentClaim 及出口自动补派已删除
-  // （闲聊记忆话术「记下了」被误判空口承诺，把「刘浩存才是真主 未来的老婆」
-  // 派成了说媒任务）。承诺诚实由提示词约束 + 中断轮次兜底记账承担。
-});
 
 /* ── P1：渠道会话隔离 ───────────────────────────────────────────── */
 

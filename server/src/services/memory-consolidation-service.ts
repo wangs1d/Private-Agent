@@ -13,7 +13,8 @@
  *  - 用户显式驱动的写入（memory-cortex.ingest 高信号、brain 工具）保持直写，
  *    不进队列——与 OpenClaw「直接请求立即写入」一致。
  *
- * 失败语义：落库失败整批回灌队列重试（沿用原 Mem0 低信号缓冲的回灌模式）。
+ * 失败语义：按候选/桶粒度隔离重试（attempts 计数封顶 MAX_FLUSH_ATTEMPTS 次，
+ * 防毒候选无限重跑重复烧 LLM token），不再整批回灌。
  */
 import type { Memory } from "mem0ai/oss";
 import OpenAI from "openai";
@@ -48,6 +49,8 @@ export type MemoryCandidate = {
   createdAt: string;
   /** KV summary 行的话题提示（沿用 inferMemoryTopic 产物） */
   topicHint?: string;
+  /** 整合失败回灌次数（封顶后丢弃，防毒候选无限重跑） */
+  attempts?: number;
 };
 
 type DecidedCandidate = {
@@ -204,29 +207,49 @@ export class MemoryConsolidationService {
     });
   }
 
+  /** 单个候选/桶的最大整合尝试次数：超过后丢弃并告警（防毒候选每次 flush 重跑 LLM） */
+  private static readonly MAX_FLUSH_ATTEMPTS = 3;
+
+  /** 失败候选按次数回灌；达到上限的丢弃（保留时间序，排到队首优先重试）。 */
+  private requeueFailed(candidates: MemoryCandidate[], reason: string): void {
+    const requeued: MemoryCandidate[] = [];
+    for (const c of candidates) {
+      const attempts = (c.attempts ?? 0) + 1;
+      if (attempts >= MemoryConsolidationService.MAX_FLUSH_ATTEMPTS) {
+        console.error(
+          `[memory-consolidation] 候选连续 ${attempts} 次整合失败，丢弃（source=${c.source}）: ${reason}`,
+        );
+        continue;
+      }
+      requeued.push({ ...c, attempts });
+    }
+    if (requeued.length > 0) {
+      this.queue = [...requeued, ...this.queue];
+      void this.persistQueue();
+    }
+  }
+
   private async flushActor(actorId: string): Promise<void> {
     const batch = this.queue.filter((c) => c.actorId === actorId);
     if (batch.length === 0) return;
-    // 先出队再落库，失败整批回灌（保持时间序），沿用原低信号缓冲的失败语义
+    // 先出队再处理；失败按候选/桶粒度回灌（attempts 封顶），不再整批重跑已成功的 LLM 抽取
     this.queue = this.queue.filter((c) => c.actorId !== actorId);
     void this.persistQueue();
 
-    try {
-      // 回声过滤：注入过的记忆被模型复述的候选不入库
-      const accepted = batch.filter((c) => {
-        if (isMemoryEcho(actorId, c.text)) return false;
-        return true;
-      });
+    const failed: MemoryCandidate[] = [];
+    const decided: DecidedCandidate[] = [];
 
-      const decided: DecidedCandidate[] = [];
+    // 回声过滤：注入过的记忆被模型复述的候选不入库
+    const accepted = batch.filter((c) => !isMemoryEcho(actorId, c.text));
 
-      // 统一抽取协议（高低信号同轨，消灭「低信号事实必须命中关键词才被
-      // 结构化对待」的双轨根因）：高信号逐条抽取；低信号按 context 分桶
-      // 合并后一次抽取（抽取产物 memories 即压缩后的独立陈述，不再单独摘要）。
-      // 抽取不可用（无 key/LLM 失败）时回退旧路径：高信号 decideMemoryWrite、
-      // 低信号 summarizeLowSignal + 启发式裁决。
-      const high = accepted.filter((c) => c.highSignal);
-      for (const candidate of high) {
+    // 统一抽取协议（高低信号同轨，消灭「低信号事实必须命中关键词才被
+    // 结构化对待」的双轨根因）：高信号逐条抽取；低信号按 context 分桶
+    // 合并后一次抽取（抽取产物 memories 即压缩后的独立陈述，不再单独摘要）。
+    // 抽取不可用（无 key/LLM 失败）时回退旧路径：高信号 decideMemoryWrite、
+    // 低信号 summarizeLowSignal + 启发式裁决。
+    const high = accepted.filter((c) => c.highSignal);
+    for (const candidate of high) {
+      try {
         const unified = isMemoryUnifiedExtractEnabled()
           ? await extractUnified(candidate.text, { client: this.unifiedClient ?? undefined })
           : null;
@@ -245,20 +268,28 @@ export class MemoryConsolidationService {
           });
           decided.push({ candidate, decision, text: candidate.text });
         }
+      } catch (err) {
+        failed.push(candidate);
+        console.warn(
+          "[memory-consolidation] 高信号候选整合失败（单独回灌）:",
+          err instanceof Error ? err.message : err,
+        );
       }
+    }
 
-      const low = accepted.filter((c) => !c.highSignal);
-      const lowByContext = new Map<"main" | "notes", MemoryCandidate[]>();
-      for (const candidate of low) {
-        const arr = lowByContext.get(candidate.context) ?? [];
-        arr.push(candidate);
-        lowByContext.set(candidate.context, arr);
-      }
-      for (const [context, items] of lowByContext) {
-        const sorted = [...items].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-        const combined = sorted.map((e) => `[${e.source}] ${e.text}`).join("\n\n---\n\n");
-        if (combined.length < 20) continue;
+    const low = accepted.filter((c) => !c.highSignal);
+    const lowByContext = new Map<"main" | "notes", MemoryCandidate[]>();
+    for (const candidate of low) {
+      const arr = lowByContext.get(candidate.context) ?? [];
+      arr.push(candidate);
+      lowByContext.set(candidate.context, arr);
+    }
+    for (const [context, items] of lowByContext) {
+      const sorted = [...items].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      const combined = sorted.map((e) => `[${e.source}] ${e.text}`).join("\n\n---\n\n");
+      if (combined.length < 20) continue;
 
+      try {
         const unified = isMemoryUnifiedExtractEnabled()
           ? await extractUnified(combined, { client: this.unifiedClient ?? undefined })
           : null;
@@ -287,18 +318,34 @@ export class MemoryConsolidationService {
           decision,
           text: summarized,
         });
+      } catch (err) {
+        failed.push(...items);
+        console.warn(
+          "[memory-consolidation] 低信号桶整合失败（桶内候选回灌）:",
+          err instanceof Error ? err.message : err,
+        );
       }
+    }
 
-      await this.egress(actorId, decided);
-    } catch (err) {
-      this.queue = [...batch, ...this.queue];
-      void this.persistQueue();
-      console.error("[memory-consolidation] flush 失败（候选已回灌待重试）:", err);
+    if (decided.length > 0) {
+      try {
+        const egressFailed = await this.egress(actorId, decided);
+        failed.push(...egressFailed);
+      } catch (err) {
+        // egress 整体异常（不应发生：内部已逐候选隔离）：全部候选回灌
+        failed.push(...decided.map((d) => d.candidate));
+        console.error("[memory-consolidation] egress 异常（候选已回灌待重试）:", err);
+      }
+    }
+
+    if (failed.length > 0) {
+      this.requeueFailed(failed, "flush");
     }
   }
 
-  /** 唯一落库出口：海马体 + Mem0（经 narrative port）+ KV summary 行。 */
-  private async egress(actorId: string, decided: DecidedCandidate[]): Promise<void> {
+  /** 唯一落库出口：海马体 + Mem0（经 narrative port）+ KV summary 行。返回写失败需回灌的候选。 */
+  private async egress(actorId: string, decided: DecidedCandidate[]): Promise<MemoryCandidate[]> {
+    const egressFailed: MemoryCandidate[] = [];
     // Supersession：overwrite/mutable_fact 语义的候选先退役语义重合的旧记忆
     for (const d of decided) {
       if (d.decision.decision === "overwrite" || d.decision.semanticClass === "mutable_fact") {
@@ -318,13 +365,21 @@ export class MemoryConsolidationService {
         d.unified.corrections.length > 0 ||
         d.unified.facts.length > 0;
       if (d.decision.decision === "reject" && !hasSideData) continue;
-      await this.deps.narrative!.writeDecided(
-        actorId,
-        d.text,
-        d.candidate.source,
-        { context: d.candidate.context, highSignal: d.candidate.highSignal },
-        d.unified,
-      );
+      try {
+        await this.deps.narrative!.writeDecided(
+          actorId,
+          d.text,
+          d.candidate.source,
+          { context: d.candidate.context, highSignal: d.candidate.highSignal },
+          d.unified,
+        );
+      } catch (err) {
+        egressFailed.push(d.candidate);
+        console.warn(
+          "[memory-consolidation] unified 候选落库失败（单独回灌）:",
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
 
     // 旧路径（unified 不可用回退）候选：非 reject 的整批一次 writeDecided
@@ -332,25 +387,41 @@ export class MemoryConsolidationService {
     if (legacy.length > 0 && this.deps.narrative) {
       const body = legacy.map((d) => d.text).join("\n");
       const context = legacy[0]!.candidate.context;
-      await this.deps.narrative.writeDecided(actorId, body, legacy[0]!.candidate.source, {
-        context,
-        highSignal: true,
-      });
+      try {
+        await this.deps.narrative.writeDecided(actorId, body, legacy[0]!.candidate.source, {
+          context,
+          highSignal: true,
+        });
+      } catch (err) {
+        egressFailed.push(...legacy.map((d) => d.candidate));
+        console.warn(
+          "[memory-consolidation] legacy 批量落库失败（候选回灌）:",
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
 
     // KV summary 行：fast_path 候选沿用旧行为——无论决策结果都落一行（记录决策）；
-    // 其他来源仅 remember/overwrite 时落行。
+    // 其他来源仅 remember/overwrite 时落行。KV 行失败只告警不回灌（非记忆本体）。
     if (this.deps.kvSync) {
       for (const d of decided) {
         const isFastPath = d.candidate.source === "chat:fast_path";
         if (!isFastPath && d.decision.decision === "reject") continue;
-        this.deps.kvSync.appendMemorySummaryLine(
-          actorId,
-          `[fast-path][${d.decision.decision}][${d.decision.semanticClass}] ${d.candidate.text}`,
-          d.candidate.topicHint,
-        );
+        try {
+          this.deps.kvSync.appendMemorySummaryLine(
+            actorId,
+            `[fast-path][${d.decision.decision}][${d.decision.semanticClass}] ${d.candidate.text}`,
+            d.candidate.topicHint,
+          );
+        } catch (err) {
+          console.warn(
+            "[memory-consolidation] KV summary 行写入失败（忽略）:",
+            err instanceof Error ? err.message : err,
+          );
+        }
       }
     }
+    return egressFailed;
   }
 
   /**
@@ -400,7 +471,8 @@ export class MemoryConsolidationService {
     }
 
     try {
-      const openai = new OpenAI({ apiKey });
+      // maxRetries:1：SDK 默认 2 次静默重试会让瞬时失败双倍烧 token
+      const openai = new OpenAI({ apiKey, maxRetries: 1 });
       const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         {
           role: "system",

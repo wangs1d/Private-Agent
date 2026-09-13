@@ -145,7 +145,7 @@ async function llmDecision(
   if (!llm) return null;
 
   try {
-    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
     // Token 审计：序列化 messages 估算输入规模
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       {

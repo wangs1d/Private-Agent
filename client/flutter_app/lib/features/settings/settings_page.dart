@@ -4,15 +4,25 @@ import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/db/isar_local_history_store.dart";
 import "../../core/services/access_auth_api.dart";
+import "../../core/services/app_auto_start.dart";
 import "../../core/services/phone_bridge_service.dart";
+import "../../core/services/phone_capture_service.dart";
 import "../../core/services/user_preferences_api.dart";
+import "../../core/theme/app_theme.dart";
+import "../../widgets/app_window_titlebar.dart";
 
-/// 「设置」页 —— 嵌入右侧面板（面板顶栏已提供标题，本页不渲染 AppBar）。
+/// 设置分区（左侧侧栏一项对应右侧一块内容）。
+enum _SettingsSection { briefing, security, phoneBridge, about }
+
+/// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
+/// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
 ///
 /// 分区：
 ///  - 早安简报：开关 / 时间 / 播报方式 / 内容板块（UserPreferencesApi）
 ///  - 设备绑定与安全：访问鉴权状态、配对码绑定、配对码签发、本机解绑
+///  - 手机桥接（仅 Android）：Agent 远程访问本机 / 消息捕捉 / 定位回传
 ///  - 关于：服务地址、当前身份、本机设备标识
 ///
 /// 凭据变化后通过 [onCredentialsChanged] 通知宿主（重连 WS 使新 token 生效）。
@@ -38,6 +48,9 @@ class _SettingsPageState extends State<SettingsPage> {
   late final UserPreferencesApi _api;
   late final AccessAuthApi _authApi;
 
+  /// 当前选中的分区（默认第一项）。
+  _SettingsSection _section = _SettingsSection.briefing;
+
   // —— 简报设置（加载自服务端偏好） ——
   bool _briefingLoading = true;
   bool _briefingEnabled = true;
@@ -48,6 +61,16 @@ class _SettingsPageState extends State<SettingsPage> {
   );
   bool _savingBriefing = false;
 
+  // —— 简报开机链路（仅 Windows，本地存储/注册表） ——
+  /// 开机自动启动（简报随开机播报的前提）。
+  bool _autoStart = false;
+  /// 简报播报前摄像头在座检测；本地 consent 为 null（未设置过）视为开启。
+  bool _presenceGate = true;
+  bool get _isWindows =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+  final IsarLocalHistoryStore _localStore =
+      IsarLocalHistoryStore(userPin: ApiConfig.localPin);
+
   late final TextEditingController _timeController;
 
   // —— 鉴权状态 ——
@@ -56,6 +79,11 @@ class _SettingsPageState extends State<SettingsPage> {
   final TextEditingController _pairCodeController = TextEditingController();
   bool _authBusy = false;
 
+  // —— 消息捕捉（通知使用权 / 落盘队列 / 定位回传） ——
+  bool _listenerEnabled = false;
+  int _captureQueueSize = 0;
+  bool _captureLoading = true;
+
   @override
   void initState() {
     super.initState();
@@ -63,7 +91,44 @@ class _SettingsPageState extends State<SettingsPage> {
     _authApi = widget.authApi ?? AccessAuthApi();
     _timeController = TextEditingController(text: _briefingTime);
     _loadBriefingPrefs();
+    _loadLocalBriefingSettings();
     _refreshAuthStatus();
+    _refreshCaptureState();
+  }
+
+  /// 加载开机自启与在座检测开关（Windows 本地状态）。
+  Future<void> _loadLocalBriefingSettings() async {
+    if (!_isWindows) return;
+    try {
+      final bool autoStart = await AppAutoStart.isEnabled();
+      final bool? consent = await _localStore.getVisionCameraConsent();
+      if (!mounted) return;
+      setState(() {
+        _autoStart = autoStart;
+        _presenceGate = consent ?? true;
+      });
+    } catch (_) {
+      // 本地设置加载失败不阻塞设置页
+    }
+  }
+
+  Future<void> _toggleAutoStart(bool v) async {
+    final bool ok = await AppAutoStart.setEnabled(v);
+    if (!mounted) return;
+    setState(() => _autoStart = ok ? v : _autoStart);
+    _snack(ok
+        ? (v ? "已开启开机自动启动" : "已关闭开机自动启动")
+        : "设置失败，请重试");
+  }
+
+  Future<void> _togglePresenceGate(bool v) async {
+    try {
+      await _localStore.setVisionCameraConsent(v);
+      if (!mounted) return;
+      setState(() => _presenceGate = v);
+    } catch (_) {
+      if (mounted) _snack("设置失败，请重试");
+    }
   }
 
   @override
@@ -245,23 +310,190 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  // ------------------------------------------------------------------ //
+  // 全屏布局：标题栏 + 左侧分区侧栏 + 右侧内容区
+  // ------------------------------------------------------------------ //
+
   @override
   Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const AppWindowTitleBar(),
+          Expanded(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                _buildSidebar(),
+                VerticalDivider(
+                  width: 1,
+                  thickness: 1,
+                  color: AppPalette.resolveSidebarSeparator(
+                    AppThemeController.instance.value,
+                  ),
+                ),
+                Expanded(child: MainPanel(child: _buildSectionContent())),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 左侧分区侧栏：背景与主界面左侧边栏同色（resolveSidebarPanel）。
+  Widget _buildSidebar() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final Color bg = AppPalette.resolveSidebarPanel(
+      AppThemeController.instance.value,
+    );
     final bool showPhoneBridge =
         !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-      children: <Widget>[
-        _buildBriefingCard(),
-        const SizedBox(height: 16),
-        _buildSecurityCard(),
-        if (showPhoneBridge) ...<Widget>[
-          const SizedBox(height: 16),
-          _buildPhoneBridgeCard(),
-        ],
-        const SizedBox(height: 16),
-        _buildAboutCard(),
-      ],
+    final List<(_SettingsSection, IconData, String)> sections = <(
+      _SettingsSection,
+      IconData,
+      String
+    )>[
+      (_SettingsSection.briefing, Icons.wb_sunny_outlined, "早安简报"),
+      (_SettingsSection.security, Icons.verified_user_outlined, "设备绑定与安全"),
+      if (showPhoneBridge)
+        (_SettingsSection.phoneBridge, Icons.smartphone_outlined, "手机桥接"),
+      (_SettingsSection.about, Icons.info_outline, "关于"),
+    ];
+    return ColoredBox(
+      color: bg,
+      child: SizedBox(
+        width: 232,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 16, 16, 8),
+              child: Row(
+                children: <Widget>[
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back, size: 20),
+                    tooltip: "返回对话",
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    "设置",
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Column(
+                children: <Widget>[
+                  for (final (
+                      _SettingsSection section,
+                      IconData icon,
+                      String label
+                    ) in sections)
+                    _navItem(cs, section, icon, label),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 侧栏导航项：选中时填充胶囊底 + 加重文字，未选中弱化。
+  Widget _navItem(
+    ColorScheme cs,
+    _SettingsSection section,
+    IconData icon,
+    String label,
+  ) {
+    final bool selected = _section == section;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Material(
+        color:
+            selected ? cs.onSurface.withValues(alpha: 0.08) : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => setState(() => _section = section),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  icon,
+                  size: 18,
+                  color: selected ? cs.onSurface : cs.onSurfaceVariant,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: selected ? cs.onSurface : cs.onSurfaceVariant,
+                          fontWeight:
+                              selected ? FontWeight.w600 : FontWeight.w400,
+                        ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 右侧内容区：分区大标题 + 对应表单卡片（限宽，避免超宽屏拉太长）。
+  Widget _buildSectionContent() {
+    final String title = switch (_section) {
+      _SettingsSection.briefing => "早安简报",
+      _SettingsSection.security => "设备绑定与安全",
+      _SettingsSection.phoneBridge => "手机桥接",
+      _SettingsSection.about => "关于",
+    };
+    final Widget card = switch (_section) {
+      _SettingsSection.briefing => _buildBriefingCard(),
+      _SettingsSection.security => _buildSecurityCard(),
+      _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
+      _SettingsSection.about => _buildAboutCard(),
+    };
+    return SingleChildScrollView(
+      // key 随分区变化：切换分区时滚动位置复位到顶部。
+      key: ValueKey<_SettingsSection>(_section),
+      padding: const EdgeInsets.fromLTRB(32, 28, 32, 40),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 760),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                title,
+                style: Theme.of(context)
+                    .textTheme
+                    .titleLarge
+                    ?.copyWith(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 16),
+              card,
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -329,10 +561,85 @@ class _SettingsPageState extends State<SettingsPage> {
                 );
               },
             ),
+            _buildCaptureTiles(),
           ],
         ),
       ),
     );
+  }
+
+  /// 消息捕捉与定位回传设置（仅桥接开启时展示）。
+  Widget _buildCaptureTiles() {
+    if (!PhoneBridgeService.instance.isEnabled) {
+      return const SizedBox.shrink();
+    }
+    final String captureSubtitle;
+    if (_captureLoading) {
+      captureSubtitle = "正在检查通知使用权…";
+    } else if (_listenerEnabled) {
+      captureSubtitle = _captureQueueSize > 0
+          ? "微信/QQ/飞书/短信通知将汇总给 Agent（待补报 $_captureQueueSize 条）"
+          : "微信/QQ/飞书/短信通知将汇总给 Agent，Agent 仅在你询问或重要事项时查看";
+    } else {
+      captureSubtitle = "需要授予系统「通知使用权」后才能捕捉消息";
+    }
+    return Column(
+      children: <Widget>[
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text("消息捕捉"),
+          subtitle: Text(captureSubtitle),
+          value: _listenerEnabled,
+          onChanged: _listenerEnabled
+              ? null // 已授权：捕捉随桥接开关生效，无需单独切换
+              : (bool _) async {
+                  await PhoneCaptureService.instance.openListenerSettings();
+                },
+        ),
+        if (!_listenerEnabled && !_captureLoading)
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: () async {
+                await PhoneCaptureService.instance.openListenerSettings();
+                // 给用户留出操作时间，稍后自动刷新状态
+                await Future<void>.delayed(const Duration(seconds: 3));
+                if (mounted) unawaited(_refreshCaptureState());
+              },
+              child: const Text("去系统设置授权"),
+            ),
+          ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text("定位低频回传"),
+          subtitle: const Text("约 15 分钟一次向服务端回传当前位置，供 Agent 主动感知你的位置；关闭后仅按需定位。"),
+          value: PhoneBridgeService.instance.isLocationReportEnabled,
+          onChanged: (bool v) {
+            setState(() {});
+            unawaited(PhoneBridgeService.instance.setLocationReportEnabled(v));
+          },
+        ),
+      ],
+    );
+  }
+
+  Future<void> _refreshCaptureState() async {
+    try {
+      final bool enabled = await PhoneCaptureService.instance.isListenerEnabled();
+      final int queueSize = await PhoneCaptureService.instance.queueSize();
+      if (!mounted) return;
+      setState(() {
+        _listenerEnabled = enabled;
+        _captureQueueSize = queueSize;
+        _captureLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _captureLoading = false;
+        _listenerEnabled = false;
+      });
+    }
   }
 
   // ------------------------------------------------------------------ //
@@ -376,10 +683,28 @@ class _SettingsPageState extends State<SettingsPage> {
                   _saveBriefing();
                 },
               ),
+              if (_isWindows) ...<Widget>[
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text("开机自动启动"),
+                  subtitle: const Text("随电脑开机启动，简报在开机后播报"),
+                  value: _autoStart,
+                  onChanged: _toggleAutoStart,
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text("简报前检测在座（摄像头）"),
+                  subtitle: const Text(
+                    "开机后等检测到你坐在电脑前才播报；无摄像头时开机直接播报",
+                  ),
+                  value: _presenceGate,
+                  onChanged: _togglePresenceGate,
+                ),
+              ],
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text("推送时间"),
-                subtitle: const Text("24 小时制，例如 07:30"),
+                subtitle: const Text("仅早上 05:00–11:59，例如 07:30"),
                 trailing: SizedBox(
                   width: 88,
                   child: TextField(
@@ -389,7 +714,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     onSubmitted: (String v) {
                       final String? parsed = _normalizeTime(v);
                       if (parsed == null) {
-                        _snack("时间格式应为 HH:mm");
+                        _snack("简报时间需为早上 05:00–11:59（HH:mm）");
                         _timeController.text = _briefingTime;
                         return;
                       }
@@ -468,6 +793,7 @@ class _SettingsPageState extends State<SettingsPage> {
         _ => "聊天卡片（文本展示）",
       };
 
+  /// 校验并归一化简报时间：HH:mm 且限定早间播报时段 05:00–11:59。
   String? _normalizeTime(String raw) {
     final String v = raw.trim();
     final RegExpMatch? m = RegExp(r"^(\d{1,2}):(\d{2})$").firstMatch(v);
@@ -475,6 +801,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final int hour = int.parse(m.group(1)!);
     final int minute = int.parse(m.group(2)!);
     if (hour > 23 || minute > 59) return null;
+    if (hour < 5 || hour >= 12) return null;
     return "${hour.toString().padLeft(2, "0")}:${minute.toString().padLeft(2, "0")}";
   }
 

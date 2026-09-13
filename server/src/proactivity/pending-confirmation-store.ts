@@ -47,12 +47,15 @@ export function nextConfirmationId(): string {
 export class PendingConfirmationStore {
   private readonly entries = new Map<string, PendingConfirmation>();
   private dirty = false;
+  /** 可注入时钟（测试/集成冒烟用；默认真实系统时间） */
+  private readonly nowFn: () => number;
 
-  constructor(private readonly path?: string) {
+  constructor(private readonly path?: string, nowFn?: () => number) {
+    this.nowFn = nowFn ?? (() => Date.now());
     if (path) {
       const raw = readJson<ConfirmationFileShape>(path, { version: 1, entries: [] });
       for (const e of raw.entries ?? []) {
-        if (e.expiresAt > Date.now()) this.entries.set(e.confirmId, e); // 过期的恢复即弃
+        if (e.expiresAt > this.nowFn()) this.entries.set(e.confirmId, e); // 过期的恢复即弃
       }
     }
   }
@@ -98,7 +101,7 @@ export class PendingConfirmationStore {
   }
 
   /** 剔除过期未回复的确认（静默作废，不执行） */
-  pruneExpired(now = Date.now()): void {
+  pruneExpired(now = this.nowFn()): void {
     for (const [id, e] of this.entries) {
       if (e.expiresAt <= now) {
         this.entries.delete(id);

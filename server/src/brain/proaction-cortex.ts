@@ -448,8 +448,11 @@ export class ProactionCortex {
       // 硬闸门拦截（静音 / cooldown）→ silent，不进 LLM
       outcome = "silent";
       rationaleParts.push(`policy_blocked:${policy.reason ?? "unknown"}`);
-    } else if (gap < threshold) {
-      // 粗筛未通过（低价值信号）→ silent，不进 LLM
+    } else if (gap < threshold && signal.metadata?.direct !== true) {
+      // 粗筛未通过（低价值信号）→ silent，不进 LLM。
+      // direct 标记（InitiativeEngine 自主决策产生的信号）豁免本阈值——
+      // 预筛公式对 LLM 自造 kind 的 4 分保底会误杀低/中重要度的自主主动；
+      // 那条链路的克制判断已由 InitiativeEngine + 频控完成。
       outcome = "silent";
       rationaleParts.push(`prefilter:gap<${threshold.toFixed(2)}`);
     } else if (!this.endToEndMaker) {

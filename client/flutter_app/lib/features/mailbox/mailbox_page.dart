@@ -4,6 +4,7 @@ import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/presentation/emotion_ball_ids.dart";
+import "../../core/services/inbox_api.dart";
 import "../../core/services/world_api_client.dart";
 import "../../core/services/ws_chat_service.dart";
 import "../chat/emotion_ball_view.dart";
@@ -28,6 +29,10 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
   bool _serverOffline = false;
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _allRequests = [];
+  // 站内信（平台→用户收件箱；服务端 InboxService 落盘，在线时经 WS 实时提醒）
+  final InboxApi _inboxApi = InboxApi();
+  List<InboxMessageItem> _inboxMessages = [];
+  int _inboxUnread = 0;
 
   // 预定义常量
   static const EdgeInsets _cardMargin = EdgeInsets.symmetric(horizontal: 12, vertical: 4);
@@ -36,7 +41,7 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
     _wsSub = widget.ws.events.listen(_onWsEvent);
     _loadData();
   }
@@ -54,6 +59,10 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
     if (type == "session.init" && _serverOffline) {
       _loadData();
     }
+    // 收到新站内信：刷新列表（全局提醒由 main.dart 的 inbox.message 处理）
+    if (type == "inbox.message") {
+      _loadInbox();
+    }
   }
 
   Future<void> _loadData() async {
@@ -62,12 +71,29 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
       await Future.wait([
         _loadFriends(),
         _loadAllRequests(),
+        _loadInbox(),
       ]);
     } catch (_) {
     } finally {
       if (mounted) {
         setState(() => _loading = false);
       }
+    }
+  }
+
+  Future<void> _loadInbox() async {
+    try {
+      final result = await _inboxApi.list();
+      if (!mounted) return;
+      if (result.ok && result.value != null) {
+        setState(() {
+          _inboxMessages = result.value!.messages;
+          _inboxUnread = result.value!.unreadCount;
+          _serverOffline = false;
+        });
+      }
+    } catch (_) {
+      // 站内信拉取失败不打断好友列表展示（未设 _serverOffline）
     }
   }
 
@@ -171,9 +197,10 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
         children: [
           TabBar(
             controller: _tabController,
-            tabs: const [
-              Tab(text: "好友"),
-              Tab(text: "新朋友"),
+            tabs: [
+              const Tab(text: "好友"),
+              const Tab(text: "新朋友"),
+              Tab(text: _inboxUnread > 0 ? "消息 ($_inboxUnread)" : "消息"),
             ],
           ),
           Expanded(
@@ -182,6 +209,7 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
               children: [
                 _buildFriendsList(theme),
                 _buildNewFriendsList(theme),
+                _buildInboxList(theme),
               ],
             ),
           ),
@@ -425,6 +453,125 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
                 ],
               ),
             ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// 打开一条站内信：详情浮层 + 标记已读
+  Future<void> _openInboxMessage(InboxMessageItem message) async {
+    if (!message.read) {
+      unawaited(_inboxApi.markRead(ids: [message.messageId]).then((_) {
+        if (mounted) _loadInbox();
+      }));
+    }
+    if (!mounted) return;
+    final theme = Theme.of(context);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(message.title),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (message.createdAt != null)
+                Text(
+                  message.createdAt.toString().substring(0, 19),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              const SizedBox(height: 12),
+              SelectableText(message.body),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text("关闭"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInboxList(ThemeData theme) {
+    if (_loading && _inboxMessages.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_inboxMessages.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.mail_outline, size: 64, color: theme.colorScheme.onSurfaceVariant),
+            const SizedBox(height: 16),
+            Text(
+              "暂无消息",
+              style: theme.textTheme.titleMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadData,
+      child: ListView.builder(
+        itemCount: _inboxMessages.length,
+        itemBuilder: (context, index) {
+          final message = _inboxMessages[index];
+          final created = message.createdAt?.toString().substring(0, 19) ?? "";
+          return ListTile(
+            leading: CircleAvatar(
+              backgroundColor: message.read
+                  ? theme.colorScheme.surfaceContainerHighest
+                  : theme.colorScheme.primaryContainer,
+              child: Icon(
+                message.kind == "announcement" ? Icons.campaign_outlined : Icons.mail_outline,
+                color: message.read
+                    ? theme.colorScheme.onSurfaceVariant
+                    : theme.colorScheme.onPrimaryContainer,
+              ),
+            ),
+            title: Row(
+              children: [
+                if (!message.read) ...[
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primary,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                Expanded(
+                  child: Text(
+                    message.title,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: message.read ? FontWeight.w400 : FontWeight.w600,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            subtitle: Text(
+              created.isNotEmpty ? "$created · ${message.body}" : message.body,
+              style: theme.textTheme.bodySmall,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () => _openInboxMessage(message),
           );
         },
       ),

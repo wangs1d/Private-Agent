@@ -1,5 +1,6 @@
 import { ServerEventType } from "../protocol.js";
 import type { ClientPushPort } from "../ports/client-push-port.js";
+import { clientSupportsMediaPlayback } from "./client-capability-registry.js";
 
 /**
  * 媒体音乐播放服务。
@@ -150,6 +151,18 @@ export class MediaMusicService {
   ): Promise<{ ok: true; pushed: boolean } | { ok: false; error: string }> {
     if (!trackId) return { ok: false, error: "trackId 不能为空" };
     if (!actorId) return { ok: false, error: "actorId 不能为空" };
+    // 能力门控（2026-09-12 诚实化）：客户端未声明 mediaPlayback 时不会消费
+    // agent.media.play 事件——历史上 push「成功」后模型向用户宣称「歌已经放上了」，
+    // 实际什么都没响。此处如实失败，让模型改走 desktop.open 等真实可达路径。
+    if (!clientSupportsMediaPlayback(actorId)) {
+      return {
+        ok: false,
+        error:
+          "当前客户端未声明媒体播放能力（session.init capabilities.mediaPlayback），" +
+          "下发播放指令不会真正出声。可改用 desktop.open 打开音乐应用播放，" +
+          "或先在客户端接入媒体播放能力后再试。",
+      };
+    }
 
     const now = Date.now();
     const state: MediaNowPlayingState = {

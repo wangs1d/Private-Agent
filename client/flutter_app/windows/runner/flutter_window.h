@@ -136,6 +136,14 @@ class FlutterWindow : public Win32Window {
   void HandleWindowTitleBarMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+  // pai/app_lifecycle —— 开机自动启动（HKCU Run 注册表键读写）
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      app_lifecycle_channel_;
+
+  void HandleAppLifecycleMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

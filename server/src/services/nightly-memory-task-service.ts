@@ -1,6 +1,7 @@
 import type { MemoryManagerService } from "./memory-manager-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
+import type { UnifiedExtraction } from "../agentic-memory/unified-extractor.js";
 import { getDailyJournalService } from "./daily-journal-service.js";
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { UserFactStore } from "./user-fact-store.js";
@@ -10,6 +11,13 @@ import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { writeJsonAtomic } from "../storage/atomic-json.js";
+import {
+  resolveNightlyMode,
+  runUnifiedNightlyConsolidation,
+  type NightlyFact,
+  type NightlyMode,
+} from "./nightly-unified-consolidator.js";
+import { semanticFingerprint } from "./memory-record-utils.js";
 
 export type NightlySleepAgentReport = {
   runAt: string;
@@ -355,7 +363,17 @@ export class NightlyMemoryTaskService {
     if (this.lastProcessedDay === today) return;
     this.lastProcessedDay = today;
 
-    console.log(`[NightlyMemory] Running night tasks for ${today}`);
+    console.log(`[NightlyMemory] Running night tasks for ${today} (mode=${resolveNightlyMode()})`);
+
+    // P1 单遍巩固器（2026-09-12）：shadow/unified 模式下，在旧管路消费任何
+    // journal 游标之前，用一次 LLM 调用同时产出「持久事实 + 当日新行留存分」。
+    //   shadow：只计算并落盘对比报告，旧管路照常执行（零行为变化）；
+    //   unified：事实与评分直接采用本通道产物（extractDurableFacts / 评分 LLM 跳过）。
+    const mode = resolveNightlyMode();
+    const precomputedFacts = new Map<string, NightlyFact[]>();
+    if (mode !== "legacy") {
+      await this.runUnifiedPrePass(mode, precomputedFacts);
+    }
 
     try {
       // 记忆架构收敛：原「DailyDigest 归档」步骤已移除——它与下方 consolidateDailyJournals
@@ -363,7 +381,13 @@ export class NightlyMemoryTaskService {
       // 夜间固化走 consolidateDailyJournals 单一入口。
       // 巩固管线（episodic → semantic）：journal 固化前先做事实提炼，
       // 此时未固化日志仍在，提炼出的稳定事实写入结构化槽位（latest-wins 归并）。
-      await this.extractFactsFromJournals();
+      // unified 模式下 precomputedFacts 由单遍巩固器提供，跳过本通道的 LLM 调用。
+      const legacyFactCounts = await this.extractFactsFromJournals(
+        mode === "unified" ? precomputedFacts : undefined,
+      );
+      if (mode === "shadow") {
+        this.completeShadowReport(legacyFactCounts);
+      }
       // 记忆架构重构：当日对话日志固化（journal → 长期记忆图），
       // 必须在 dreaming 之前完成，让后续合并/衰减阶段能看到新固化内容。
       await this.consolidateDailyJournals();
@@ -374,6 +398,118 @@ export class NightlyMemoryTaskService {
     } catch (err) {
       console.error("[NightlyMemory] Night tasks error:", err);
     }
+  }
+
+  /**
+   * P1 单遍巩固预通道：对每个 actor 一次 LLM 调用，同时产出
+   * 「持久事实（替代 extractDurableFacts）+ 当日新行留存分（种子进评分缓存，
+   * consolidateNow 增量评分命中缓存即 0 次调用）」。
+   * shadow 模式只计算与记录，不写任何记忆存储。
+   */
+  private async runUnifiedPrePass(
+    mode: Exclude<NightlyMode, "legacy">,
+    precomputedFacts: Map<string, NightlyFact[]>,
+  ): Promise<void> {
+    const journal = getDailyJournalService();
+    if (!journal || !this.memoryManager) return;
+
+    for (const actorId of this.getAllActorIds()) {
+      try {
+        const transcript = await this.buildNightlyTranscript(journal, actorId);
+        if (!transcript) continue;
+
+        // 评分行必须与 consolidateNow 的评分输入同源同格式（consumeTodayJournalLines
+        // 的行格式），指纹才能在缓存中精确命中；此处只读不消费游标。
+        const todayLines = await journal.readTodayLines(actorId).catch(() => []);
+        const formatRole = (role: string): string =>
+          role === "user" ? "用户" : role === "assistant" ? "Agent" : role;
+        const scoreLines = todayLines.map((h) => ({
+          fp: semanticFingerprint(`[${h.time}] ${formatRole(h.role)}: ${h.text}`),
+          text: `[${h.time}] ${formatRole(h.role)}: ${h.text}`,
+        }));
+
+        const outcome = await runUnifiedNightlyConsolidation({ actorId, transcript, scoreLines });
+        if (!outcome) continue;
+
+        if (mode === "shadow") {
+          this.recordShadowReport({
+            day: this.getTodayKey(),
+            actorId,
+            unifiedFacts: outcome.facts.length,
+            unifiedScoredLines: outcome.scores.length,
+          });
+          continue;
+        }
+
+        // unified 模式：产物直接采用
+        precomputedFacts.set(actorId, outcome.facts);
+        if (outcome.scores.length > 0) {
+          this.memoryManager.seedScoreCache(actorId, outcome.scores);
+        }
+      } catch (err) {
+        console.error(`[NightlyMemory] unified pre-pass failed for ${actorId}:`, err);
+      }
+    }
+  }
+
+  /** 从未固化 journal 行拼装精简流水（extractFactsFromJournals / unified 预通道共用） */
+  private async buildNightlyTranscript(
+    journal: NonNullable<ReturnType<typeof getDailyJournalService>>,
+    actorId: string,
+  ): Promise<string | null> {
+    const unconsolidated = await journal.getUnconsolidatedLines(actorId);
+    if (unconsolidated.length === 0) return null;
+
+    const transcriptLines: string[] = [];
+    for (const { dateKey, lines } of unconsolidated) {
+      for (const line of lines) {
+        const m = line.match(/^- \[(\d{2}:\d{2})\]\s*(.*)$/);
+        if (!m) continue;
+        const roleMatch = m[2]!.match(/^(?:(\S+)\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
+        if (!roleMatch) continue;
+        const role = roleMatch[2]!;
+        const content = roleMatch[3]!.slice(0, 300);
+        if (isNoiseLogLine(role, content)) continue;
+        transcriptLines.push(`[${dateKey} ${m[1]} ${role}] ${content}`);
+      }
+    }
+    if (transcriptLines.length < 4) return null;
+    return transcriptLines.slice(-120).join("\n");
+  }
+
+  // ---- P1 shadow 对比报告（data/nightly-unified-shadow.json，保留最近 60 条） ----
+
+  private shadowRows: Array<{
+    day: string;
+    actorId: string;
+    unifiedFacts: number;
+    unifiedScoredLines: number;
+    legacyFacts?: number;
+  }> = [];
+
+  private recordShadowReport(row: {
+    day: string;
+    actorId: string;
+    unifiedFacts: number;
+    unifiedScoredLines: number;
+  }): void {
+    this.shadowRows.push(row);
+  }
+
+  private completeShadowReport(legacyFactCounts: Map<string, number>): void {
+    if (this.shadowRows.length === 0) return;
+    for (const row of this.shadowRows) {
+      row.legacyFacts = legacyFactCounts.get(row.actorId) ?? 0;
+    }
+    const path = join(process.cwd(), "data", "nightly-unified-shadow.json");
+    void writeJsonAtomic(path, { version: 1, rows: this.shadowRows.slice(-60) }).catch(() => {});
+    for (const row of this.shadowRows) {
+      console.log(
+        `[NightlyMemory][shadow] actor=${row.actorId} unifiedFacts=${row.unifiedFacts} ` +
+          `legacyFacts=${row.legacyFacts} unifiedScoredLines=${row.unifiedScoredLines}`,
+      );
+    }
+    this.shadowRows = [];
   }
 
   /**
@@ -411,12 +547,28 @@ export class NightlyMemoryTaskService {
             if (isNoiseLogLine(role, content)) continue;
             const roleLabel = role === "U" ? "用户" : role === "A" ? "助手" : role;
             const highSignal = role === "prefer" || role === "fact" || role === "commit";
+            // 2026-09-12 token 治理（P0-A）：固化行直存（infer:false），不再逐行二次抽取。
+            // 同批对话内容白天已由统一写入者 extractUnified 抽取过并写入同一存储；夜间
+            // 逐行 ingest 每行再触发一次 extractUnified 属纯重复（产生的重复记忆还要靠
+            // 次日 24h 生命周期审查再花 LLM 清理）。固化的价值是 episodic 时间线——
+            // 原文直存即可；语义提升由 extractFactsFromJournals 的整批事实提炼承担。
+            const fixationText = `[日志固化 ${dateKey} ${time}·${roleLabel}] ${content}`;
+            const fixationExtraction: UnifiedExtraction = {
+              decision: highSignal ? "remember" : "decay",
+              memories: [fixationText],
+              commitments: [],
+              corrections: [],
+              understandings: [],
+              facts: [],
+              importance: highSignal ? 0.7 : 0.3,
+            };
             await this.narrativeMemory!
-              .ingest(
+              .writeDecided(
                 actorId,
-                `[日志固化 ${dateKey} ${time}·${roleLabel}] ${content}`,
+                fixationText,
                 "journal:consolidate",
-                { highSignal },
+                { context: "main", highSignal },
+                fixationExtraction,
               )
               .catch(() => {});
             ingested += 1;
@@ -463,78 +615,84 @@ export class NightlyMemoryTaskService {
    *
    * 设计要点：
    * - 单 actor 单次 LLM 批处理调用（替代逐条实时写入决策，便宜且质量更高）；
+   * - unified 模式下传入 precomputedFacts（单遍巩固器产物），跳过本通道 LLM；
    * - LLM 不可用 / 提炼失败 → 静默跳过该 actor，不影响后续固化与 dreaming；
    * - 行文本按 kind 加类型前缀，命中槽位分类正则后自动归入对应槽位。
+   *
+   * @returns 每个 actor 实际落库的事实条数（shadow 对比报告用）
    */
-  private async extractFactsFromJournals(): Promise<void> {
+  private async extractFactsFromJournals(
+    precomputed?: Map<string, NightlyFact[]>,
+  ): Promise<Map<string, number>> {
+    const appliedCounts = new Map<string, number>();
     const journal = getDailyJournalService();
-    if (!journal || !this.memorySync) return;
+    if (!journal || !this.memorySync) return appliedCounts;
     const llm = resolvePrimaryLlmClientConfig();
-    if (!llm) return;
+    if (!llm && !precomputed) return appliedCounts;
 
     const factStore = this.getFactStore();
     const actorIds = this.getAllActorIds();
     for (const actorId of actorIds) {
       try {
-        const unconsolidated = await journal.getUnconsolidatedLines(actorId);
-        if (unconsolidated.length === 0) continue;
-
-        // 拼装精简日志（保留日期/时间/角色/内容，过滤噪音行，限最近 120 行）
-        const transcriptLines: string[] = [];
-        for (const { dateKey, lines } of unconsolidated) {
-          for (const line of lines) {
-            const m = line.match(/^- \[(\d{2}:\d{2})\]\s*(.*)$/);
-            if (!m) continue;
-            const roleMatch = m[2]!.match(/^(?:(\S+)\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
-            if (!roleMatch) continue;
-            const role = roleMatch[2]!;
-            const content = roleMatch[3]!.slice(0, 300);
-            if (isNoiseLogLine(role, content)) continue;
-            transcriptLines.push(`[${dateKey} ${m[1]} ${role}] ${content}`);
-          }
+        let facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }> | undefined;
+        if (precomputed?.has(actorId)) {
+          // unified 模式：单遍巩固器已产出事实，跳过本通道 LLM 调用
+          facts = precomputed.get(actorId);
+        } else {
+          if (!llm) continue;
+          const transcript = await this.buildNightlyTranscript(journal, actorId);
+          if (!transcript) continue;
+          facts = await this.extractDurableFacts(llm, transcript);
         }
-        if (transcriptLines.length < 4) continue;
-        const transcript = transcriptLines.slice(-120).join("\n");
+        if (!facts || facts.length === 0) continue;
 
-        const facts = await this.extractDurableFacts(llm, transcript);
-        if (facts.length === 0) continue;
-
-        let canonical = 0;
-        let kvWritten = 0;
-        for (const fact of facts) {
-          const text = fact.text.trim().slice(0, 200);
-          if (!text) continue;
-          if (fact.kind === "preference" || fact.kind === "fact") {
-            // 稳定偏好/事实 → 事实主库（subject 归一 + provenance，冲突即替换）
-            await this.getFactStore().upsertFact(actorId, {
-              kind: fact.kind,
-              value: text,
-              source: "nightly-extract",
-              confidence: 0.7,
-            });
-            canonical += 1;
-          } else {
-            // 承诺/待办（时效性内容）→ KV 槽位快速路径
-            this.memorySync.appendMemorySummaryLine(actorId, `承诺：${text}`, "consolidate");
-            kvWritten += 1;
-          }
-        }
-        // 派生视图同步：事实主库 → KV 结构化槽位（事实为主、槽位为视图，
-        // 与事实冲突的旧行被替换，当天 per-turn 捕获的未提升行保留）
-        if (canonical > 0) {
-          const sync = await this.getFactStore().syncDerivedSlots(actorId, this.memorySync);
-          console.log(
-            `[NightlyMemory] 事实提炼: actor=${actorId} 主库 ${canonical} 条` +
-              `（偏好 ${sync.preferences} / 事实 ${sync.facts}），承诺 ${kvWritten} 条走 KV，` +
-              `槽位保留近期行 ${sync.keptRecent}`,
-          );
-        } else if (kvWritten > 0) {
-          console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${kvWritten} 条走 KV 槽位`);
-        }
+        const { canonical, kvWritten } = await this.applyNightlyFacts(actorId, facts);
+        appliedCounts.set(actorId, canonical + kvWritten);
       } catch (err) {
         console.error(`[NightlyMemory] fact extraction failed for ${actorId}:`, err);
       }
     }
+    return appliedCounts;
+  }
+
+  /** 事实落库：偏好/事实 → 事实主库，承诺/待办 → KV 槽位，最后同步派生视图。 */
+  private async applyNightlyFacts(
+    actorId: string,
+    facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }>,
+  ): Promise<{ canonical: number; kvWritten: number }> {
+    let canonical = 0;
+    let kvWritten = 0;
+    for (const fact of facts) {
+      const text = fact.text.trim().slice(0, 200);
+      if (!text) continue;
+      if (fact.kind === "preference" || fact.kind === "fact") {
+        // 稳定偏好/事实 → 事实主库（subject 归一 + provenance，冲突即替换）
+        await this.getFactStore().upsertFact(actorId, {
+          kind: fact.kind,
+          value: text,
+          source: "nightly-extract",
+          confidence: 0.7,
+        });
+        canonical += 1;
+      } else {
+        // 承诺/待办（时效性内容）→ KV 槽位快速路径
+        this.memorySync!.appendMemorySummaryLine(actorId, `承诺：${text}`, "consolidate");
+        kvWritten += 1;
+      }
+    }
+    // 派生视图同步：事实主库 → KV 结构化槽位（事实为主、槽位为视图，
+    // 与事实冲突的旧行被替换，当天 per-turn 捕获的未提升行保留）
+    if (canonical > 0) {
+      const sync = await this.getFactStore().syncDerivedSlots(actorId, this.memorySync!);
+      console.log(
+        `[NightlyMemory] 事实提炼: actor=${actorId} 主库 ${canonical} 条` +
+          `（偏好 ${sync.preferences} / 事实 ${sync.facts}），承诺 ${kvWritten} 条走 KV，` +
+          `槽位保留近期行 ${sync.keptRecent}`,
+      );
+    } else if (kvWritten > 0) {
+      console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${kvWritten} 条走 KV 槽位`);
+    }
+    return { canonical, kvWritten };
   }
 
   /** 单次 LLM 调用：从日志中抽取持久事实（失败返回空数组，不抛错） */
@@ -542,7 +700,7 @@ export class NightlyMemoryTaskService {
     llm: { apiKey: string; baseURL?: string; model?: string },
     transcript: string,
   ): Promise<Array<{ kind: "preference" | "fact" | "commitment"; text: string }>> {
-    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
     const model =
       process.env.AGENT_MEMORY_DECISION_MODEL?.trim() || llm.model || "gpt-4.1-mini";
     try {

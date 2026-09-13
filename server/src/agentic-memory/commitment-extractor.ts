@@ -93,7 +93,7 @@ export async function extractCommitments(
   if (!apiKey && !opts?.client) return [];
 
   try {
-    const openai = opts?.client ?? new OpenAI({ apiKey });
+    const openai = opts?.client ?? new OpenAI({ apiKey, maxRetries: 1 });
     const now = opts?.now ?? new Date();
     const response = await openai.chat.completions.create({
       model: opts?.model ?? getAgenticMemoryLlmModel(),

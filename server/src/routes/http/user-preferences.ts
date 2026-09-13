@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
+import { isWithinBriefingWindow } from "../../services/morning-briefing-service.js";
+
 type BriefingMode = "voice" | "window" | "card";
 type BriefingSections = {
   weather: boolean;
@@ -207,7 +209,11 @@ export function registerUserPreferencesRoutes(app: FastifyInstance): void {
     if (body.preferences?.morningBriefing) {
       const mb = body.preferences.morningBriefing;
       if (typeof mb.enabled === "boolean") prefs.morningBriefing.enabled = mb.enabled;
-      if (typeof mb.time === "string" && /^\d{2}:\d{2}$/.test(mb.time)) {
+      if (
+        typeof mb.time === "string" &&
+        /^\d{2}:\d{2}$/.test(mb.time) &&
+        isWithinBriefingWindow(mb.time)
+      ) {
         prefs.morningBriefing.time = mb.time;
       }
       if (typeof mb.mode === "string" && ["voice", "window", "card"].includes(mb.mode)) {

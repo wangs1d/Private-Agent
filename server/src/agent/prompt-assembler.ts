@@ -253,6 +253,8 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
   if (m.scheduleSnapshot) dynamicContext.push(m.scheduleSnapshot);
   if (m.travelState) dynamicContext.push(m.travelState);
+  // 前置检索证据：realtime_lookup 轮的程序化搜索结果，块内自带以证据为准的强约束
+  if (m.webEvidence) dynamicContext.push(m.webEvidence);
   // 任务家族（3→1）：任务上下文 / 追问锚点 / 建议工具链
   const taskBlock = buildFamilyBlock("[Turn Task Context]", undefined, [
     { label: "任务", content: m.taskContext },

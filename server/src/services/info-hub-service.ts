@@ -3,11 +3,7 @@ import { dirname, join } from "path";
 import { randomUUID } from "crypto";
 
 import {
-  discoverHtmlSourcesFromResults,
   fetchDomesticNews,
-  fetchDomesticOfficialNews,
-  fetchDomesticTechNews,
-  searchBingChinaRelaxed,
   searchWebMultiEngine,
   type DomesticFetchOptions,
 } from "./domestic-web-providers.js";
@@ -199,63 +195,20 @@ export class InfoHubService {
       return cached;
     }
 
-    // 3. 实际搜索
+    // 3. 实际搜索：搜索 API（AnySearch）直出——搜到多少用多少，不设任何
+    //    「数量不足补足」阶段。API 不可用/失败时由 searchWebMultiEngine 内部
+    //    走百度/搜狗应急兜底（逐条过相关性闸门，全不相关返回空）。
+    //
+    // 2026-09-12 精简：搜索链路里的「官方/科技 RSS 整源拉取」「必应 relaxed
+    // 扩搜」「动态源发现」全部移除。实测：RSS 整源拉取返回的是与 query 无关的
+    // 当前通用热点（每轮被相关性闸门 100% 丢弃）却能动拖 17s+；必应对多词
+    // 中文 query 只按首字匹配、返回「刘姓起源」类垃圾；动态发现爬新闻首页
+    // 无上界再拖 10s+。三者纯延迟零收益。整源新闻仍由 fetchNews/trackTopic
+    // （新闻页/话题跟踪功能）提供，与 search() 无关。
     const domesticOpts: DomesticFetchOptions = { userAgent: this.userAgent, rssHealth: this.rssHealth };
-    const isTechKeyword = /科技|技术|ai|芯片|互联网|数码|it\b/i.test(keyword);
     const isNewsKeyword = intent.intent === "latest" || intent.requiresFreshWeb;
-
-    // 搜索时间预算：整段搜索（含多引擎 + 官方 RSS + 扩搜 + 动态源发现）总耗时软上限，
-    // 超过预算不再追加扩搜/动态发现阶段，避免搜索累积到几十秒造成前端长时间无结果。
-    // 首轮并行已含各引擎自身超时，这里主要兜住后续串行阶段。
-    const SEARCH_BUDGET_MS = Number.parseInt(process.env.SEARCH_TIME_BUDGET_MS ?? "6500", 10) || 6500;
-    const searchDeadline = Date.now() + SEARCH_BUDGET_MS;
-    const overBudget = (): boolean => Date.now() > searchDeadline;
-
-    // 主查询：完整原始 query 原样透传给「API 优先 + 多引擎」链。
-    // 不再把 query 截断/提取实体去搜——实体辅助查询曾把「A·B」这类完整描述拆成
-    // 碎片短词，搜回大量错误结果（2026-09 按用户反馈移除）。query 组织责任在 LLM。
-    const [bingResults, tech, official] = await Promise.all([
-      searchWebMultiEngine(keyword, effectiveLimit, domesticOpts),
-      isTechKeyword ? fetchDomesticTechNews(keyword, Math.min(8, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
-      isNewsKeyword ? fetchDomesticOfficialNews(keyword, Math.min(12, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
-    ]);
-
-    // 相关性闸门（2026-09-08 用户反馈：搜「我老婆最近有什么消息」返回一堆中新网滚动热点）：
-    // 官方/科技 RSS 与动态发现的新闻源是「整源拉取」——fetchDomesticOfficialNews 拿着
-    // topic 参数但从不做关键词过滤，返回的就是当前最新通用新闻。这类条目必须在并入前
-    // 按 query 关键词过滤，零命中就整组丢弃——实体化/个人化 query 搜不到时宁可返回空，
-    // 让 LLM 如实说「没搜到」，也不能拿通用热点冒充搜索结果。
-    const relevantOfficial = filterItemsByQueryKeywords(official, keyword);
-    const relevantTech = filterItemsByQueryKeywords(tech, keyword);
-    let merged = dedupeByUrl([...relevantOfficial, ...bingResults, ...relevantTech]); // 官方媒体 RSS 排前面（实时性更高）
+    const merged = await searchWebMultiEngine(keyword, effectiveLimit, domesticOpts);
     console.error(`[DEBUG-search] 首轮耗时=${Date.now() - __t0}ms items=${merged.length} keyword=${keyword.slice(0,20)}`);
-
-    // 5. 第二轮扩搜：结果偏少时用完整 query 再宽松搜一轮（skipRelevanceFilter 时代保留的
-    //    兜底路径），不再用实体/短片段当 fallback query——那正是搜错内容的来源。
-    const sparseThreshold = Math.min(effectiveLimit, Math.max(4, Math.ceil(effectiveLimit * 0.6)));
-    if (merged.length < sparseThreshold && !overBudget()) {
-      const relaxedBatches = await Promise.all(
-        [keyword].map((value) => searchBingChinaRelaxed(value, effectiveLimit, domesticOpts)),
-      );
-      const relaxedMerged = dedupeByUrl(relaxedBatches.flat());
-      if (relaxedMerged.length > 0) {
-        merged = dedupeByUrl([...merged, ...relaxedMerged]);
-      }
-    }
-
-    // 动态源发现：当预定义源 + 必应结果不足时，从已有搜索结果中识别新闻网站，
-    // 自动爬取其首页拿到实时新闻（必应索引有延迟，首页是实时更新的）
-    console.error(`[DEBUG-search] 扩搜后耗时=${Date.now() - __t0}ms itemCount=${merged.length}`);
-    const allBingResults = dedupeByUrl(bingResults);
-    if (merged.length < effectiveLimit && allBingResults.length > 0 && !overBudget()) {
-      const discovered = await discoverHtmlSourcesFromResults(allBingResults, keyword, domesticOpts);
-      // 同样过相关性闸门：首页爬取条目与 query 无关时不并入
-      const relevantDiscovered = filterItemsByQueryKeywords(discovered, keyword);
-      if (relevantDiscovered.length > 0) {
-        merged = dedupeByUrl([...merged, ...relevantDiscovered]);
-      }
-    }
-    console.error(`[DEBUG-search] 动态发现后耗时=${Date.now() - __t0}ms itemCount=${merged.length}`);
 
     // 质量评分排序：相关性(50%) + 权威度(30%) + 时效性(20%)
     const scored = sortByQuality(merged, keyword);
@@ -587,51 +540,10 @@ function summarizePlainText(text: string): string {
   return chunks.slice(0, 3).join("。");
 }
 
-/**
- * 从 query 提取匹配用关键词片段：
- *  - 标点/空白切词（≥2 字符）
- *  - 中文连续段按 2 字滑窗切碎片（「刘浩存最近」→ 刘浩/浩存/存最/最近…，
- *    滑窗保证「刘浩存」这类实体无论处在 query 什么位置都能命中标题）
- *  - 英文单词（≥2 字符）
- */
-function extractQueryMatchFragments(query: string): string[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return [];
-  const words = q
-    .split(/[\s,，、。；;:：/|?？!！（）()【\[\]]+/)
-    .map((w) => w.trim())
-    .filter((w) => w.length >= 2);
-  const fragments: string[] = [];
-  for (const run of q.matchAll(/[\u4e00-\u9fff]{2,}/gu)) {
-    const text = run[0];
-    for (let i = 0; i + 2 <= text.length; i++) {
-      fragments.push(text.slice(i, i + 2));
-    }
-  }
-  const enWords = [...q.matchAll(/\b[a-z]{2,}\b/gi)].map((m) => m[0].toLowerCase());
-  return [...new Set([...words, ...fragments, ...enWords])];
-}
-
-/**
- * 整源拉取条目（官方/科技 RSS、动态发现的新闻首页）的相关性闸门：
- * 条目的标题/摘要/URL 至少命中一个 query 关键词片段才允许并入搜索结果。
- * query 无可用片段（纯符号/空白）时不过滤，保持原行为。
- */
-function filterItemsByQueryKeywords(items: InfoSearchItem[], query: string): InfoSearchItem[] {
-  if (items.length === 0) return items;
-  const fragments = extractQueryMatchFragments(query);
-  if (fragments.length === 0) return items;
-  const kept = items.filter((item) => {
-    const hay = `${item.title}\n${item.snippet}\n${item.url}`.toLowerCase();
-    return fragments.some((k) => hay.includes(k));
-  });
-  if (kept.length < items.length) {
-    console.error(
-      `[INFO-search] 相关性闸门：${items.length} 条整源拉取条目中 ${items.length - kept.length} 条与 query 无关键词命中，已丢弃 keyword=${query.slice(0, 24)}`,
-    );
-  }
-  return kept;
-}
+/* extractQueryMatchFragments / filterItemsByQueryKeywords 已删除（2026-09-12）：
+ * 它们服务的「RSS 整源拉取 / 扩搜 / 动态发现」阶段已整体移出搜索链路
+ * （与 query 无关的通用热点被实测 100% 丢弃），相关性过滤现在由
+ * domestic-web-providers 的 filterByQueryFragments 在兜底引擎结果上执行。 */
 
 function decodeHtmlEntities(text: string): string {
   return text

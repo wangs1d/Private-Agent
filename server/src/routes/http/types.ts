@@ -76,6 +76,8 @@ export type HttpRouteDeps = {
   emailRegistrationService: EmailRegistrationService;
   /** 财务入站邮件记账（未装配时 /finance/ingest/* 端点返回 503） */
   financeIngestService?: FinanceIngestService;
+  /** 支付订单服务（未装配时管理概览不含支付统计） */
+  paymentService?: import("../../services/payment-service.js").PaymentService;
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;
   weatherService: WeatherService;
@@ -113,6 +115,11 @@ export type HttpRouteDeps = {
   proactivePipeline?: import("../../proactivity/proactive-pipeline.js").ProactivePipeline | null;
   /** 移动端推送通道（离线必达升级）；可选，未注入时推送注册路由禁用 */
   proactivePushService?: import("../../proactivity/mobile-push-service.js").MobilePushService | null;
+  /**
+   * 五层主动性架构观测（传感健康/仲裁预览/目标板/链路自检）；可选，
+   * 未注入时 /sensors 与 /selftest 端点不可用。
+   */
+  proactivityFabric?: import("../../routes/http/proactivity.js").ProactivityFabricDeps | null;
   /** 助手动态台账（右侧面板「助手动态」卡数据源） */
   agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
   marketSignalService?: MarketSignalService;
@@ -131,6 +138,8 @@ export type HttpRouteDeps = {
   accessAuthService?: import("../../services/access-auth-service.js").AccessAuthService;
   /** 待确认收件箱外观（proactivity + habit 待确认条目统一 list/resolve；未注入时收件箱路由不挂载） */
   approvalInboxService?: import("../../services/approval-inbox-service.js").ApprovalInboxService;
+  /** 站内信服务（平台→用户收件箱；未注入时 /api/inbox 路由不挂载） */
+  inboxService?: import("../../services/inbox-service.js").InboxService;
   /** 注意力台账（分级触达的投递/ack 记录；未注入时 /api/attention 不挂载） */
   attentionStore?: import("../../proactivity/attention-store.js").AttentionStore;
   /** 分级触达路由（矩阵路由 + 升级计时；未注入时 /api/attention 不挂载） */

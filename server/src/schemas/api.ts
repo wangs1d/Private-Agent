@@ -373,6 +373,37 @@ export const agentActivityRecordBodySchema = z.object({
   dedupKey: z.string().min(1).max(200).optional(),
 });
 
+// ── 站内信（平台→用户收件箱）─────────────────────────
+
+export const inboxSendBodySchema = z.object({
+  /** 单个目标用户；与 userIds 二选一 */
+  userId: z.string().min(1).optional(),
+  /** 批量目标（群发）；与 userId 二选一 */
+  userIds: z.array(z.string().min(1)).max(100).optional(),
+  /** 发送方（平台身份/另一 actor）；系统消息可缺省 */
+  fromActorId: z.string().min(1).max(200).optional(),
+  /** 消息分类：system / announcement / friend / ... */
+  kind: z.string().min(1).max(80).optional(),
+  title: z.string().min(1).max(120),
+  body: z.string().min(1).max(4000),
+  importance: z.enum(["low", "normal", "high", "critical"]).optional(),
+  /** 幂等键：同一 messageId 重复投递不会产生第二条 */
+  messageId: z.string().min(1).max(120).optional(),
+});
+
+export const inboxListQuerySchema = z.object({
+  userId: z.string().min(1),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+  /** "1"/"true" 时只返回未读 */
+  unreadOnly: z.string().optional(),
+});
+
+export const inboxReadBodySchema = z.object({
+  userId: z.string().min(1),
+  /** 缺省时标记该用户全部未读为已读 */
+  ids: z.array(z.string().min(1)).max(500).optional(),
+});
+
 export const chatScheduleDraftBodySchema = z.object({
   sessionId: z.string().min(1),
   text: z.string().min(1).max(4000),
@@ -498,7 +529,7 @@ export const wechatClawBridgeChatBodySchema = z.object({
 });
 
 export const messageBridgeInboundBodySchema = z.object({
-  platform: z.enum(["wechat", "qq", "feishu", "generic"]),
+  platform: z.enum(["wechat", "qq", "feishu", "sms", "generic"]),
   text: z.string().max(16_000),
   userId: z.string().min(1).optional(),
   sessionId: z.string().min(1).optional(),

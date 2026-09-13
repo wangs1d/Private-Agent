@@ -292,3 +292,34 @@ test("compressOversizedAssistantMessages: 最近 N 轮全量保留，幂等不�
   compress(msgs as never[], 800);
   assert.equal(JSON.stringify(msgs), snapshot, "已压缩内容不应二次压缩");
 });
+
+// ── 2026-09-13 回归：无时间戳的历史消息恢复时不得兜底打「当前时间」帧 ──
+// 背景：客户端桥灌入/极旧的存量消息没有 [ts:] 帧，旧逻辑用 `?? now` 兜底，
+// 把整段历史盖成「just now」，模型把昨天的错误回答当成刚发生的对话事实复读。
+test("restore: 无时间戳的历史消息保持无帧，不得伪装成 just now", () => {
+  const legacy = [
+    { role: "user", content: "我老婆最近在那" },
+    { role: "assistant", content: "刘浩存今天在成都——她今天在成都有品牌活动。" },
+  ];
+  const persistence = {
+    loadRestoredMessages: (sessionId: string) => legacy.map((m) => ({ ...m })),
+    scheduleSave: () => {},
+  };
+  const store = new ChatThreadStore(persistence as never);
+  const thread = store.thread("restore-ts-frame-test", "system");
+  const body = thread.filter((m) => m.role === "user" || m.role === "assistant");
+  assert.ok(body.length >= 2, "恢复的消息应保留");
+  for (const m of body) {
+    const text = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+    assert.doesNotMatch(
+      text,
+      /\[ts:[^\]]*just now\]/,
+      "无时间戳的历史消息不能被打上 just now 帧",
+    );
+    assert.doesNotMatch(
+      String(text).split("\n")[0] ?? "",
+      /^\[ts:/,
+      "无时间戳的历史消息恢复时不应被补当前时间帧",
+    );
+  }
+});

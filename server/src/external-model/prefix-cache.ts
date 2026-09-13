@@ -50,7 +50,11 @@ function envEnabled(name: string, defaultValue: boolean): boolean {
 }
 
 function includeToolsInPromptCacheKey(): boolean {
-  return envEnabled("OPENAI_PROMPT_CACHE_KEY_INCLUDE_TOOLS", false);
+  // 默认 true：contextual/delegate 档的工具集合跨轮会变，key 不含工具签名时，
+  // 不同工具集的请求被路由到同一 OpenAI cache 分片却无法前缀复用，命中率反而
+  // 被稀释。含签名后同工具集请求精确聚簇（DeepSeek/Kimi 隐式前缀缓存不走此 key，
+  // 不受影响）。
+  return envEnabled("OPENAI_PROMPT_CACHE_KEY_INCLUDE_TOOLS", true);
 }
 
 function stableToolSignature(tools?: ChatCompletionTool[]): string {

@@ -113,6 +113,12 @@ export type AgentPromptMemoryContext = {
    */
   travelState?: string;
   /**
+   * 扣子式前置检索证据（2026-09-13）：realtime_lookup 轮由程序先执行
+   * search_web，把真实返回注入此块；模型必须基于证据作答，不再自行决定
+   * 是否搜索。由 agent-core 前置检索写入（构建晚于 PromptContextBuilder）。
+   */
+  webEvidence?: string;
+  /**
    * 当前精确时间（年/月/日/时/分/秒 + 星期 + 时区），每轮注入。
    * 与对话历史中每条消息的 `[ts:...]` 前缀对应，供 LLM 做时间维度计算与对齐。
    */

@@ -23,6 +23,8 @@ process.env.AGENT_TOKENJUICE_ENABLED = "0";
 process.env.AGENT_TOOL_SEARCH_BACKEND = "adaptive";
 process.env.AGENT_TOOL_SEARCH_EMBEDDING = "off";
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
+// desktop.* 需在基础工具集内（getDesktopVisualChatTools 的 env 门控），否则目录缺 desktop.open
+process.env.DESKTOP_VISUAL_ENABLED = "1";
 // 神经通道钉死关闭：URL 指向不可达端口 + 特性开关 off（双保险，保证确定性）
 process.env.AGENT_TOOL_EMBEDDING_PROVIDER = "openai";
 process.env.AGENT_NEURAL_SIDECAR_URL = "http://127.0.0.1:1";
@@ -61,6 +63,10 @@ const GOLDEN: GoldenCase[] = [
   { query: "我钱包还有多少钱", expect: ["wallet.get_balance"] },
   { query: "找个教做红烧肉的视频", expect: ["search_videos"] },
   { query: "把客厅的灯打开", expect: ["smart_home.control_device"] },
+  // 2026-09-12：desktop.open 意图别名回归锁——「打开XX应用」此前 top5 无 desktop.open，
+  // 任务面规划器漏选时 tool_discover 兜底召回必失败（模型只能口头推脱或编造工具名）。
+  { query: "打开抖音", expect: ["desktop.open"] },
+  { query: "打开网易云 播放影月", expect: ["desktop.open"] },
   // ── 需外部信息（search 族，允许同义）──
   { query: "比特币现在什么价", expect: ["search_web", "internet.research", "deep_search", "internet.live_check"], topK: 3 },
   { query: "帮我搜一下刘浩存最近的消息", expect: ["search_web", "internet.research", "deep_search"], topK: 3 },

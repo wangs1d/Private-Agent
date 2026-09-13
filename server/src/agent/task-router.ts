@@ -45,6 +45,12 @@ export type RouteDecision = {
     emotionTags: string[];
     topics: string[];
   };
+  /**
+   * realtime_lookup 时由路由器生成的完整搜索查询词（结合最近对话解决指代，
+   * 如「我老婆最近在那呢」→「刘浩存 最近 行程」）。供前置检索（扣子式
+   * search-before-LLM）确定性执行；其他 intent / 路由降级时缺省。
+   */
+  searchQuery?: string;
 };
 
 /** 由车道派生词法级执行计划（降级路径用）。 */

@@ -102,10 +102,9 @@ const DESKTOP_RUN_SHELL_TOOL: ChatCompletionTool = {
     name: "desktop.run_shell",
     description:
       "【桌面·受控 Shell】在已绑定电脑（与 userId 一致）上执行一条 shell 命令（cmd / powershell / bash），返回 stdout / stderr / exitCode。" +
-      "**优先级**：打开软件/文件/网页 → 用 desktop.open；常用操作（列目录/读文件/ping/查进程等）→ 用 desktop.run_preset；仅当预设覆盖不到时才用本工具裸拼命令。" +
-      "⚠ **禁止用本工具搜索应用安装路径**（如 `Get-ChildItem -Recurse -Filter 'xxx*'`、`where.exe xxx.exe`）。" +
-      "打开软件请直接传裸名给 desktop.open（如 `desktop.open({target:'app', path:'豆包'}`），" +
-      "它会自动跨盘符扫描 Program Files / AppData / 非系统盘根目录、展开中英别名、兜底走开始菜单 .lnk 快捷方式。" +
+      "**优先级**：打开软件/文件/网页 → 用 desktop.open；常用只读操作（列目录/读文件/ping/查进程等）→ 用 desktop.run_preset；仅当预设覆盖不到时才用本工具裸拼命令。" +
+      "⚠ **禁止用本工具搜索应用安装路径**（如 `Get-ChildItem -Recurse -Filter 'xxx*'`、`where.exe xxx.exe`）——" +
+      "打开软件直接传裸名给 desktop.open，它会自动跨盘符扫描、展开中英别名、兜底开始菜单快捷方式。" +
       "Windows 下未指定 shell 时按命令内容自动判定：简单单行命令走 cmd，cmdlet/管道/变量走 powershell。" +
       "默认**白名单**模式：仅允许只读命令（dir / ls / cat / type / Get-ChildItem / Get-Process / systeminfo / ipconfig / Test-NetConnection 等）。" +
       "如需写入/删除/启停服务等操作，**必须**设置 allowDestructive=true（同时要求 server 端 DESKTOP_SHELL_ALLOWLIST=0、DESKTOP_BRIDGE_TOKEN ≥8 字符）。" +
@@ -223,11 +222,11 @@ const DESKTOP_UIA_QUERY_TOOL: ChatCompletionTool = {
   function: {
     name: "desktop.uia_query",
     description:
-      "【桌面·UIAutomation 查询】Windows UIAutomation 结构化查询，读取控件树/按 AutomationId 定位/检查坐标处元素。" +
-      "场景：读 ListView/Tree 内容、按控件名精准定位、检查 (x,y) 处元素信息（含 Invoke 等支持的 pattern）、" +
+      "【桌面·UIAutomation 查询】Windows UIAutomation 结构化查询：读控件树 / 按 AutomationId 定位 / 检查坐标处元素。" +
+      "场景：读 ListView/Tree 内容、按控件名精准定位、检查 (x,y) 处元素（含 Invoke 等支持的 pattern）、" +
       "对整个窗口做控件树快照（snapshot，元素带 path，可传给 desktop.run_automation 的 selector.path 复用）。" +
-      "非 Windows 或 pywinauto 未安装时返回 ok:false。返回元素含 name/automation_id/control_type/bbox/patterns。" +
-      "bbox 为屏幕物理像素，可直接作为 desktop.run_input 的坐标。",
+      "返回元素含 name/automation_id/control_type/bbox/patterns；bbox 为屏幕物理像素，可直接作为 desktop.run_input 的坐标。" +
+      "非 Windows 或 pywinauto 未安装时返回 ok:false。",
     parameters: {
       type: "object",
       properties: {
@@ -276,21 +275,21 @@ const DESKTOP_RUN_INPUT_TOOL: ChatCompletionTool = {
     description:
       "【桌面·原生输入·优先用】操作系统的键盘/鼠标模拟输入，**不走 VLM**，不消耗 VLM token，任何时候可用。" +
       "⚠ **打开软件后，打字 / 点击 / 快捷键 / 滚动必须优先用本工具**，不要用 desktop.visual.run_task（靠 VLM 看屏幕再点，又慢又贵还容易挂）。" +
-      "支持的操作（对齐主流 computer-use 动作空间）:\n" +
-      "- click {x,y,button?}: 鼠标移动到 (x,y) 点击（button=left/right/middle，默认 left）\n" +
-      "- double_click {x,y} / triple_click {x,y}: 双击 / 三击（三击常用于选中整段文字）\n" +
-      "- right_click {x,y} / middle_click {x,y}: 右键 / 中键\n" +
-      "- move {x,y}: 移动鼠标不点击\n" +
-      "- type {text}: 在光标位置输入文字；中文/emoji 自动走剪贴板粘贴，ASCII 逐字输入\n" +
-      "- key {key}: 按单键（enter/tab/esc/backspace/space/delete/up/down/left/right/f1-f12 等）\n" +
-      "- shortcut {keys}: 组合键（如 'ctrl+v' 粘贴，'alt+tab' 切换窗口）\n" +
-      "- hold_key {key,holdSeconds?}: 按住某键一段时间\n" +
+      "支持的操作:\n" +
+      "- click {x,y,button?}: 移到 (x,y) 点击（button 默认 left）\n" +
+      "- double_click/triple_click {x,y}: 双击/三击（三击常用于选中整段文字）\n" +
+      "- right_click/middle_click {x,y}: 右键/中键\n" +
+      "- move {x,y}: 仅移动不点击\n" +
+      "- type {text}: 光标处输入；中文/emoji 自动走剪贴板粘贴，ASCII 逐字\n" +
+      "- key {key}: 单键（enter/tab/esc/backspace/space/delete/方向键/f1-f12 等）\n" +
+      "- shortcut {keys}: 组合键，如 'ctrl+v'、'alt+tab'\n" +
+      "- hold_key {key,holdSeconds?}: 按住某键\n" +
       "- drag {x,y,toX,toY,button?}: 拖拽\n" +
-      "- scroll {scrollClicks?,scrollX?,x?,y?}: 滚轮（scrollClicks 正=上/负=下；scrollX 正=右/负=左；传 x,y 可先移到目标位置再滚）\n" +
-      "- wait {waitMs?}: 等待界面加载（默认 500ms，上限 10s）。点击触发加载后建议 wait 1-2s\n" +
-      "- cursor_position {}: 读取当前鼠标坐标\n" +
-      "⚠ 坐标默认为屏幕物理像素。使用前通常先调 desktop.uia_query 定位目标控件的 bbox 中心；" +
-      "若用的是降采样截图上的坐标，传 coordSpace:'image' + 截图返回的 imageWidth/imageHeight。",
+      "- scroll {scrollClicks?,scrollX?,x?,y?}: 滚轮；scrollClicks 正=上/负=下，scrollX 正=右/负=左，传 x,y 先移再滚\n" +
+      "- wait {waitMs?}: 等待加载（默认 500ms 上限 10s）；点击触发加载后建议 wait 1-2s\n" +
+      "- cursor_position {}: 读当前鼠标坐标\n" +
+      "⚠ 坐标默认屏幕物理像素：先调 desktop.uia_query 拿目标控件 bbox 中心；" +
+      "若用降采样截图上的坐标，传 coordSpace:'image' + 截图返回的 imageWidth/imageHeight。",
     parameters: {
       type: "object",
       properties: {
@@ -337,26 +336,19 @@ const DESKTOP_RUN_AUTOMATION_TOOL: ChatCompletionTool = {
   function: {
     name: "desktop.run_automation",
     description:
-      "【桌面·UIA 原生控件操作·最高优先级】Windows UIAutomation pattern 直调,不模拟鼠标键盘,不抢焦点,不要求窗口在前台。" +
+      "【桌面·UIA 原生控件操作·最高优先级】Windows UIAutomation pattern 直调，不模拟鼠标键盘，不抢焦点，不要求窗口在前台。" +
       "⚠ **支持 UIA 的应用(记事本/计算器/资源管理器/WPF/WinForms/Win32)优先用本工具**,不要用 desktop.run_input 模拟鼠标。" +
       "⚠ **Electron 自绘应用(微信新版/腾讯视频/QQ/抖音)内部控件 UIA 读不到,本工具返回 ok:false,需改用 desktop.run_input 坐标路径。**" +
-      "\n支持的 action:\n" +
-      "- click: 调 InvokePattern(等效点击按钮/菜单项,但不抢鼠标)\n" +
-      "- set_value: 调 ValuePattern.SetValue(直接设置文本框内容,不模拟键盘,无需窗口在前台)\n" +
-      "- get_value: 读 ValuePattern.CurrentValue\n" +
-      "- toggle: 调 TogglePattern.Toggle(复选框/单选)\n" +
-      "- focus: 调 SetFocus(设焦点)\n" +
-      "- select: 调 SelectionItemPattern.Select(选中列表项/树节点)\n" +
-      "- expand / collapse: 调 ExpandCollapsePattern(展开/折叠下拉框、树节点)\n" +
-      "- scroll_into_view: 调 ScrollItemPattern(把元素滚动到可见区域)\n" +
-      "\n定位方式(二选一):\n" +
-      "- selector: name/name_contains/control_type/class_name/automation_id 组合;" +
-      "- selector.path: desktop.uia_query(mode='snapshot') 输出的元素 path(如 '2.1.3'),跨调用稳定,推荐用。\n" +
-      "windowTitle 可把查找范围限定到指定窗口,避免跨应用误匹配。" +
-      "\n典型用法:\n" +
-      "- 记事本输入:selector={control_type:'Edit'} action=set_value value='内容'\n" +
-      "- 点按钮:selector={name:'确定',control_type:'Button'} action=click\n" +
-      "- 读文本框:selector={control_type:'Edit'} action=get_value",
+      "\naction 语义:\n" +
+      "- click: InvokePattern 等效点击(按钮/菜单项,不抢鼠标)\n" +
+      "- set_value: ValuePattern 直接设文本框内容(不模拟键盘,无需窗口在前台)\n" +
+      "- get_value/toggle/focus/select: 读值/切换复选框单选/设焦点/选中列表项树节点\n" +
+      "- expand/collapse: 展开/折叠下拉框树节点; scroll_into_view: 滚动到可见\n" +
+      "\n定位(二选一): selector(name/name_contains/control_type/class_name/automation_id 组合)" +
+      " 或 selector.path=uia_query snapshot 输出的元素 path(如 '2.1.3',跨调用稳定,推荐)。" +
+      "windowTitle 限定查找窗口,避免跨应用误匹配。" +
+      "\n例: 记事本输入 selector={control_type:'Edit'} action=set_value value='内容';" +
+      " 点按钮 selector={name:'确定',control_type:'Button'} action=click",
     parameters: {
       type: "object",
       properties: {

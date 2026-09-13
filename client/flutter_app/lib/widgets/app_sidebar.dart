@@ -20,7 +20,7 @@ class AppSidebar extends StatefulWidget {
     required this.onSetDarkTheme,
     required this.onSetSystemTheme,
     required this.onOpenMessages,
-    required this.onOpenUserMenuSettings,
+    required this.onOpenSettings,
     required this.onOpenUserMenuHelp,
     required this.onOpenDevices,
     required this.onLogout,
@@ -45,8 +45,8 @@ class AppSidebar extends StatefulWidget {
   /// 用户菜单「站内信」行:打开右侧消息聚合面板
   final VoidCallback onOpenMessages;
 
-  /// 用户菜单「设置」行
-  final VoidCallback onOpenUserMenuSettings;
+  /// 侧栏底部「设置」按钮:全屏打开设置页
+  final VoidCallback onOpenSettings;
 
   /// 用户菜单「帮助与反馈」行
   final VoidCallback onOpenUserMenuHelp;
@@ -133,8 +133,8 @@ class _AppSidebarState extends State<AppSidebar> {
                   ),
                 ),
               ),
-              // 头像锚定在最底端靠左(与上方导航图标左边距 10 对齐,
-              // 留 8px 底间距,不贴死底边)
+              // 头像锚定在侧栏底部最左(与上方导航图标左边距 10 对齐),
+              // 「设置」按钮锚定在最右,二者各占一角,均无描边。
               Positioned(
                 left: 10,
                 bottom: 8,
@@ -148,12 +148,16 @@ class _AppSidebarState extends State<AppSidebar> {
                     onSetDarkTheme: widget.onSetDarkTheme,
                     onSetSystemTheme: widget.onSetSystemTheme,
                     onOpenMessages: widget.onOpenMessages,
-                    onOpenSettings: widget.onOpenUserMenuSettings,
                     onOpenHelp: widget.onOpenUserMenuHelp,
                     onOpenDevices: widget.onOpenDevices,
                     onLogout: widget.onLogout,
                   ),
                 ),
+              ),
+              Positioned(
+                right: 10,
+                bottom: 8,
+                child: _SidebarSettingsButton(onTap: widget.onOpenSettings),
               ),
             ],
           ),
@@ -175,6 +179,62 @@ class SidebarItemSpec {
   final IconData iconFilled;
   final String label;
   final int tabIndex;
+}
+
+/// 侧栏「设置」按钮:锚定在侧栏底部最右侧,与头像同规格但无描边,
+/// 只保留 hover 底色反馈,点击全屏打开设置页。
+class _SidebarSettingsButton extends StatefulWidget {
+  const _SidebarSettingsButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  State<_SidebarSettingsButton> createState() => _SidebarSettingsButtonState();
+}
+
+class _SidebarSettingsButtonState extends State<_SidebarSettingsButton> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final AppThemeVariant variant = AppThemeController.instance.value;
+    final Color bgColor = _hovering
+        ? cs.surfaceContainer.withValues(alpha: 0.6)
+        : Colors.transparent;
+    final Color iconColor = _hovering
+        ? AppPalette.resolveSidebarIconHover(variant)
+        : AppPalette.resolveSidebarIconDefault(variant);
+
+    return Tooltip(
+      message: "设置",
+      child: MouseRegion(
+        onEnter: (_) => deferSidebarHover(() {
+          if (mounted) setState(() => _hovering = true);
+        }),
+        onExit: (_) => deferSidebarHover(() {
+          if (mounted) setState(() => _hovering = false);
+        }),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          behavior: HitTestBehavior.opaque,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+            width: 40,
+            height: 40,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: bgColor,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(Icons.settings_outlined, size: 20, color: iconColor),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class SidebarNavItem extends StatefulWidget {

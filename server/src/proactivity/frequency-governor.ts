@@ -77,6 +77,7 @@ export class FrequencyGovernor {
   private readonly actors = new Map<string, ActorFrequencyState>();
 
   private readonly dailyBudget: number;
+  private readonly nowFn: () => Date;
   private readonly kindCooldownMs: Record<string, number>;
   private readonly disableQuietHours: boolean;
   /** env 显式覆盖过的 kind（restore 时不落盘值覆盖 env 意图） */
@@ -89,9 +90,14 @@ export class FrequencyGovernor {
     ignoreEnv?: boolean;
     /** 测试用：禁用静默时段（避免深夜跑测试随机失败） */
     disableQuietHours?: boolean;
+    /** 测试注入：时钟源（默认真实系统时间；集成冒烟用 mock 时钟） */
+    nowFn?: () => Date;
   }) {
     this.disableQuietHours = opts?.disableQuietHours === true;
-    this.dailyBudget = opts?.dailyBudget ?? readEnvInt("PROACTIVITY_DAILY_BUDGET", 3);
+    this.nowFn = opts?.nowFn ?? (() => new Date());
+    // 每日预算定位为「异常熔断」而非主动性的日常约束：正常节制的责任在
+    // ArbiterV2 打断成本 + 分 kind 冷却 + 反馈自适应，这里只防 LLM 抽风连发。
+    this.dailyBudget = opts?.dailyBudget ?? readEnvInt("PROACTIVITY_DAILY_BUDGET", 15);
     this.kindCooldownMs = { ...DEFAULT_KIND_COOLDOWN_MS };
     for (const [kind, ms] of Object.entries(opts?.kindCooldownMs ?? {})) {
       if (typeof ms === "number" && Number.isFinite(ms)) {
@@ -183,7 +189,7 @@ export class FrequencyGovernor {
     actorId: string,
     kind: string,
     importance: "high" | "medium" | "low",
-    now: Date = new Date(),
+    now: Date = this.nowFn(),
   ): FrequencyVerdict {
     const state = this.stateOf(actorId, now);
 
@@ -214,14 +220,14 @@ export class FrequencyGovernor {
   }
 
   /** 记录一次已放行的触发（进入计数与冷却） */
-  record(actorId: string, kind: string, now: Date = new Date()): void {
+  record(actorId: string, kind: string, now: Date = this.nowFn()): void {
     const state = this.stateOf(actorId, now);
     state.dailyCount += 1;
     state.kindLastAt.set(kind, now.getTime());
   }
 
   /** 测试/诊断：当日已用预算 */
-  dailyCountOf(actorId: string, now: Date = new Date()): number {
+  dailyCountOf(actorId: string, now: Date = this.nowFn()): number {
     return this.stateOf(actorId, now).dailyCount;
   }
 

@@ -32,17 +32,21 @@ import { registerMessageBridgeRoutes } from "./message-bridge.js";
 import { registerChatDataRoutes } from "./chat-data.js";
 import { registerBrowserSessionRoutes } from "./browser-sessions.js";
 import { registerPhoneBridgeRoutes } from "./phone-bridge.js";
+import { registerPhoneBridgeCaptureRoutes } from "./phone-bridge-captures.js";
 import { registerDownloadRoutes } from "./downloads.js";
 import { registerLifeSignalRoutes } from "./life-signals.js";
 import { registerMoodInferenceRoutes } from "./mood-inferences.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerMorningBriefingRoutes } from "./morning-briefing.js";
 import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
+import { registerPresenceDetectRoutes } from "./presence-detect.js";
 import { registerProactivitySuppressionRoutes } from "./proactivity-suppression.js";
 import { registerProactivityPipelineRoutes } from "./proactivity.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
+import { registerFeedbackRoutes } from "./feedback.js";
+import { registerAdminConsoleRoutes } from "./admin-console.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerGatewayAdminRoutes } from "./gateway-admin.js";
 import { registerToolRegistryRoutes } from "./tool-registry-routes.js";
@@ -50,6 +54,7 @@ import { registerNotesRoutes } from "./notes.js";
 import { registerDeviceRoutes } from "./device.js";
 import { registerAuthRoutes } from "./auth.js";
 import { registerApprovalRoutes } from "./approvals.js";
+import { registerInboxRoutes } from "./inbox.js";
 import { registerAttentionRoutes } from "./attention.js";
 import { registerVoiceMessageRoutes } from "./voice-messages.js";
 import { registerImageFileRoutes } from "./image-files.js";
@@ -117,6 +122,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   });
   registerBrowserSessionRoutes(app, deps);
   registerPhoneBridgeRoutes(app, { phoneBridgeCoordinator: deps.phoneBridgeCoordinator });
+  registerPhoneBridgeCaptureRoutes(app);
   registerMultiAgentMonitorRoutes(app, {
     runtime: deps.runtime,
     scheduleTaskService: deps.scheduleTaskService,
@@ -158,6 +164,28 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
         return coordinator.getCachedWithTime(sessionId)?.payload ?? null;
       }
     : undefined;
+  // 播报稿口语润色（单次小 LLM 调用，ephemeral 不污染会话）：启动简报路由与
+  // 手动预览共用同一份，保证与调度推送路径口径一致；LLM 未启用时服务内回退模板
+  const briefingLlmComplete = deps.externalChat?.isEnabled()
+    ? async (prompt: string) => {
+        let full = "";
+        await deps.externalChat!.streamCompletion(
+          `morning-briefing-${Date.now()}`,
+          { text: prompt },
+          (delta: string) => {
+            full += delta;
+          },
+          undefined,
+          {
+            systemPromptOverride: prompt,
+            ephemeralTurn: true,
+            disableThinking: true,
+            maxThreadMessages: 0,
+          },
+        );
+        return full;
+      }
+    : undefined;
   registerMorningBriefingRoutes(app, {
     weatherService: deps.weatherService,
     weatherPrefsService: deps.weatherPrefsService,
@@ -166,6 +194,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     // 用户称呼来源：记忆同步 KV 的 user_profile「称呼」行
     agentMemorySyncService: deps.agentMemorySyncService,
     requestClientLocation: briefingClientLocation,
+    llmComplete: briefingLlmComplete,
   });
   registerBriefingDeliveryRoutes(app);
   if (deps.proactivitySuppressionStore) {
@@ -173,7 +202,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       suppressionStore: deps.proactivitySuppressionStore,
     });
   }
-  registerProactivityPipelineRoutes(app, { pipeline: deps.proactivePipeline ?? null, pushService: deps.proactivePushService ?? null });
+  registerProactivityPipelineRoutes(app, {
+    pipeline: deps.proactivePipeline ?? null,
+    pushService: deps.proactivePushService ?? null,
+    fabric: deps.proactivityFabric ?? null,
+  });
   registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore });
   registerBriefingTestRoutes(app, {
     wsConnectionRegistry: deps.wsConnectionRegistry,
@@ -184,9 +217,13 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     scheduleTaskService: deps.scheduleTaskService,
     notesService: deps.notesService,
     requestClientLocation: briefingClientLocation,
+    llmComplete: briefingLlmComplete,
   });
   registerBriefingTtsRoutes(app, { ttsService: deps.ttsService });
+  registerPresenceDetectRoutes(app);
   registerUserPreferencesRoutes(app);
+  registerFeedbackRoutes(app);
+  registerAdminConsoleRoutes(app, deps);
   if (deps.devicePairingService && deps.deviceRegistry) {
     registerDeviceRoutes(app, {
       devicePairingService: deps.devicePairingService,
@@ -200,6 +237,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 待确认收件箱路由（approvalInboxService 未注入时不挂载）
   if (deps.approvalInboxService) {
     registerApprovalRoutes(app, { approvalInboxService: deps.approvalInboxService });
+  }
+  // 站内信路由（inboxService 未注入时不挂载）
+  if (deps.inboxService) {
+    registerInboxRoutes(app, { inboxService: deps.inboxService });
   }
   // 分级触达注意力路由（attentionStore + reachRouter 未注入时不挂载）
   if (deps.attentionStore && deps.reachRouter) {

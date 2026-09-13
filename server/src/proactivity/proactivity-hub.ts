@@ -33,6 +33,8 @@ import type {
   ProactiveBehaviorMode,
   ProactiveIntent,
 } from "./proactivity-types.js";
+import type { ArbitrationDecision, ProactiveProposal } from "./pipeline-types.js";
+import { renderProactiveText } from "./voice-templates.js";
 import {
   deriveActValue,
   deriveRiskFromSteps,
@@ -180,6 +182,20 @@ function readTickIntervalMs(): number {
 const RECENT_INITIATIVES_LIMIT = 8;
 /** 对话后主动评估去抖（默认 90s：聊完歇一会儿再决定要不要补一句，模拟人类节奏） */
 const INITIATIVE_DEBOUNCE_DEFAULT_MS = 90_000;
+/**
+ * LLM 通用路径每日评估上限（只管"问 LLM 的次数"，与主动发送频控无关）。
+ * 这是不乱调 LLM 的硬保障：传感/评估/仲裁全自动零 LLM，唯一要省的就是这里。
+ */
+function readMaxEvalsPerDay(): number {
+  const raw = process.env.PROACTIVITY_MAX_EVALS_PER_DAY;
+  if (!raw) return 40;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 40;
+}
+/** 直达车道开关（speak 经模板直投管道，绕过 ProactionCortex 预筛；默认开） */
+function readDirectLaneEnabled(): boolean {
+  return process.env.PROACTIVITY_DIRECT_LANE !== "0";
+}
 
 function readInitiativeDebounceMs(): number {
   const raw = process.env.PROACTIVITY_INITIATIVE_DEBOUNCE_MS;
@@ -274,6 +290,18 @@ export class ProactivityHub {
   /** 对话后去抖评估定时器（每 actor 一个，新对话轮重置） */
   private readonly initiativeDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly initiativeDebounceMs = readInitiativeDebounceMs();
+  /**
+   * 直达车道：speak/advise 不再走 LifeSignal→ProactionCortex 预筛（该预筛对
+   * 自造 kind 的 value 保底分天然误杀低/中重要度信号），而是模板渲染 directText
+   * 直投统一管道——deliveryId / outcome 反馈 / 去重 / 离线挂起全部继承。
+   * 装配层在管道创建后经 setDirectLane 注入。
+   */
+  private directLane: ((p: ProactiveProposal) => ArbitrationDecision | void) | null = null;
+  private readonly directLaneEnabled = readDirectLaneEnabled();
+  private hubSeq = 0;
+  /** LLM 评估计数（每日熔断，防乱调用） */
+  private readonly evalCounts = new Map<string, number>();
+  private readonly maxEvalsPerDay = readMaxEvalsPerDay();
   private started = false;
 
   constructor(private readonly deps: ProactivityHubDeps) {
@@ -292,6 +320,34 @@ export class ProactivityHub {
     fn: (entry: PendingConfirmation, approved: boolean) => Promise<{ executed: boolean } | null> | { executed: boolean } | null,
   ): void {
     this.pipelineConfirmationResolver = fn;
+  }
+
+  /**
+   * 接线直达车道（装配层在管道构造后调用）：speak/advise 的零 LLM 快车道。
+   * 提案带 directText 模板文案进统一管道——投递带 deliveryId、outcome 反馈、
+   * 去重、离线挂起、静默择时全部继承管道既有语义。
+   */
+  setDirectLane(fn: (p: ProactiveProposal) => ArbitrationDecision | void): void {
+    this.directLane = fn;
+  }
+
+  /** 直达车道是否启用（诊断展示） */
+  isDirectLaneEnabled(): boolean {
+    return this.directLaneEnabled && this.directLane !== null;
+  }
+
+  /**
+   * 记录一次已表达的主动（评估器/直达车道投递成功后调用）：进入防重复记忆，
+   * InitiativeEngine 的 prompt 会看到"最近已主动（勿重复）"——同一事件不再
+   * 被模板与 LLM 各表达一次。
+   */
+  noteInitiative(actorId: string, kind: string, title: string): void {
+    this.rememberInitiative(actorId, `${kind}: ${title}`);
+  }
+
+  /** 最近交互时刻（仲裁层 ContextSnapshot 输入；deps 兜底 + hub 自记） */
+  lastInteractionAtOf(actorId: string): number | null {
+    return this.deps.getLastInteractionAt?.(actorId) ?? this.lastInteractionAt.get(actorId) ?? null;
   }
 
   // ---- 已知 actor 持久化（重启恢复主动性资格：否则重启后 agent 永不主动） ----
@@ -482,6 +538,7 @@ export class ProactivityHub {
         `像朋友想起对方一直在意的东西一样，用一两句自然提起即可，分享你的看法或轻问一句，别写成资讯播报。`,
       mode: "speak",
       source: "interest_watch",
+      templateData: { name, excerpt: hit.title, summary: hit.title },
     }).catch((err) => {
       console.log(`[ProactivityHub] 兴趣热议推送失败（忽略）: ${err}`);
     });
@@ -529,11 +586,13 @@ export class ProactivityHub {
     now: Date,
     lastInteractionAt: number | null,
   ): Promise<void> {
-    // 预算前置短路：预算耗尽时任何决策都会被频控拦截（canTrigger 规则 1 无重要性豁免），
-    // 直接跳过本轮 LLM 评估。放在 consumeWindow 之前——观察不消费，预算跨零点
-    // 重置后仍可被下一 tick 评估，不丢感知。
-    if (this.governor.dailyCountOf(actorId, now) >= this.governor.getBudget()) {
-      console.log(`[ProactivityHub] 预算耗尽，跳过通用路径评估 actor=${actorId}`);
+    // 【预算与评估解耦】预算耗尽只拦发送（频控在发送前裁决），不再短路评估——
+    // agent 保持"有想法"，只是表达被节制。这里是纯评估，唯一的护栏是
+    // 每日 LLM 评估熔断（不乱调 LLM 的硬保障）。
+    const evalKey = `${actorId}:${now.toISOString().slice(0, 10)}`;
+    const evalCount = this.evalCounts.get(evalKey) ?? 0;
+    if (evalCount >= this.maxEvalsPerDay) {
+      console.log(`[ProactivityHub] 评估熔断（今日 LLM 评估已达 ${evalCount} 次）actor=${actorId}`);
       return;
     }
     // 日程感知：拉今日快照，有变化才推观察（LLM 看到日程自主判断要不要做什么）
@@ -570,8 +629,9 @@ export class ProactivityHub {
     } catch {
       /* 工具清单读取失败：LLM 无 act 依据，仍可 speak/advise */
     }
-    const budgetNote = `今日已用 ${this.governor.dailyCountOf(actorId, now)}/${this.governor.getBudget()} 次`;
+    const budgetNote = `今日已主动发送 ${this.governor.dailyCountOf(actorId, now)} 次（额度是自适应的，参考即可）`;
 
+    this.evalCounts.set(evalKey, evalCount + 1);
     const decision = await this.engine.evaluate({
       actorId,
       observations,
@@ -697,6 +757,9 @@ export class ProactivityHub {
 
     switch (decision.mode as ProactiveBehaviorMode) {
       case "speak":
+        // InitiativeEngine 已自主判断过"该不该说"，走 LifeSignal 路径生成话术
+        // （LLM 质量），但带 direct 标记——ProactionCortex 跳过 value/disturb
+        // 预筛阈值（对自造 kind 保底 4 分的误杀），policy 硬闸门保留。
         this.emitSpeakSignal({
           actorId,
           kind: decision.kind,
@@ -704,6 +767,8 @@ export class ProactivityHub {
           title: rationale.slice(0, 60),
           summary: decision.messageHint || rationale,
           source,
+          mode: "speak" as const,
+          direct: true,
         } as ProactiveIntent);
         break;
       case "act":
@@ -726,6 +791,8 @@ export class ProactivityHub {
           title: rationale.slice(0, 60),
           summary: decision.messageHint || rationale,
           source,
+          mode: "speak" as const,
+          direct: true,
         } as ProactiveIntent);
         break;
     }
@@ -791,12 +858,21 @@ export class ProactivityHub {
       console.log(`[ProactivityHub] 频控拦截 kind=${intent.kind} actor=${intent.actorId} reason=${verdict.reason}`);
       return;
     }
-    this.governor.record(intent.actorId, intent.kind);
+    // 直达车道：计数移到管道投递时（verdict=delivered 才计，语义更准）；
+    // 这里只做前置粗筛。旧车道保持原计数语义。
+    if (!this.isDirectLaneEnabled()) {
+      this.governor.record(intent.actorId, intent.kind);
+    }
     this.rememberInitiative(intent.actorId, `${intent.kind}: ${intent.title}`);
 
     switch (intent.mode as ProactiveBehaviorMode) {
       case "speak":
-        this.emitSpeakSignal(intent);
+      case "advise":
+        if (this.isDirectLaneEnabled()) {
+          this.submitDirectSpeak(intent);
+        } else {
+          this.emitSpeakSignal(intent);
+        }
         break;
       case "act":
         // 三分支执行语义（方案 C）：效用评估 → 静默执行 / 先问 / 沉默
@@ -810,15 +886,50 @@ export class ProactivityHub {
           source: intent.source,
         });
         break;
-      case "advise":
-        // advise 不再注入对话 prompt（会污染对话），改由 fast speak 车道以主动对话形式投递。
-        this.emitSpeakSignal(intent);
-        break;
+    }
+  }
+
+  /**
+   * 直达车道提交：intent → 零 LLM 模板渲染 directText → 统一管道提案。
+   * 频控在管道仲裁层再查一次（socialCanTrigger），计数在真正 delivered 时发生。
+   */
+  private submitDirectSpeak(intent: ProactiveIntent): void {
+    if (!this.directLane) {
+      // 车道未接线（管道未创建/测试环境）：回退旧路径
+      this.emitSpeakSignal(intent);
+      return;
+    }
+    const text = renderProactiveText(intent.kind, {
+      dedupKey: `${intent.kind}:${intent.title}`.slice(0, 80),
+      title: intent.title,
+      ...(intent.templateData ?? {}),
+    });
+    const proposal: ProactiveProposal = {
+      proposalId: `hub_${Date.now().toString(36)}_${(this.hubSeq++).toString(36)}`,
+      actorId: intent.actorId,
+      kind: intent.kind,
+      tier: "social",
+      importance: intent.importance,
+      dedupKey: `hub:${intent.kind}:${intent.summary.slice(0, 48)}`,
+      title: intent.title,
+      summary: intent.summary,
+      directText: text,
+      evidence: [`source=${intent.source}`, "direct_lane"],
+      createdAt: Date.now(),
+      source: `hub:${intent.source}`,
+    };
+    try {
+      this.directLane(proposal);
+      console.log(
+        `[ProactivityHub] 直达车道提交 kind=${intent.kind} actor=${intent.actorId} text="${text.slice(0, 40)}"`,
+      );
+    } catch (err) {
+      console.log(`[ProactivityHub] 直达车道提交失败（忽略）kind=${intent.kind}: ${err}`);
     }
   }
 
   /** speak 模式：发布 LifeSignal → 现有 ProactionCortex 闭环接管 */
-  private emitSpeakSignal(intent: ProactiveIntent): void {
+  private emitSpeakSignal(intent: ProactiveIntent & { direct?: boolean }): void {
     try {
       this.deps.publishSignal({
         actorId: intent.actorId,
@@ -831,6 +942,7 @@ export class ProactivityHub {
         metadata: {
           source: intent.source,
           proactivityKind: intent.kind,
+          ...(intent.direct ? { direct: true } : {}),
         },
       });
       console.log(

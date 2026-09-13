@@ -20,7 +20,6 @@ enum ThemeChoice { light, dark, system }
 /// - 点击后:在头像右侧弹出列表面板,模仿"设置菜单"
 /// - 列表面板内容(根据当前需求裁剪):
 ///   - 主题           亮色 / 暗色 / 跟随系统   (hover 浮出 3 选 1 子菜单)
-///   - 设置
 ///   - 帮助与反馈
 ///   - 我的设备
 ///   - 站内信          (带未读小红点)
@@ -39,7 +38,6 @@ class SidebarUserMenu extends StatefulWidget {
     required this.onSetDarkTheme,
     required this.onSetSystemTheme,
     required this.onOpenMessages,
-    required this.onOpenSettings,
     required this.onOpenHelp,
     required this.onOpenDevices,
     required this.onLogout,
@@ -65,9 +63,6 @@ class SidebarUserMenu extends StatefulWidget {
 
   /// 点击「站内信」:滑出右侧消息聚合面板
   final VoidCallback onOpenMessages;
-
-  /// 点击「设置」:后续接设置页
-  final VoidCallback onOpenSettings;
 
   /// 点击「帮助与反馈」:后续接帮助页
   final VoidCallback onOpenHelp;
@@ -122,10 +117,6 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onOpenMessages();
           },
-          onOpenSettings: () {
-            Navigator.of(context, rootNavigator: true).pop();
-            widget.onOpenSettings();
-          },
           onOpenHelp: () {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onOpenHelp();
@@ -171,14 +162,10 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
             width: 40,
             height: 40,
             alignment: Alignment.center,
+            // 无描边,只保留 hover 底色反馈,让头像组件本身成为视觉主体
             decoration: BoxDecoration(
               color: bgColor,
               borderRadius: BorderRadius.circular(8),
-              // 与导航按钮一致:常驻描边框,hover 时底色加深一档
-              border: Border.all(
-                color: cs.outline.withValues(alpha: 0.35),
-                width: 1,
-              ),
             ),
             child: _UserAvatar(
               name: widget.userName,
@@ -250,7 +237,6 @@ class _UserMenuOverlay extends StatefulWidget {
     required this.onSetDarkTheme,
     required this.onSetSystemTheme,
     required this.onOpenMessages,
-    required this.onOpenSettings,
     required this.onOpenHelp,
     required this.onOpenDevices,
     required this.onLogout,
@@ -264,7 +250,6 @@ class _UserMenuOverlay extends StatefulWidget {
   final VoidCallback onSetDarkTheme;
   final VoidCallback onSetSystemTheme;
   final VoidCallback onOpenMessages;
-  final VoidCallback onOpenSettings;
   final VoidCallback onOpenHelp;
   final VoidCallback onOpenDevices;
   final VoidCallback onLogout;
@@ -368,8 +353,8 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
     // 这样弹窗是从头像位置往上长的,视觉上紧贴头像,不会跑到屏幕最底端。
     final double screenHeight = MediaQuery.of(context).size.height;
     // 预估面板高度,用来在面板太高时夹一下避免溢出屏幕顶部
-    // (header + 主题/设置/帮助/设备/站内信/退出 6 行 + 3 条分隔线)
-    const double estimatedPanelHeight = 240;
+    // (header + 主题/帮助/设备/站内信/退出 5 行 + 3 条分隔线)
+    const double estimatedPanelHeight = 200;
     double bottom = screenHeight - widget.anchor.bottom + 8;
     final double maxBottom = screenHeight - 8 - estimatedPanelHeight;
     if (bottom > maxBottom) bottom = maxBottom;
@@ -433,11 +418,6 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                   Divider(
                       height: 1, thickness: 1,
                       color: cs.outline.withValues(alpha: 0.2)),
-                  _Row(
-                    leading: const Icon(Icons.settings_outlined, size: 18),
-                    title: "设置",
-                    onTap: widget.onOpenSettings,
-                  ),
                   _Row(
                     leading: const Icon(Icons.help_outline, size: 18),
                     title: "帮助与反馈",

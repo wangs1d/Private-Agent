@@ -35,22 +35,13 @@ import type {
   DesktopVisualSetDndResult,
 } from "./desktop-visual-port.js";
 import { resolveDesktopVisualVlmConfig } from "./desktop-visual-vlm-config.js";
+import { isVisualEnabled } from "./desktop-visual-env.js";
 
-function parseBooleanEnv(raw: string | undefined): boolean {
-  if (!raw) return false;
-  const v = raw.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
-}
+// 纯 env 判定收敛到叶子模块 desktop-visual-env.ts（避免 env 谓词随本模块的重依赖被静态引出）。
+export { isLocalDesktopVisualEnabledFromEnv } from "./desktop-visual-env.js";
 
 function envStr(env: NodeJS.ProcessEnv, key: string, legacyKey: string, fallback = ""): string {
   return env[key]?.trim() || env[legacyKey]?.trim() || fallback;
-}
-
-function isVisualEnabled(env: NodeJS.ProcessEnv): boolean {
-  return (
-    parseBooleanEnv(env.DESKTOP_VISUAL_ENABLED) ||
-    parseBooleanEnv(env.DESKTOP_VISUAL_AGENT_ENABLED)
-  );
 }
 
 function packageDirExists(root: string): boolean {
@@ -545,3 +536,4 @@ export function createDesktopVisualFromEnv(
 ): DesktopVisualPort {
   return new SubprocessDesktopVisual(env);
 }
+

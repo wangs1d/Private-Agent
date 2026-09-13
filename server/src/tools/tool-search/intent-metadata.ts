@@ -177,6 +177,27 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
+    exact: "desktop.open",
+    metadata: {
+      aliases: [
+        "open app", "launch app", "open application", "open program", "open software",
+        "打开软件", "打开应用", "打开App", "启动应用", "启动软件", "运行软件",
+        "打开程序", "帮我打开", "打开抖音", "打开微信", "打开网易云", "打开记事本",
+        "打开B站", "打开QQ音乐", "打开浏览器",
+      ],
+      negativeAliases: [
+        "read webpage content",
+        "读网页正文", "搜索网页内容",
+      ],
+      examples: [
+        "打开抖音", "帮我打开微信", "打开网易云播放影月", "启动记事本", "open wechat",
+      ],
+      negativeExamples: [
+        "读一下这个网页说了什么",
+      ],
+    },
+  },
+  {
     prefix: "embodiment.",
     metadata: {
       aliases: ["move", "roam", "avatar", "window", "移动", "漫游", "化身"],

@@ -6,6 +6,9 @@ import {
   type ChatToolsAccessContext,
 } from "../agent/agent-access-mode.js";
 import { DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS } from "../tools/desktop-visual-chat-tools.js";
+// 从叶子模块引入：desktop-visual-subprocess → vlm-config → resolve-provider →
+// 具体 providers → abstract-chat-provider → 本模块 构成静态环，ESM 下类继承求值报错。
+import { isLocalDesktopVisualEnabledFromEnv } from "../services/desktop-visual-env.js";
 import {
   getBuiltinAgentChatTools,
   selectRelevantTools,
@@ -368,7 +371,7 @@ function applyToolExposureProfile(
   // 任何筛选/合并/pin 都是污染——原样返回。
   if (profile === "explicit") return tools;
   // delegate（任务面默认 profile）：2026-09-05 起按路由层能力束（toolCapabilities）
-  // 裁剪——查天气/搜新闻这类轻任务不再全量注入 112+ 工具 schema（~64k 字符），
+  // 裁剪——查天气/搜新闻这类轻任务不再全量注入 ~220 个工具 schema（~150k 字符），
   // 未注入工具经 searchableTools 全集进 BM25 延迟目录，LLM 用 tool_discover 桥
   // 按需召回；路由判错由出口自检（TurnOutcomeGate）兜底。
   if (profile === "delegate") {
@@ -434,12 +437,18 @@ export function resolveChatToolsForStream(
  * 桥离线的 desktop.* 是"必然执行失败的工具"——模型会优先尝试它（pinned 权重高），
  * 连续失败耗尽工具波次后才有概率回退 search_web，浪费 10s+ 延迟甚至整轮查不了。
  * 仅在 desktopBridgeOnline === false（明确离线）时剔除；undefined（未知）保持原行为。
+ *
+ * 2026-09-12 修正：「必然失败」只在桥离线 **且** 本机视觉执行体不可用时成立——
+ * DESKTOP_VISUAL_ENABLED=1 时 desktop.* 经 localVisual 兜底仍能真实执行
+ * （desktop-visual-tools.ts 的 bridge → local 回退链），此时剔除反而把
+ * 「打开网易云/抖音」这类开 App 任务的唯一工具藏掉，模型只能口头推脱或编造工具名。
  */
 function dropOfflineDesktopTools(
   tools: ChatCompletionTool[],
   accessCtx?: ChatToolsAccessContext,
 ): ChatCompletionTool[] {
   if (accessCtx?.desktopBridgeOnline !== false) return tools;
+  if (isLocalDesktopVisualEnabledFromEnv()) return tools;
   return tools.filter(
     (tool) => tool.type !== "function" || !/^desktop\./.test(tool.function?.name ?? ""),
   );

@@ -21,6 +21,7 @@
 import OpenAI from "openai";
 
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../../external-model/resolve-provider.js";
+import { getModelForTask, TaskTier } from "../../config/model-routing.js";
 
 export interface MemoryAssociation {
   conclusion: string;
@@ -43,8 +44,10 @@ export function loadAssociationSynthesizerConfig(): AssociationSynthesizerConfig
   return {
     enabled:
       enabledRaw === undefined ? true : !(enabledRaw === "0" || enabledRaw.toLowerCase() === "false"),
+    // 默认走 MINI 档（跟随主模型，MODEL_MINI env 可统一切小模型）
     model:
       process.env.MEMORY_ASSOCIATION_MODEL?.trim() ||
+      getModelForTask(TaskTier.MINI) ||
       resolvePrimaryLlmClientConfig()?.model ||
       "gpt-4.1-mini",
     minConfidence: parseFloatEnv(process.env.MEMORY_ASSOCIATION_MIN_CONFIDENCE, 0.65),
@@ -163,7 +166,9 @@ export class MemoryAssociationSynthesizer {
 
   constructor(config: AssociationSynthesizerConfig, apiKey: string, baseURL?: string) {
     this.config = config;
-    this.client = new OpenAI(baseURL?.trim() ? { apiKey, baseURL: baseURL.trim() } : { apiKey });
+    this.client = new OpenAI(
+      baseURL?.trim() ? { apiKey, baseURL: baseURL.trim(), maxRetries: 1 } : { apiKey, maxRetries: 1 },
+    );
   }
 
   get enabled(): boolean {

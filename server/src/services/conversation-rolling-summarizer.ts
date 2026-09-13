@@ -319,7 +319,8 @@ export function createLlmRollingRecapSummarizer(opts?: {
         binding?.model?.trim() ||
         DEFAULT_MODEL;
       const baseURL = binding?.baseURL?.trim() || process.env.OPENAI_BASE_URL?.trim();
-      const openai = new OpenAI(baseURL ? { apiKey, baseURL } : { apiKey });
+      // maxRetries:1：SDK 默认 2 次静默重试会让瞬时失败双倍烧 token
+      const openai = new OpenAI(baseURL ? { apiKey, baseURL, maxRetries: 1 } : { apiKey, maxRetries: 1 });
       // Token 审计：串行化 prompt 估算输入规模
       const auditInput = JSON.stringify(buildSummarizeMessages(ctx));
       const response = await openai.chat.completions.create({

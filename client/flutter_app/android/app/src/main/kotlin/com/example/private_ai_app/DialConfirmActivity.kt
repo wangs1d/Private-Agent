@@ -240,7 +240,7 @@ class DialConfirmActivity : Activity() {
         if (finished) return
         finished = true
         window.decorView.removeCallbacks(timeoutRunnable)
-        PhoneBridgePlugin.completePending(
+        PhoneBridgePlugin.completeDialPending(
             mutableMapOf<String, Any?>(
                 "ok" to ok,
                 "state" to state,

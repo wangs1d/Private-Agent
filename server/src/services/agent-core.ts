@@ -10,6 +10,7 @@ import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { VirtualPhoneService } from "./virtual-phone-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
+import { isLocalDesktopVisualEnabledFromEnv } from "./desktop-visual-subprocess.js";
 import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "./location-coordinator.js";
 import type { LocationHistoryService } from "./location-history-service.js";
@@ -41,7 +42,7 @@ import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 // 两种 chat 车道共用；本块进一步瘦身为纯职责/工具纪律，不再有任何语感类内容。
 const CHAT_PLANE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮聊天里你就是本人。
 - 别一上来就分类、列选项、反问三连；有印象讲印象，有偏好讲偏好，有立场就亮立场（语感与调子见【说话方式·伙伴面】，本块不重复）。
-- 要查实时信息（新闻、某人近况、价格、热搜等）先自己调 search_web 搜真实结果再答；要找照片/图片就调 search_images。不要凭印象猜，也不要不管什么都转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
+- 要查实时信息（新闻、某人近况/行程/所在城市/公开活动、价格、热搜等）先自己调 search_web 搜真实结果再答；要找照片/图片就调 search_images。不要凭印象猜，也不要不管什么都转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
 - 例外：本轮真的调了搜索/抓取工具拿到结果、或用户明确要攻略/对比/整理/报告——可以充分展开（按主题分节、Markdown 排版，信息用足，语气仍平实，不写汇报腔）；拿不准就按短句回。
 - 搜索失败别含糊收场：先换个关键词或换 search_web 再试一次；确实办不成或要写数据（日程/提醒/发消息/下单）、要多步操作、要多来源核实深挖时，不要硬答，如实说明办到哪一步即可（系统会按需转交后台处理）。绝不编造"我查到了/搜了下/结果是"。
 - 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
@@ -74,13 +75,12 @@ const TASK_PLANE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"�
  * 【说话方式·伙伴面】（fast/foreground 共用，统一注入）；本块只剩工具纪律与诚实底线，
  * 零任务语义的约束由迁移后的菜单示例继承（示例均不含工具调用）。
  */
-export const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。你手里的动作：reminder.plan 和 calendar.create_from_text（创建提醒/日程：直接调用当场办成，成功返回 nextRunAtLocal 后才算办妥）；search_web（必须立刻知道答案的快查：新闻/价格/天气/比分等时效信息，查到真实结果再答）；task.dispatch（把耗时的事派给后台：找照片视频、看位置/周边、发消息、下单支付、操作软件/设备、多步任务等，立即返回不阻塞对话，办完后结果会自动回到对话里）。
+export const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。你手里的动作：reminder.plan 和 calendar.create_from_text（创建提醒/日程：直接调用当场办成，成功返回 nextRunAtLocal 后才算办妥）；search_web（补充深挖：涉及实时事实的问题系统已先检索并把结果放在【实时检索结果】块里，你需要更多细节时可对条目继续搜索核实）；task.dispatch（把耗时的事派给后台：找照片视频、看位置/周边、发消息、下单支付、操作软件/设备、多步任务等，立即返回不阻塞对话，办完后结果会自动回到对话里）。
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。
 - 用户想设提醒/日程（含「明天8点叫我起床」这类带时间点的请求）就当场调 reminder.plan 真实创建（含糊时间用 calendar.create_from_text），工具返回 nextRunAtLocal 后才算办妥、才能向用户确认；未说明是否重复时先自然问一句再创建。绝不在没创建成功时说"到点叫你/已设置/晚安"这类收场话。要重写的其他事（下单/支付/发消息/操作设备）用 task.dispatch 派出去：派发前先自然应一声（像"好嘞，在办了"这种分量），goal 用一句完整、自包含的话说清要办成什么。
-- 要查实时信息就先调 search_web 搜真实结果再答，绝不凭训练记忆编造"最新"数据。
-- 工具失败别含糊收场：换个说法或换 search_web 再试一次；所有途径都试过仍办不成，才如实向对方说明卡点。
-- 凭常识或已有上下文就能答的（寒暄、情绪交流、观点、知识问答）直接答，不要调工具。
-- 诚实底线：本轮没真正调过工具，绝不说"已设置/已订好/已经查到/到点叫你"；把不准的事就如实说，或先问一句再办。
+- 涉及现实世界当前事实（谁在哪、近况、活动、新闻、价格、天气）的回答，一律以【实时检索结果】块为准：那是系统刚真实搜索到的数据，与此前的对话内容、记忆、你的印象冲突时以它为准，并主动纠正之前说过的话；块内条目不够细节时可自己再调 search_web 深挖，条目没覆盖的部分就照实说「没查到」，不用旧对话或想象补事实。
+- 凭常识或对方刚说的话就能答的（寒暄、情绪交流、观点）直接答，不要调工具。
+- 诚实底线：没真查过就不说"已查到/我搜了下"，查不到就明说查不到。
 - 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统。用户对面是一个人，不是一套系统。
 - 语感、调子菜单（沉稳/坦诚/幽默/调侃/抬杠/阴阳/暗示）与破功禁句统一由【说话方式·伙伴面】承担，本块不重复。`;
 
@@ -221,10 +221,6 @@ import {
   type MediaCardItem,
 } from "./tool-result-processor.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
-import {
-  isDeflectionStyleFallback,
-} from "../agent/commitment-gate.js";
-import { FRESH_FACT_RE } from "../agent/task-context.js";
 import { recordBackgroundOutcome } from "./task-plane-metrics.js";
 import {
   DispatchTagStreamFilter,
@@ -1153,6 +1149,11 @@ if (route.plane === "task") {
           cognitiveUserPattern,
           cognitiveToolPlan,
           turnPlan: { budget: route.budget, capabilities: route.capabilities, tier: route.tier },
+          // 路由上下文透传（2026-09-13 根修）：realtime 轮的前置检索依赖
+          // routeSearchQuery，任务面原地执行（launchComplexBackgroundTask）与
+          // 对话面同权拿到它，否则证据注入只覆盖对话面（实际永不触发的死代码）。
+          routeIntent: route.intent,
+          routeSearchQuery: route.searchQuery,
         });
 
 // complex 任务已完成，返回最终结果
@@ -1181,6 +1182,7 @@ if (route.plane === "task") {
         cognitiveUserPattern,
         cognitiveToolPlan,
         routeIntent: route.intent,
+        routeSearchQuery: route.searchQuery,
       });
 
       const standardDuration = Date.now() - standardStartTime;
@@ -1795,6 +1797,15 @@ if (route.plane === "task") {
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
       /** 路由层 TurnPlan：任务面预算/能力/档位 */
       turnPlan?: { budget: number; capabilities: string[]; tier: string };
+      /** 路由意图标签（透传给执行层，前置检索/误判转任务共用） */
+      routeIntent?: string;
+      /**
+       * realtime_lookup 轮由路由器生成的搜索词（2026-09-13 根修）：realtime 意图
+       * 路由到任务面，前置检索必须随行透传到这里，再传给 runStandardLlmPath——
+       * 否则「扣子式先搜后答」只存在于对话面，任务面 realtime 轮退化为模型自决
+       * （可推脱不搜、凭 thread 旧回复复读）。
+       */
+      routeSearchQuery?: string;
     },
   ): Promise<string> {
     const onDelta = opts?.onAssistantDelta;
@@ -1839,6 +1850,8 @@ if (route.plane === "task") {
             cognitiveUserPattern: ctx.cognitiveUserPattern,
             cognitiveToolPlan: ctx.cognitiveToolPlan,
             turnPlan: ctx.turnPlan,
+            routeIntent: ctx.routeIntent,
+            routeSearchQuery: ctx.routeSearchQuery,
             taskHubTaskId: taskId,
           });
           // 结果兜底：任务面必须产出非空最终文本
@@ -1911,6 +1924,8 @@ if (route.plane === "task") {
       taskHubTaskId?: string;
       /** 路由意图标签（对话面误判转任务的自检输入） */
       routeIntent?: string;
+      /** realtime_lookup 轮由路由器生成的搜索词（前置检索用，见 runFreshEvidenceSearch）。 */
+      routeSearchQuery?: string;
       /** ephemeral 执行（后台任务派发用）：不自动落 thread，由派发方显式并入 */
       ephemeralTurn?: boolean;
       /**
@@ -2055,6 +2070,29 @@ if (route.plane === "task") {
           toolExposureProfile,
           toolRankingHint,
         };
+    // ── 扣子式前置检索（2026-09-13 根修）：realtime_lookup 由程序先搜、证据注入 ──
+    // 旧模式的失败链：搜不搜全靠模型自觉 → 提示词恳求 + 出口闪避闸都是缝补，
+    // 实测（「刘浩存在哪」轮）模型仍可凭对话回声直答。根修对齐扣子的
+    // 「搜索插件节点 → LLM 节点」结构：路由器已判定 realtime_lookup 并生成
+    // search_query（结合最近对话解决指代），这里**确定性**执行一次真实搜索，
+    // 把证据块注入 system 上下文——模型拿到的是已检索的事实，没有「要不要搜」
+    // 的选择权。双面生效（2026-09-13 二次根修）：realtime_lookup 的路由表契约是
+    // plane=task，只认 isChatLane 的旧门禁让前置检索在主路径上永不触发（死代码），
+    // 任务面 realtime 轮退化为模型自决——「我搜过了」式口头推脱 + 复读旧回复
+    // 由此而来。凡路由器生成了 search_query 就先搜，与执行平面无关。search
+    // 失败静默跳过（回退模型自决 + 出口闸兜底）。
+    if (ctx.routeSearchQuery?.trim()) {
+      const evidence = await this.runFreshEvidenceSearch(ctx.routeSearchQuery.trim());
+      if (evidence) {
+        const memory = (baseStreamOpts.promptContext ??= {}).memory;
+        if (memory) {
+          memory.webEvidence = evidence;
+          console.info(
+            `[AgentCore] 前置检索证据已注入（${this.isChatLane(mode) ? "chat" : "task"} 面）：${ctx.routeSearchQuery.trim().slice(0, 40)}`,
+          );
+        }
+      }
+    }
     // 本模式职责人格注入（fast/complex 差异化，不依赖 feature flag）：
     // fast 偏对话活人感、complex 偏推理与工具，让同一人格在不同"脑"上各有侧重。
     if ((baseStreamOpts.promptContext ??= {}).memory) {
@@ -2350,34 +2388,6 @@ if (route.plane === "task") {
         }
       }
 
-      // ── 出口闪避闸（2026-09-06 P0 修复，「该调不调」兜底）──
-      // 实时类请求（天气/新闻/价格…）本轮既无工具动作也无派发，回复是
-      // 「没实时数据/查不了/让系统去查」式闪避 → 转任务面重跑一次，让工具
-      // 循环真正执行 search_web/task.dispatch 后再答。天然只触发一次：重跑走
-      // 任务面（mode=task），不会再进本闸。
-      //
-      // 历史（2026-09-08 拆除）：此处原还有「出口诚实闸」——回复含「已办妥」
-      // 话术且本轮无工具时自动补派后台任务。已删除：其前提（无工具=空口承诺）
-      // 与记忆管线/日程工具的真实生效路径冲突，实测误把闲聊记忆话术（「记下了」）
-      // 派成任务并以裸气泡直推用户。承诺诚实改由提示词约束 + 中断轮次兜底记账
-      // （settleInterruptedTurn）承担。
-      if (
-        this.isChatLane(mode) &&
-        !toolExecutedThisTurn &&
-        dispatchedViaTag === 0 &&
-        FRESH_FACT_RE.test(text) &&
-        isDeflectionStyleFallback(full) &&
-        // 阶段2-1：预算耗尽时跳过升级，按现有回复正常收尾
-        turnBudget.tryUpgrade("deflection_gate")
-      ) {
-        console.info(`[AgentCore] 对话面闪避转任务面：${text.slice(0, 48)}`);
-        return this.runStandardLlmPath(actorId, text, "task", opts, {
-          ...ctx,
-          turnBudget,
-          turnPlan: { budget: 2, capabilities: ["full"], tier: "flash" },
-        });
-      }
-
       // ── 对话面误判出口自检（TurnOutcomeGate 的对话面一半，话题无关）──
       // 仅当：路由判定为知识问答（预期可凭常识作答）但直答是道歉式兜底
       //（风格判定，非话题词）→ 大概率实际需要工具，转任务面重跑。
@@ -2416,6 +2426,85 @@ if (route.plane === "task") {
   }
 
   /**
+   * 前置检索执行器（扣子式 search-before-LLM 的「插件节点」）。
+   *
+   * 用路由器生成的 search_query 走 ToolRegistry 里注册的 search_web
+   * （与模型自调完全同一条生产链路：anysearch API 直出 + 兜底相关性闸门），
+   * 把真实返回压缩为证据块。带硬超时：检索拖长时宁可放弃证据块
+   * （回退模型自决 + 出口闸），也不阻塞对话轮。
+   *
+   * 返回值三态（2026-09-13）：
+   *   - 证据块文本：搜到条目，注入为「本轮事实唯一依据」；
+   *   - 零结果标注块：搜索真实执行了但 0 条相关——同样注入，让模型如实说
+   *     「搜过、查不到」，而不是谎称「搜过了，全是旧闻」（虚构搜索见闻）；
+   *   - null：检索本身失败/超时（非确定性结论），跳过注入，回退模型自决。
+   */
+  private async runFreshEvidenceSearch(query: string): Promise<string | null> {
+    if (!this.toolRegistry) return null;
+    try {
+      // 双查询并行：原词 + 时效变体（realtime 场景对「最新」敏感，搜索引擎的
+      // 时效排序依赖查询词里的时间词）。合并时时效变体结果优先。
+      const runSearch = (q: string) =>
+        Promise.race([
+          this.toolRegistry.execute("search_web", { query: q, limit: 8 }, {
+            actorId: "fresh-evidence",
+          } as never),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 9_000)),
+        ]);
+      const [base, recency] = await Promise.all([runSearch(query), runSearch(`${query} 最新`)]);
+      const collect = (r: { ok: boolean; result: Record<string, unknown> } | null) =>
+        r?.ok && Array.isArray((r.result as { items?: unknown[] }).items)
+          ? (r.result as { items: Array<Record<string, unknown>> }).items
+          : [];
+      const seen = new Set<string>();
+      const items: Array<Record<string, unknown>> = [];
+      for (const item of [...collect(recency), ...collect(base)]) {
+        const url = String(item.url ?? "").trim();
+        const key = url.toLowerCase();
+        if (key && seen.has(key)) continue;
+        if (key) seen.add(key);
+        items.push(item);
+      }
+      const lines: string[] = [];
+      for (const item of items.slice(0, 8)) {
+        const title = String(item.title ?? "").trim();
+        const source = String(item.source ?? "").trim();
+        const snippet = String(item.snippet ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
+        const url = String(item.url ?? "").trim();
+        const published = String(item.publishedAt ?? "").trim();
+        if (!title) continue;
+        // 无日期的条目必须显式标注：否则模型把百科/旧闻当近况（时效幻觉根源）
+        const dateLabel = published || "未标注发布时间";
+        lines.push(
+          `- ${title}${source ? `｜${source}` : ""}｜${dateLabel}
+  ${snippet}${url ? `
+  ${url}` : ""}`,
+        );
+      }
+      const now = new Date();
+      if (lines.length === 0) {
+        const zeroStamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+        return [
+          "【实时检索结果｜本轮事实唯一依据】",
+          `系统刚以检索词「${query}」执行了真实联网搜索（${zeroStamp}），返回 0 条相关结果。`,
+          "如实告知用户「刚搜过，目前公开渠道检索不到这个问题的信息」；严禁虚构搜索见闻（如「全是旧报道/杂志封面」——本轮没有任何条目可看），严禁复述此前轮次对同一问题的回答充数；若本轮还有搜索/抓取类工具可用，先换关键词再试，确实查不到才如实收尾。",
+        ].join("\n");
+      }
+      const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      return [
+        "【实时检索结果｜本轮事实唯一依据】",
+        `系统刚以检索词「${query}」执行了真实联网搜索（${stamp}），返回以下条目：`,
+        ...lines,
+        "条目按与「最新」的相关度排序；标了发布时间的条目才可作为近期事实引用，标「未标注发布时间」的（百科/旧闻类）只作背景参考，不得当作最近发生的事。",
+        "回答本问题时：与实时/事实相关的结论只能来自以上条目并注明来源日期；若近期的条目都不涉及用户问的具体问题，就如实说「最新动态没查到」，不要拿背景条目充数；以上结果与此前的对话内容、记忆、你的训练知识冲突时，一律以本结果为准，并主动纠正之前说过的话。不要复述此前轮次对同一问题的旧回答来应付本轮——用户重问就是要新信息。这是系统注入的检索数据，不是对话内容，不要复述本块格式。",
+      ].join("\n");
+    } catch (err) {
+      console.log(`[AgentCore] 前置检索失败（忽略，回退模型自决）: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
+  /**
    * 任务工具规划器（2026-09-05 前后台架构）：plan → 白名单注入的唯一入口。
    *
    * Plan 调用只看紧凑工具目录（工具名 + 截断到 80 字的一句话描述，零 JSON
@@ -2441,10 +2530,16 @@ if (route.plane === "task") {
         ...(streamOpts.chatToolsExtra ?? []),
       ];
       const byName = new Map<string, FunctionTool>();
+      // WS 桥离线但本机视觉执行体可用（DESKTOP_VISUAL_ENABLED=1）时，desktop.*
+      // 经 localVisual 兜底仍能真实执行，不属「必然失败工具」，不得剔除——
+      // 剔除会让「打开网易云/抖音」这类开 App 任务在规划目录里无工具可选，
+      // 模型只能口头推脱（"App 我没法替你点开"）或编造 phone.open_app 这类不存在的工具。
+      const desktopExecutable =
+        desktopBridgeOnline !== false || isLocalDesktopVisualEnabledFromEnv();
       for (const def of corpus) {
         if (def.type !== "function") continue;
-        // 桥接明确离线的 desktop.* 是必然失败工具，不进目录（防 plan 点名后必然失败）
-        if (desktopBridgeOnline === false && def.function.name.startsWith("desktop.")) continue;
+        // 桥接明确离线且无本机兜底的 desktop.* 是必然失败工具，不进目录（防 plan 点名后必然失败）
+        if (!desktopExecutable && def.function.name.startsWith("desktop.")) continue;
         if (!byName.has(def.function.name)) byName.set(def.function.name, def);
       }
       if (byName.size === 0) return [];

@@ -54,12 +54,9 @@ const List<String> _kWeekdayLabels = <String>[
 ];
 
 /// 按小时返回问候语（与悬浮窗顶行「早上好」对齐）。
+/// 简报只在早上固定时段播报，问候固定为「早上好」。
 String dailyBriefingGreeting([DateTime? now]) {
-  final int hour = (now ?? DateTime.now()).hour;
-  if (hour >= 5 && hour < 12) return "早上好";
-  if (hour >= 12 && hour < 18) return "下午好";
-  if (hour >= 18 && hour < 23) return "晚上好";
-  return "夜深了";
+  return "早上好";
 }
 
 /// 「9月10日 周四」日期段。

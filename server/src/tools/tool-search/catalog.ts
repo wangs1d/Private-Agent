@@ -240,8 +240,16 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
 
 export function estimateToolsSchemaTokens(tools: ChatCompletionTool[]): number {
   if (tools.length === 0) return 0;
-  const bytes = Buffer.byteLength(JSON.stringify(tools), "utf8");
-  return Math.ceil(bytes / 4);
+  const json = JSON.stringify(tools);
+  // 中文感知估算：bytes/4 对 CJK description 低估 1.5-3 倍（中文约 0.6-1 token/字），
+  // 导致 token 预算裁剪实际放进来的真实 token 远超标称。CJK 区（≥U+2E80，UTF-8
+  // 3 字节）按 1.0 token/字计，其余按 4 字节/token 计。
+  let cjkChars = 0;
+  for (const ch of json) {
+    if ((ch.codePointAt(0) ?? 0) >= 0x2e80) cjkChars++;
+  }
+  const otherBytes = Buffer.byteLength(json, "utf8") - cjkChars * 3;
+  return Math.ceil(otherBytes / 4 + cjkChars);
 }
 
 export function shouldActivateToolSearch(

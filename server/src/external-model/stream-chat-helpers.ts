@@ -769,6 +769,11 @@ export function stripDsmlToolCallMarkup(content: string): string {
  *  2. 若 `content` 为空但 `reasoning` 非空：清洗掉 think 标签后返回 reasoning。
  *     这是关键兜底：思考模型经常把「思考过程 + 正式答案」都写进 reasoning，外面包 think 标签。
  *  3. 两者都为空：返回空串（让上层走 EmptyStreamContentError）。
+ *
+ * reasoning 兜底路径还要过一道 DSML 协议标记剥离（2026-09-12）：思考模型偶尔把
+ * 工具调用按训练格式（<| | DSML | | invoke…>）写成 reasoning 草稿、content 留空，
+ * 该路径此前的 stripThinkTags 不认识 DSML，协议原文会整段泄漏进正式回复。
+ * （只剥展示，不执行——reasoning 里的调用是思考草稿，提取执行会放大误触发。）
  */
 export function pickVisibleText(
   content: string,
@@ -778,7 +783,7 @@ export function pickVisibleText(
   if (c) return content;
   const r = reasoning.trim();
   if (!r) return "";
-  return stripThinkTags(reasoning);
+  return stripDsmlToolCallMarkup(stripThinkTags(reasoning));
 }
 
 /* ------------------------------------------------------------------ *

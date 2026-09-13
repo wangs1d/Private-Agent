@@ -583,6 +583,30 @@ export class PaymentService {
   getMockOrders(): PaymentOrderResult[] {
     return Array.from(this.mockOrders.values());
   }
+
+  /**
+   * 订单统计（管理概览）：下单量即付费意愿，已支付金额即收入。
+   * 本地只落 mock 订单；live 模式订单在支付渠道侧，本地无副本可统计。
+   */
+  orderStats(): {
+    total: number;
+    pending: number;
+    paid: number;
+    closed: number;
+    paidAmount: number;
+  } {
+    const stats = { total: 0, pending: 0, paid: 0, closed: 0, paidAmount: 0 };
+    for (const order of this.mockOrders.values()) {
+      stats.total++;
+      if (order.status === "pending") stats.pending++;
+      else if (order.status === "paid") {
+        stats.paid++;
+        stats.paidAmount += order.amount;
+      } else if (order.status === "closed") stats.closed++;
+    }
+    stats.paidAmount = Math.round(stats.paidAmount * 100) / 100;
+    return stats;
+  }
 }
 
 let sharedPaymentService: PaymentService | null = null;

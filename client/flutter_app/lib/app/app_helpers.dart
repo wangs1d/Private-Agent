@@ -1,6 +1,7 @@
 /// 右侧抽屉要展示的内容种类。
-/// （行程规划不在此列：它以独立全屏界面打开，见 TravelPlanFullscreenPage。）
-enum RightPanelKind { friends, messages, devices, schedule, imagePreview, gallery, catalog, approvals, settings }
+/// （行程规划不在此列：它以独立全屏界面打开，见 TravelPlanFullscreenPage。
+///   设置同样不在此列：它以独立全屏界面打开，见 SettingsPage。）
+enum RightPanelKind { friends, messages, devices, schedule, imagePreview, gallery, catalog, approvals }
 
 /// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
 const double kWideLayoutBreakpoint = 820;
@@ -29,8 +30,6 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.5; // 能力面板：域列表 + 明细两级视图
       case RightPanelKind.approvals:
         return 0.6; // 待确认收件箱：卡片流，右面板较窄
-      case RightPanelKind.settings:
-        return 0.42; // 设置：分区表单，需要较大空间
     }
   }
 }
@@ -97,8 +96,6 @@ String rightPanelTitle(RightPanelKind kind) {
       return "能力面板";
     case RightPanelKind.approvals:
       return "决策中心";
-    case RightPanelKind.settings:
-      return "设置";
   }
 }
 

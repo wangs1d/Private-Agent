@@ -7,8 +7,8 @@
     <!-- 电量 -->
     <uses-permission android:name="android.permission.BATTERY_STATS"/>
 
-    <!-- 通知监听 -->
-    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"/>
+    <!-- 通知（BIND_NOTIFICATION_LISTENER_SERVICE 是 service 级权限，
+         声明在 MessageCaptureListenerService 的 android:permission 上，不能写成 uses-permission） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
     <!-- 相机 -->
@@ -34,8 +34,15 @@
     <!-- 手机桥接拨号（phone.dial）：确认窗确认后直接拨出 -->
     <uses-permission android:name="android.permission.CALL_PHONE"/>
 
+    <!-- 短信代发（messages.reply / send_sms）：确认窗确认后发送 -->
+    <uses-permission android:name="android.permission.SEND_SMS"/>
+
     <!-- 前台服务与电池优化白名单 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
 
@@ -73,6 +80,67 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout"
             android:showWhenLocked="true"
             android:turnScreenOn="true"/>
+
+        <!-- 短信代发确认窗：Agent 发起 send_sms 时展示号码与内容，用户确认后 SmsManager 发出 -->
+        <activity
+            android:name=".SmsSendConfirmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/DialConfirmTheme"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"/>
+
+        <!-- 录屏授权中转窗：MediaProjection 系统授权必须由前台 Activity 发起 -->
+        <activity
+            android:name=".ScreenRecordConsentActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/DialConfirmTheme"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"/>
+
+        <!-- 通知监听：捕捉微信/QQ/飞书/短信通知 → 批量上报服务端消息聚合中心。
+             通知使用权需用户在系统设置里手动授予（设置页有引导跳转）。 -->
+        <service
+            android:name=".MessageCaptureListenerService"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService"/>
+            </intent-filter>
+        </service>
+
+        <!-- 消息桥接前台服务：常驻通知保活 WS 桥接与消息上报、定位低频回传 -->
+        <service
+            android:name=".MessageBridgeForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|location"/>
+
+        <!-- 远程拍照：camera 类型前台服务 + CameraX -->
+        <service
+            android:name=".CameraCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="camera"/>
+
+        <!-- 屏幕录制：mediaProjection 类型前台服务 + MediaRecorder -->
+        <service
+            android:name=".ScreenRecordService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"/>
+
+        <!-- 开机自启：重启前台服务恢复桥接与消息捕捉 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
 
         <meta-data
             android:name="flutterEmbedding"

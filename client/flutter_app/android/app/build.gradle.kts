@@ -10,6 +10,14 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    // CameraX 的 ProcessCameraProvider 暴露 ListenableFuture 类型，但生态里有依赖把
+    // listenablefuture 替换成 9999.0-empty 空包，必须强制回真包（仅含接口，无冲突）
+    configurations.all {
+        resolutionStrategy {
+            force("com.google.guava:listenablefuture:1.0")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -44,6 +52,17 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
+    // 远程拍照（camera_capture）：CameraX 后台拍照（前台服务 + camera 类型）
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    // LifecycleService：让 CameraCaptureService 持有生命周期绑定 CameraX
+    implementation("androidx.lifecycle:lifecycle-service:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    // CameraX ProcessCameraProvider.getInstance 返回 ListenableFuture
+    implementation("com.google.guava:listenablefuture:1.0")
 }
 
 flutter {

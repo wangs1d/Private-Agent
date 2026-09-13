@@ -336,6 +336,8 @@ export function createProactiveOutreachExecutor(
               title: "Agent 主动联系",
               text: bubbles[i].text,
               channel: decision.channel ?? "websocket",
+              // importance 透传：客户端据此选择弹窗触达（高重要度主动消息可弹窗）
+              importance: signal.importance ?? (decision.valueScore > 5 ? "high" : "medium"),
               reason: isLast ? decision.rationale : undefined,
               isPartial: !isLast,
             },

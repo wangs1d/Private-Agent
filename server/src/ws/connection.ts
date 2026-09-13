@@ -14,6 +14,7 @@ import type { SessionService } from "../services/session-service.js";
 import type { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
+import { declareClientCapabilities } from "../services/client-capability-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import type { VoiceCapabilityService } from "../services/voice-capability-service.js";
@@ -44,6 +45,7 @@ import {
 } from "../task-plane/task-events.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
+import type { MessageHubPlatform, MessageHubService } from "../services/message-hub-service.js";
 import type { LocationCoordinator } from "../services/location-coordinator.js";
 import type { LocationIngestPipeline } from "../services/location-ingest-pipeline.js";
 import {
@@ -182,6 +184,8 @@ export type WsRouteDeps = {
   unifiedIdempotencyService: UnifiedIdempotencyService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
+  /** 消息聚合中心：手机桥接 phone.msg.report 批量落库用；null=未装配 */
+  messageHubService?: MessageHubService | null;
   /** 按需位置协调器：Agent 需要位置时向客户端请求实时 GPS */
   locationCoordinator: LocationCoordinator;
   /** 位置上报管线（方案 A-D）：历史落库 / 围栏判定 / 到达触发；null=未装配 */
@@ -220,6 +224,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
+    messageHubService,
     locationCoordinator,
     locationIngest,
     virtualPhoneService,
@@ -659,6 +664,13 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const userIdRaw = payload.userId != null ? String(payload.userId).trim() : "";
           const isDesktopBridgeChannel = payload.desktopBridge === true;
           const isPhoneBridgeChannel = payload.phoneBridge === true;
+          // 客户端能力声明（2026-09-12）：mediaPlayback 等能力由客户端在聊天主通道的
+          // session.init 里自报，媒体推送类工具据此决定「下发指令」还是「如实告知办不到」。
+          // 桥接通道不解析（其 actorId 与主通道相同，避免覆盖主通道声明；媒体事件也
+          // 只推给聊天主通道）。未带 capabilities 的旧客户端视为不声明＝不支持。
+          const declaredCapabilities = payload.capabilities as
+            | Record<string, unknown>
+            | undefined;
           // ─── 设备自绑定鉴权门（ACCESS_AUTH_REQUIRED=1 且未在 upgrade query 预验时）───
           // 非桥接通道须在 payload.token 携带有效 access token；desktopBridge /
           // phoneBridge 通道豁免（继续走各自 PHONE_BRIDGE_TOKEN / DESKTOP_BRIDGE_TOKEN
@@ -703,6 +715,11 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               }),
             );
             return;
+          }
+          if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
+            declareClientCapabilities(actorId, {
+              mediaPlayback: declaredCapabilities?.mediaPlayback === true,
+            });
           }
           if (isDesktopBridgeChannel) {
             if (!userIdRaw) {
@@ -1025,6 +1042,91 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           phoneBridgeCoordinator.completeFromSocket(boundActorId, socket, jobId, pl as PhoneBridgeResult);
+          return;
+        }
+
+        if (event.type === ClientEventType.PhoneMsgReport) {
+          // 手机桥接消息捕捉批量上报 → 消息聚合中心落库 → ack 回执供手机端出队。
+          if (!boundActorId || !initAsPhoneBridge) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: {
+                  code: "PHONE_BRIDGE_INIT_REQUIRED",
+                  message: "消息上报仅允许在已完成注册的手机桥接连接上发送",
+                },
+              }),
+            );
+            return;
+          }
+          if (!messageHubService) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "MESSAGE_HUB_UNAVAILABLE", message: "消息聚合中心未装配" },
+              }),
+            );
+            return;
+          }
+          const reportPayload = (event.payload ?? {}) as Record<string, unknown>;
+          const batchId = String(reportPayload.batchId ?? "").trim();
+          const items = Array.isArray(reportPayload.messages) ? reportPayload.messages : [];
+          const reportablePlatforms = new Set<string>(["wechat", "qq", "feishu", "sms", "generic"]);
+          let accepted = 0;
+          let duplicates = 0;
+          let invalid = 0;
+          for (const raw of items.slice(0, 100)) {
+            const item = (raw ?? {}) as Record<string, unknown>;
+            const platform = String(item.platform ?? "").trim();
+            const text = String(item.text ?? "").trim();
+            if (!reportablePlatforms.has(platform) || !text) {
+              invalid += 1;
+              continue;
+            }
+            const channelId =
+              String(item.channelId ?? item.participantId ?? item.title ?? "unknown")
+                .trim()
+                .slice(0, 200) || "unknown";
+            try {
+              const result = await messageHubService.ingestInbound({
+                actorId: boundActorId,
+                platform: platform as MessageHubPlatform,
+                channelId,
+                text: text.slice(0, 4000),
+                participantId: item.participantId != null ? String(item.participantId).slice(0, 200) : undefined,
+                participantName: item.participantName != null ? String(item.participantName).slice(0, 200) : undefined,
+                title: item.title != null ? String(item.title).slice(0, 200) : undefined,
+                senderId: item.senderId != null ? String(item.senderId).slice(0, 200) : undefined,
+                senderName: item.senderName != null ? String(item.senderName).slice(0, 200) : undefined,
+                externalMessageId: item.externalMessageId != null ? String(item.externalMessageId).slice(0, 200) : undefined,
+                meta: {
+                  source: "phone_capture",
+                  capturedAt: item.capturedAt != null ? String(item.capturedAt) : undefined,
+                },
+              });
+              if (result.deduped) duplicates += 1;
+              else accepted += 1;
+            } catch {
+              invalid += 1;
+            }
+          }
+          socket.send(
+            JSON.stringify({
+              type: ServerEventType.PhoneMsgReportAck,
+              payload: { ok: true, batchId, accepted, duplicates, invalid, total: items.length },
+            }),
+          );
+          return;
+        }
+
+        if (event.type === ClientEventType.PhoneLocReport) {
+          // 手机后台低频定位回传：与 LocationReport 同管线落 location.db（fire-and-forget）。
+          if (!boundActorId || !initAsPhoneBridge) return;
+          const locPayload = (event.payload ?? {}) as Record<string, unknown>;
+          const ingested = parseClientLocation(locPayload);
+          if (ingested && locationIngest) {
+            locationIngest.ingest(boundActorId, { ...ingested, source: "continuous" }, "continuous");
+          }
           return;
         }
 

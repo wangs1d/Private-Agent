@@ -9,6 +9,28 @@ export function registerMessageHubTools(
   registry: ToolRegistry,
   deps: { hub: MessageHubService; gateway: MessagePlatformGateway; runtime: RuntimeFacade },
 ): void {
+  registry.register("messages.overview", async (_params, ctx: ToolContext) => {
+    const actorId = resolveActorId(ctx);
+    const overview = deps.hub.overview(actorId);
+    if (overview.totalUnread === 0) {
+      const platforms = overview.platforms.length
+        ? `（有历史会话的平台：${overview.platforms.map((p) => p.platform).join("、")}，均无未读）`
+        : "（暂无任何消息记录）";
+      return { ok: true, totalUnread: 0, platforms: overview.platforms, summary: `没有未读消息${platforms}` };
+    }
+    const lines = overview.platforms.map((p) => {
+      const latest = p.latest[0];
+      const latestText = latest ? `，最新：${latest.participantName ?? latest.title ?? "未知"}「${latest.preview}」` : "";
+      return `${p.platform} ${p.unreadCount} 条未读 / ${p.conversationCount} 个会话${latestText}`;
+    });
+    return {
+      ok: true,
+      totalUnread: overview.totalUnread,
+      platforms: overview.platforms,
+      summary: `共 ${overview.totalUnread} 条未读。${lines.join("；")}。要看某个会话的完整消息请用 messages.read_conversation（conversationId 见 platforms 字段）。`,
+    };
+  });
+
   registry.register("messages.list_conversations", async (params, ctx: ToolContext) => {
     const actorId = resolveActorId(ctx);
     return {
@@ -35,36 +57,56 @@ export function registerMessageHubTools(
     };
   });
 
-  registry.register("messages.reply", async (params, ctx: ToolContext) => {
-    const actorId = resolveActorId(ctx);
-    const conversationId = String(params.conversationId ?? "").trim();
-    const text = String(params.text ?? "").trim();
-    if (!conversationId) return { ok: false, error: "missing conversationId" };
-    if (!text) return { ok: false, error: "missing text" };
-    const conversation = deps.hub.getConversation(actorId, conversationId);
-    if (!conversation) return { ok: false, error: "conversation not found" };
-    const sendResult = await deps.gateway.send({
-      actorId,
-      platform: conversation.platform,
-      channelId: conversation.channelId,
-      text,
-      conversationId,
-      replyToMessageId: typeof params.replyToMessageId === "string" ? params.replyToMessageId : undefined,
-    });
-    const created = await deps.hub.createOutbound({
-      actorId,
-      platform: conversation.platform,
-      channelId: conversation.channelId,
-      text,
-      participantId: conversation.participantId,
-      participantName: conversation.participantName,
-      title: conversation.title,
-      replyToMessageId: typeof params.replyToMessageId === "string" ? params.replyToMessageId : undefined,
-      externalMessageId: sendResult.externalMessageId,
-      meta: { delivered: sendResult.delivered === true, platformMessage: sendResult.message ?? "" },
-    });
-    return { ok: true, delivered: sendResult.delivered === true, conversation: created.conversation, message: created.message };
-  });
+  registry.register(
+    "messages.reply",
+    async (params, ctx: ToolContext) => {
+      const actorId = resolveActorId(ctx);
+      const conversationId = String(params.conversationId ?? "").trim();
+      const text = String(params.text ?? "").trim();
+      if (!conversationId) return { ok: false, error: "missing conversationId" };
+      if (!text) return { ok: false, error: "missing text" };
+      const conversation = deps.hub.getConversation(actorId, conversationId);
+      if (!conversation) return { ok: false, error: "conversation not found" };
+      if (conversation.platform === "sms" && !ctx.phoneBridgeOnline) {
+        return {
+          ok: false,
+          error: "手机不在线，无法代发短信",
+          errorCode: "TOOL_UNAVAILABLE",
+        };
+      }
+      const sendResult = await deps.gateway.send({
+        actorId,
+        platform: conversation.platform,
+        channelId: conversation.channelId,
+        text,
+        conversationId,
+        replyToMessageId: typeof params.replyToMessageId === "string" ? params.replyToMessageId : undefined,
+        to: typeof params.to === "string" ? params.to.trim() : undefined,
+      });
+      const created = await deps.hub.createOutbound({
+        actorId,
+        platform: conversation.platform,
+        channelId: conversation.channelId,
+        text,
+        participantId: conversation.participantId,
+        participantName: conversation.participantName,
+        title: conversation.title,
+        replyToMessageId: typeof params.replyToMessageId === "string" ? params.replyToMessageId : undefined,
+        externalMessageId: sendResult.externalMessageId,
+        meta: { delivered: sendResult.delivered === true, platformMessage: sendResult.message ?? "" },
+      });
+      return {
+        ok: true,
+        delivered: sendResult.delivered === true,
+        conversation: created.conversation,
+        message: created.message,
+        summary: sendResult.delivered
+          ? "已发送。"
+          : `未送达：${sendResult.message ?? "发送通道不可用"}。不要谎称已发出。`,
+      };
+    },
+    { sideEffect: "write", requireHonestFailure: true },
+  );
 
   registry.register("messages.mark_read", async (params, ctx: ToolContext) => {
     const actorId = resolveActorId(ctx);

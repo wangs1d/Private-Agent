@@ -3,10 +3,10 @@
     "actor-4": {
       "revision": 2,
       "entries": {
-        "memory_summary": "[2026-09-11T15:57:16.102Z] [topic:general] I live in Shanghai\n[2026-09-11T15:57:16.108Z] [topic:general] I live in Beijing",
+        "memory_summary": "[2026-09-12T18:34:00.382Z] [topic:general] I live in Shanghai\n[2026-09-12T18:34:00.387Z] [topic:general] I live in Beijing",
         "memory_summary_forgotten": "",
-        "memory_facts": "[2026-09-11T15:57:16.108Z] [topic:general] I live in Beijing",
-        "session_recap": "[2026-09-11T15:57:16.102Z] [topic:general] I live in Shanghai\n[2026-09-11T15:57:16.108Z] [topic:general] I live in Beijing"
+        "memory_facts": "[2026-09-12T18:34:00.387Z] [topic:general] I live in Beijing",
+        "session_recap": "[2026-09-12T18:34:00.382Z] [topic:general] I live in Shanghai\n[2026-09-12T18:34:00.387Z] [topic:general] I live in Beijing"
       }
     }
   }

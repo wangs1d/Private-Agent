@@ -77,5 +77,7 @@ export function buildOverworkIntent(
     mode: "act",
     actArgs: steps,
     source: "rhythm",
+    // 直达车道模板数据（零 LLM 话术）
+    templateData: { hours: workHours >= 3 ? Math.round(workHours) : undefined },
   };
 }

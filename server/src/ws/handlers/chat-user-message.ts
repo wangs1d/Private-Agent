@@ -13,7 +13,7 @@ import {
   sanitizeVisionFramesFromWire,
   type VisionWireInput,
 } from "../../vision/sanitize-vision-frames.js";
-import { formatStatusForDisplay, stripSentencesAlreadySaid } from "../../utils/text.js";
+import { formatStatusForDisplay, normalizeDashTypos, stripSentencesAlreadySaid } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { subscribeTravelProgress } from "../../skills/travel-planning/travel-progress-bus.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
@@ -1118,6 +1118,10 @@ async function processBatchedMessage(
       scheduleOutcome?.trim() ||
       reply.text.trim() ||
       (chunkSeq > 0 ? "" : "");
+
+    // 错字归一化：模型偶发用单个「—」冒充量词「一」（deepseek 破折号习惯），
+    // 发送前修掉（不动合法的「——」）。
+    finalText = normalizeDashTypos(finalText);
 
     // 工具成功但 LLM 末轮没出正文时，用工具结果文本作为回复（不再用合成的"已查到见上面"）。
     // 真实数据比提示语更有价值——用户能看到工具到底返回了什么。

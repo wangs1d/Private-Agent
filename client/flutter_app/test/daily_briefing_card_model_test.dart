@@ -27,11 +27,11 @@ void main() {
     "agentGreeting": "早上好！",
   };
 
-  test("问候语按小时切换", () {
+  test("问候语固定为早安（简报只在早上播报）", () {
     expect(dailyBriefingGreeting(DateTime(2026, 9, 10, 8)), "早上好");
-    expect(dailyBriefingGreeting(DateTime(2026, 9, 10, 14)), "下午好");
-    expect(dailyBriefingGreeting(DateTime(2026, 9, 10, 20)), "晚上好");
-    expect(dailyBriefingGreeting(DateTime(2026, 9, 10, 2)), "夜深了");
+    expect(dailyBriefingGreeting(DateTime(2026, 9, 10, 14)), "早上好");
+    expect(dailyBriefingGreeting(DateTime(2026, 9, 10, 20)), "早上好");
+    expect(dailyBriefingGreeting(DateTime(2026, 9, 10, 2)), "早上好");
   });
 
   test("日期标签：月日 + 周几", () {

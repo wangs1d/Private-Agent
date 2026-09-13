@@ -49,6 +49,11 @@ export type ProactiveIntent = {
   mode: ProactiveBehaviorMode;
   /** act 模式：直接后台执行的工具调用（白名单内，按序执行） */
   actArgs?: ProactiveActStep[];
+  /**
+   * 直达车道模板数据（零 LLM 话术）：speak/advise 经 voice-templates 渲染时
+   * 传入的 kind 专属字段（interest_alert 的 name/excerpt、overwork 的 hours……）。
+   */
+  templateData?: Record<string, unknown>;
   source:
     | "conversation"
     | "task"
