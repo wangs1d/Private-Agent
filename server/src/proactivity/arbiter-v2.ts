@@ -75,10 +75,10 @@ export const COST_WEIGHTS = {
 const BURST_WINDOW_MS = 30 * 60_000;
 /** burst 熔断：30min 内超过该次数后，alert/normal 全部只挂起不直投 */
 const BURST_BREAKER = 5;
-/** 挂起条目默认保质期 */
+/** 挂起条目默认保质期：normal 8h（等一个工作日内自然停顿）、alert 8h */
 export const PARK_TTL: Record<Exclude<AttentionUrgency, "interrupt" | "log">, number> = {
   alert: 8 * 3600_000,
-  normal: 2 * 3600_000,
+  normal: 8 * 3600_000,
 };
 
 /** 打断成本 0-10（纯函数，导出供单测与校准脚本） */
@@ -121,19 +121,26 @@ export type ArbiterAction = {
  * 纯裁决函数（导出供单测/selftest 预览，无副作用）。
  * alertMid：alert 档中等成本直投边界（默认 4.5；CostCalibrator 按 outcome
  * 接受率让它上下呼吸 ±0.5——用户接得积极就更敢说，连续忽略就收敛）。
+ * tier=must（用户点名要的事，如临会提醒/守约催办）旁路成本择时——
+ * 与管道层「must 绕过社交预算」同一原则：点名的事必达，过期即失效。
  */
 export function decideAction(
   urgency: AttentionUrgency,
   cost: number,
   burst: number,
   alertMid: number = ALERT_COST_BASE,
+  tier: "must" | "social" = "social",
 ): ArbiterAction {
   if (urgency === "log") return { action: "log", cost, reason: "log_only" };
   if (burst >= BURST_BREAKER && urgency !== "interrupt") {
     return { action: "wait_for_pause", cost, reason: `burst_breaker(${burst})` };
   }
-  if (urgency === "interrupt" || cost <= 3) {
-    return { action: "deliver_now", cost, reason: cost <= 3 ? `low_cost(${cost})` : "interrupt" };
+  if (tier === "must" || urgency === "interrupt" || cost <= 3) {
+    return {
+      action: "deliver_now",
+      cost,
+      reason: tier === "must" ? "must_bypass_cost" : urgency === "interrupt" ? "interrupt" : `low_cost(${cost})`,
+    };
   }
   // alert（健康关怀/临会提醒/守约催办）：中等成本也放行——错过时机的关心没有价值；
   // normal（闲聊/兴趣/心跳）才严格等 pause。
@@ -151,6 +158,8 @@ export type ParkedEntry = {
   deliver: () => void;
   expireAt: number;
   parkedAt: number;
+  /** 入队时的上下文快照：pause 检测首个 tick 的比对起点（避免多提案互相覆盖基线） */
+  snapshot: ContextSnapshot;
 };
 
 export class ArbiterV2 {
@@ -158,16 +167,7 @@ export class ArbiterV2 {
   private readonly deliveredAt: number[] = [];
   private lastCost = -1;
   /** 每 actor 的上下文基线（pause 跃迁检测的比对起点） */
-  private readonly actorBaselines = new Map<
-    string,
-    {
-      cost: number;
-      inConversation: boolean;
-      quietHours: boolean | null;
-      screenFocus: ScreenFocusKind | null;
-      presence: "active" | "idle" | "offline";
-    }
-  >();
+  private readonly actorBaselines = new Map<string, ContextSnapshot>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly deps: ArbiterV2Deps) {}
@@ -205,12 +205,14 @@ export class ArbiterV2 {
   /**
    * 事件裁决入口：决定立即投递 / 挂起等 pause / 只记台账。
    * deliver 回调由调用方注入（通常 = pipeline.submitProposal）。
+   * tier：must=用户点名要的事（旁路成本择时必达）；缺省 social。
    */
   admit(input: {
     actorId: string;
     urgency: AttentionUrgency;
     label: string;
     deliver: () => void;
+    tier?: "must" | "social";
   }): ArbiterAction {
     const now = this.deps.nowFn?.() ?? Date.now();
     const s = this.snapshot(input.actorId, new Date(now));
@@ -220,26 +222,20 @@ export class ArbiterV2 {
       return { action: "log", cost, reason: "log_only" };
     }
 
-    const decision = decideAction(input.urgency, cost, s.recentBurst, this.alertMid());
+    const decision = decideAction(input.urgency, cost, s.recentBurst, this.alertMid(), input.tier ?? "social");
     if (decision.action === "deliver_now") {
       this.recordDelivery(now);
       input.deliver();
       return decision;
     }
     if (decision.action === "wait_for_pause") {
-      // 挂起等 pause（alert 8h / normal 2h 保质期；静默时段顺延到静默结束）。
-      // 同时建立该 actor 的上下文基线：pause 检测需要"挂起时的状态"作比对起点，
-      // 否则下一次 tick 缺少前值，"会议散场才开口"永远差一拍。
+      // 挂起等 pause（alert/normal 8h 保质期；静默时段顺延到静默结束+宽限）。
+      // 入队时的上下文快照存进条目本身：pause 检测首个 tick 以"最旧挂起项入队时的
+      // 状态"为比对起点。不能写进 per-actor 基线——多个挂起项在不同状态下入队会互相
+      // 抹掉"对话中→结束"的转换记录，pause 检测对后入队的项失明（实测挂起项饿死）。
       this.lastCost = cost;
-      this.actorBaselines.set(input.actorId, {
-        cost,
-        inConversation: s.inConversation,
-        quietHours: s.quietHours,
-        screenFocus: s.screenFocus,
-        presence: s.presence,
-      });
       this.park(
-        { ...input, id: `park_${now.toString(36)}_${input.label.slice(0, 24)}` },
+        { ...input, id: `park_${now.toString(36)}_${input.label.slice(0, 24)}`, snapshot: s },
         now,
       );
     }
@@ -299,15 +295,25 @@ export class ArbiterV2 {
 
   /** 单 actor 的 pause 检测与放行（tick 的每-actor 体） */
   private detectPauseFor(actorId: string, now: number): void {
-    const prev = this.actorBaselines.get(actorId) ?? {
-      cost: -1,
+    const mine = this.parked.filter((p) => p.actorId === actorId);
+    const oldest = mine.length
+      ? mine.reduce((a, b) => (a.parkedAt <= b.parkedAt ? a : b))
+      : undefined;
+    // 前值：tick 维护的基线；首个 tick 用最旧挂起项入队时的快照（挂起时的状态）
+    const prev: ContextSnapshot = this.actorBaselines.get(actorId) ?? oldest?.snapshot ?? {
+      now: new Date(now),
+      presence: "active",
       inConversation: false,
-      quietHours: null as boolean | null,
-      screenFocus: null as ScreenFocusKind | null,
-      presence: "active" as "active" | "idle" | "offline",
+      screenFocus: null,
+      nextEventMin: null,
+      quietHours: false,
+      receptivity: 0.5,
+      recentBurst: 0,
     };
     const s = this.snapshot(actorId, new Date(now));
     const cost = interruptCost(s);
+    const prevCost = interruptCost(prev);
+    const oldestParkedAt = oldest?.parkedAt ?? now;
 
     const paused =
       (prev.inConversation && !s.inConversation) ||
@@ -315,50 +321,60 @@ export class ArbiterV2 {
       (prev.quietHours === true && !s.quietHours) ||
       // 用户离开后回归（idle/offline → active）：回来本身就是开口时机
       ((prev.presence === "idle" || prev.presence === "offline") && s.presence === "active") ||
-      (prev.cost > 4.5 && cost <= 3);
+      // 成本从高跌破 alert 中档：用户退出了高打扰活动（会议散场/视频关掉/专注降档）
+      (prevCost > 4.5 && cost <= 4.5) ||
+      // 稳态低打扰放行：挂起超过 45min 且当前始终是低打扰状态（写代码/听歌）——
+      // 成本模型的转换检测对"长时间平稳的低打扰状态"存在盲区（无跃迁即无 pause），
+      // 挂起项会饿到 8h 保质期作废；此时用户显然"一直停着"，开口是安全的
+      (now - oldestParkedAt >= 45 * 60_000 && cost <= 4.5 && !s.inConversation);
 
-    this.actorBaselines.set(actorId, {
-      cost,
-      inConversation: s.inConversation,
-      quietHours: s.quietHours,
-      screenFocus: s.screenFocus,
-      presence: s.presence,
-    });
+    this.actorBaselines.set(actorId, s);
     // 兼容旧诊断字段（lastCostValue）
     this.lastCost = cost;
 
     if (paused && cost <= 4.5) {
-      // 取该 actor 紧迫度最高的队首一条投递（同紧迫度 FIFO），其余等下一次 pause
-      const mine = this.parked
-        .map((p, idx) => ({ p, idx }))
-        .filter(({ p }) => p.actorId === actorId);
-      if (mine.length === 0) return;
+      // 每个 pause 至多放行 2 条（紧迫度优先，同紧迫度 FIFO）：一次停顿把
+      // 积压的两件事说完是自然节奏；更多的留给下一次 pause（防连发）
       const rank = { interrupt: 3, alert: 2, normal: 1, log: 0 } as const;
-      let best = mine[0];
-      for (const m of mine) {
-        if (rank[m.p.urgency] > rank[best.p.urgency]) best = m;
-      }
-      this.parked.splice(best.idx, 1);
-      this.recordDelivery(now);
-      try {
-        best.p.deliver();
-      } catch {
-        /* 投递回调失败不阻塞队列 */
+      for (let released = 0; released < 2; released++) {
+        const mine = this.parked
+          .map((p, idx) => ({ p, idx }))
+          .filter(({ p }) => p.actorId === actorId);
+        if (mine.length === 0) break;
+        let best = mine[0];
+        for (const m of mine) {
+          if (rank[m.p.urgency] > rank[best.p.urgency]) best = m;
+        }
+        this.parked.splice(best.idx, 1);
+        this.recordDelivery(now);
+        try {
+          best.p.deliver();
+        } catch {
+          /* 投递回调失败不阻塞队列 */
+        }
       }
     }
   }
 
   private park(
-    input: { actorId: string; urgency: AttentionUrgency; label: string; deliver: () => void; id: string },
+    input: {
+      actorId: string;
+      urgency: AttentionUrgency;
+      label: string;
+      deliver: () => void;
+      id: string;
+      snapshot: ContextSnapshot;
+    },
     now: number,
   ): void {
     const ttl =
       input.urgency === "alert" ? PARK_TTL.alert : input.urgency === "normal" ? PARK_TTL.normal : 3600_000;
     let expireAt = now + ttl;
     // 静默时段挂起的事件留到静默结束（对齐管道 quiet_hours defer 语义）：
-    // 晚上理好的事早上说，而不是 2h 后悄悄作废
+    // 晚上理好的事早上说，而不是 2h 后悄悄作废。加 30min 宽限：正好卡在
+    // 静默结束点过期的挂起项会在晨间 pause 放行前一瞬被清掉（实测踩过）
     if (isQuietHourNow(new Date(now))) {
-      expireAt = Math.max(expireAt, nextQuietEnd(new Date(now)));
+      expireAt = Math.max(expireAt, nextQuietEnd(new Date(now)) + 30 * 60_000);
     }
     this.parked.push({
       id: input.id,
@@ -368,6 +384,7 @@ export class ArbiterV2 {
       deliver: input.deliver,
       parkedAt: now,
       expireAt,
+      snapshot: input.snapshot,
     });
     if (this.parked.length > 50) this.parked.shift(); // 防膨胀
   }

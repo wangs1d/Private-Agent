@@ -153,6 +153,11 @@ export class MessageBatchProcessor {
         const queue = this.messageQueue.get(sessionId) ?? [];
         queue.push(...pending);
         this.messageQueue.set(sessionId, queue);
+        // 排队可观测：统计"回复未完成时用户继续发言"的真实频率，
+        // 为客户端排队 UI 与打断/排队语义取舍提供数据依据。
+        console.log(
+          `[message-batch-processor] session=${sessionId} 处理中新消息入队 count=${pending.length} queueDepth=${queue.length}`,
+        );
       }
       return;
     }

@@ -16,6 +16,7 @@ import type { LocationCoordinator } from "./location-coordinator.js";
 import type { LocationHistoryService } from "./location-history-service.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
+import { isActorDisabled } from "./user-disable-gate.js";
 
 /**
  * 本模式职责人格（chat/task 双面差异化 persona）。
@@ -221,6 +222,7 @@ import {
   type MediaCardItem,
 } from "./tool-result-processor.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
+import { claimsWebSearch } from "../agent/realtime-search-query.js";
 import { recordBackgroundOutcome } from "./task-plane-metrics.js";
 import {
   DispatchTagStreamFilter,
@@ -608,6 +610,7 @@ export class AgentCore {
     sessionId: string,
     text: string,
     recentUserTurns: string[] = [],
+    entityContextLines: string[] = [],
   ): Promise<import("../agent/task-router.js").RouteDecision> {
     return routeTurnByLlm(
       this.externalChat,
@@ -615,6 +618,7 @@ export class AgentCore {
       text,
       recentUserTurns,
       getTaskHub().activeSummary(sessionId),
+      entityContextLines,
     );
   }
 
@@ -677,6 +681,11 @@ export class AgentCore {
     text: string,
     opts?: HandleUserMessageOptions,
   ): Promise<AgentReply> {
+    // 管理员禁用门：被禁用主体拒绝对话（跨进程读账号文件，mtime 缓存）。
+    if (await isActorDisabled(actorId)) {
+      throw new Error("该账号已被管理员禁用，如有疑问请联系部署者");
+    }
+
     const sessionId = opts?.sessionId ?? actorId;
 
     // 身份/记忆 Markdown 文档懒种子：每个 actor 每进程只做一次（启动种子已覆盖老 actor），
@@ -725,6 +734,17 @@ export class AgentCore {
     } | undefined;
     /** 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围 */
     let cognitiveToolPlan: import("../brain/tool-planning-cortex.js").ToolPlan | undefined;
+
+    // 投机并行搜索（2026-09-13）：路由判定期间就用用户原话发起前置搜索。
+    // realtime 轮省掉「路由(≤3s)→搜索(≤9s)」的串行首响；路由判非 realtime
+    // 则结果弃用（30s 查询缓存对冲重复消耗）；路由保守降级/超时（无
+    // searchQuery）轮直接复用——保守降级不再零证据裸奔（真实测试实证的
+    // 「编造搜索见闻」缺口）。AGENT_SPECULATIVE_SEARCH=0 关闭；<6 字短消息
+    // （寒暄/应答）不投机。
+    const speculativeSearch =
+      process.env.AGENT_SPECULATIVE_SEARCH !== "0" && text.trim().length >= 6
+        ? this.runFreshEvidenceSearch(text.trim()).catch(() => null)
+        : null;
 
     if (this.brainCenter && text?.trim()) {
       // 2026-08-29 路由权威切换：词法硬规则（task-router 正则 / rule-router 关键词 /
@@ -1154,6 +1174,7 @@ if (route.plane === "task") {
           // 对话面同权拿到它，否则证据注入只覆盖对话面（实际永不触发的死代码）。
           routeIntent: route.intent,
           routeSearchQuery: route.searchQuery,
+          specEvidence: speculativeSearch ?? undefined,
         });
 
 // complex 任务已完成，返回最终结果
@@ -1183,6 +1204,7 @@ if (route.plane === "task") {
         cognitiveToolPlan,
         routeIntent: route.intent,
         routeSearchQuery: route.searchQuery,
+        specEvidence: speculativeSearch ?? undefined,
       });
 
       const standardDuration = Date.now() - standardStartTime;
@@ -1806,6 +1828,8 @@ if (route.plane === "task") {
        * （可推脱不搜、凭 thread 旧回复复读）。
        */
       routeSearchQuery?: string;
+      /** 投机并行搜索结果（路由无查询词的保守降级轮复用），见 handleUserMessage。 */
+      specEvidence?: Promise<string | null>;
     },
   ): Promise<string> {
     const onDelta = opts?.onAssistantDelta;
@@ -1852,6 +1876,7 @@ if (route.plane === "task") {
             turnPlan: ctx.turnPlan,
             routeIntent: ctx.routeIntent,
             routeSearchQuery: ctx.routeSearchQuery,
+            specEvidence: ctx.specEvidence,
             taskHubTaskId: taskId,
           });
           // 结果兜底：任务面必须产出非空最终文本
@@ -1926,6 +1951,12 @@ if (route.plane === "task") {
       routeIntent?: string;
       /** realtime_lookup 轮由路由器生成的搜索词（前置检索用，见 runFreshEvidenceSearch）。 */
       routeSearchQuery?: string;
+      /**
+       * 投机并行搜索（2026-09-13）：路由判定期间已用用户原话发起的搜索 Promise。
+       * 路由产出查询词时弃用（用更准的 route_query 重搜）；路由保守降级/超时
+       * 无查询词时直接复用——保守降级轮不再零证据裸奔。
+       */
+      specEvidence?: Promise<string | null>;
       /** ephemeral 执行（后台任务派发用）：不自动落 thread，由派发方显式并入 */
       ephemeralTurn?: boolean;
       /**
@@ -1954,6 +1985,8 @@ if (route.plane === "task") {
     if (!ctx.turnBudget) turnBudget.consumeMainPath();
     /** 本轮是否执行过任何工具（出口诚实闸的「动作」一侧证据）。 */
     let toolExecutedThisTurn = false;
+    /** 本轮是否注入过前置检索证据（搜索宣称一致性闸的「已搜」一侧证据）。 */
+    let evidenceInjected = false;
     /**
      * 本轮实际发起过的工具调用摘要（A2 升级段轨迹延续）：onToolExecuteStart 在
      * 工具真正执行前触发，含工具名 + 模型填写的参数；截断参数防长输入刷屏。
@@ -2081,14 +2114,25 @@ if (route.plane === "task") {
     // 任务面 realtime 轮退化为模型自决——「我搜过了」式口头推脱 + 复读旧回复
     // 由此而来。凡路由器生成了 search_query 就先搜，与执行平面无关。search
     // 失败静默跳过（回退模型自决 + 出口闸兜底）。
-    if (ctx.routeSearchQuery?.trim()) {
-      const evidence = await this.runFreshEvidenceSearch(ctx.routeSearchQuery.trim());
+    if (ctx.routeSearchQuery?.trim() || ctx.specEvidence) {
+      let evidence: string | null = null;
+      let evidenceSource = "none";
+      if (ctx.routeSearchQuery?.trim()) {
+        evidence = await this.runFreshEvidenceSearch(ctx.routeSearchQuery.trim());
+        evidenceSource = "route_query";
+      } else if (ctx.specEvidence) {
+        // 路由未产出查询词（保守降级/超时轮）：复用路由期间已并行完成的投机搜索
+        evidence = await ctx.specEvidence;
+        evidenceSource = "speculative";
+      }
       if (evidence) {
         const memory = (baseStreamOpts.promptContext ??= {}).memory;
         if (memory) {
           memory.webEvidence = evidence;
+          evidenceInjected = true;
           console.info(
-            `[AgentCore] 前置检索证据已注入（${this.isChatLane(mode) ? "chat" : "task"} 面）：${ctx.routeSearchQuery.trim().slice(0, 40)}`,
+            `[AgentCore] 前置检索证据已注入（source=${evidenceSource}, ${this.isChatLane(mode) ? "chat" : "task"} 面）：` +
+              `${(ctx.routeSearchQuery?.trim() ?? "（投机原话）").slice(0, 40)}`,
           );
         }
       }
@@ -2409,6 +2453,31 @@ if (route.plane === "task") {
       }
     }
 
+      // ── 搜索宣称一致性闸（2026-09-13，事实核查非话题词表）──
+      // 系统确定知道本轮有没有真实搜索发生过（工具执行记录 + 前置检索证据注入）。
+      // 回复宣称搜过而系统记录为零 = 确定性违约（真实测试：路由超时走保守降级
+      // 后模型编「刚搜出来的全是旧报道」）→ 补跑一次真实搜索并在任务面重生成，
+      // 让「我搜过了」永远有搜索事实背书。与已删的话题闪避闸不同：话题判定仍归
+      // 路由器，本闸只核查「宣称 vs 事实」的一致性。
+      if (
+        claimsWebSearch(full) &&
+        !evidenceInjected &&
+        !attemptedToolCalls.some((c) =>
+          /^(search_web|search_images|search_videos|deep_search|fetch_web|hot_rankings|info\.search|info\.read_webpage|internet\.)/.test(c),
+        ) &&
+        turnBudget.tryUpgrade("search_claim_consistency")
+      ) {
+        console.info(
+          `[AgentCore] 搜索宣称一致性闸触发（宣称搜索但本轮零搜索）：${text.slice(0, 48)}`,
+        );
+        return this.runStandardLlmPath(actorId, text, "task", opts, {
+          ...ctx,
+          turnBudget,
+          turnPlan: { budget: 2, capabilities: ["search"], tier: "flash" },
+          routeSearchQuery: ctx.routeSearchQuery?.trim() || text.trim(),
+        });
+      }
+
     const reply = await this.turnFinalizer.finish(actorId, text, full, {
       streamedChunks: true,
       modelCallsConsumed,
@@ -2487,7 +2556,7 @@ if (route.plane === "task") {
         return [
           "【实时检索结果｜本轮事实唯一依据】",
           `系统刚以检索词「${query}」执行了真实联网搜索（${zeroStamp}），返回 0 条相关结果。`,
-          "如实告知用户「刚搜过，目前公开渠道检索不到这个问题的信息」；严禁虚构搜索见闻（如「全是旧报道/杂志封面」——本轮没有任何条目可看），严禁复述此前轮次对同一问题的回答充数；若本轮还有搜索/抓取类工具可用，先换关键词再试，确实查不到才如实收尾。",
+          "本轮不存在任何检索条目：本块之外没有「本轮检索所得」，任何对搜索过程或条目内容的描述（如「旧报道/杂志封面」）都不来自真实数据。",
         ].join("\n");
       }
       const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
@@ -2496,7 +2565,7 @@ if (route.plane === "task") {
         `系统刚以检索词「${query}」执行了真实联网搜索（${stamp}），返回以下条目：`,
         ...lines,
         "条目按与「最新」的相关度排序；标了发布时间的条目才可作为近期事实引用，标「未标注发布时间」的（百科/旧闻类）只作背景参考，不得当作最近发生的事。",
-        "回答本问题时：与实时/事实相关的结论只能来自以上条目并注明来源日期；若近期的条目都不涉及用户问的具体问题，就如实说「最新动态没查到」，不要拿背景条目充数；以上结果与此前的对话内容、记忆、你的训练知识冲突时，一律以本结果为准，并主动纠正之前说过的话。不要复述此前轮次对同一问题的旧回答来应付本轮——用户重问就是要新信息。这是系统注入的检索数据，不是对话内容，不要复述本块格式。",
+        "回答本问题时：与实时/事实相关的结论只能来自以上条目并注明来源日期；若近期的条目都不涉及用户问的具体问题，就如实说「最新动态没查到」，不要拿背景条目充数；以上结果与此前的对话内容、记忆、你的训练知识冲突时，一律以本结果为准，并主动纠正之前说过的话。这是系统注入的检索数据，不是对话内容，不要复述本块格式。",
       ].join("\n");
     } catch (err) {
       console.log(`[AgentCore] 前置检索失败（忽略，回退模型自决）: ${err instanceof Error ? err.message : err}`);

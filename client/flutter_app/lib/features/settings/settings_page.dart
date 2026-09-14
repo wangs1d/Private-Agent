@@ -7,6 +7,8 @@ import "../../core/config/api_config.dart";
 import "../../core/db/isar_local_history_store.dart";
 import "../../core/services/access_auth_api.dart";
 import "../../core/services/app_auto_start.dart";
+import "../../core/services/capability_api.dart";
+import "../../core/services/memory_api.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
 import "../../core/services/user_preferences_api.dart";
@@ -14,13 +16,15 @@ import "../../core/theme/app_theme.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
-enum _SettingsSection { briefing, security, phoneBridge, about }
+enum _SettingsSection { briefing, capabilities, memory, security, phoneBridge, about }
 
 /// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
 /// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
 ///
 /// 分区：
 ///  - 早安简报：开关 / 时间 / 播报方式 / 内容板块（UserPreferencesApi）
+///  - 能力：各能力域就绪状态 + 实验徽标（CapabilityApi，渐进式解锁卡片）
+///  - 关于我的记忆：查看/编辑/删除 Agent 记住的长期记忆与用户画像（MemoryApi）
 ///  - 设备绑定与安全：访问鉴权状态、配对码绑定、配对码签发、本机解绑
 ///  - 手机桥接（仅 Android）：Agent 远程访问本机 / 消息捕捉 / 定位回传
 ///  - 关于：服务地址、当前身份、本机设备标识
@@ -84,16 +88,77 @@ class _SettingsPageState extends State<SettingsPage> {
   int _captureQueueSize = 0;
   bool _captureLoading = true;
 
+  // —— 能力就绪状态（渐进式解锁卡片） ——
+  late final CapabilityApi _capabilityApi;
+  bool _capsLoading = true;
+  String? _capsError;
+  CapabilityOverview? _caps;
+
+  // —— 关于我的记忆（查看/编辑/删除） ——
+  late final MemoryApi _memoryApi;
+  bool _memLoading = true;
+  String? _memError;
+  List<MemoryItem> _memItems = const <MemoryItem>[];
+  String? _memProfile;
+  bool _memBusy = false;
+  final TextEditingController _memSearchController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
     _api = widget.api ?? UserPreferencesApi(baseUrl: ApiConfig.httpBase);
     _authApi = widget.authApi ?? AccessAuthApi();
+    _capabilityApi = CapabilityApi();
+    _memoryApi = MemoryApi();
     _timeController = TextEditingController(text: _briefingTime);
     _loadBriefingPrefs();
     _loadLocalBriefingSettings();
     _refreshAuthStatus();
     _refreshCaptureState();
+    _loadCapabilities();
+    _loadMemories();
+  }
+
+  Future<void> _loadCapabilities() async {
+    try {
+      final CapabilityOverview caps = await _capabilityApi.fetch();
+      if (!mounted) return;
+      setState(() {
+        _caps = caps;
+        _capsLoading = false;
+        _capsError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _capsLoading = false;
+        _capsError = "$e";
+      });
+    }
+  }
+
+  Future<void> _loadMemories() async {
+    try {
+      final String actorId = ApiConfig.effectiveActorId;
+      final List<MemoryItem> items = await _memoryApi.list(
+        actorId,
+        q: _memSearchController.text,
+      );
+      final String profile = await _memoryApi.profile(actorId);
+      if (!mounted) return;
+      setState(() {
+        _memItems = items;
+        _memProfile = profile;
+        _memLoading = false;
+        _memError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _memLoading = false;
+        _memError = "$e";
+      });
+    }
   }
 
   /// 加载开机自启与在座检测开关（Windows 本地状态）。
@@ -357,6 +422,8 @@ class _SettingsPageState extends State<SettingsPage> {
       String
     )>[
       (_SettingsSection.briefing, Icons.wb_sunny_outlined, "早安简报"),
+      (_SettingsSection.capabilities, Icons.widgets_outlined, "能力"),
+      (_SettingsSection.memory, Icons.psychology_outlined, "关于我的记忆"),
       (_SettingsSection.security, Icons.verified_user_outlined, "设备绑定与安全"),
       if (showPhoneBridge)
         (_SettingsSection.phoneBridge, Icons.smartphone_outlined, "手机桥接"),
@@ -460,12 +527,16 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildSectionContent() {
     final String title = switch (_section) {
       _SettingsSection.briefing => "早安简报",
+      _SettingsSection.capabilities => "能力",
+      _SettingsSection.memory => "关于我的记忆",
       _SettingsSection.security => "设备绑定与安全",
       _SettingsSection.phoneBridge => "手机桥接",
       _SettingsSection.about => "关于",
     };
     final Widget card = switch (_section) {
       _SettingsSection.briefing => _buildBriefingCard(),
+      _SettingsSection.capabilities => _buildCapabilitiesCard(),
+      _SettingsSection.memory => _buildMemoryCard(),
       _SettingsSection.security => _buildSecurityCard(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
       _SettingsSection.about => _buildAboutCard(),
@@ -495,6 +566,389 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       ),
     );
+  }
+
+  // ------------------------------------------------------------------ //
+  // 能力（渐进式解锁卡片）
+  // ------------------------------------------------------------------ //
+
+  /// 能力状态卡：各能力域就绪情况 + 实验徽标。
+  /// 内测期（configSource=byok）未配置项给出 env 变量引导；切平台供 key 后
+  /// 服务端会把 configSource 置为 platform，卡片自动变为"已包含"文案。
+  Widget _buildCapabilitiesCard() {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.widgets_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("能力状态", style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 20),
+                  tooltip: "刷新",
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () {
+                    setState(() => _capsLoading = true);
+                    _loadCapabilities();
+                  },
+                ),
+              ],
+            ),
+            if (_capsLoading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_capsError != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  "加载失败：$_capsError",
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              )
+            else ...<Widget>[
+              const SizedBox(height: 4),
+              Text(
+                _caps?.platformProvided == true
+                    ? "能力由平台统一提供，无需自行配置。"
+                    : "内测期：未就绪的能力需要在服务端 .env 中补齐配置后重启生效。",
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                "${_caps?.readyCount ?? 0} / ${_caps?.capabilities.length ?? 0} 项就绪",
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+              ),
+              const Divider(height: 20),
+              for (final CapabilityStatus c in _caps?.capabilities ?? const <CapabilityStatus>[])
+                _capabilityRow(c),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _capabilityRow(CapabilityStatus c) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(
+            c.ready ? Icons.check_circle_outline : Icons.help_outline,
+            size: 20,
+            color: c.ready ? Colors.green.shade600 : cs.tertiary,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Flexible(child: Text(c.label, style: Theme.of(context).textTheme.bodyMedium)),
+                    if (c.experimental) ...<Widget>[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: cs.tertiaryContainer,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          "实验",
+                          style: Theme.of(context).textTheme.labelSmall?.copyWith(color: cs.onTertiaryContainer),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(c.description, style: Theme.of(context).textTheme.bodySmall),
+                if (!c.ready && c.hints.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 2),
+                  for (final String hint in c.hints)
+                    Text(
+                      "· $hint",
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(color: cs.tertiary),
+                    ),
+                ]
+                else if (c.note != null)
+                  Text(c.note!, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.outline)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------------ //
+  // 关于我的记忆
+  // ------------------------------------------------------------------ //
+
+  /// 记忆管理卡：Agent 记住的长期记忆可见、可改、可删；
+  /// "我对用户的理解"（USER_PROFILE.md）只读展示。
+  Widget _buildMemoryCard() {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.psychology_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("记忆管理", style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                if (_memBusy)
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 20),
+                  tooltip: "刷新",
+                  visualDensity: VisualDensity.compact,
+                  onPressed: _memBusy
+                      ? null
+                      : () {
+                          setState(() => _memLoading = true);
+                          _loadMemories();
+                        },
+                ),
+              ],
+            ),
+            Text(
+              "这些是 Agent 记住的关于你的内容。可直接修改或删除，纠正后立即生效；"
+              "Agent 引用记忆时会注明出处，发现记错了随时来改。",
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _memSearchController,
+              decoration: InputDecoration(
+                hintText: "搜索记忆关键词",
+                isDense: true,
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: _memSearchController.text.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.clear, size: 18),
+                        onPressed: () {
+                          _memSearchController.clear();
+                          setState(() => _memLoading = true);
+                          _loadMemories();
+                        },
+                      ),
+                border: const OutlineInputBorder(),
+              ),
+              onSubmitted: (_) {
+                setState(() => _memLoading = true);
+                _loadMemories();
+              },
+            ),
+            const SizedBox(height: 8),
+            if (_memProfile != null && _memProfile!.trim().isNotEmpty)
+              Theme(
+                data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                child: ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  childrenPadding: const EdgeInsets.only(bottom: 8),
+                  title: Text("我对用户的理解", style: Theme.of(context).textTheme.bodyMedium),
+                  children: <Widget>[
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: SelectableText(
+                        _memProfile!,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const Divider(height: 20),
+            if (_memLoading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_memError != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  "加载失败：$_memError",
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              )
+            else if (_memItems.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Text(
+                  "还没有长期记忆。聊得越多，记得越多。",
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              )
+            else
+              ..._memItems.map(_memoryRow),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _memoryRow(MemoryItem item) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  item.content,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                if (item.updatedAt != null || item.source != null)
+                  Text(
+                    <String?>[
+                      item.source,
+                      (item.updatedAt ?? item.createdAt)?.split("T").first,
+                    ].whereType<String>().where((s) => s.isNotEmpty).join(" · "),
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(color: cs.outline),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.edit_outlined, size: 18),
+            tooltip: "修改",
+            visualDensity: VisualDensity.compact,
+            onPressed: _memBusy ? null : () => _editMemory(item),
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline, size: 18),
+            tooltip: "删除",
+            visualDensity: VisualDensity.compact,
+            onPressed: _memBusy ? null : () => _deleteMemory(item),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _editMemory(MemoryItem item) async {
+    final TextEditingController controller = TextEditingController(text: item.content);
+    final bool? saved = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: const Text("修改记忆"),
+        content: TextField(
+          controller: controller,
+          maxLines: 4,
+          autofocus: true,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            hintText: "记住的内容",
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text("取消"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text("保存"),
+          ),
+        ],
+      ),
+    );
+    if (saved != true || !mounted) return;
+    final String content = controller.text.trim();
+    if (content.isEmpty || content == item.content) return;
+    setState(() => _memBusy = true);
+    try {
+      await _memoryApi.update(ApiConfig.effectiveActorId, item.id, content);
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("已更新，Agent 下次引用即为新内容")),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text("更新失败：$e")),
+      );
+    } finally {
+      if (mounted) setState(() => _memBusy = false);
+    }
+    _loadMemories();
+  }
+
+  Future<void> _deleteMemory(MemoryItem item) async {
+    final bool? del = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: const Text("删除记忆"),
+        content: Text("确定让 Agent 忘记「${item.content}」吗？"),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text("取消"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text("删除"),
+          ),
+        ],
+      ),
+    );
+    if (del != true || !mounted) return;
+    setState(() => _memBusy = true);
+    try {
+      await _memoryApi.delete(ApiConfig.effectiveActorId, item.id);
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("已删除这条记忆")),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text("删除失败：$e")),
+      );
+    } finally {
+      if (mounted) setState(() => _memBusy = false);
+    }
+    _loadMemories();
   }
 
   // ------------------------------------------------------------------ //

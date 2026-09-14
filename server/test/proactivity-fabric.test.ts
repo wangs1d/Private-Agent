@@ -310,6 +310,26 @@ test("模板: 各 kind 渲染非空且带上下文", () => {
 
 // ─── 直达车道（hub → 管道，全程零 LLM）────
 
+test("评估器状态持久化: 跨实例恢复必须穿透 register（重启不失忆回归）", async () => {
+  const clock = new MockClock(MockClock.localAt(10, 0));
+  const dir = tmpDir();
+  // 实例 1：跑一次评估产生状态（work_marathon 的 since）
+  const chain1 = new EvaluatorChain({ dataPath: dir, nowFn: () => clock.t, flushIntervalMs: 60_000 });
+  chain1.register(buildBuiltinEvaluators({}).find((e) => e.id === "work_marathon")!);
+  chain1.handleSignal({ stream: "screen", at: clock.t, fingerprint: "s1", salience: "low", payload: { kind: "coding" } });
+  await chain1.flush();
+  chain1.stop(); // 强制落盘
+  // 实例 2：新构造 + register → 状态必须还在（曾因 register 清空 Map 而丢失）
+  const chain2 = new EvaluatorChain({ dataPath: dir, nowFn: () => clock.t, flushIntervalMs: 60_000 });
+  chain2.register(buildBuiltinEvaluators({}).find((e) => e.id === "work_marathon")!);
+  const probe = chain2.probes().find((x) => x.id === "work_marathon")!;
+  assert.equal(probe.stateKeys, 1, "恢复的 since 状态必须穿透 register 存活");
+  // 事件去重指纹同样跨实例生效：同 dedupKey 重发被拦
+  let fired = 0;
+  chain2.onEvent(() => fired += 1);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("直达车道: hub.submitIntent → 模板直投管道（带 directText，不触 LLM）", async () => {
   const delivered: Array<{ kind: string; text: string; hasDeliveryId: boolean }> = [];
   const hub = new ProactivityHub({

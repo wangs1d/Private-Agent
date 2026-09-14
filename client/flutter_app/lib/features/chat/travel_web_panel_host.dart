@@ -14,7 +14,12 @@ import "travel_web_panel_controller.dart";
 /// 打开/关闭面板、进出全屏都不再重新加载地图（HTML + MapLibre 常驻），
 /// 仅在 loadPlan 时切换数据。
 ///
-/// 预加载：[preload] 在 App 启动即后台初始化（隐藏渲染），首次打开面板零等待。
+/// 预加载：[preload] 后台初始化（隐藏渲染），首次打开面板零等待。
+///
+/// ⚠️ 只允许在「确定要用 WebView 的时机」调用（行程独立子进程启动时）。
+/// 主应用禁止在启动/首页 initState 里预加载：WebView2 一旦创建就会产生
+/// 内部顶层窗口，若滞留屏幕会变成透明"幽灵窗"拦截其他应用的点击
+/// （曾实测盖住左半屏）；主进程路径由 TravelPlanPanel 挂载时懒加载兜底。
 class TravelWebPanelHost {
   TravelWebPanelHost._();
 

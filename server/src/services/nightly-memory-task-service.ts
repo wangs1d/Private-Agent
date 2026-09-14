@@ -560,6 +560,7 @@ export class NightlyMemoryTaskService {
               corrections: [],
               understandings: [],
               facts: [],
+              referents: [],
               importance: highSignal ? 0.7 : 0.3,
             };
             await this.narrativeMemory!

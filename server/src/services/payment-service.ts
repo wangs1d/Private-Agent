@@ -1,5 +1,15 @@
 import crypto from "node:crypto";
-import { getPaymentConfig, type PaymentConfig } from "../config/payment-config.js";
+import {
+  getPaymentConfig,
+  getPaymentGuardrailConfig,
+  type PaymentConfig,
+} from "../config/payment-config.js";
+import {
+  getPaymentOrderLedger,
+  type LedgerModeStats,
+  type LedgerOrderRow,
+  type PaymentOrderStatus,
+} from "./payment-order-ledger.js";
 
 export interface PaymentOrderRequest {
   amount: number;
@@ -100,6 +110,67 @@ export class PaymentService {
     );
   }
 
+  /** 该 provider 本次下单实际走的模式（配置 mock 或凭证缺失都按 mock）。 */
+  private modeFor(provider: "wechat" | "alipay"): "mock" | "live" {
+    if (provider === "wechat") {
+      return this.wechatMode() === "mock" || !this.wechatCredentialsAvailable() ? "mock" : "live";
+    }
+    return this.alipayMode() === "mock" || !this.alipayCredentialsAvailable() ? "mock" : "live";
+  }
+
+  /** 下单成功即落台账（mock/live 都记），管理后台才有完整订单视图。 */
+  private recordLedger(result: PaymentOrderResult, mode: "mock" | "live"): void {
+    getPaymentOrderLedger().record({
+      outTradeNo: result.outTradeNo,
+      provider: result.provider,
+      method: result.method,
+      amount: result.amount,
+      description: result.description,
+      mode,
+      status: result.status,
+      createdAt: result.createdAt,
+      updatedAt: result.createdAt,
+      paidAt: null,
+    });
+  }
+
+  /**
+   * 支付护栏检查（返回 null = 放行，返回字符串 = 拦截原因）。
+   * 类别取 metadata.category（payment.create_order 已把显式 category 参数并入）。
+   */
+  private checkGuardrails(req: PaymentOrderRequest): string | null {
+    const guardrail = getPaymentGuardrailConfig();
+    const category = req.metadata?.category?.trim() ?? "";
+
+    if (category && !guardrail.allowedCategories.includes("*") && !guardrail.allowedCategories.includes(category)) {
+      return (
+        `支付护栏：业务类别「${category}」未授权代付（当前放行：${guardrail.allowedCategories.join("、")}）。` +
+        `请先向用户确认，由用户在服务端 .env 的 PAYMENT_ALLOWED_CATEGORIES 中放行后再试。`
+      );
+    }
+
+    if (guardrail.maxSingleAmountCny > 0 && req.amount > guardrail.maxSingleAmountCny) {
+      return (
+        `支付护栏：单笔上限 ${guardrail.maxSingleAmountCny} 元，本次 ${req.amount} 元。` +
+        `请先向用户说明，确认后由用户调高 PAYMENT_MAX_SINGLE_CNY 再试，不要自行拆单绕过。`
+      );
+    }
+
+    if (guardrail.dailyBudgetCny > 0) {
+      const dayStart = new Date();
+      dayStart.setHours(0, 0, 0, 0);
+      const usedToday = getPaymentOrderLedger().sumAmountSince(dayStart.toISOString());
+      if (usedToday + req.amount > guardrail.dailyBudgetCny) {
+        return (
+          `支付护栏：今日代付累计已达 ${usedToday.toFixed(2)} 元（日预算 ${guardrail.dailyBudgetCny} 元），` +
+          `本次 ${req.amount} 元将超出。请告知用户，确认后由用户调高 PAYMENT_DAILY_BUDGET_CNY 再试。`
+        );
+      }
+    }
+
+    return null;
+  }
+
   async createOrder(req: PaymentOrderRequest): Promise<PaymentOrderResult> {
     if (req.amount <= 0) {
       return {
@@ -115,13 +186,34 @@ export class PaymentService {
       };
     }
 
+    // 支付护栏（用户可见的硬性边界）：类别授权 → 单笔上限 → 当日累计。
+    // 拦截信息同时写给用户和 Agent：Agent 据此先向用户确认而不是重试。
+    const block = this.checkGuardrails(req);
+    if (block) {
+      return {
+        ok: false,
+        outTradeNo: "",
+        provider: req.provider,
+        method: req.method,
+        amount: req.amount,
+        description: req.description,
+        status: "error",
+        createdAt: new Date().toISOString(),
+        error: block,
+      };
+    }
+
     const outTradeNo = req.outTradeNo || generateOutTradeNo();
 
     if (req.provider === "wechat") {
-      return this.createWechatOrder(req, outTradeNo);
+      const result = await this.createWechatOrder(req, outTradeNo);
+      if (result.ok) this.recordLedger(result, this.modeFor("wechat"));
+      return result;
     }
     if (req.provider === "alipay") {
-      return this.createAlipayOrder(req, outTradeNo);
+      const result = await this.createAlipayOrder(req, outTradeNo);
+      if (result.ok) this.recordLedger(result, this.modeFor("alipay"));
+      return result;
     }
 
     return {
@@ -407,9 +499,31 @@ export class PaymentService {
     }
 
     if (provider === "wechat") {
-      return this.queryWechatOrder(outTradeNo);
+      const result = await this.queryWechatOrder(outTradeNo);
+      if (result.ok) this.syncLedgerFromQuery(result);
+      return result;
     }
-    return this.queryAlipayOrder(outTradeNo);
+    const result = await this.queryAlipayOrder(outTradeNo);
+    if (result.ok) this.syncLedgerFromQuery(result);
+    return result;
+  }
+
+  /**
+   * live 订单渠道轮询拿到终态时回写台账。台账是本地副本，
+   * 渠道侧仍是事实源；未落台账的旧单号更新自然 no-op。
+   */
+  private syncLedgerFromQuery(result: PaymentQueryResult): void {
+    const state = result.tradeState;
+    let status: PaymentOrderStatus | null = null;
+    if (state === "SUCCESS" || state === "TRADE_SUCCESS" || state === "TRADE_FINISHED") {
+      status = "paid";
+    } else if (state === "CLOSED" || state === "TRADE_CLOSED" || state === "REVOKED") {
+      status = "closed";
+    } else if (state === "REFUND") {
+      status = "refunded";
+    }
+    if (!status) return;
+    getPaymentOrderLedger().updateStatus(result.outTradeNo, status, result.payTime);
   }
 
   private async queryWechatOrder(outTradeNo: string): Promise<PaymentQueryResult> {
@@ -569,6 +683,7 @@ export class PaymentService {
     if (!order) return false;
     order.status = "paid";
     this.mockOrders.set(outTradeNo, order);
+    getPaymentOrderLedger().updateStatus(outTradeNo, "paid", new Date().toISOString());
     return true;
   }
 
@@ -577,6 +692,7 @@ export class PaymentService {
     if (!order) return false;
     order.status = "closed";
     this.mockOrders.set(outTradeNo, order);
+    getPaymentOrderLedger().updateStatus(outTradeNo, "closed");
     return true;
   }
 
@@ -584,28 +700,35 @@ export class PaymentService {
     return Array.from(this.mockOrders.values());
   }
 
+  /** 管理后台订单列表：从持久台账读，mock/live 都在。 */
+  listOrders(limit = 200): LedgerOrderRow[] {
+    return getPaymentOrderLedger().list(limit);
+  }
+
   /**
    * 订单统计（管理概览）：下单量即付费意愿，已支付金额即收入。
-   * 本地只落 mock 订单；live 模式订单在支付渠道侧，本地无副本可统计。
+   * 数据来自持久台账；byMode 拆分模拟/真实订单 —— live 订单事实源在渠道侧，
+   * 本地为轮询回写的副本，支付页需按模式区分展示。
    */
   orderStats(): {
     total: number;
     pending: number;
     paid: number;
     closed: number;
+    refunded: number;
     paidAmount: number;
+    byMode: { mock: LedgerModeStats; live: LedgerModeStats };
   } {
-    const stats = { total: 0, pending: 0, paid: 0, closed: 0, paidAmount: 0 };
-    for (const order of this.mockOrders.values()) {
-      stats.total++;
-      if (order.status === "pending") stats.pending++;
-      else if (order.status === "paid") {
-        stats.paid++;
-        stats.paidAmount += order.amount;
-      } else if (order.status === "closed") stats.closed++;
-    }
-    stats.paidAmount = Math.round(stats.paidAmount * 100) / 100;
-    return stats;
+    const all = getPaymentOrderLedger().stats();
+    return {
+      total: all.total.total,
+      pending: all.total.pending,
+      paid: all.total.paid,
+      closed: all.total.closed,
+      refunded: all.total.refunded,
+      paidAmount: all.total.paidAmount,
+      byMode: { mock: all.mock, live: all.live },
+    };
   }
 }
 

@@ -36,3 +36,39 @@ export function getPaymentConfig(env: NodeJS.ProcessEnv = process.env): PaymentC
     paymentNotifyBaseUrl: env.PAYMENT_NOTIFY_BASE_URL?.trim() || "",
   };
 }
+
+/**
+ * 支付护栏（用户可见的硬性边界，PaymentService.createOrder 入口强制执行）：
+ * - 单笔上限 / 当日累计上限：0 = 不限；默认开启，防 Agent 失控下单。
+ * - 类别授权：只放行列出的业务类别（"*" = 全部），未授权时 Agent 必须先问用户。
+ * 差旅订票链路另有独立限额（BOOKING_MAX_AMOUNT_CNY / BOOKING_DAILY_BUDGET_CNY），
+ * 两层护栏互不替代。
+ */
+export interface PaymentGuardrailConfig {
+  maxSingleAmountCny: number;
+  dailyBudgetCny: number;
+  /** 允许代付的业务类别；["*"] = 全部允许 */
+  allowedCategories: string[];
+}
+
+function readAmountEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw.trim());
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+export function getPaymentGuardrailConfig(env: NodeJS.ProcessEnv = process.env): PaymentGuardrailConfig {
+  const rawCategories = env.PAYMENT_ALLOWED_CATEGORIES?.trim() ?? "";
+  const allowedCategories =
+    rawCategories === "" || rawCategories === "*"
+      ? ["*"]
+      : rawCategories
+          .split(/[,，]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+  return {
+    maxSingleAmountCny: readAmountEnv(env.PAYMENT_MAX_SINGLE_CNY, 1000),
+    dailyBudgetCny: readAmountEnv(env.PAYMENT_DAILY_BUDGET_CNY, 3000),
+    allowedCategories,
+  };
+}

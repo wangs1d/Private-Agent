@@ -2,7 +2,9 @@ import { createWriteStream } from "node:fs";
 import { mkdir, readdir, stat, unlink, rename } from "node:fs/promises";
 import { join, basename, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
+
+import { adminAudit, requireAdmin } from "./admin-auth.js";
 
 /**
  * 下载文件存储目录。
@@ -13,17 +15,6 @@ function downloadsDir(): string {
   // Docker 容器内默认路径
   if (process.env.NODE_ENV === "production") return resolve("/app/downloads");
   return resolve(import.meta.dirname ?? __dirname, "../../../downloads");
-}
-
-/** 管理员 token：环境变量 ADMIN_UPLOAD_TOKEN */
-function adminToken(): string {
-  return process.env.ADMIN_UPLOAD_TOKEN ?? "admin-upload-secret";
-}
-
-/** 校验管理员身份 */
-function checkAdmin(req: FastifyRequest): boolean {
-  const token = req.headers["x-admin-token"] as string | undefined;
-  return token === adminToken();
 }
 
 /** 安全文件名 */
@@ -37,7 +28,7 @@ export function registerDownloadRoutes(app: FastifyInstance): void {
   const dir = downloadsDir();
 
   /** GET /api/admin/downloads/list — 列出可下载文件 */
-  app.get("/api/admin/downloads/list", async (_req, reply) => {
+  app.get("/api/admin/downloads/list", { preHandler: requireAdmin }, async (_req, reply) => {
     try {
       await mkdir(dir, { recursive: true });
       const entries = await readdir(dir, { withFileTypes: true });
@@ -63,11 +54,7 @@ export function registerDownloadRoutes(app: FastifyInstance): void {
   });
 
   /** POST /api/admin/downloads/upload — 上传桌面应用文件 */
-  app.post("/api/admin/downloads/upload", async (req, reply) => {
-    if (!checkAdmin(req)) {
-      return reply.code(401).send("Unauthorized: invalid admin token");
-    }
-
+  app.post("/api/admin/downloads/upload", { preHandler: requireAdmin }, async (req, reply) => {
     const data = await req.file();
     if (!data) {
       return reply.code(400).send("No file provided");
@@ -103,7 +90,9 @@ export function registerDownloadRoutes(app: FastifyInstance): void {
 
       await rename(tempPath, targetPath);
 
-      app.log.info(`download uploaded: ${finalName} (${(await stat(targetPath)).size} bytes)`);
+      const size = (await stat(targetPath)).size;
+      app.log.info(`download uploaded: ${finalName} (${size} bytes)`);
+      await adminAudit("downloads.upload", { file: finalName, size }, req);
       return reply.send({ ok: true, file: finalName, url: `/downloads/${encodeURIComponent(finalName)}` });
     } catch (err) {
       app.log.error(err, "download upload failed");
@@ -112,20 +101,21 @@ export function registerDownloadRoutes(app: FastifyInstance): void {
   });
 
   /** DELETE /api/admin/downloads/:file — 删除文件 */
-  app.delete<{ Params: { file: string } }>("/api/admin/downloads/:file", async (req, reply) => {
-    if (!checkAdmin(req)) {
-      return reply.code(401).send("Unauthorized: invalid admin token");
-    }
+  app.delete<{ Params: { file: string } }>(
+    "/api/admin/downloads/:file",
+    { preHandler: requireAdmin },
+    async (req, reply) => {
+      const name = safeName(req.params.file);
+      const path = join(dir, name);
 
-    const name = safeName(req.params.file);
-    const path = join(dir, name);
-
-    try {
-      await unlink(path);
-      app.log.info(`download deleted: ${name}`);
-      return reply.send({ ok: true });
-    } catch {
-      return reply.code(404).send("File not found");
-    }
-  });
+      try {
+        await unlink(path);
+        app.log.info(`download deleted: ${name}`);
+        await adminAudit("downloads.delete", { file: name }, req);
+        return reply.send({ ok: true });
+      } catch {
+        return reply.code(404).send("File not found");
+      }
+    },
+  );
 }

@@ -37,13 +37,13 @@ test("频控器：新场景 kind 注册与冷却配置", () => {
   const t1Plus5h = new Date(t1.getTime() + 5 * 60 * 60 * 1000);
   assert.equal(governor.canTrigger(ACTOR, "life_reminder", "medium", t1Plus5h).allowed, true);
 
-  // monthly_report：报告类每日 1 次（24h 冷却）
+  // monthly_report：报告类每日 1 次（日历日语义：同一天拦截，跨零点恢复）
   const t2 = new Date("2026-08-29T09:00:00");
   governor.record(ACTOR, "monthly_report", t2);
-  const t2Plus23h = new Date(t2.getTime() + 23 * 60 * 60 * 1000);
-  assert.equal(governor.canTrigger(ACTOR, "monthly_report", "medium", t2Plus23h).allowed, false);
-  const t2Plus25h = new Date(t2.getTime() + 25 * 60 * 60 * 1000);
-  assert.equal(governor.canTrigger(ACTOR, "monthly_report", "medium", t2Plus25h).allowed, true);
+  const t2Plus2h = new Date(t2.getTime() + 2 * 60 * 60 * 1000);
+  assert.equal(governor.canTrigger(ACTOR, "monthly_report", "medium", t2Plus2h).allowed, false);
+  const t2NextDay = new Date("2026-08-30T08:00:00");
+  assert.equal(governor.canTrigger(ACTOR, "monthly_report", "medium", t2NextDay).allowed, true);
 });
 
 // ── 2. ProactivitySuppressionStore ────────────────────

@@ -82,6 +82,11 @@ class ChatPage extends StatefulWidget {
 
     /// 取消后台任务回调（回执 hover 取消按钮；null 时仅展示无取消入口）
     this.onCancelBackgroundTask,
+
+    /// 当前仍在排队、等待 Agent 依次处理的用户消息 id 集合。
+    /// 命中的用户气泡在时间行显示「排队中」徽标，服务端开始处理该条
+    /// （chat.turn_started 晋级）后由父组件移出集合，徽标随之消失。
+    this.queuedMessageIds = const <String>{},
   });
 
   final List<ChatMessage> messages;
@@ -155,6 +160,9 @@ class ChatPage extends StatefulWidget {
 
   /// 取消后台任务回调（回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
+
+  /// 当前仍在排队、等待 Agent 依次处理的用户消息 id 集合（父组件维护）
+  final Set<String> queuedMessageIds;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -1046,6 +1054,7 @@ class _ChatPageState extends State<ChatPage>
       cs: cs,
       mainMessage: mainMessage,
       isUser: isUser,
+      isQueued: widget.queuedMessageIds.contains(mainMessage.messageId),
       contentSummary: contentSummary,
       agentName: widget.agentName,
       agentAvatarUrl: widget.agentAvatarUrl,
@@ -1659,6 +1668,7 @@ class _HoverableMessageWidget extends StatelessWidget {
     required this.cs,
     required this.mainMessage,
     required this.isUser,
+    required this.isQueued,
     required this.cardPadding,
     this.contentSummary,
     this.agentName,
@@ -1694,6 +1704,9 @@ class _HoverableMessageWidget extends StatelessWidget {
   final ColorScheme cs;
   final ChatMessage mainMessage;
   final bool isUser;
+
+  /// 该用户消息是否仍在排队（等待 Agent 依次处理），控制「排队中」徽标
+  final bool isQueued;
   final EdgeInsets cardPadding;
   final ContentSummaryParseResult? contentSummary;
   final String? agentName;
@@ -1745,6 +1758,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       cs: cs,
       mainMessage: mainMessage,
       isUser: isUser,
+      isQueued: isQueued,
       cardPadding: cardPadding,
       contentSummary: contentSummary,
       agentName: agentName,
@@ -1775,6 +1789,7 @@ class _HoverableMessageContent extends StatefulWidget {
     required this.cs,
     required this.mainMessage,
     required this.isUser,
+    required this.isQueued,
     required this.cardPadding,
     this.contentSummary,
     this.agentName,
@@ -1800,6 +1815,9 @@ class _HoverableMessageContent extends StatefulWidget {
   final ColorScheme cs;
   final ChatMessage mainMessage;
   final bool isUser;
+
+  /// 该用户消息是否仍在排队（等待 Agent 依次处理），控制「排队中」徽标
+  final bool isQueued;
   final EdgeInsets cardPadding;
   final ContentSummaryParseResult? contentSummary;
   final String? agentName;
@@ -2080,6 +2098,23 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     );
 
     if (widget.isUser) {
+      // 排队中徽标：处理中收到的新消息按发送顺序排队，逐条处理；
+      // 服务端开始处理该条（chat.turn_started 晋级）后父组件会移出集合。
+      if (widget.isQueued) {
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 2, right: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.schedule, size: 11, color: cs.onSurfaceVariant),
+              const SizedBox(width: 3),
+              Text("排队中", style: timeStyle),
+              const SizedBox(width: 6),
+              Text(timeStr, style: timeStyle),
+            ],
+          ),
+        );
+      }
       return Padding(
         padding: const EdgeInsets.only(bottom: 2, right: 4),
         child: Text(timeStr, style: timeStyle),

@@ -1,24 +1,30 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
+import Database from "better-sqlite3";
+import type { Database as SqliteDatabase } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { resolveActorId } from "../../agent/actor-id.js";
-import { writeJsonAtomic } from "../../storage/atomic-json.js";
+import { adminAudit, isAdminRequest } from "./admin-auth.js";
 
 /**
  * 帮助与反馈：客户端反馈的唯一落点。
  *
- * 私有化部署下没有第三方云服务，反馈直接落到服务端 data/feedback.json，
- * 管理员（部署者本人）通过 GET /api/feedback 查看全部反馈并流转状态；
- * 客户端只查自己提交的记录（scope=actorId 过滤），形成提交→处理→回复的闭环。
+ * 存储为 SQLite（缺省 data/feedback.db，环境变量 FEEDBACK_DB 覆盖），
+ * 不再是 500 条环形上限的 JSON 文件 —— 旧文件在首次打开且表为空时整表导入，
+ * 原文件保留作备份不删除。
+ *
+ * 权限边界：提交（POST /api/feedback）与按身份查询自己的反馈
+ * （GET /api/feedback?actorId=…，客户端「我的反馈」）保持开放；
+ * 全量列表与状态流转是管理操作，须携带 x-admin-token
+ * （之前无鉴权，任何人可看全部反馈并改状态）。
  */
 
 const FEEDBACK_TYPES = new Set(["bug", "suggestion", "other"]);
 const FEEDBACK_STATUSES = new Set(["open", "processing", "resolved"]);
-const MAX_RECORDS = 500;
 const MAX_DIAGNOSTIC_ENTRIES = 30;
 
 type FeedbackType = "bug" | "suggestion" | "other";
@@ -38,10 +44,6 @@ type FeedbackRecord = {
   diagnostics: Record<string, string | number | boolean>;
   createdAt: string;
   updatedAt: string;
-};
-
-type FeedbackStore = {
-  items: FeedbackRecord[];
 };
 
 const submitBodySchema = z.object({
@@ -64,11 +66,12 @@ const statusBodySchema = z.object({
 const listQuerySchema = z.object({
   userId: z.string().optional(),
   sessionId: z.string().optional(),
-  /** 传入时只返回该身份的反馈（客户端「我的反馈」）；缺省返回全部（管理端）。 */
+  /** 传入时只返回该身份的反馈（客户端「我的反馈」）；缺省为管理端全量列表（需管理员令牌）。 */
   actorId: z.string().optional(),
   status: z.string().optional(),
   type: z.string().optional(),
-  limit: z.coerce.number().int().positive().max(200).optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+  offset: z.coerce.number().int().nonnegative().optional(),
 });
 
 /** 诊断信息只收标量、限量限长：反馈通道不该成为任意数据的倾倒口。 */
@@ -91,48 +94,221 @@ function sanitizeDiagnostics(
   return out;
 }
 
+function feedbackDbPath(): string {
+  return process.env.FEEDBACK_DB?.trim() || join(process.cwd(), "data", "feedback.db");
+}
+
+function legacyJsonPath(): string {
+  return join(process.cwd(), "data", "feedback.json");
+}
+
 class FeedbackStoreManager {
-  private store: FeedbackStore | null = null;
-  private readonly filePath = join(process.cwd(), "data", "feedback.json");
+  private db: SqliteDatabase | null = null;
+  private imported = false;
 
-  async load(): Promise<FeedbackStore> {
-    if (this.store) return this.store;
-    let raw: string | undefined;
+  private open(): SqliteDatabase | null {
+    if (this.db) return this.db;
     try {
-      raw = await readFile(this.filePath, "utf8");
+      const file = feedbackDbPath();
+      mkdirSync(dirname(file), { recursive: true });
+      const db = new Database(file);
+      db.pragma("journal_mode = WAL");
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS feedback (
+          id             TEXT PRIMARY KEY,
+          type           TEXT NOT NULL,
+          title          TEXT NOT NULL,
+          description    TEXT NOT NULL,
+          contact        TEXT,
+          status         TEXT NOT NULL,
+          reply_note     TEXT,
+          actor_id       TEXT NOT NULL,
+          client_version TEXT,
+          platform       TEXT,
+          diagnostics    TEXT,
+          created_at     TEXT NOT NULL,
+          updated_at     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_feedback_actor ON feedback(actor_id);
+      `);
+      this.db = db;
+      this.importLegacyJsonOnce(db);
+      return db;
+    } catch (err) {
+      console.error("[feedback] open sqlite failed:", err);
+      return null;
+    }
+  }
+
+  /** 首次打开且表为空时导入旧 data/feedback.json，原文件保留作备份。 */
+  private importLegacyJsonOnce(db: SqliteDatabase): void {
+    if (this.imported) return;
+    this.imported = true;
+    try {
+      const count = db.prepare("SELECT COUNT(*) AS c FROM feedback").get() as { c: number };
+      if (count.c > 0) return;
+      const raw = readFileSync(legacyJsonPath(), "utf8");
+      const parsed = JSON.parse(raw) as { items?: FeedbackRecord[] };
+      const items = Array.isArray(parsed.items) ? parsed.items : [];
+      if (!items.length) return;
+      const insert = db.prepare(`
+        INSERT INTO feedback (id, type, title, description, contact, status, reply_note,
+                              actor_id, client_version, platform, diagnostics, created_at, updated_at)
+        VALUES (@id, @type, @title, @description, @contact, @status, @replyNote,
+                @actorId, @clientVersion, @platform, @diagnosticsJson, @createdAt, @updatedAt)
+      `);
+      const insertAll = db.transaction((records: FeedbackRecord[]) => {
+        for (const r of records) {
+          if (!r?.id) continue;
+          insert.run({
+            id: r.id,
+            type: r.type ?? "other",
+            title: r.title ?? "",
+            description: r.description ?? "",
+            contact: r.contact ?? null,
+            status: r.status ?? "open",
+            replyNote: r.replyNote ?? null,
+            actorId: r.actorId ?? "",
+            clientVersion: r.clientVersion ?? null,
+            platform: r.platform ?? null,
+            diagnosticsJson: JSON.stringify(r.diagnostics ?? {}),
+            createdAt: r.createdAt ?? new Date().toISOString(),
+            updatedAt: r.updatedAt ?? r.createdAt ?? new Date().toISOString(),
+          });
+        }
+      });
+      insertAll(items);
+      console.log(`[feedback] imported ${items.length} legacy records from data/feedback.json`);
     } catch {
-      // 首次启动没有数据文件
+      // 旧文件不存在或损坏：跳过导入
     }
-    let items: FeedbackRecord[] = [];
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw) as Partial<FeedbackStore>;
-        items = Array.isArray(parsed.items) ? parsed.items : [];
-      } catch (error) {
-        console.error("[feedback] load failed:", error);
-      }
-    }
-    this.store = { items };
-    return this.store;
   }
 
-  async persist(): Promise<void> {
-    if (!this.store) return;
-    await writeJsonAtomic(this.filePath, this.store);
+  async add(record: FeedbackRecord): Promise<void> {
+    const db = this.open();
+    if (!db) return;
+    db.prepare(`
+      INSERT INTO feedback (id, type, title, description, contact, status, reply_note,
+                            actor_id, client_version, platform, diagnostics, created_at, updated_at)
+      VALUES (@id, @type, @title, @description, @contact, @status, @replyNote,
+              @actorId, @clientVersion, @platform, @diagnosticsJson, @createdAt, @updatedAt)
+    `).run((() => {
+      // diagnostics 是对象（非 SQLite 基元），序列化进 @diagnosticsJson，不进参数展开
+      const { diagnostics, ...rest } = record;
+      return { ...rest, diagnosticsJson: JSON.stringify(diagnostics) };
+    })());
   }
 
-  /** 按创建时间倒序插入，超量丢最旧的已闭环记录，不够再丢最旧的。 */
-  add(record: FeedbackRecord): void {
-    const items = this.store?.items;
-    if (!items) return;
-    items.unshift(record);
-    if (items.length > MAX_RECORDS) {
-      const closedIdx = items.findIndex(
-        (item, i) => i >= MAX_RECORDS / 2 && item.status === "resolved",
-      );
-      if (closedIdx >= 0) items.splice(closedIdx, 1);
-      else items.pop();
+  async query(filters: {
+    actorId?: string;
+    status?: string;
+    type?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ total: number; items: FeedbackRecord[] }> {
+    const db = this.open();
+    if (!db) return { total: 0, items: [] };
+    const where: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (filters.actorId) {
+      where.push("actor_id = @actorId");
+      params.actorId = filters.actorId;
     }
+    if (filters.status && FEEDBACK_STATUSES.has(filters.status)) {
+      where.push("status = @status");
+      params.status = filters.status;
+    }
+    if (filters.type && FEEDBACK_TYPES.has(filters.type)) {
+      where.push("type = @type");
+      params.type = filters.type;
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    // better-sqlite3 具名绑定要求 SqliteValue 值域；未知来源参数统一 String 化
+    const totalRow = db
+      .prepare(`SELECT COUNT(*) AS c FROM feedback ${whereSql}`)
+      .get(
+        Object.fromEntries(Object.entries(params).map(([k, v]) => [k, typeof v === "object" ? JSON.stringify(v) : (v as string | number | null)])),
+      ) as { c: number };
+    const rows = db.prepare(
+      `SELECT id, type, title, description, contact, status, reply_note AS replyNote,
+              actor_id AS actorId, client_version AS clientVersion, platform, diagnostics,
+              created_at AS createdAt, updated_at AS updatedAt
+       FROM feedback ${whereSql}
+       ORDER BY created_at DESC
+       LIMIT @limit OFFSET @offset`,
+    ).all({ ...params, limit: filters.limit ?? 50, offset: filters.offset ?? 0 }) as Array<
+      Omit<FeedbackRecord, "diagnostics"> & { diagnostics: string }
+    >;
+    return {
+      total: totalRow.c,
+      items: rows.map((row) => ({
+        ...row,
+        diagnostics: safeParseDiagnostics(row.diagnostics),
+      })),
+    };
+  }
+
+  async updateStatus(
+    id: string,
+    status: FeedbackStatus,
+    replyNote?: string,
+  ): Promise<FeedbackRecord | null> {
+    const db = this.open();
+    if (!db) return null;
+    const existing = db.prepare("SELECT id FROM feedback WHERE id = ?").get(id);
+    if (!existing) return null;
+    db.prepare(
+      `UPDATE feedback SET status = @status,
+             reply_note = COALESCE(@replyNote, reply_note),
+             updated_at = @updatedAt
+       WHERE id = @id`,
+    ).run({
+      id,
+      status,
+      replyNote: replyNote ?? null,
+      updatedAt: new Date().toISOString(),
+    });
+    return this.getById(id);
+  }
+
+  async getById(id: string): Promise<FeedbackRecord | null> {
+    const db = this.open();
+    if (!db) return null;
+    const row = db.prepare(
+      `SELECT id, type, title, description, contact, status, reply_note AS replyNote,
+              actor_id AS actorId, client_version AS clientVersion, platform, diagnostics,
+              created_at AS createdAt, updated_at AS updatedAt
+       FROM feedback WHERE id = ?`,
+    ).get(id) as (Omit<FeedbackRecord, "diagnostics"> & { diagnostics: string }) | undefined;
+    if (!row) return null;
+    return { ...row, diagnostics: safeParseDiagnostics(row.diagnostics) };
+  }
+
+  async counts(): Promise<{ total: number; open: number; processing: number; resolved: number }> {
+    const db = this.open();
+    const counts = { total: 0, open: 0, processing: 0, resolved: 0 };
+    if (!db) return counts;
+    const rows = db.prepare("SELECT status, COUNT(*) AS c FROM feedback GROUP BY status").all() as Array<{
+      status: string;
+      c: number;
+    }>;
+    for (const row of rows) {
+      counts.total += row.c;
+      if (row.status === "open") counts.open = row.c;
+      else if (row.status === "processing") counts.processing = row.c;
+      else if (row.status === "resolved") counts.resolved = row.c;
+    }
+    return counts;
+  }
+}
+
+function safeParseDiagnostics(raw: string): Record<string, string | number | boolean> {
+  try {
+    const parsed = JSON.parse(raw || "{}") as Record<string, string | number | boolean>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
   }
 }
 
@@ -165,9 +341,7 @@ export function registerFeedbackRoutes(app: FastifyInstance): void {
       createdAt: now,
       updatedAt: now,
     };
-    const store = await storeManager.load();
-    storeManager.add(record);
-    await storeManager.persist();
+    await storeManager.add(record);
     return { ok: true, feedback: record };
   });
 
@@ -177,39 +351,38 @@ export function registerFeedbackRoutes(app: FastifyInstance): void {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     const q = parsed.data;
-    const store = await storeManager.load();
-    let items = store.items;
+    // 带身份 = 客户端查自己的反馈，保持开放；不带身份 = 管理端全量列表，须鉴权。
+    let actorId: string | undefined;
     if (q.actorId) {
-      const actorId = resolveActorId({
+      actorId = resolveActorId({
         userId: q.userId,
         sessionId: q.sessionId ?? "",
       });
-      items = items.filter((item) => item.actorId === actorId);
+    } else if (!isAdminRequest(request)) {
+      return reply.code(401).send({ ok: false, message: "Unauthorized: invalid admin token" });
     }
-    if (q.status && FEEDBACK_STATUSES.has(q.status)) {
-      items = items.filter((item) => item.status === q.status);
-    }
-    if (q.type && FEEDBACK_TYPES.has(q.type)) {
-      items = items.filter((item) => item.type === q.type);
-    }
-    return { ok: true, total: items.length, items: items.slice(0, q.limit ?? 50) };
+    const { total, items } = await storeManager.query({
+      actorId,
+      status: q.status,
+      type: q.type,
+      limit: q.limit,
+      offset: q.offset,
+    });
+    return { ok: true, total, items };
   });
 
   app.post<{ Params: { id: string } }>("/api/feedback/:id/status", async (request, reply) => {
+    if (!isAdminRequest(request)) {
+      return reply.code(401).send({ ok: false, message: "Unauthorized: invalid admin token" });
+    }
     const parsed = statusBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     const id = String(request.params.id ?? "").trim();
-    const store = await storeManager.load();
-    const record = store.items.find((item) => item.id === id);
+    const record = await storeManager.updateStatus(id, parsed.data.status, parsed.data.replyNote);
     if (!record) return reply.code(404).send({ ok: false, message: "feedback not found" });
-    record.status = parsed.data.status;
-    if (parsed.data.replyNote !== undefined) {
-      record.replyNote = parsed.data.replyNote || null;
-    }
-    record.updatedAt = new Date().toISOString();
-    await storeManager.persist();
+    await adminAudit("feedback.update_status", { id, status: record.status }, request);
     return { ok: true, feedback: record };
   });
 }
@@ -221,13 +394,5 @@ export async function feedbackStatusCounts(): Promise<{
   processing: number;
   resolved: number;
 }> {
-  const store = await storeManager.load();
-  const counts = { total: store.items.length, open: 0, processing: 0, resolved: 0 };
-  for (const item of store.items) {
-    if (counts[item.status as FeedbackStatus] !== undefined) {
-      counts[item.status as FeedbackStatus]++;
-    }
-  }
-  return counts;
+  return storeManager.counts();
 }
-

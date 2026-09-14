@@ -444,24 +444,58 @@ export class UpstreamSearchService {
   }> {
     const keyword = String(query ?? "").trim();
     if (!keyword) {
-      return { provider: "bing-videos", mediaType: "video", items: [], notes: ["query 不能为空"] };
+      return { provider: "none", mediaType: "video", items: [], notes: ["query 不能为空"] };
     }
     const boundedLimit = clamp(limit, 1, 12);
-    const url = `https://cn.bing.com/videos/search?q=${encodeURIComponent(keyword)}`;
-    const html = await this.fetchText(url, 10_000);
-    const parsed = parseBingVideoResults(html, boundedLimit);
-    if (parsed.length >= Math.min(3, boundedLimit)) {
+
+    // 三源并行（2026-09-13 根修「搜出来的视频不对」）：
+    //  - Bing 视频页直抓：改版后 mmeta/vrhm 只剩推广位携带，服务端直抓的有机结果
+    //    常为 0-1 条且混着广告位视频（真实测试：搜「刘浩存」首位是「新笔记本设置」），
+    //    解析后按查询词相关性门禁剔除推广位；
+    //  - B站公开搜索接口：无需登录直出播放页+真实缩略图+时长，覆盖质量稳定；
+    //  - 社交平台中转：与 search_web 的微博/抖音源同口径——平台 MCP 未配置时用
+    //    site: 限定搜索过滤出视频播放页直链（抖音/微博/腾讯视频/西瓜），实测
+    //    产出稀疏但真实，作为第三源补充（任一源失败不拖垮其余源）。
+    // 各源按比例分配名额：B站源质量最高（真实缩略图+时长）占大头，中转源
+    // 留出固定份额——否则先到源带满 limit 名额，后到源永远进不了最终列表。
+    const biliLimit = Math.max(3, Math.ceil(boundedLimit * 0.75));
+    const relayLimit = Math.max(2, Math.ceil(boundedLimit * 0.5));
+    const [bingParsed, biliItems, relayItems] = await Promise.all([
+      this.fetchText(`https://cn.bing.com/videos/search?q=${encodeURIComponent(keyword)}`, 10_000)
+        .then((html) => parseBingVideoResults(html, boundedLimit, keyword))
+        .catch(() => [] as MediaSearchItem[]),
+      this.searchBilibiliVideos(keyword, biliLimit).catch(() => [] as MediaSearchItem[]),
+      Promise.race([
+        this.searchSocialVideoRelay(keyword, relayLimit),
+        new Promise<MediaSearchItem[]>((resolve) => setTimeout(() => resolve([]), 9_000)),
+      ]).catch(() => [] as MediaSearchItem[]),
+    ]);
+
+    const merged = dedupeMediaByPageUrl([
+      ...bingParsed,
+      ...biliItems,
+      ...relayItems,
+    ]).slice(0, boundedLimit);
+    if (merged.length >= Math.min(3, boundedLimit)) {
+      const sources = [
+        bingParsed.length > 0 ? "bing-videos" : null,
+        biliItems.length > 0 ? "bilibili-api" : null,
+        relayItems.length > 0 ? "social-relay" : null,
+      ].filter(Boolean);
       return {
-        provider: "bing-videos",
+        provider: sources.join("+") || "none",
         mediaType: "video",
-        items: parsed,
+        items: merged,
         notes: ["返回 pageUrl 可打开播放页；thumbnailUrl 可用于对话内预览"],
       };
     }
 
+    // 仍不足 → 网页搜索兜底：只收播放页直链。旧版还按「标题含 视频/bilibili/播放」
+    // 放行，把 B站搜索页/个人空间/豆瓣豆列/X主页等非视频页全混进了结果
+    // （真实测试实证），现在必须 URL 命中视频播放页特征才收。
     const web = await this.searchWeb(`${keyword} 视频 OR site:bilibili.com OR site:youtube.com`, boundedLimit);
     const fallback = web.items
-      .filter((item) => isLikelyVideoUrl(item.url) || /视频|youtube|bilibili|哔哩|播放/i.test(`${item.title} ${item.snippet}`))
+      .filter((item) => isLikelyVideoUrl(item.url))
       .slice(0, boundedLimit)
       .map((item) => ({
         type: "video" as const,
@@ -470,14 +504,90 @@ export class UpstreamSearchService {
         source: inferMediaSource(item.url, item.source),
         snippet: item.snippet,
       }));
+    const items = dedupeMediaByPageUrl([...merged, ...fallback]).slice(0, boundedLimit);
+    const sources = [
+      bingParsed.length > 0 ? "bing-videos" : null,
+      biliItems.length > 0 ? "bilibili-api" : null,
+      relayItems.length > 0 ? "social-relay" : null,
+      fallback.length > 0 ? "web-fallback" : null,
+    ].filter(Boolean);
     return {
-      provider: parsed.length > 0 ? "bing-videos:mixed" : "bing-videos:fallback-web",
+      provider: sources.join("+") || "none",
       mediaType: "video",
-      items: dedupeMediaByPageUrl([...parsed, ...fallback]).slice(0, boundedLimit),
-      notes: parsed.length > 0
-        ? ["视频页结果较少，已补充视频相关网页结果"]
-        : ["视频页解析失败，已降级返回视频相关网页结果"],
+      items,
+      notes:
+        items.length > 0
+          ? ["视频直抓结果较少，已补充视频播放页网页结果"]
+          : ["各视频源均未返回结果"],
     };
+  }
+
+  /** B站公开搜索接口（无需登录）：search_type=video 直出播放页/缩略图/时长。 */
+  private async searchBilibiliVideos(keyword: string, limit: number): Promise<MediaSearchItem[]> {
+    // search_type=video 已限定视频域，关键词尾缀「视频」冗余，且实测同一 IP 无
+    // cookie 直查带尾缀词更易触发风控 412（「刘浩存 视频」稳定 412，「刘浩存」放行）
+    const bareKeyword = keyword.replace(/\s*视频\s*$/, "").trim() || keyword;
+    const cookie = await resolveBilibiliCookie();
+    const url = `https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=${encodeURIComponent(bareKeyword)}`;
+    // 不带 referer/cookie 会被风控拦（412），必须带站内搜索来源与首页种下的 cookie
+    const text = await this.fetchText(url, 8_000, "https://search.bilibili.com/", cookie);
+    const json = tryParseJson<BilibiliVideoSearchResponse>(text);
+    const list =
+      json?.code === 0 && Array.isArray(json?.data?.result) ? json.data.result : [];
+    return list
+      .slice(0, limit)
+      .map((it) => {
+        const rawPage = it.arcurl || (it.bvid ? `https://www.bilibili.com/video/${it.bvid}` : "");
+        // B站返回 http:// 链接与 // 协议相对图址，统一升 https 避免前端混合内容拦截
+        const pageUrl = rawPage.replace(/^http:\/\//, "https://");
+        const rawPic = typeof it.pic === "string" && it.pic.trim() ? it.pic.trim() : "";
+        const thumbnailUrl = rawPic
+          ? rawPic.startsWith("//")
+            ? `https:${rawPic}`
+            : rawPic.replace(/^http:\/\//, "https://")
+          : undefined;
+        const item: MediaSearchItem = {
+          type: "video",
+          // 标题/摘要里的 <em class="keyword"> 高亮标签用空串剥离（stripTags 的
+          // 空格替换会在中文标题里留下「周星驰 电影 片段」式假空格）
+          title:
+            decodeHtmlEntities(String(it.title ?? "").replace(/<[^>]+>/g, "")).trim() ||
+            "B站视频",
+          pageUrl,
+          mediaUrl: pageUrl,
+          thumbnailUrl,
+          duration: typeof it.duration === "string" && it.duration ? it.duration : undefined,
+          source: "哔哩哔哩",
+          snippet: decodeHtmlEntities(String(it.description ?? "").replace(/<[^>]+>/g, "")).slice(0, 200),
+        };
+        return item;
+      })
+      .filter((it) => /^https?:\/\//i.test(it.pageUrl));
+  }
+
+  /**
+   * 社交平台视频中转（与 search_web 的微博/抖音平台源同口径）：
+   * 平台搜索 MCP 未配置、无登录态时，用 site: 限定搜索过滤出视频播放页直链。
+   * 实测产出稀疏（每查询 1-2 条真实直链）且混大量站外结果，靠 URL 白名单过滤，
+   * 只作为主源（B站/Bing）之外的补充。
+   */
+  private async searchSocialVideoRelay(keyword: string, limit: number): Promise<MediaSearchItem[]> {
+    const web = await this.searchWeb(
+      `${keyword} 视频 OR site:douyin.com OR site:weibo.com OR site:v.qq.com OR site:ixigua.com`,
+      limit,
+    );
+    return web.items
+      // 中转结果混大量站外/主页噪声，比 isLikelyVideoUrl 更严：必须是播放页直链
+      // （抖音必须 /video/，排除用户主页；B站必须 /video/；微博必须 tv 页）
+      .filter((item) => SOCIAL_VIDEO_PAGE_RE.test(item.url))
+      .slice(0, limit)
+      .map((item) => ({
+        type: "video" as const,
+        title: item.title,
+        pageUrl: item.url,
+        source: inferMediaSource(item.url, item.source),
+        snippet: item.snippet,
+      }));
   }
 
   async readWeb(url: string): Promise<{ title: string; content: string; summary: string }> {
@@ -920,19 +1030,27 @@ export class UpstreamSearchService {
     }
   }
 
-  private async fetchText(url: string, timeoutMs: number): Promise<string> {
+  private async fetchText(
+    url: string,
+    timeoutMs: number,
+    referer?: string,
+    cookie?: string,
+  ): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      const headers: Record<string, string> = {
+        "user-agent":
+          process.env.WEB_FETCH_USER_AGENT ??
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      };
+      if (referer) headers.referer = referer;
+      if (cookie) headers.cookie = cookie;
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: {
-          "user-agent":
-            process.env.WEB_FETCH_USER_AGENT ??
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-        },
+        headers,
         redirect: "follow",
       });
       if (!response.ok) return "";
@@ -1184,16 +1302,62 @@ function parseBingImageResults(html: string, limit: number): MediaSearchItem[] {
   return out;
 }
 
-function parseBingVideoResults(html: string, limit: number): MediaSearchItem[] {
-  // 必应视频页每条真实结果由两个互补的 JSON 属性描述，普通 <a> 链接几乎全是
-  // 站内筛选/翻页链接（"全部/短视频/时长筛选"等），旧的 <a> 启发式解析抓到的
-  // 正是这些假结果，导致视频搜索"有返回但全是废链接"：
-  //   - 结果容器 <div class="mc_vtvc ..." mmeta="{...}">：murl/pgurl(播放页) +
-  //     turl(真实缩略图)；
-  //   - 结果内 <div class="vrhdata" vrhm="{...}">：vt(标题) + du(时长) + purl。
-  // 两者按播放页 URL 合并；仅当两者都缺失（页面结构变化）时才退回旧 <a> 解析。
+/** 导出供回归测试（Bing 视频页新/旧结构与推广位门禁） */
+export function parseBingVideoResults(
+  html: string,
+  limit: number,
+  query = "",
+): MediaSearchItem[] {
+  // 必应视频页结果解析（2026-09-13 根修）：
+  //   0) 2026-09 新结构：结果单元是 <a class="mc_vtvc_link ..." href="播放页直链"
+  //      aria-label="标题 来源: … · 时长: …">，内层 mc_vtvc_title（标题）/
+  //      mc_bc_rc（时长）/ img（缩略图）。改版后 mmeta/vrhm 属性只剩推广位携带，
+  //      旧解析因此只会命中广告位视频（真实测试：搜「刘浩存」首位是「新笔记本
+  //      设置」推广视频）——新结构必须优先解析；
+  //   1/2) 旧结构 mmeta/vrhm 兼容保留；
+  //   3) 全部缺失时退回 <a> 链接启发式解析。
+  // 直抓解析出的条目统一过查询词相关性门禁（见 gateVideoResultsByQuery）。
   const out: MediaSearchItem[] = [];
   const seen = new Set<string>();
+
+  // 0) mc_vtvc_link 新结构
+  for (const match of html.matchAll(/class="mc_vtvc_link/g)) {
+    const classIdx = match.index ?? 0;
+    const tagStart = html.lastIndexOf("<a", classIdx);
+    const tagEnd = html.indexOf(">", classIdx);
+    if (tagStart < 0 || tagEnd < 0) continue;
+    const openTag = html.slice(tagStart, tagEnd + 1);
+    const nextClass = html.indexOf('class="mc_vtvc_link', tagEnd + 1);
+    const block = html.slice(tagEnd + 1, nextClass > 0 ? nextClass : tagEnd + 1 + 8000);
+    const rawHref =
+      /\bhref="([^"]+)"/.exec(openTag)?.[1] ??
+      /\bourl="([^"]+)"/.exec(block)?.[1];
+    if (!rawHref) continue;
+    const pageUrl = decodeHtmlEntities(rawHref).trim();
+    if (!/^https?:\/\//i.test(pageUrl)) continue;
+    const key = pageUrl.toLowerCase();
+    if (seen.has(key)) continue;
+    const ariaLabel = decodeHtmlEntities(/\baria-label="([^"]*)"/.exec(openTag)?.[1] ?? "");
+    const rawTitle = /class="mc_vtvc_title[^>]*>([\s\S]{0,500}?)<\/div>/.exec(block)?.[1] ?? "";
+    const title =
+      stripTags(rawTitle).trim() || ariaLabel.split(/\s*来源:/)[0].trim();
+    const duration =
+      /\bclass="mc_bc_rc[^"]*"[^>]*>\s*([0-9]{1,2}(?::[0-9]{2}){1,2})\s*</.exec(block)?.[1];
+    const rawThumb =
+      /data-src-hq="([^"]+)"/.exec(block)?.[1] ??
+      /<img\b[^>]*\bsrc="([^"]+)"/.exec(block)?.[1];
+    seen.add(key);
+    out.push({
+      type: "video",
+      title: title || "视频结果",
+      pageUrl,
+      mediaUrl: pageUrl,
+      thumbnailUrl: rawThumb ? absolutizeBingUrl(decodeHtmlEntities(rawThumb)) : undefined,
+      duration,
+      source: inferMediaSource(pageUrl, "Bing Videos"),
+    });
+    if (out.length >= limit) break;
+  }
 
   // 1) mmeta：播放页 + 缩略图（aria-label 兜底标题跟在容器后的首个 <a> 上）
   const metaByKey = new Map<string, { pageUrl: string; thumbnailUrl?: string; ariaLabel?: string }>();
@@ -1238,6 +1402,8 @@ function parseBingVideoResults(html: string, limit: number): MediaSearchItem[] {
   // 3) 合并输出：mmeta 有缩略图的条目优先；缺标题时用容器 aria-label 兜底
   for (const { pageUrl, thumbnailUrl, ariaLabel } of metaByKey.values()) {
     const key = pageUrl.toLowerCase();
+    // 新结构（步骤 0）可能已收录同一播放页，跳过避免重复条目
+    if (seen.has(key)) continue;
     const meta = titleByKey.get(key);
     const title =
       meta?.title ||
@@ -1258,7 +1424,8 @@ function parseBingVideoResults(html: string, limit: number): MediaSearchItem[] {
     });
     if (out.length >= limit) break;
   }
-  if (out.length > 0) return out;
+  const gated = gateVideoResultsByQuery(out, query);
+  if (gated.length > 0) return gated;
 
   // 兜底：mmeta/vrhm 都缺失时退回 <a> 链接启发式解析（结果质量差但聊胜于无）
   const blockRe = /<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
@@ -1297,7 +1464,60 @@ function parseBingVideoResults(html: string, limit: number): MediaSearchItem[] {
     });
     if (out.length >= limit) break;
   }
-  return out;
+  return gateVideoResultsByQuery(out, query);
+}
+
+/**
+ * 查询词相关性门禁：直抓页面上的推广位视频（小游戏/带货/推荐流）与查询词毫无
+ * 字面交集，却带着缩略图和时长排在首位（真实测试实证），是「搜出来的视频不对」
+ * 的直接来源。解析条目标题与查询词无任何 token 交集时剔除。只对 Bing 页面直抓
+ * 解析的条目生效——网页搜索兜底由搜索引擎按相关性排序，不适用本门禁（中英文
+ * 标题不一致会被误杀）。
+ */
+function gateVideoResultsByQuery(items: MediaSearchItem[], query: string): MediaSearchItem[] {
+  const tokens = queryEntityTokens(query);
+  if (tokens.length === 0) return items;
+  return items.filter((it) => {
+    const title = (it.title ?? "").toLowerCase();
+    return tokens.some((tok) => title.includes(tok));
+  });
+}
+
+/** 查询词 token：CJK 连续串（≥2 字）与拉丁词（小写化）。 */
+function queryEntityTokens(query: string): string[] {
+  const t = (query ?? "").toLowerCase();
+  if (!t.trim()) return [];
+  return [...t.matchAll(/[\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9'.+-]{1,}/g)].map((m) => m[0]);
+}
+
+// B站风控（HTTP 412）对无 cookie 的直查按词间歇触发：先访首页种下 buvid3 等
+// cookie 再调接口即可放行（真实测试实证）。cookie 进程级缓存 30 分钟。
+let biliCookieCache: { cookie: string; at: number } | null = null;
+
+async function resolveBilibiliCookie(): Promise<string> {
+  if (biliCookieCache && Date.now() - biliCookieCache.at < 30 * 60 * 1000) {
+    return biliCookieCache.cookie;
+  }
+  try {
+    const res = await fetch("https://www.bilibili.com/", {
+      headers: {
+        "user-agent":
+          process.env.WEB_FETCH_USER_AGENT ??
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(5_000),
+    });
+    const cookie = res.headers
+      .getSetCookie()
+      .map((c) => c.split(";")[0])
+      .filter(Boolean)
+      .join("; ");
+    if (cookie) biliCookieCache = { cookie, at: Date.now() };
+    return cookie;
+  } catch {
+    return biliCookieCache?.cookie ?? "";
+  }
 }
 
 function dedupeMediaByPageUrl(items: MediaSearchItem[]): MediaSearchItem[] {
@@ -1321,6 +1541,30 @@ function pickNumber(value: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/** B站公开视频搜索接口（search_type=video）响应 */
+type BilibiliVideoSearchResponse = {
+  code?: number;
+  data?: {
+    result?: Array<{
+      title?: string;
+      description?: string;
+      arcurl?: string;
+      bvid?: string;
+      pic?: string;
+      duration?: string;
+      author?: string;
+    }>;
+  };
+};
+
+function tryParseJson<T>(text: string): T | null {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
 function stripTags(html: string): string {
   return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -1335,8 +1579,12 @@ function absolutizeBingUrl(raw: string): string | undefined {
 }
 
 function isLikelyVideoUrl(url: string): boolean {
-  return /(?:youtube\.com\/watch|youtu\.be\/|bilibili\.com\/video\/|v\.qq\.com|ixigua\.com|douyin\.com|kuaishou\.com|youku\.com|iqiyi\.com|mgtv\.com|\/video\/)/i.test(url);
+  return /(?:youtube\.com\/watch|youtu\.be\/|bilibili\.com\/video\/|v\.qq\.com|ixigua\.com|douyin\.com|kuaishou\.com|youku\.com|iqiyi\.com|mgtv\.com|weibo\.com\/tv|video\.weibo\.com|\/video\/)/i.test(url);
 }
+
+/** 社交平台中转源专用的播放页白名单（比 isLikelyVideoUrl 严：排除用户主页/发现页） */
+const SOCIAL_VIDEO_PAGE_RE =
+  /(?:youtube\.com\/watch|youtu\.be\/|bilibili\.com\/video\/|douyin\.com\/video\/|v\.qq\.com\/x\/|ixigua\.com\/\d|kuaishou\.com\/short-video\/|weibo\.com\/tv|video\.weibo\.com)/i;
 
 function inferMediaSource(url: string, fallback: string): string {
   try {
@@ -1363,7 +1611,11 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ");
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h: string) =>
+      String.fromCodePoint(Number.parseInt(h, 16)),
+    );
 }
 
 function resolveBin(defaultName: "mcporter" | "gh" | "rdt"): string {

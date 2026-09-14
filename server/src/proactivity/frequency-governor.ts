@@ -22,6 +22,10 @@ const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
   weather_alert: 30 * 60 * 1000,        // 恶劣天气预警：预警类需即时触达，30min 冷却防同一场雨连发
   life_reminder: 4 * 60 * 60 * 1000,    // 生活提醒（重要日子/预算超支/节律提醒等）：4h 冷却
   monthly_report: 24 * 60 * 60 * 1000,  // 月度报告（消费月报等）：每日最多 1 次
+  // ── 评估器场景独立档（一个场景一个 kind，避免与生活提醒互相挤占冷却）──
+  message_burst: 2 * 60 * 60 * 1000,    // 消息爆发提醒：2h 一次
+  meeting_early: 4 * 60 * 60 * 1000,    // 临会预告（1h 档）：4h 冷却（与 15min 档独立）
+  sleep_care: 20 * 60 * 60 * 1000,      // 深夜睡眠关怀：每晚最多一次
   // ── 位置场景（方案 D）──
   location_arrival: 6 * 60 * 60 * 1000, // 到达常去地点问候：同地点 6h 一次（别每次到家都唠叨）
   geofence_event: 30 * 60 * 1000,       // 地理围栏动作的 speak 告知：30min 兜底（围栏层自有防抖）
@@ -32,6 +36,14 @@ const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
  * 每日总预算仍是最终兜底——即使 LLM 每次发明新标签也不会超预算打扰。
  */
 const DEFAULT_UNKNOWN_KIND_COOLDOWN_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * 「每天最多一次」语义的 kind：按日历日本地日去重（而非 24h 滚动冷却）。
+ * 滚动冷却下晨间问候时刻每天提前几分钟就会吞掉次日的晨报（实测：
+ * d1 8:50 问候 → d2 7:50 晨报被 24h 冷却拦截）。日历日语义才符合
+ * "每天最多一次"的用户预期。
+ */
+const DAILY_ONCE_KINDS = new Set(["greeting", "interest_share", "monthly_report", "digest"]);
 
 /** 静默时段（对齐 ProactiveContactPolicy quietHours 语义）：23:00-7:00 */
 const QUIET_HOUR_START = 23;
@@ -183,18 +195,23 @@ export class FrequencyGovernor {
   /**
    * 判定一次主动意图是否允许触发。
    * @param kind 已知 kind 用专属冷却；LLM 自定义标签用默认冷却（预算兜底）
-   * @param importance 静默时段仅 high 放行
+   * @param importance 静默时段仅 high 放行（awake 且低打扰档除外）
+   * @param opts.awake 用户当前活跃在设备前（管道传入）：静默时段的低/中打扰
+   *   消息不算惊扰——「23 点还醒着」时的轻声一句话与「把人叫醒」是两回事；
+   *   high/critical（弹窗/响铃级）不豁免，仍按静默规则把关
    */
   canTrigger(
     actorId: string,
     kind: string,
     importance: "high" | "medium" | "low",
     now: Date = this.nowFn(),
+    opts?: { awake?: boolean },
   ): FrequencyVerdict {
     const state = this.stateOf(actorId, now);
 
-    // 规则 3：静默时段仅 high 放行
-    if (!this.disableQuietHours && isQuietHour(now.getHours()) && importance !== "high") {
+    // 规则 3：静默时段仅 high 放行（awake 时的低打扰档豁免）
+    const lowKeyQuietOk = opts?.awake === true && importance !== "high";
+    if (!this.disableQuietHours && isQuietHour(now.getHours()) && importance !== "high" && !lowKeyQuietOk) {
       return { allowed: false, reason: `quiet_hours(${now.getHours()}h,importance=${importance})` };
     }
 
@@ -206,13 +223,20 @@ export class FrequencyGovernor {
     // 规则 2：分 kind 冷却（未知 kind 用默认冷却，防新标签绕过）
     const lastAt = state.kindLastAt.get(kind);
     if (lastAt !== undefined) {
-      const elapsed = now.getTime() - lastAt;
-      const cooldown = this.kindCooldownMs[kind] ?? DEFAULT_UNKNOWN_KIND_COOLDOWN_MS;
-      if (elapsed < cooldown) {
-        return {
-          allowed: false,
-          reason: `kind_cooldown(${kind},${Math.round(elapsed / 60000)}m<${Math.round(cooldown / 60000)}m)`,
-        };
+      // 日历日 kind：同一天已发过即拦（跨零点立刻恢复资格）
+      if (DAILY_ONCE_KINDS.has(kind)) {
+        if (localDateKey(new Date(lastAt)) === state.dateKey) {
+          return { allowed: false, reason: `daily_once(${kind},${state.dateKey})` };
+        }
+      } else {
+        const elapsed = now.getTime() - lastAt;
+        const cooldown = this.kindCooldownMs[kind] ?? DEFAULT_UNKNOWN_KIND_COOLDOWN_MS;
+        if (elapsed < cooldown) {
+          return {
+            allowed: false,
+            reason: `kind_cooldown(${kind},${Math.round(elapsed / 60000)}m<${Math.round(cooldown / 60000)}m)`,
+          };
+        }
       }
     }
 

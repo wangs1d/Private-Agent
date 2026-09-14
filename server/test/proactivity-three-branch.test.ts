@@ -51,14 +51,41 @@ function actIntent(overrides: Partial<ProactiveIntent> = {}): ProactiveIntent {
   };
 }
 
-test("execute_silently: 可逆+隐式授权+高价值 → 执行且不通知", async () => {
+test("execute_silently: 可逆+隐式授权+高价值 → 执行并轻提一句（做完轻提一句语义）", async () => {
   const { hub, signals, toolCalls } = makeHub();
   hub.submitIntent(actIntent());
   await flush();
   assert.equal(toolCalls.length, 1, "行动计划已执行");
   assert.equal(toolCalls[0].tool, "media.play");
-  assert.equal(signals.length, 0, "静默执行不发通知");
+  // 静默执行不再是全无声：做完轻提一句（与 InitiativeEngine「act=做完轻提一句」
+  // 的设计一致），文案为低打扰的结果告知
+  assert.equal(signals.length, 1, "执行后轻提一句");
+  assert.ok(signals[0].title.includes("顺手") || signals[0].summary.includes("已悄悄办好"), `轻提文案: ${signals[0].summary}`);
   assert.ok(hub.getActAudit(ACTOR).length >= 1, "act 审计留痕");
+});
+
+test("ask_first: 确认后安全门仍兜底——delete/shutdown 永不放行，无害步骤执行", async () => {
+  const { hub, signals, toolCalls } = makeHub();
+  hub.submitIntent(
+    actIntent({
+      kind: "cleanup",
+      title: "想帮忙清理文件",
+      actArgs: [
+        { tool: "file.delete", args: { path: "/tmp/old" } },
+        { tool: "media.play", args: { trackId: "t" } },
+        { tool: "system.shutdown", args: {} },
+      ],
+    }),
+  );
+  await flush();
+  // 整份计划含不可逆动作 → ask_first 挂起，确认请求即主动消息
+  assert.deepEqual(toolCalls.map((c) => c.tool), []);
+  assert.equal(hub.listPendingConfirmations(ACTOR).length, 1);
+  // 用户同意 → 执行挂起计划，但黑名单安全门仍兜底：delete/shutdown 永不放行
+  const resolved = await hub.resolveConfirmation(ACTOR, true);
+  assert.equal(resolved.executed, true);
+  assert.deepEqual(toolCalls.map((c) => c.tool), ["media.play"]);
+  assert.ok(signals.length >= 1, "确认闭环有回执");
 });
 
 test("ask_first: 不可逆动作 → 不执行，发确认请求并挂起", async () => {

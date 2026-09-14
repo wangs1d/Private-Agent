@@ -2,7 +2,7 @@ import QRCode from "qrcode";
 import { resolveActorId } from "../agent/actor-id.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { PaymentService } from "../services/payment-service.js";
-import { getPaymentConfig } from "../config/payment-config.js";
+import { getPaymentConfig, getPaymentGuardrailConfig } from "../config/payment-config.js";
 
 const PROVIDERS = ["wechat", "alipay"] as const;
 const METHODS = ["native", "h5"] as const;
@@ -37,6 +37,14 @@ export function registerPaymentTools(registry: ToolRegistry, paymentService: Pay
       ? `${config.paymentNotifyBaseUrl}/api/payment/notify/${provider}`
       : undefined;
 
+    // 业务类别（支付护栏的授权粒度）：显式 category 参数优先，兼容 metadata.category
+    const category = String(input.category ?? "").trim() ||
+      String((input.metadata as Record<string, string> | undefined)?.category ?? "").trim();
+    const metadata: Record<string, string> | undefined = {
+      ...((input.metadata as Record<string, string> | undefined) ?? {}),
+      ...(category ? { category } : {}),
+    };
+
     const result = await paymentService.createOrder({
       amount,
       description,
@@ -44,7 +52,7 @@ export function registerPaymentTools(registry: ToolRegistry, paymentService: Pay
       method: method as "native" | "h5",
       outTradeNo: input.outTradeNo ? String(input.outTradeNo).trim() : undefined,
       notifyUrl,
-      metadata: input.metadata as Record<string, string> | undefined,
+      metadata,
     });
 
     if (!result.ok) {
@@ -166,10 +174,17 @@ export function registerPaymentTools(registry: ToolRegistry, paymentService: Pay
       },
     ];
 
+    const guardrails = getPaymentGuardrailConfig();
     return {
       summary: "支付方式列表",
       methods,
       defaultProvider: config.wechatMode === "live" ? "wechat" : config.alipayMode === "live" ? "alipay" : "wechat",
+      guardrails: {
+        maxSingleAmountCny: guardrails.maxSingleAmountCny,
+        dailyBudgetCny: guardrails.dailyBudgetCny,
+        allowedCategories: guardrails.allowedCategories,
+        note: "create_order 受支付护栏约束：类别未授权/超单笔上限/超当日累计会被拦截，拦截时先向用户说明并确认",
+      },
       actorId,
     };
   });

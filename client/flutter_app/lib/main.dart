@@ -51,8 +51,8 @@ import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/travel_plan_launcher.dart";
 import "features/chat/travel_plan_window.dart";
+import "features/chat/travel_plan_browser_launcher.dart";
 import "features/chat/travel_plan_panel.dart";
-import "features/chat/travel_web_panel_host.dart";
 import "features/chat/right_side_panel.dart";
 import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
@@ -407,6 +407,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Timer? _agentReplyWatchdog;
   String? _pendingAssistantChunkMessageId;
   String? _pendingAgentUserMessageId;
+
+  /// 排队中的用户消息 id（FIFO，豆包式列队发送）。
+  /// Agent 处理中收到的新输入不再打断当前轮，而是入队原样发给服务端
+  /// （服务端 MessageBatchProcessor 同样按序排队），每条都会得到独立回复；
+  /// 服务端开始处理某条时以 chat.turn_started(traceId=消息id) 通知，
+  /// 客户端据此把该条从队列晋级为活动轮次（见 _handleTurnStartedV2）。
+  final Set<String> _queuedUserMessageIds = <String>{};
+
   final StringBuffer _pendingAssistantChunkText = StringBuffer();
   final AssistantTextSanitizer _assistantTextSanitizer =
       AssistantTextSanitizer();
@@ -415,8 +423,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   String? _pendingRetryText;
   int _pendingRetryCount = 0;
 
-  /// 记录被打断的回复内容，用于后续整)
-  final List<String> _interruptedResponses = <String>[];
   static const Duration _agentReplyTimeout = Duration(minutes: 3);
 
   /// 网络电话悬浮按钮状态 null=无通话, ringing=正在呼叫, connected=已接通 ended=通话结束
@@ -492,8 +498,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     ImagePreviewLauncher.setHandler(_openImagePreview);
     // 「行程规划」独立界面：行程卡点击 / autoOpen → 全屏路由打开
     TravelPlanLauncher.setHandler(_openTravelPlanPanel);
-    // 行程面板共享 WebView 进程级预加载：地图常驻，打开卡片/进出全屏零重载
-    TravelWebPanelHost.preload();
+    // 注意：主进程不再预加载共享行程 WebView（TravelWebPanelHost.preload）。
+    // 预加载会让 WebView2 在启动时就创建内部顶层窗口，该窗口曾滞留屏幕上
+    // 成为透明"幽灵窗"，拦截其他应用的点击；现改为真实使用时懒加载——
+    // 行程卡默认走独立子进程窗口（自带预加载），应用内回退页由
+    // TravelPlanPanel.initState 的 ensureStarted() 兜底初始化。
     // 今日安排面板数据刷新：设置（创建/删除）提醒日程后，通过信号刷新右侧面板
     _scheduleReloadSignal.addListener(_onScheduleReloadSignal);
     _bootstrap();
@@ -822,6 +831,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final bool hadPendingTurn =
               _isAgentProcessing && _pendingAgentUserMessageId != null;
           _disarmAgentReplyWatchdog();
+          // 连接异常时排队消息可能已随服务端队列丢失：清空排队集合，
+          // 重连后若服务端仍在处理，chat.turn_started 会走采纳规则自我修正。
+          if (_queuedUserMessageIds.isNotEmpty) {
+            _queuedUserMessageIds.clear();
+            if (mounted) setState(() {});
+          }
           if (hadPendingTurn) {
             _handleAgentReplyTimeout(showSnackBar: false);
           } else {
@@ -851,6 +866,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           if (_isAgentProcessing && _pendingAgentUserMessageId != null) {
             _disarmAgentReplyWatchdog();
             _handleAgentReplyTimeout(showSnackBar: false);
+          }
+          if (_queuedUserMessageIds.isNotEmpty) {
+            _queuedUserMessageIds.clear();
+            if (mounted) setState(() {});
           }
           final String message = payload["message"]?.toString() ?? "与服务器的连接已断开";
           if (mounted) {
@@ -1264,7 +1283,21 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               doneTraceId.isNotEmpty &&
               activeTraceId != null &&
               doneTraceId != activeTraceId) {
+            // 非活动轮次的 done：若属于排队消息（并发槽位超时 BUSY 兜底等
+            // 未走 turn_started 的终态），结清排队徽标后丢弃
+            if (_queuedUserMessageIds.remove(doneTraceId)) {
+              if (mounted) setState(() {});
+            }
             return;
+          }
+          if (doneTraceId != null &&
+              doneTraceId.isNotEmpty &&
+              activeTraceId == null) {
+            // 无活动轮次时收到排队消息的 done（服务端未发 turn_started 的
+            // 兜底终态）：结清排队徽标，正文照常落列
+            if (_queuedUserMessageIds.remove(doneTraceId)) {
+              if (mounted) setState(() {});
+            }
           }
           final String bufferedText = _takePendingAssistantChunkText();
           // 关键：先在 traceId 上打「本轮已结束」标记，再做后续副作用。
@@ -1532,17 +1565,36 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               SnackBar(
                 content: Text("$title\n$text"),
                 duration: const Duration(seconds: 8),
-                action: SnackBarAction(
-                  label: "知道了",
-                  onPressed: () {
-                    _sendContactFeedback(
-                      channel: "websocket",
-                      responded: true,
-                      feedback: "positive",
-                      quietHours: _isQuietHoursNow(),
-                    );
-                  },
-                ),
+                // 有 deliveryId 时把唯一动作位让给"太多了"——一键负反馈直通
+                // 频控自适应（该类消息冷却×1.5），比"知道了"更有调教价值
+                action: deliveryId.isEmpty
+                    ? SnackBarAction(
+                        label: "知道了",
+                        onPressed: () {
+                          _sendContactFeedback(
+                            channel: "websocket",
+                            responded: true,
+                            feedback: "positive",
+                            quietHours: _isQuietHoursNow(),
+                          );
+                        },
+                      )
+                    : SnackBarAction(
+                        label: "太多了",
+                        onPressed: () {
+                          _sendProactiveFeedback(
+                            deliveryId,
+                            "too_many",
+                            kind: payload["kind"]?.toString(),
+                          );
+                          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                            const SnackBar(
+                              content: Text("好的，这类消息会少推一些（设置里可恢复）"),
+                              duration: Duration(seconds: 3),
+                            ),
+                          );
+                        },
+                      ),
               ),
             );
             controller?.closed.then((dynamic reason) {
@@ -2198,8 +2250,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 关键设计变更：流式阶段（agent 还在干活、思考气泡还在）期间，
     // **不要把 chunk 拼到消息列表**——避免用户看到「思考中」和「回复正文」同框。
     // 只清空缓冲，文本留到 chat.assistant_done 拿到 finalText 后再一次性入列表。
-    // 缓冲本身仍保留（被 _handleAgentReplyTimeout / _sendMessage 中断分支用作
-    // _interruptedResponses / 兜底文本）。
+    // 缓冲本身仍保留（被 _handleAgentReplyTimeout 用作超时兜底文本）。
     _assistantChunkFlushTimer?.cancel();
     _assistantChunkFlushTimer = null;
     _pendingAssistantChunkMessageId = null;
@@ -2317,6 +2368,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// v2：用户点 TurnPanel 顶栏「停止」按钮时的软取消。
   /// 不发 WS 事件——只本地清状态，让后续 chunk/agent_status 因 traceId 不匹配被过滤。
   /// 服务端 LLM 调用仍在后台跑（无法硬中断），但客户端不再接收/渲染。
+  /// 排队语义：只停止「当前活动轮次」；排队中的消息仍会按序被服务端处理，
+  /// 其 chat.turn_started 到达时经排队晋级分支重新点亮处理状态。
   void _cancelCurrentTurn() {
     if (!_isAgentProcessing) return;
     _disarmAgentReplyWatchdog();
@@ -2345,14 +2398,40 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 阶段 0：服务端确认收到，路由开始。
   /// 用服务端 t0 替换本地占位（让首字延迟测量更准）；
   /// 若 traceId 与本轮不匹配或已无活动轮次，丢弃。
+  ///
+  /// 排队语义（2026-09-14）：服务端队列开始处理某条排队消息时，本事件是
+  /// 客户端唯一的「该轮已激活」信号，承担三种分支：
+  ///   - traceId == 活动轮次：常规路径；
+  ///   - traceId ∈ 排队集合：晋级——服务端开始处理这条排队消息了；
+  ///   - 无活动轮次且不在排队集合：采纳（429 退避重发乱序/重连等场景下
+  ///     服务端真实轮序与客户端推断不一致时，以服务端为准自我修正）。
   void _handleTurnStartedV2(Map<String, dynamic> payload) {
     final String? traceId = payload["traceId"]?.toString();
-    final String? activeTraceId = _pendingAgentUserMessageId;
-    if (traceId == null ||
-        traceId.isEmpty ||
-        activeTraceId == null ||
-        traceId != activeTraceId) {
+    if (traceId == null || traceId.isEmpty) {
       return;
+    }
+    final String? activeTraceId = _pendingAgentUserMessageId;
+    if (traceId != activeTraceId) {
+      if (_queuedUserMessageIds.contains(traceId)) {
+        // 晋级：排队消息成为活动轮次（重置看门狗与轮内状态徽标）
+        _queuedUserMessageIds.remove(traceId);
+        _armAgentReplyWatchdog(traceId);
+        setState(() {
+          _isAgentProcessing = true;
+          _agentStatusLine = null;
+          _agentStatusPercent = null;
+          _currentToolName = null;
+        });
+        _notifyAgentProcessingUi(true);
+      } else if (activeTraceId != null) {
+        // 既有活动轮次且非本条：迟到事件，丢弃
+        return;
+      } else {
+        // 无活动轮次：采纳服务端开启的轮次（自我修正）
+        _armAgentReplyWatchdog(traceId);
+        setState(() => _isAgentProcessing = true);
+        _notifyAgentProcessingUi(true);
+      }
     }
     final dynamic t0Raw = payload["t0"];
     final DateTime t0 = t0Raw is num
@@ -2687,20 +2766,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       return;
     }
 
-    // 如果Agent正在处理中，说明用户要打断当前回复
-    if (_isAgentProcessing) {
-      final String interruptedText = _takePendingAssistantChunkText();
-      if (interruptedText.isNotEmpty) {
-        _interruptedResponses.add(interruptedText);
-      }
-
-      _disarmAgentReplyWatchdog();
-      _pendingAgentUserMessageId = null;
-      _clearAgentProcessingState(done: false);
-      _assistantChunkFlushTimer?.cancel();
-      _assistantChunkFlushTimer = null;
-      _pendingAssistantChunkMessageId = null;
-    }
+    // 豆包式列队发送（2026-09-14）：Agent 处理中收到的新输入不再打断当前轮，
+    // 而是排队等待依次处理（服务端 MessageBatchProcessor 同语义，每条独立回复）。
+    // 429 退避重发同样走排队：服务端按到达顺序排在已排队消息之后，两端顺序一致。
+    final bool isQueued = isRetry || _isAgentProcessing;
 
     final int attachCount = attachmentFrames?.length ?? 0;
     final ChatMessage userMessage = ChatMessage(
@@ -2716,6 +2785,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _pendingRetryText = effectiveText;
     if (isRetry) {
       // 重试时不重复添加用户消息（首次已添加）
+    } else if (isQueued) {
+      // 排队入列：活动轮次仍在进行并持有状态行，不重置
+      setState(() {
+        _messages.add(userMessage);
+        _inputController.clear();
+        _isAgentProcessing = true;
+      });
     } else {
       setState(() {
         _messages.add(userMessage);
@@ -2750,28 +2826,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // agent.location_request，客户端响应后实时回传；天气面板也会主动上报缓存。
     userMsg["agentAccessMode"] = "full";
 
-    // 如果有被打断的回复，将其添加到消息上下文中（作为系统提示文本
-    if (_interruptedResponses.isNotEmpty) {
-      final String interruptedContext =
-          _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
-      userMsg["interruptedContext"] = interruptedContext;
-      // 清空已整合的打断历史
-      _interruptedResponses.clear();
+    if (isQueued) {
+      // 入队等待：不抢当前活动轮次的 traceId/看门狗/流式缓冲；
+      // 服务端开始处理本条时 chat.turn_started 会把它晋级为活动轮次。
+      _queuedUserMessageIds.add(userMessage.messageId);
+    } else {
+      _armAgentReplyWatchdog(userMessage.messageId);
+
+      // v2 阶段 0：本地立即建占位 TurnState，让用户感知到「已发送 / 正在思考」，
+      // 不等服务端 chat.turn_started 回来（豆包式即时反馈的关键）。
+      _pendingLocalTurn = TurnState(
+        traceId: userMessage.messageId,
+        sessionId: ApiConfig.effectiveActorId,
+        t0: DateTime.now(),
+      );
+      if (mounted) setState(() {});
     }
-
-    _armAgentReplyWatchdog(userMessage.messageId);
-
-    // v2 阶段 0：本地立即建占位 TurnState，让用户感知到「已发送 / 正在思考」，
-    // 不等服务端 chat.turn_started 回来（豆包式即时反馈的关键）。
-    _pendingLocalTurn = TurnState(
-      traceId: userMessage.messageId,
-      sessionId: ApiConfig.effectiveActorId,
-      t0: DateTime.now(),
-    );
-    if (mounted) setState(() {});
 
     final bool sent = _ws.sendEvent("chat.user_message", userMsg);
     if (!sent) {
+      _queuedUserMessageIds.remove(userMessage.messageId);
       _disarmAgentReplyWatchdog();
       _pendingAgentUserMessageId = null;
       _clearAgentProcessingState();
@@ -2818,40 +2892,33 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final String label = action.label.trim();
     if (label.isEmpty) return;
 
-    // 如果 Agent 正在处理中,先把当前被截断的回复纳入上下文(与键盘输入同语义)
-    if (_isAgentProcessing) {
-      final String interruptedText = _takePendingAssistantChunkText();
-      if (interruptedText.isNotEmpty) {
-        _interruptedResponses.add(interruptedText);
-      }
-      _disarmAgentReplyWatchdog();
-      _pendingAgentUserMessageId = null;
-      _clearAgentProcessingState(done: false);
-      _assistantChunkFlushTimer?.cancel();
-      _assistantChunkFlushTimer = null;
-      _pendingAssistantChunkMessageId = null;
-    }
+    // 与 _sendMessage 同语义：处理中点击卡片按钮 → 排队，不打断当前轮
+    final bool isQueued = _isAgentProcessing;
 
     // 用一个内部 traceId 关联本轮 Agent 回复(不添加用户消息气泡到 _messages)
     final String actionMessageId =
         "action-${DateTime.now().microsecondsSinceEpoch}";
 
-    setState(() {
-      _isAgentProcessing = true;
-      _agentStatusLine = null;
-    });
-    _notifyAgentProcessingUi(true);
-    AgentSphereMoodBridge.instance.listening();
+    if (isQueued) {
+      _queuedUserMessageIds.add(actionMessageId);
+    } else {
+      setState(() {
+        _isAgentProcessing = true;
+        _agentStatusLine = null;
+      });
+      _notifyAgentProcessingUi(true);
+      AgentSphereMoodBridge.instance.listening();
 
-    _armAgentReplyWatchdog(actionMessageId);
+      _armAgentReplyWatchdog(actionMessageId);
 
-    // 本地占位 TurnState:让用户立即看到「Agent 正在思考衔接回复」反馈
-    _pendingLocalTurn = TurnState(
-      traceId: actionMessageId,
-      sessionId: ApiConfig.effectiveActorId,
-      t0: DateTime.now(),
-    );
-    if (mounted) setState(() {});
+      // 本地占位 TurnState:让用户立即看到「Agent 正在思考衔接回复」反馈
+      _pendingLocalTurn = TurnState(
+        traceId: actionMessageId,
+        sessionId: ApiConfig.effectiveActorId,
+        t0: DateTime.now(),
+      );
+      if (mounted) setState(() {});
+    }
 
     final bool sent = _ws.sendCardAction(
       sessionId: ApiConfig.sessionId,
@@ -2869,6 +2936,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           ApiConfig.userId.trim().isNotEmpty ? ApiConfig.userId.trim() : null,
     );
     if (!sent) {
+      _queuedUserMessageIds.remove(actionMessageId);
       _disarmAgentReplyWatchdog();
       _pendingAgentUserMessageId = null;
       _clearAgentProcessingState();
@@ -2976,6 +3044,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   Future<void> _openTravelPlanWindow(AgentResultData data) async {
+    // 首选：本机 server 页面 + 系统浏览器（零独立进程/WebView2 幽灵窗）。
+    // server 不可达时退回独立子进程窗口，再退应用内全屏页。
+    if (await TravelPlanBrowserLauncher.open(data)) {
+      if (!mounted) return;
+      setState(() => _tabIndex = 0); // 主窗口聚焦时，行程卡就在聊天页眼前
+      return;
+    }
     final bool opened = await TravelPlanWindowLauncher.open(data);
     if (opened) {
       if (!mounted) return;
@@ -3340,6 +3415,27 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           .then(
             (_) {},
             onError: (Object e) => debugPrint("[proactive] outcome post failed: $e"),
+          ),
+    );
+  }
+
+  /// 用户语义化反馈（"太多了"）：服务端回灌频控自适应冷却，
+  /// kind 可选附加上以便服务端定位投递类别。
+  void _sendProactiveFeedback(String deliveryId, String action, {String? kind}) {
+    unawaited(
+      http
+          .post(
+            Uri.parse("${ApiConfig.httpBase}/api/proactivity/feedback"),
+            headers: const {"Content-Type": "application/json"},
+            body: jsonEncode(<String, String?>{
+              "deliveryId": deliveryId,
+              "action": action,
+              if (kind != null && kind.isNotEmpty) "kind": kind,
+            }),
+          )
+          .then(
+            (_) {},
+            onError: (Object e) => debugPrint("[proactive] feedback post failed: $e"),
           ),
     );
   }
@@ -5289,6 +5385,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 任务面回执聚合（状态带「N 个任务后台进行中」）+ 逐任务取消入口
       backgroundTaskCount: _taskPlaneActiveTaskIds.length,
       onCancelBackgroundTask: _cancelBackgroundTask,
+      // 豆包式列队发送：排队中的用户消息气泡显示「排队中」徽标
+      queuedMessageIds: _queuedUserMessageIds,
     );
   }
 

@@ -57,8 +57,9 @@ services:
       AGENT_QDRANT_URL: http://qdrant:6333
       # 限流默认关闭；设为 1 时启用并与 redis 服务共享配额
       HTTP_RATE_LIMIT_REDIS_URL: redis://redis:6379
-      # 下载上传管理密码（请修改为强密码，或通过 .env 注入）
-      ADMIN_UPLOAD_TOKEN: ${ADMIN_UPLOAD_TOKEN:-admin-upload-secret}
+      # 管理后台/下载上传管理密码：必须通过 .env 注入强密码；
+      # 未设置时管理接口一律锁定（服务端不再提供默认口令）
+      ADMIN_UPLOAD_TOKEN: ${ADMIN_UPLOAD_TOKEN:?请在 .env 中设置 ADMIN_UPLOAD_TOKEN（管理后台口令）}
       DOWNLOADS_DIR: /app/downloads
     volumes:
       - app-data:/app/data

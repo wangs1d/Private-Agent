@@ -36,14 +36,12 @@ test("search_query 提取：缺省/空串/非字符串返回 undefined", () => {
   );
 });
 
-test("search_query 提取：超长查询截断采用而非整体丢弃（丢弃 = realtime 轮失去前置检索）", () => {
+test("search_query 提取：超长查询全量透传（对齐主流：长度交模型自决与搜索后端自限，代码不切）", () => {
   const longQuery =
-    "刘浩存 最近半年 行程动态汇总 在哪个城市 泰国电影拍摄剧组进展 公开活动安排 杂志拍摄通告 最新消息 微博更新 粉丝偶遇 现身机场"; // > 60 字符
-  assert.ok(longQuery.length > 60, `用例前置：查询词需超 60 字（实际 ${longQuery.length}）`);
+    "刘浩存 最近半年 行程动态汇总 在哪个城市 泰国电影拍摄剧组进展 公开活动安排 杂志拍摄通告 最新消息 微博更新 粉丝偶遇 现身机场 剧组杀青 品牌代言活动安排";
+  assert.ok(longQuery.length > 60);
   const extracted = extractRouteSearchQuery(JSON.stringify({ search_query: longQuery }));
-  assert.ok(extracted, "超长查询不得被丢弃");
-  assert.equal(extracted!.length, 60);
-  assert.ok(longQuery.startsWith(extracted!));
+  assert.equal(extracted, longQuery, "查询词必须原样透传，不得截断");
 });
 
 test("路由表契约：realtime_lookup 恒为任务面 search 能力（前置检索双面透传的前提）", () => {

@@ -163,7 +163,10 @@ export function startRuntimeLinkServer(options: RuntimeLinkServerOptions): Promi
             const recent = Array.isArray(frame.params.recentUserTurns)
               ? (frame.params.recentUserTurns as unknown[]).map(String)
               : [];
-            const result = await facade.routeTurnForWs(sessionId, text, recent);
+            const entityLines = Array.isArray(frame.params.entityContextLines)
+              ? (frame.params.entityContextLines as unknown[]).map(String)
+              : [];
+            const result = await facade.routeTurnForWs(sessionId, text, recent, entityLines);
             send({ kind: "res", id: frame.id, ok: true, result });
             return;
           }

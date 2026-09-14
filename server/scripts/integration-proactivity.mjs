@@ -27,6 +27,7 @@ import { PendingConfirmationStore } from "../src/proactivity/pending-confirmatio
 import { PresenceService } from "../src/proactivity/presence-service.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
 import { ProactivityHub } from "../src/proactivity/proactivity-hub.js";
+import { ProactiveCaller } from "../src/proactivity/proactive-caller.js";
 import { CostCalibrator } from "../src/proactivity/cost-calibrator.js";
 import { appendEventAudit } from "../src/proactivity/evaluators/evaluator-chain.js";
 import { existsSync } from "node:fs";
@@ -355,6 +356,59 @@ record("🎚️ 自校准", `接受率驱动阈值 → ${calibrator.alertMidThre
 assert.ok(existsSync(join(dataDir, "evaluator-state.json")), "评估器状态已落盘");
 assert.ok(existsSync(join(dataDir, "events.ndjson")), "事件审计已落盘");
 record("💾 审计", "evaluator-state.json + events.ndjson 均已落盘（重启不失忆、事后可追溯）");
+
+// S10 主动呼叫闭环：承诺到期 → 真实来电汇报 → 通话内两轮对话 → 结果回灌
+console.log("════ S10 主动呼叫（贾维斯式来电汇报 + 通话对话）════");
+{
+  const callLog = [];
+  const mockPhone = {
+    async callUserWithRinging(params) {
+      callLog.push({ phase: "ringing+connect", transcript: params.transcript });
+      record("📞 来电", `振铃 6s → 接通播报：「${params.transcript.slice(0, 50)}…」`);
+      return { ok: true, callId: "call-e2e-1", pushed: true };
+    },
+    async waitForCallReply(_id, _ms) {
+      const script = ["什么事？", "知道了，那帮我催一下吧", "好，再见"];
+      const i = callLog.filter((l) => l.phase === "turn").length;
+      if (i >= script.length) return null;
+      callLog.push({ phase: "turn" });
+      record("🎤 用户", script[i]);
+      return { text: script[i] };
+    },
+    async pushVoiceReply(_id, _to, transcript) {
+      callLog.push({ phase: "voice" });
+      record("🔊 Agent", transcript);
+      return { ok: true, pushed: true };
+    },
+    endCall(_id, reason) {
+      record("📴 结束", `reason=${reason}`);
+      return { ok: true };
+    },
+  };
+  // mock turnLlm：规则化回复（脚本零外网；生产由 externalChat 承担同签名）
+  const turnLlm = async (history) => {
+    const last = history[history.length - 1].content;
+    if (last.includes("催")) return "好的，我现在就给小李发消息催一下，发完告诉你。";
+    return "是承诺守约提醒：答应小李的报价单快到期了，需要我代催吗？";
+  };
+  const caller = new ProactiveCaller({
+    virtualPhone: mockPhone,
+    turnLlm,
+    dataPath: dataDir,
+    fallbackTextDelivery: (actorId, title, text) => record("⬇️ 兜底", title),
+    onOutcome: (input) => record("🔁 通话回灌", `outcome=${input.outcome} 轮次=${input.transcript.length}`),
+  });
+  const result = await caller.callAndReport({
+    actorId: ACTOR,
+    kind: "commitment_chain",
+    importance: "high",
+    title: "承诺临近",
+    report: "答应小李的报价单还有 75 分钟到期，要我现在帮你催一下吗？",
+    context: "来自承诺守约链",
+  });
+  assert.equal(result.outcome, "replied", "通话应真实完成对话");
+  assert.ok(existsSync(join(dataDir, "call-log.jsonl")), "通话记录已落盘");
+}
 
 // ══════════════ 汇总 ══════════════
 

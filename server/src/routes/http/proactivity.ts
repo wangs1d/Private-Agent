@@ -11,6 +11,7 @@ import type { FastifyInstance } from "fastify";
 
 import type { ProactivePipeline } from "../../proactivity/proactive-pipeline.js";
 import type { MobilePushService } from "../../proactivity/mobile-push-service.js";
+import type { ProactivitySuppressionStore } from "../../proactivity/suppression-store.js";
 import type { ProactiveOutcome } from "../../proactivity/pipeline-types.js";
 
 const ALLOWED_OUTCOMES = new Set<ProactiveOutcome>([
@@ -22,6 +23,25 @@ const ALLOWED_OUTCOMES = new Set<ProactiveOutcome>([
 ]);
 
 const ALLOWED_PUSH_PROVIDERS = new Set(["jpush", "bark", "webhook"]);
+
+/** 用户语义化反馈动作（一键"太多了/别推这个"直通频控与静音表） */
+const ALLOWED_FEEDBACK_ACTIONS = new Set(["too_many", "mute_topic", "resume_topic", "like"]);
+
+/** 允许被反馈静音的触达类别：与抑制表路由白名单对齐 + 简报系 kind */
+const FEEDBACK_SUPPRESSIBLE_KINDS = new Set([
+  "greeting",
+  "interest_share",
+  "interest_alert",
+  "care",
+  "followup",
+  "task_celebration",
+  "overwork_care",
+  "weather_alert",
+  "life_reminder",
+  "monthly_report",
+  "digest",
+  "morning_briefing",
+]);
 
 export type ProactivityFabricDeps = {
   /** 传感器健康快照（L1） */
@@ -36,6 +56,12 @@ export type ProactivityFabricDeps = {
   evaluatorProbes?: () => unknown;
   /** outcome 回灌桥（CostCalibrator.observe） */
   observeOutcome?: (outcome: string) => void;
+  /** 主动话术生成器状态（内容型场景 LLM 用量） */
+  phraseStats?: () => unknown;
+  /** 主动呼叫器状态（通话轮次/冷却） */
+  callStats?: () => unknown;
+  /** 自检来电（?call=1 实拨一通测试电话验证呼叫闭环） */
+  testCall?: (actorId: string) => Promise<unknown> | unknown;
   /** 设备信号上行（家居/手机/可穿戴 → 传感层 feeder） */
   emitDeviceSignal?: (input: {
     actorId: string;
@@ -56,6 +82,7 @@ export function registerProactivityPipelineRoutes(
     pipeline: ProactivePipeline | null;
     pushService?: MobilePushService | null;
     fabric?: ProactivityFabricDeps | null;
+    suppressionStore?: ProactivitySuppressionStore | null;
   },
 ): void {
   const pipeline = deps.pipeline;
@@ -88,10 +115,91 @@ export function registerProactivityPipelineRoutes(
         error: `未知 outcome「${outcome}」，可选：${[...ALLOWED_OUTCOMES].join(", ")}`,
       });
     }
-    const applied = pipeline.recordOutcome(deliveryId, outcome);
-    if (!applied) return reply.code(404).send({ ok: false, error: "deliveryId not found" });
-    deps.fabric?.observeOutcome?.(outcome);
-    return { ok: true, deliveryId, outcome };
+  const applied = pipeline.recordOutcome(deliveryId, outcome);
+  if (!applied) return reply.code(404).send({ ok: false, error: "deliveryId not found" });
+  deps.fabric?.observeOutcome?.(outcome);
+  return { ok: true, deliveryId, outcome };
+});
+
+  // 用户语义化反馈：一键"太多了 / 这个话题别再推 / 喜欢"→ 频控自适应 + 话题静音。
+  //   deliveryId 优先（主动消息卡片自带）；简报等无 deliveryId 的投递物用 kind + actorId。
+  //   too_many / like → 自适应冷却（负反馈冷却×1.5、正反馈回落）；
+  //   mute_topic / resume_topic → 抑制表（仲裁器与 Hub 发送前都会检查）。
+  app.post("/api/proactivity/feedback", async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      deliveryId?: string;
+      actorId?: string;
+      kind?: string;
+      action?: string;
+      keywords?: unknown;
+      note?: string;
+      target?: string;
+    };
+    const action = String(body.action ?? "").trim();
+    if (!ALLOWED_FEEDBACK_ACTIONS.has(action)) {
+      return reply.code(400).send({
+        ok: false,
+        error: `未知 action「${action}」，可选：${[...ALLOWED_FEEDBACK_ACTIONS].join(", ")}`,
+      });
+    }
+    const deliveryId = String(body.deliveryId ?? "").trim();
+    let actorId = String(body.actorId ?? "").trim();
+    let kind = String(body.kind ?? "").trim();
+    if (deliveryId) {
+      const record = pipeline.describeDelivery(deliveryId);
+      if (!record) {
+        return reply.code(404).send({ ok: false, error: "deliveryId not found" });
+      }
+      actorId = actorId || record.actorId;
+      kind = kind || record.kind;
+    }
+    if (!kind) return reply.code(400).send({ ok: false, error: "kind required（或提供 deliveryId）" });
+
+    const suppression = deps.suppressionStore ?? null;
+    const suppressible = FEEDBACK_SUPPRESSIBLE_KINDS.has(kind);
+    const applied: Record<string, unknown> = {};
+
+    if (action === "too_many" || action === "like") {
+      // 频控自适应：有投递记录走完整 outcome 状态机；否则直接回灌冷却
+      const positive = action === "like";
+      if (deliveryId) {
+        applied.outcomeRecorded = pipeline.recordOutcome(
+          deliveryId,
+          positive ? "accepted" : "dismissed",
+        );
+      } else {
+        pipeline.noteKindFeedback(kind, positive);
+        applied.cooldownAdjusted = true;
+      }
+    }
+
+    if (action === "mute_topic" || action === "resume_topic") {
+      if (!actorId) {
+        return reply.code(400).send({ ok: false, error: "actorId required for topic actions" });
+      }
+      if (!suppression) {
+        return reply.code(503).send({ ok: false, error: "suppression store not wired" });
+      }
+      if (!suppressible) {
+        return reply.code(400).send({
+          ok: false,
+          error: `类别「${kind}」暂不支持话题静音，可选：${[...FEEDBACK_SUPPRESSIBLE_KINDS].join(", ")}`,
+        });
+      }
+      if (action === "mute_topic") {
+        const keywords = Array.isArray(body.keywords)
+          ? body.keywords.map((k) => String(k).trim()).filter(Boolean)
+          : [];
+        applied.suppressions = await suppression.add(actorId, kind, keywords, body.note);
+        // 静音本身也是一次负反馈，同步回灌冷却
+        if (deliveryId) pipeline.recordOutcome(deliveryId, "dismissed");
+        else pipeline.noteKindFeedback(kind, false);
+      } else {
+        applied.suppressions = await suppression.remove(actorId, String(body.target ?? "").trim() || kind);
+      }
+    }
+
+    return { ok: true, action, actorId: actorId || undefined, kind, ...applied };
   });
 
   // ─── 五层主动性架构观测端点 ───
@@ -104,10 +212,17 @@ export function registerProactivityPipelineRoutes(
   // GET /api/proactivity/selftest —— 一键链路自检：上下文快照 + 打断成本 + 裁决预览。
   //   ?fire=1 实际投递一条测试消息（验证直达车道端到端可用）
   app.get("/api/proactivity/selftest", async (request) => {
-    const q = request.query as { fire?: string };
+    const q = request.query as { fire?: string; call?: string };
     const fire = q.fire === "1";
     if (!deps.fabric) return { ok: false, error: "fabric not wired" };
-    return { ok: true, ...(await deps.fabric.selftest(fire)) };
+    const base = (await deps.fabric.selftest(fire)) as Record<string, unknown>;
+    if (q.call === "1") {
+      const actorId = String(base.actorId ?? "local_user");
+      base.testCall = deps.fabric.testCall
+        ? await deps.fabric.testCall(actorId)
+        : { ok: false, error: "testCall not wired" };
+    }
+    return { ok: true, ...base };
   });
 
   // POST /api/proactivity/device-signal —— 物理设备信号统一上行入口

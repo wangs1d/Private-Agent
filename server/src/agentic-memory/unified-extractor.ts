@@ -63,6 +63,20 @@ export interface UnifiedFact {
 }
 
 /**
+ * 角色指代映射（2026-09-13）：用户用角色/亲属称谓指代具体人物的映射记录
+ * （「我老婆是刘浩存」→ role:老婆 name:刘浩存）。写时结构化——落结构化事实库
+ * （field=指代·老婆），realtime 轮的代码侧指代消解 O(1) 直查，不再靠原文频次
+ * 挖掘（打地鼠模式）。只记录「用户这么指代」，不断言真实关系（粉丝式称呼同样收）。
+ */
+export interface UnifiedReferent {
+  /** 用户使用的称谓（老婆|老公|女朋友|偶像|儿子…，≤12 字） */
+  role: string;
+  /** 被指代的具体人名（≤40 字） */
+  name: string;
+  confidence?: number;
+}
+
+/**
  * 五维重要性评分（植入裁决「评分」步，2026-09-07）：LLM 对候选逐维打 0-1 分，
  * 代码侧加权合成综合分并按阈值闸门裁决是否植入长期库——不信任单一直觉分，
  * 确保无用的消息（低持久+低影响的日常琐事）不会被植入长期记忆。
@@ -100,6 +114,8 @@ export interface UnifiedExtraction {
   understandings: UnifiedUnderstanding[];
   /** 结构化事实（事实库字段级 latest-wins upsert，实时生效） */
   facts: UnifiedFact[];
+  /** 角色→人名指代映射（结构化事实库 指代·role 字段，realtime 消解直查） */
+  referents: UnifiedReferent[];
 }
 
 export function isMemoryUnifiedExtractEnabled(): boolean {
@@ -139,6 +155,11 @@ const SYSTEM_PROMPT = [
   "  // 用户表示不喜欢这个称呼则不输出（按更正处理，字段级覆盖由系统完成）。",
   "  // 拿不准是不是字面为真就不输出。用户更正旧信息时 facts 输出新值（字段级覆盖由系统完成）。",
   "  // field 用短字段名（称呼|职业|居住地|技术栈|生日|公司|学历 或其他 ≤6 字字段）；value 是确定短值（≤20 字）",
+  '"referents":[{"role":"称谓","name":"人名","confidence":0到1}],',
+  "  // 用户用角色/亲属称谓指代具体人物时输出映射：「我老婆是刘浩存」→ role:老婆 name:刘浩存；",
+  "  // 粉丝式称呼同样输出（如「我老婆最近在哪」指代某明星）——本字段只记录「用户这么指代」，",
+  "  // 不断言真实关系；role 用用户原话里的称谓（老婆|老公|女朋友|偶像|儿子，≤12 字），",
+  "  // name 是具体人名/专名（≤40 字，能定位到唯一人物；泛指如「我妈」无名字则不输出）；无则空数组",
   '"commitments":[{"text":"承诺内容（第三人称）","committedBy":"user|agent|third_party","deadline":"ISO 8601 或 null","confidence":0到1,"evidence":"原文片段","category":"报价|交付|会面|转账|其他"}],',
   '"corrections":[{"oldClaim":"被纠正的旧陈述","newClaim":"纠正后的新陈述"}]  // 用户明确否认/更正既有信息时才有',
   "}",
@@ -164,6 +185,7 @@ interface RawUnified {
   corrections?: unknown;
   understandings?: unknown;
   facts?: unknown;
+  referents?: unknown;
 }
 
 function asStringArray(raw: unknown): string[] {
@@ -276,6 +298,24 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
         .slice(0, 6)
     : [];
 
+  // 角色→人名指代映射（写时结构化，realtime 消解 O(1) 直查的来源）
+  const referents = Array.isArray(raw.referents)
+    ? (raw.referents as Array<Record<string, unknown>>)
+        .map((r) => {
+          const role = typeof r.role === "string" ? r.role.trim() : "";
+          const name = typeof r.name === "string" ? r.name.trim() : "";
+          if (!role || role.length > 12 || !name || name.length > 40) return null;
+          const conf = Number(r.confidence);
+          return {
+            role,
+            name,
+            ...(Number.isFinite(conf) ? { confidence: Math.max(0, Math.min(1, conf)) } : {}),
+          } as UnifiedReferent;
+        })
+        .filter((r): r is UnifiedReferent => r !== null)
+        .slice(0, 5)
+    : [];
+
   const scores = parseScores(raw.scores);
   return applyPromotionGate({
     decision,
@@ -287,6 +327,7 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
     corrections,
     understandings,
     facts,
+    referents,
   });
 }
 

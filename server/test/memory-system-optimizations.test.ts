@@ -77,6 +77,24 @@ test("normalizeUnified：决策校验 / 承诺规范化 / 纠正项 / 无效决�
   assert.equal(normalizeUnified({ decision: "reject", memories: ["不应带出"] })!.memories.length, 0);
 });
 
+test("normalizeUnified：referents 角色指代映射规范化（写时结构化，realtime 消解数据源）", () => {
+  const ok = normalizeUnified({
+    decision: "remember",
+    memories: ["用户半开玩笑地自称'老婆'是明星刘浩存（粉丝式称呼）"],
+    referents: [
+      { role: "老婆", name: "刘浩存", confidence: 0.9 },
+      { role: "", name: "无名丢弃" },
+      { role: "超长称谓字段超过十二个字以上被丢弃", name: "x" },
+      { role: "偶像", name: "", confidence: 0.8 },
+    ],
+  });
+  assert.ok(ok);
+  assert.deepEqual(ok.referents, [{ role: "老婆", name: "刘浩存", confidence: 0.9 }]);
+  // 旧输出无 referents 字段 → 空数组兜底（不破坏既有调用方）
+  const legacy = normalizeUnified({ decision: "remember", memories: ["普通记忆"] });
+  assert.deepEqual(legacy!.referents, []);
+});
+
 // ── 五维评分植入闸门（持久性/频率/情感强度/影响范围/确定性 → 加权综合分裁决） ──
 
 test("评分闸门：无用消息（低持久+低影响）即使 LLM 误标 remember 也被 reject", () => {

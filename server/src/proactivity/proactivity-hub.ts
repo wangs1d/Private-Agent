@@ -167,6 +167,11 @@ const ACT_TOOL_DENY_RE =
   /delete|remove|drop|format|wipe|uninstall|shutdown|reboot|restart|run_shell|run_automation|kill/i;
 /** act 单次行动计划步数上限 */
 const ACT_MAX_STEPS = 5;
+/** act 执行循环步数上限 / 每日 LLM 循环轮次熔断 */
+const ACT_LOOP_MAX_STEPS = 10;
+/** 连续无进展步数上限：超过即收场（防 LLM 原地打转烧轮次）；换路成功即清零 */
+const ACT_LOOP_MAX_CONSECUTIVE_FAILURES = 2;
+const ACT_LOOP_DAILY_TURN_CAP = 40;
 /** 核心执行面工具（searchTools 注入时保底并入，主动性最常用的 act 工具族） */
 const CORE_ACT_TOOL_RE = /^(media\.|calendar\.|clock\.|voice\.speak|weather\.)/;
 /** 通用路径喂给 LLM 的工具数上限（top-K 相关 + 核心保底） */
@@ -301,6 +306,8 @@ export class ProactivityHub {
   private hubSeq = 0;
   /** LLM 评估计数（每日熔断，防乱调用） */
   private readonly evalCounts = new Map<string, number>();
+  /** act 执行循环每日轮次（actorId:date → 已用轮次） */
+  private readonly actLoopTurns = new Map<string, number>();
   private readonly maxEvalsPerDay = readMaxEvalsPerDay();
   private started = false;
 
@@ -772,15 +779,28 @@ export class ProactivityHub {
         } as ProactiveIntent);
         break;
       case "act":
-        await this.runActPlan({
-          actorId,
-          kind: decision.kind,
-          importance: decision.importance,
-          steps: decision.actions.map((a) => ({ tool: a.tool, args: a.args })),
-          rationale,
-          messageHint: decision.messageHint,
-          source,
-        });
+        if (this.engine.isEnabled()) {
+          // LLM 在环执行循环：执行→看结果→再决策，把"决定 act"升级为"自主办完"
+          await this.runActLoop({
+            actorId,
+            kind: decision.kind,
+            importance: decision.importance,
+            goal: rationale,
+            messageHint: decision.messageHint,
+            source,
+            seedSteps: decision.actions.map((a) => ({ tool: a.tool, args: a.args })),
+          });
+        } else {
+          await this.runActPlan({
+            actorId,
+            kind: decision.kind,
+            importance: decision.importance,
+            steps: decision.actions.map((a) => ({ tool: a.tool, args: a.args })),
+            rationale,
+            messageHint: decision.messageHint,
+            source,
+          });
+        }
         break;
       case "advise":
         // advise 不再注入对话 prompt，改由 fast speak 车道以主动对话形式投递。
@@ -928,7 +948,22 @@ export class ProactivityHub {
     }
   }
 
-  /** speak 模式：发布 LifeSignal → 现有 ProactionCortex 闭环接管 */
+  /**
+   * 行为反馈型 speak（act 执行结果/确认请求）的统一出口：
+   * 直达车道开启时走模板直投管道（带 deliveryId/outcome 闭环），否则回退
+   * LifeSignal 路径。与 route() 的 speak/advise 分发逻辑保持一致。
+   */
+  private speakFeedback(intent: ProactiveIntent): void {
+    if (this.isDirectLaneEnabled()) {
+      this.submitDirectSpeak(intent);
+    } else {
+      this.emitSpeakSignal(intent);
+    }
+  }
+
+  /**
+   * speak 模式：发布 LifeSignal → 现有 ProactionCortex 闭环接管
+   */
   private emitSpeakSignal(intent: ProactiveIntent & { direct?: boolean }): void {
     try {
       this.deps.publishSignal({
@@ -976,7 +1011,7 @@ export class ProactivityHub {
     // 回退开关：跳过效用评估，恢复「直接执行 + 事后告知」的升级前语义
     if (!isUtilityEvalEnabled()) {
       await this.executeActs(input.actorId, input.steps);
-      this.emitSpeakSignal({
+      this.speakFeedback({
         actorId: input.actorId,
         kind: input.kind,
         importance: input.importance,
@@ -1001,6 +1036,18 @@ export class ProactivityHub {
       console.log(
         `[ProactivityHub] act 静默执行 kind=${input.kind} tools=${input.steps.map((s) => s.tool).join(",")} netUtility=${result.netUtility}`,
       );
+      // 做完轻提一句（与 InitiativeEngine「act=做完轻提一句」的约定一致）：
+      // 完全无声的执行会让用户对 agent 的后台行为失去心智模型。原重要度保留
+      // （频控/静默时段仍按原档把关），文案是低打扰的顺嘴一提。
+      this.speakFeedback({
+        actorId: input.actorId,
+        kind: input.kind,
+        importance: input.importance,
+        title: `我顺手做了点事：${input.rationale.slice(0, 40)}`,
+        summary: `已悄悄办好：${input.steps.map((s) => s.tool).join(" → ")}。${input.messageHint}`,
+        mode: "speak",
+        source: input.source,
+      } as ProactiveIntent);
       return result.branch;
     }
     if (result.branch === "ask_first") {
@@ -1016,7 +1063,7 @@ export class ProactivityHub {
       });
       // 暂停执行，确认请求即本次主动消息；回复「可以」走 resolveConfirmation 推进
       this.deps.onPendingConfirmation?.(pending);
-      this.emitSpeakSignal({
+      this.speakFeedback({
         actorId: input.actorId,
         kind: input.kind,
         importance: input.importance,
@@ -1112,7 +1159,7 @@ export class ProactivityHub {
     } else {
       summary = `已按你的确认完成：${tools}。`;
     }
-    this.emitSpeakSignal({
+    this.speakFeedback({
       actorId,
       kind: entry.kind,
       importance: okCount === results.length ? "low" : "medium",
@@ -1126,6 +1173,282 @@ export class ProactivityHub {
   /** 沉默决策检索（「你上周为什么没提醒我 XX」反问链路） */
   searchSilences(opts: SilenceSearchOptions): SilenceLogEntry[] {
     return this.silenceLog.search(opts);
+  }
+
+  /**
+   * act 执行循环（LLM 在环）：每步执行后把真实结果（含失败原因）喂回 LLM 决定下一步。
+   * 关键设计——失败换路：某步失败/被拦截时**不整体收手**，把 ok:false + 真实错误
+   * 写进历史喂回 LLM，由它换参数（重试一次）、换工具或换路径达成同一目标；
+   * 连续 ACT_LOOP_MAX_CONSECUTIVE_FAILURES 步无进展才收场，并诚实交代
+   * "试过什么、卡在哪"（用户委托的事不该无声消失）。护栏：
+   *   - 每步独立过安全门（ACT_TOOL_DENY_RE：拦截 ≠ 中断，反馈后 LLM 自适应）
+   *     + 效用门槛（仅 execute_silently 可自动执行；ask_first/silence → 停止循环
+   *     转为口头请示/沉默留痕——循环模式下没有"确定的剩余计划"，不做确认续跑的伪机制）
+   *   - 步数上限 / 连续失败上限 / 每日 LLM 循环轮次熔断
+   * llmComplete 未注入（引擎禁用）时走旧版固定计划（runActPlan）。
+   */
+  private async runActLoop(input: {
+    actorId: string;
+    kind: string;
+    importance: "high" | "medium" | "low";
+    goal: string;
+    messageHint: string;
+    source: string;
+    seedSteps: Array<{ tool: string; args: Record<string, unknown> }>;
+  }): Promise<void> {
+    const done: Array<{ tool: string; ok: boolean; error?: string }> = [];
+    const history: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; result?: Record<string, unknown>; error?: string }> = [];
+    let consecutiveFailures = 0;
+
+    const okTools = (): string => done.filter((d) => d.ok).map((d) => d.tool).join(" → ");
+    const lastError = (): string => [...history].reverse().find((h) => !h.ok)?.error ?? "";
+
+    // 成功收尾：至少做成了一步
+    const finishSuccess = (note: string): void => {
+      const okCount = done.filter((d) => d.ok).length;
+      // LLM 驱动的 act 收尾走 LifeSignal 车道（与 LLM speak 同出口，配额已预留）；
+      // 若走直达车道会被 routeDecision 刚记录的分 kind 冷却反杀
+      this.emitSpeakSignal({
+        actorId: input.actorId,
+        kind: input.kind,
+        importance: input.importance,
+        title: `我顺手办好了：${input.goal.slice(0, 40)}`,
+        summary: `已悄悄办好（${okCount}/${done.length}）：${okTools()}。${note || input.messageHint}`,
+        mode: "speak",
+        source: input.source,
+      } as ProactiveIntent);
+    };
+
+    // 失败/中止收场：诚实交代试过什么、卡在哪——部分成功交代成果+卡点，
+    // 全部失败降为 low 档的低打扰交代（不发"办好了"的假汇报）
+    const finishGaveUp = (reason: string): void => {
+      const okCount = done.filter((d) => d.ok).length;
+      if (okCount > 0) {
+        this.emitSpeakSignal({
+          actorId: input.actorId,
+          kind: input.kind,
+          importance: input.importance,
+          title: `办了一半：${input.goal.slice(0, 40)}`,
+          summary: `完成了：${okTools()}。剩下的没走通${lastError() ? `（卡在：${lastError()}）` : ""}。${reason}`,
+          mode: "speak",
+          source: input.source,
+        } as ProactiveIntent);
+        return;
+      }
+      this.emitSpeakSignal({
+        actorId: input.actorId,
+        kind: input.kind,
+        importance: "low",
+        title: `没办成：${input.goal.slice(0, 40)}`,
+        summary: `试过 ${done.map((d) => `${d.tool}×`).join("、") || "几种方式"}，${lastError() ? `卡在：${lastError()}。` : ""}${reason}`,
+        mode: "speak",
+        source: input.source,
+      } as ProactiveIntent);
+    };
+
+    /** 单步执行（门禁+审计+历史留痕）。ask_first/silence 由本函数收尾（发言/留痕）。 */
+    const executeGated = async (tool: string, args: Record<string, unknown>): Promise<"executed" | "failed" | "blocked" | "ask_first" | "silence"> => {
+      if (ACT_TOOL_DENY_RE.test(tool)) {
+        // 危险工具在自主层永不执行：拦截 ≠ 中断——记入历史（blocked + 原因）喂回
+        // LLM 让它换路，循环继续（LLM 收到拦截反馈后通常能绕道达成目标）
+        console.log(`[ProactivityHub] act 循环步骤被安全门拦截: ${tool}`);
+        history.push({ tool, args, ok: false, error: "安全门拦截：该工具禁止自主执行，请换其他方式" });
+        done.push({ tool, ok: false, error: "安全门拦截" });
+        return "blocked";
+      }
+      const utility = evaluateActionUtility({
+        kind: input.kind,
+        title: input.goal,
+        risk: deriveRiskFromSteps([{ tool, args }]),
+        authorization: authorizationForSource(input.source),
+        value: deriveActValue(input.importance),
+      });
+      if (utility.branch !== "execute_silently") {
+        if (utility.branch === "ask_first") {
+          // 循环里没有"确定的剩余计划"可供批准后续跑：停下口头请示，用户
+          // 在对话里点头后再以显式委托继续（把确认续跑建在流沙上是伪能力）
+          this.silenceLog.record({
+            at: Date.now(),
+            actorId: input.actorId,
+            kind: input.kind,
+            title: input.goal.slice(0, 60),
+            source: input.source,
+            scope: "action",
+            netUtility: utility.netUtility,
+            riskScore: utility.riskScore,
+            valueScore: utility.valueScore,
+            reason: `act_loop_ask_first:${utility.reason}`,
+          });
+          this.emitSpeakSignal({
+            actorId: input.actorId,
+            kind: input.kind,
+            importance: input.importance,
+            title: `需要你点头：${input.goal.slice(0, 40)}`,
+            summary: `已完成：${okTools() || "无"}。接下来的（${tool}）会${utility.reason.startsWith("unauthorized_third_party") ? "影响第三方" : "不易撤回"}，你确认我再继续。`,
+            mode: "speak",
+            source: input.source,
+          } as ProactiveIntent);
+          return "ask_first";
+        }
+        this.silenceLog.record({
+          at: Date.now(),
+          actorId: input.actorId,
+          kind: input.kind,
+          title: input.goal.slice(0, 60),
+          source: input.source,
+          scope: "action",
+          netUtility: utility.netUtility,
+          riskScore: utility.riskScore,
+          valueScore: utility.valueScore,
+          reason: `act_loop_silence:${utility.reason}`,
+        });
+        return "silence";
+      }
+      try {
+        const ret = await this.deps.executeTool(tool, args, input.actorId);
+        this.recordActAudit(input.actorId, tool, args);
+        if (ret?.ok === true) {
+          done.push({ tool, ok: true });
+          history.push({ tool, args, ok: true, result: ret?.result ?? {} });
+          return "executed";
+        }
+        // 工具明确失败：把真实错误喂回 LLM（换参数/换工具/换路径的依据）
+        const err = String((ret?.result as Record<string, unknown> | undefined)?.error ?? "工具返回失败").slice(0, 160);
+        done.push({ tool, ok: false, error: err });
+        history.push({ tool, args, ok: false, error: err, result: ret?.result ?? {} });
+        console.log(`[ProactivityHub] act 循环步骤失败 tool=${tool}: ${err}`);
+        return "failed";
+      } catch (err) {
+        const msg = String(err).slice(0, 160);
+        done.push({ tool, ok: false, error: msg });
+        history.push({ tool, args, ok: false, error: msg });
+        console.log(`[ProactivityHub] act 循环执行异常 tool=${tool}（喂回 LLM）: ${err}`);
+        return "failed";
+      }
+    };
+
+    // 种子步骤：LLM 决策附带的初始计划。失败不再整体叫停——失败原因进历史，
+    // 由 LLM 在循环里换路（同一目标，另一条路）
+    let stopped: "ask_first" | "silence" | null = null;
+    for (const step of input.seedSteps.slice(0, ACT_MAX_STEPS)) {
+      const outcome = await executeGated(step.tool, step.args);
+      if (outcome === "ask_first" || outcome === "silence") {
+        stopped = outcome;
+        break;
+      }
+      if (outcome === "executed") consecutiveFailures = 0;
+      else consecutiveFailures += 1;
+    }
+    if (stopped) return;
+
+    // LLM 在环：每步后问"下一步做什么"。连续失败换路，直到 done / 无进展收场
+    for (let step = 0; step < ACT_LOOP_MAX_STEPS; step++) {
+      if (consecutiveFailures >= ACT_LOOP_MAX_CONSECUTIVE_FAILURES) break;
+      if (!this.consumeActLoopTurn(input.actorId)) break;
+      const next = await this.llmActStep(input.actorId, input.goal, history);
+      if (!next || next.action === "done") {
+        if (done.some((d) => d.ok)) finishSuccess(next?.messageHint ?? "");
+        else finishGaveUp("还没找到可行的做法，我先停了。");
+        return;
+      }
+      if (next.action === "abort") {
+        console.log(`[ProactivityHub] act 循环中止 goal=${input.goal.slice(0, 40)} reason=${next.messageHint}`);
+        // 一步未执行就放弃（LLM 掂量后觉得不该做）：沉默留痕即可，不打扰
+        if (!done.some((d) => d.ok)) {
+          this.silenceLog.record({
+            at: Date.now(),
+            actorId: input.actorId,
+            kind: input.kind,
+            title: input.goal.slice(0, 60),
+            source: input.source,
+            scope: "action",
+            netUtility: 0,
+            riskScore: 0,
+            valueScore: 0,
+            reason: `act_loop_abort:${next.messageHint ?? ""}`,
+          });
+          return;
+        }
+        finishGaveUp(next.messageHint || "我先不往下做了。");
+        return;
+      }
+      if (!next.tool) {
+        // continue 但没带工具名：视为一次无效轮询，按现状收场
+        if (done.some((d) => d.ok)) finishSuccess("");
+        return;
+      }
+      const outcome = await executeGated(next.tool, next.args ?? {});
+      if (outcome === "ask_first" || outcome === "silence") return;
+      if (outcome === "executed") consecutiveFailures = 0;
+      else consecutiveFailures += 1;
+    }
+
+    // 收场：有成果且非失败所致 → 成功汇报；因连续失败退出 → 诚实交代
+    if (done.some((d) => d.ok) && consecutiveFailures < ACT_LOOP_MAX_CONSECUTIVE_FAILURES) {
+      finishSuccess("");
+    } else {
+      finishGaveUp("几种方式都没走通，我先停了。");
+    }
+  }
+
+  /** act 循环每日轮次预算（与评估熔断同思路：防 LLM 在环失控） */
+  private consumeActLoopTurn(actorId: string): boolean {
+    const key = `${actorId}:${new Date().toISOString().slice(0, 10)}`;
+    const n = this.actLoopTurns.get(key) ?? 0;
+    if (n >= ACT_LOOP_DAILY_TURN_CAP) return false;
+    this.actLoopTurns.set(key, n + 1);
+    return true;
+  }
+
+  /** act 循环单步决策（失败/解析失败 → null = 结束循环） */
+  private async llmActStep(
+    actorId: string,
+    goal: string,
+    history: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; result?: Record<string, unknown>; error?: string }>,
+  ): Promise<{ action: "continue" | "done" | "abort"; tool?: string; args?: Record<string, unknown>; messageHint?: string } | null> {
+    const llm = this.deps.llmComplete;
+    if (!llm) return null;
+    const tools = this.deps.listTools?.() ?? [];
+    const lines = [
+      `你在执行模式（act 循环）：目标「${goal}」。每步执行后根据真实结果（含失败与错误原因）决定下一步。`,
+      "执行历史（JSONL，ok:false 的条目带真实 error——那是换路的依据）：",
+      ...(history.length ? history.map((h) => JSON.stringify(h)) : ["（暂无，先执行第一步）"]),
+      tools.length ? `可用工具（name 必须完全一致）：${tools.slice(0, 18).map((t) => t.name).join("、")}` : "",
+      "失败处理原则：先读 error 找原因；可以换参数重试一次，但同一方式不要原样重复；",
+      "换工具或换路径达成同一目标（被安全门拦截的工具请直接放弃该步骤换别的做法）；",
+      "连续走不通就 abort 并说清试过什么。",
+      "只返回 JSON：",
+      '{"action":"continue","tool":"名","args":{}} 继续执行一步；',
+      '{"action":"done","messageHint":"一句话结果"} 目标已达成；',
+      '{"action":"abort","messageHint":"原因"} 走不通，放弃。',
+    ];
+    try {
+      const prompt = lines.filter(Boolean).join("\n");
+      const raw = await llm(prompt, actorId);
+      const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
+      recordLlmUsageByChars({ stage: "proactive_act_loop", inputChars: prompt.length + raw.length, outputChars: raw.length });
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start < 0 || end <= start) return null;
+      const parsed = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
+      const action = parsed.action;
+      if (action === "done" || action === "abort") {
+        return { action, messageHint: typeof parsed.messageHint === "string" ? parsed.messageHint.slice(0, 120) : "" };
+      }
+      if (action === "continue" && typeof parsed.tool === "string" && parsed.tool.trim()) {
+        return {
+          action: "continue",
+          tool: parsed.tool.trim(),
+          args: parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args)
+            ? (parsed.args as Record<string, unknown>)
+            : {},
+        };
+      }
+      return null;
+    } catch (err) {
+      console.log(`[ProactivityHub] act 循环 LLM 步失败（结束循环）: ${err}`);
+      return null;
+    }
   }
 
   /**

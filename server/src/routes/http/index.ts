@@ -42,6 +42,9 @@ import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
 import { registerPresenceDetectRoutes } from "./presence-detect.js";
 import { registerProactivitySuppressionRoutes } from "./proactivity-suppression.js";
 import { registerProactivityPipelineRoutes } from "./proactivity.js";
+import { registerCapabilityReadinessRoutes } from "./capability-readiness.js";
+import { registerMemoryCrudRoutes } from "./memory-crud.js";
+import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
@@ -64,6 +67,7 @@ import { registerUserFileRoutes } from "./user-files.js";
 import { registerTravelMediaRoutes } from "./travel-media.js";
 import { registerAgentActivityRoutes } from "./agent-activities.js";
 import { registerTravelPlanRoutes } from "./travel-plan.js";
+import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -84,6 +88,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerTravelMediaRoutes(app, deps);
   // 行程路由域（编辑/搜索/预订/分享；travelPlanningService 未装配时端点返回 503）
   registerTravelPlanRoutes(app, deps);
+  // 行程规划浏览器页面（行程卡 → 系统浏览器打开；见 travel-map.ts）
+  registerTravelMapRoutes(app);
+  registerPoiDetailsRoute(app);
   registerPhoneRoutes(app, deps);
   registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);
@@ -206,7 +213,12 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     pipeline: deps.proactivePipeline ?? null,
     pushService: deps.proactivePushService ?? null,
     fabric: deps.proactivityFabric ?? null,
+    suppressionStore: deps.proactivitySuppressionStore ?? null,
   });
+  // 能力就绪状态（渐进式解锁卡片）+ 记忆管理 + 支付护栏/回执（自包含，无 deps）
+  registerCapabilityReadinessRoutes(app);
+  registerMemoryCrudRoutes(app);
+  registerPaymentGuardrailRoutes(app);
   registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore });
   registerBriefingTestRoutes(app, {
     wsConnectionRegistry: deps.wsConnectionRegistry,

@@ -19,6 +19,12 @@ export type FabricSelftestDeps = {
   evaluatorProbes?: () => Array<{ id: string; streams: string[]; stateKeys: number; tickEveryMs?: number }>;
   /** 成本校准快照（接受率 → alert 阈值） */
   calibration?: () => CostCalibrationSnapshot;
+  /** 主动话术生成器状态（内容型场景 LLM 用量/熔断） */
+  phraseStats?: () => unknown;
+  /** 主动呼叫器状态（通话轮次/冷却/统计） */
+  callStats?: () => unknown;
+  /** L4 目标板快照（托盘/预执行状态） */
+  goalStats?: () => unknown;
 };
 
 export async function fabricSelftest(deps: FabricSelftestDeps): Promise<Record<string, unknown>> {
@@ -45,8 +51,10 @@ export async function fabricSelftest(deps: FabricSelftestDeps): Promise<Record<s
     L3_cost: interruptCostOf(deps.arbiterV2, actorId),
     L3_preview: preview,
     L3_parked: deps.arbiterV2.parkedEntries(),
-    L4_goals: undefined,
+    L4_goals: deps.goalStats?.() ?? "not wired",
     calibration: deps.calibration?.() ?? "not wired",
+    L5_phrase: deps.phraseStats?.() ?? "not wired",
+    L5_call: deps.callStats?.() ?? "not wired",
   };
   if (!deps.fire) {
     return {

@@ -171,6 +171,11 @@ export class AgenticMemoryLifecycleService {
     return deleted;
   }
 
+  /** 手动删除（记忆管理端点）：与 TTL 物理删除同一条级联（bridge 调和 + 强化侧表回收） */
+  async deleteByIds(ids: string[]): Promise<string[]> {
+    return this.deleteConfirmed(ids);
+  }
+
   private notifyDeleted(ids: string[]): void {
     if (ids.length === 0) return;
     try {

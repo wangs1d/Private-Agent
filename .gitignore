@@ -94,3 +94,6 @@ server/*.json.bak
 .zcode/
 .uploads/
 tmp/
+
+# 开机自启生成的启动器（含本机绝对路径，由 install-autostart.mjs 生成）
+scripts/autostart/autostart-launcher.vbs

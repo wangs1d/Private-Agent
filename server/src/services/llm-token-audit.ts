@@ -39,6 +39,9 @@ export type LlmAuditStage =
   | "interest_watch"
   /** 主动意图生成（ProactivityHub） */
   | "proactive_intent"
+  | "proactive_act_loop"
+  /** 主动话术生成（内容型场景：行程变化/消息来临 → LLM 生成主动回复） */
+  | "proactive_phrase"
   /** 自我进化 / 自动能力迭代 */
   | "self_evolution"
   /** 代码修复 */

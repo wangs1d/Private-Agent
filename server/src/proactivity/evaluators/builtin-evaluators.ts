@@ -52,6 +52,8 @@ function event(partial: Omit<AttentionEvent, "id" | "at"> & { at?: number }): At
 export function buildBuiltinEvaluators(services: BuiltinServices): Evaluator[] {
   return [
     // 1. away_return：用户长时间离开后回归 —— 久别问候 / 接续话题的时机
+    //    只认"白天真实离开"：离开起点在 7-22 点、且离开窗口不跨静默时段——
+    //    跨夜的"离开"是睡眠，晨间问候（morning_brief）已覆盖，不双发打扰
     {
       id: "away_return",
       streams: ["presence"],
@@ -66,9 +68,14 @@ export function buildBuiltinEvaluators(services: BuiltinServices): Evaluator[] {
           }
           if (state === "active" && idleSince !== null) {
             const awayMin = Math.round((sig.at - idleSince) / 60_000);
+            // 离开窗口跨过午夜（或深夜时段）→ 按睡眠处理：晨间问候已覆盖，不双发
+            const since = new Date(idleSince);
+            const back = new Date(sig.at);
+            const overnight = back.getDate() !== since.getDate() || back.getMonth() !== since.getMonth();
+            const spansQuiet = overnight || since.getHours() >= 23 || back.getHours() < 7;
             st.set("idleSince", null);
             const hour = ctx.now.getHours();
-            if (awayMin >= 240 && hour >= 7 && hour < 23) {
+            if (awayMin >= 240 && !spansQuiet && hour >= 7 && hour < 23) {
               const awayLabel = awayMin >= 480 ? `${Math.round(awayMin / 60)} 小时` : `${awayMin} 分钟`;
               out.push(
                 event({
@@ -104,8 +111,10 @@ export function buildBuiltinEvaluators(services: BuiltinServices): Evaluator[] {
         const out: AttentionEvent[] = [];
         const sig = ctx.latest("schedule");
         if (!sig) return out;
-        const min = num(payloadOf(sig).nextEventMin);
+        // 距会分钟数现场推导：传感器只在任务集合变化时产出（payload.nextEventMin 是
+        // 产出时刻的快照），以 nextRunAt 为基准换算当前剩余分钟才是活值
         const runAt = num(payloadOf(sig).nextRunAt);
+        const min = runAt === null ? num(payloadOf(sig).nextEventMin) : Math.round((runAt - ctx.nowMs) / 60_000);
         const title = str(payloadOf(sig).nextTitle) || "下一个安排";
         if (min === null || runAt === null || min <= 0) return out;
         // 过期清理（runAt 已过/已提醒超过一天的键）
@@ -145,7 +154,7 @@ export function buildBuiltinEvaluators(services: BuiltinServices): Evaluator[] {
             event({
               kind: "meeting_soon_early",
               urgency: "normal",
-              proposalKind: "life_reminder",
+              proposalKind: "meeting_early",
               tier: "social",
               importance: "low",
               title: `「${title}」1 小时内开始`,
@@ -233,7 +242,7 @@ export function buildBuiltinEvaluators(services: BuiltinServices): Evaluator[] {
             event({
               kind: "unread_burst",
               urgency: "normal",
-              proposalKind: "life_reminder",
+              proposalKind: "message_burst",
               tier: "social",
               importance: "low",
               title: `${fresh.length} 条新消息未读`,
@@ -332,13 +341,15 @@ export function buildBuiltinEvaluators(services: BuiltinServices): Evaluator[] {
           event({
             kind: "sleep_boundary",
             urgency: "normal",
-            proposalKind: "life_reminder",
+            proposalKind: "sleep_care",
             tier: "social",
             importance: "low",
             title: "深夜还在屏幕前",
             body: renderProactiveText("sleep_boundary", { dedupKey: `sleep:${dayKey}`, now: ctx.now }),
             dedupKey: `sleep_boundary:${dayKey}`,
             salience: "low",
+            // 过了当晚就失去意义：早晨说「昨晚该睡了」是噪音，最多保留到凌晨 1 点
+            expiresAt: ctx.nowMs + (60 - ctx.now.getMinutes()) * 60_000 + 60 * 60_000,
           }),
         ];
       },
@@ -415,6 +426,8 @@ export function buildBuiltinEvaluators(services: BuiltinServices): Evaluator[] {
             tier: "social",
             importance: "low",
             actorId: ctx.actorIdOf(ctx.latest("presence")),
+            // PROACTIVE_MORNING_CALL=1：晨间简报升级为贾维斯式来电汇报（通话内可对话）
+            ...(process.env.PROACTIVE_MORNING_CALL === "1" ? { callPolicy: "always" as const } : {}),
             title: "晨间简报",
             body,
             dedupKey: `morning_brief:${dayKey}`,

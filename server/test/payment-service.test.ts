@@ -1,9 +1,17 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PaymentService } from "../src/services/payment-service.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 import { registerPaymentTools } from "../src/tools/payment-tools.js";
 import type { ToolContext } from "../src/tools/tool-registry.js";
+
+// 订单台账是落盘的（SQLite）：重定向到临时目录，避免测试订单污染开发数据。
+// 台账在首次下单时才打开，模块加载后再设环境变量同样生效。
+process.env.PAYMENT_LEDGER_DB = join(mkdtempSync(join(tmpdir(), "pa-payment-test-")), "orders.db");
 
 function makeContext(overrides?: Partial<ToolContext>): ToolContext {
   return {

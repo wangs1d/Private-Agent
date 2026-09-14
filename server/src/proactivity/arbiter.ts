@@ -75,15 +75,22 @@ export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): Arbitratio
       utility: utilityResult,
     };
   }
-  // 静默时段：非 critical 择时到静默结束（defer 而非丢弃——"没发"与"择机发"是两种体验）
+  // 静默时段：非 critical 且用户不在设备前 → 择时到静默结束（defer 而非丢弃——
+  // "没发"与"择机发"是两种体验）。用户活跃（深夜还在用设备）时的低/中打扰
+  // 聊天气泡不算惊扰，照发；high/critical（弹窗级）仍一律 defer/critical 直达
   if (isQuietHourNow(new Date(ctx.now)) && p.importance !== "critical") {
-    return {
-      proposal: p,
-      verdict: "deferred",
-      reasonChain: [...chain, "quiet_hours_defer_to_morning"],
-      deliverAfter: Math.max(nextQuietEnd(new Date(ctx.now)), p.deliverAfter ?? 0),
-      utility: utilityResult,
-    };
+    const userAwake = ctx.presence === "active";
+    const lowKey = p.importance === "low" || p.importance === "medium";
+    if (!(userAwake && lowKey)) {
+      return {
+        proposal: p,
+        verdict: "deferred",
+        reasonChain: [...chain, "quiet_hours_defer_to_morning"],
+        deliverAfter: Math.max(nextQuietEnd(new Date(ctx.now)), p.deliverAfter ?? 0),
+        utility: utilityResult,
+      };
+    }
+    chain.push("quiet_hours_awake_low_key_bypass");
   }
   // 分层频控：must 层（用户点名要的事）绕过社交预算，不占社交配额
   if (p.tier === "social") {

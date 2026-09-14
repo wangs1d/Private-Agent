@@ -13,7 +13,7 @@ export type GreetingJudgement = {
 };
 
 const MORNING_WINDOW_START = 7;
-const MORNING_WINDOW_END = 10;
+const MORNING_WINDOW_END = 11; // 周末晚起（10:30 后）也算早上，不漏问候
 const MORNING_SILENCE_MS = 10 * 60 * 60 * 1000;   // 早安：>10h 未聊才发（刚聊过就问好很怪）
 const LONG_ABSENCE_MS = 48 * 60 * 60 * 1000;      // 久别：>48h 未聊
 

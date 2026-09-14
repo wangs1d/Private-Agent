@@ -55,6 +55,22 @@ npm run dev:server --workspace=server
 npm run standalone --workspace=agent-world
 ```
 
+### 开机自启（服务端常驻）
+
+今日简报等定时能力依赖服务端在触发时刻处于运行状态。注册后，每次登录 Windows 会隐藏拉起服务端栈（与 `npm run dev:all` 同一链路；端口 3000 已占用则跳过，进程崩溃自动退避重启，日志写入 `logs/autostart/`）：
+
+```bash
+npm run autostart:install    # 注册：优先计划任务，无管理员权限时自动退回当前用户 Run 键
+npm run autostart:status     # 查看注册方式 / 服务运行状态 / 最近日志
+npm run autostart:uninstall  # 注销，并停止由自启拉起的服务进程
+```
+
+说明：
+
+- 登录后约 15 秒启动（留出网络就绪时间）；错过精确触发时间的简报会在当日 05:00–12:00 窗口内补播一次。
+- 默认 dev 模式（ts watch，改动即热载）。生产模式：先 `npm run build --workspace=server`，再把 `scripts/autostart/autostart-server.mjs` 顶部 `MODE` 改为 `prod`（或启动前设 `AUTOSTART_MODE=prod`），然后重跑 `npm run autostart:install`。
+- 手动立即验证：`schtasks /run /tn PrivateAgentServer`。
+
 ## 现在最值得继续整理的区域
 
 - 根目录存在较多预览页、临时脚本、产物目录，建议后续继续收拢

@@ -435,9 +435,11 @@ import { ArbiterV2 } from "../proactivity/arbiter-v2.js";
 import { EvaluatorChain, appendEventAudit, type EventAuditRecord } from "../proactivity/evaluators/evaluator-chain.js";
 import { buildBuiltinEvaluators } from "../proactivity/evaluators/builtin-evaluators.js";
 import { GoalBoard } from "../proactivity/goal-board.js";
+import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
 import { fabricSelftest } from "../proactivity/selftest.js";
 import { CostCalibrator } from "../proactivity/cost-calibrator.js";
 import { MessageWatchTrigger } from "../proactivity/triggers/message-watch-trigger.js";
+import { SpeechPolisher } from "../proactivity/speech-polisher.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { ProactivePipeline } from "../proactivity/proactive-pipeline.js";
 import { SilenceLog } from "../proactivity/silence-log.js";
@@ -1153,6 +1155,27 @@ export async function createAppServices(): Promise<AppServices> {
         }
       }
     }
+    // 角色→人名指代映射（2026-09-13 写时结构化）：落结构化事实库
+    // field=指代·role，realtime 轮的代码侧指代消解 O(1) 直查该字段，
+    // 不再依赖原文频次挖掘。只记录「用户这么指代」，不断言真实关系。
+    for (const referent of event.referents ?? []) {
+      try {
+        const result = structuredFactStore?.applyFact({
+          actorId: event.actorId,
+          field: `指代·${referent.role}`,
+          value: referent.name,
+          sourceRef: event.sourceId,
+          confidence: referent.confidence ?? null,
+        });
+        if (result?.changed) {
+          console.info(
+            `[structured-facts] 指代映射登记 actor=${event.actorId} 指代·${referent.role}=${referent.name}`,
+          );
+        }
+      } catch (err) {
+        console.warn("[structured-facts] 指代映射登记失败（忽略）:", err);
+      }
+    }
     // 用户理解档案：agent 对用户理解的结构化沉淀（topic + 理解句 + 性质标注）。
     // 同 topic 新理解生效即旧理解入「演变历史」（同事务，不删除——旧对话是
     // 真实发生的事，可追溯）；理解是「修订」而非「证伪」，不做跨存储抹除，
@@ -1415,6 +1438,12 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   const externalChat = createExternalChatProviderFromEnv();
+  // 主动话术生成器（内容型场景：行程变化/消息来临 → LLM 主动回复；模板兜底）。
+  // 用量纪律：每日熔断 PROACTIVITY_MAX_PHRASE_PER_DAY（默认 30），PROACTIVITY_PHRASE_LLM=0 关闭。
+  const speechPolisher = new SpeechPolisher({
+    chat: () => (externalChat?.isEnabled() ? externalChat : null),
+    dataPath: join(process.cwd(), "data", "proactivity"),
+  });
   const moodInferenceService = new MoodInferenceService({
     externalChat,
     persistFilePath: join(process.cwd(), "data", "mood-inferences.jsonl"),
@@ -2503,6 +2532,8 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   const desktopVisual = createDesktopVisualFromEnv();
+  // 主动性在场服务引用（proactivityPresence 在下方才构造；桌面同步回调运行时已就绪）
+  let proactivityPresenceRef: import("../proactivity/presence-service.js").PresenceService | null = null;
   const desktopBridgeCoordinator = new DesktopBridgeCoordinator({
     onSync: (actorId, payload) => {
       wsConnectionRegistry.trySend(
@@ -2512,6 +2543,9 @@ export async function createAppServices(): Promise<AppServices> {
       desktopPresenceSignalService.handleSync(actorId, payload);
       // 桌面 presence 同步 = 用户活跃标记，喂节律感知（连续工作/深夜检测）
       rhythmCore?.noteActivity(actorId, "desktop_presence");
+      // 同步刷新主动性在场：否则静默工作 10 分钟后被误判 idle，
+      // 重新开口时会触发假性「你离开了 N 小时」问候
+      proactivityPresenceRef?.noteActivity(actorId);
     },
     onTaskResult: (actorId, payload) => {
       desktopPresenceSignalService.handleTaskResult(actorId, payload);
@@ -3667,6 +3701,7 @@ export async function createAppServices(): Promise<AppServices> {
   const proactivityGovernor = new FrequencyGovernor();
   // 在场感知（active/idle/offline）：WS 连接事件 + 对话活跃喂入，供仲裁择时与投递选通道
   const proactivityPresence = new PresenceService();
+  proactivityPresenceRef = proactivityPresence;
   // 沉默日志（方案 B）：hub act 沉默与管道 silenced 共用同一实例，落盘 data/proactivity/silence-log.json
   const proactivitySilenceLog = new SilenceLog(
     join(process.cwd(), "data", "proactivity", "silence-log.json"),
@@ -4111,13 +4146,75 @@ export async function createAppServices(): Promise<AppServices> {
 
   // 成本自校准器（P1）：outcome 接受率 EWMA 驱动 alert 档阈值呼吸（零 LLM）
   const costCalibrator = new CostCalibrator(proactivityFabricPath);
-  const costFeedTimer = setInterval(() => {
-    // 定时回灌历史触达结果（OutcomeStore 是唯一事实源；30min 一次足够）
-    const outcomes = outcomesStoreForCalibrator?.recent(100) ?? [];
-    const fresh = outcomes.filter((o) => o.outcome !== "delivered").map((o) => o.outcome);
-    if (fresh.length > 0) costCalibrator.observeAll(fresh);
-  }, 30 * 60_000);
-  if (typeof costFeedTimer.unref === "function") costFeedTimer.unref();
+  // outcome 喂入走 POST /outcome 路由的 observeOutcome 实时回灌（单一来源，
+  // 不做 OutcomeStore 定时轮询——否则同一条 outcome 计数两次，EWMA 失真）。
+
+  // 主动呼叫器（L5）：遇到事情真实打电话汇报 + 通话内多轮对话（贾维斯式）。
+  // 触发是确定性策略（kind 白名单 + critical 豁免静默 + 分 kind 呼叫冷却），
+  // LLM 只花在接通后的每轮口语回复；无应答自动降级文本补达。
+  const proactiveCaller = new ProactiveCaller({
+    virtualPhone: virtualPhoneService,
+    turnLlm: externalChat?.isEnabled()
+      ? async (history) => {
+          let full = "";
+          const last = history[history.length - 1];
+          await externalChat!.streamCompletion(
+            `proactive_call:${Date.now()}`,
+            { text: last?.content ?? "" },
+            (delta: string) => {
+              full += delta;
+            },
+            undefined,
+            {
+              systemPromptOverride: history
+                .filter((m) => m.role === "system")
+                .map((m) => m.content)
+                .join(" "),
+              ephemeralTurn: true,
+              disableThinking: true,
+              maxThreadMessages: 0,
+              ...(process.env.PROACTIVITY_PHRASE_MODEL
+                ? { modelOverride: process.env.PROACTIVITY_PHRASE_MODEL }
+                : process.env.PROACTIVITY_MODEL
+                  ? { modelOverride: process.env.PROACTIVITY_MODEL }
+                  : {}),
+            },
+          );
+          return full;
+        }
+      : null,
+    dataPath: proactivityFabricPath,
+    // 振铃无应答/设备离线 → 文本兜底（信息必达，空响不打扰）
+    fallbackTextDelivery: (actorId, title, text) => {
+      proactivePipeline.submitProposal({
+        proposalId: `call_fallback_${Date.now().toString(36)}`,
+        actorId,
+        kind: "life_reminder",
+        tier: "must",
+        importance: "high",
+        dedupKey: `call_fallback:${title.slice(0, 40)}`,
+        title,
+        summary: text.slice(0, 120),
+        directText: text,
+        evidence: ["proactive_call_fallback"],
+        createdAt: Date.now(),
+        source: "proactive_call",
+      });
+    },
+    onOutcome: (input) => {
+      // 通话结果回灌：接受率口径（replied=正反馈，no_response/user_hangup=负反馈）
+      costCalibrator.observe(input.outcome === "replied" ? "accepted" : "ignored");
+      appendEventAudit(join(process.cwd(), "data", "proactivity", "events.ndjson"), {
+        at: Date.now(),
+        eventId: input.callId || `call_${Date.now().toString(36)}`,
+        kind: `call:${input.kind}`,
+        urgency: "alert",
+        actorId: input.actorId,
+        action: input.outcome,
+        title: `通话结束（${input.transcript.length} 轮）`,
+      });
+    },
+  });
 
   // 注意力仲裁器（L3）：打断成本 = 屏幕上下文 × 对话占用 × 日程临近 × 接受度
   const arbiterV2 = new ArbiterV2({
@@ -4406,6 +4503,9 @@ export async function createAppServices(): Promise<AppServices> {
     governor: proactivityGovernor,
     suppression: proactivitySuppressionStore,
     presence: proactivityPresence,
+    // 对话进行中判定走对话时刻（hub 记录的最近交互）：桌面同步会持续刷新设备活跃，
+    // 若用活跃时刻判定，用户在电脑前的每一分钟都像"对话中"，社交提案将被无限顺延
+    lastConversationAt: (actorId) => proactivityHub.lastInteractionAtOf(actorId),
     silenceLog: proactivitySilenceLog,
     confirmations: proactivityConfirmations,
     // 分级触达：提案级确认（承诺代催等）→ Router 挂升级（确认文案已由管道投递）
@@ -4554,6 +4654,7 @@ export async function createAppServices(): Promise<AppServices> {
     arbiterV2.admit({
       actorId: p.actorId,
       urgency,
+      tier: p.tier,
       label: p.title,
       deliver: () => {
         const decision = proactivePipeline.submitProposal(p);
@@ -4581,9 +4682,24 @@ export async function createAppServices(): Promise<AppServices> {
     const action = arbiterV2.admit({
       actorId,
       urgency: event.urgency,
+      tier: event.tier,
       label: event.title,
       deliver: () => {
-        const decision = proactivePipeline.submitProposal({
+        // 内容型评估器事件（消息来临/临会提醒）→ LLM 话术润色后再投递；
+        // 其余 kind 保持模板直投。polish 失败自动回退 event.body。
+        const phraseKinds = ["unread_burst", "meeting_soon"];
+        // 呼叫路由：PROACTIVE_CALL_KINDS 白名单（默认承诺守约链/行程变化）+
+        // 任意 critical 事件——遇到事情打电话汇报，通话内可对话
+        const callKinds = (process.env.PROACTIVE_CALL_KINDS ?? "commitment_chain,schedule_change")
+          .split(",")
+          .map((k) => k.trim())
+          .filter(Boolean);
+        const viaCall =
+          event.callPolicy === "always" ||
+          callKinds.includes(event.kind) ||
+          event.importance === "critical";
+        const submit = (bodyText: string): void => {
+          const decision = proactivePipeline.submitProposal({
           proposalId: event.id,
           actorId,
           kind: event.proposalKind,
@@ -4605,6 +4721,40 @@ export async function createAppServices(): Promise<AppServices> {
         console.log(
           `[ArbiterV2] 事件投递 kind=${event.kind} verdict=${decision.verdict} urgency=${event.urgency}`,
         );
+        };
+        if (viaCall) {
+          // 真实来电汇报 + 通话内对话；无应答/离线自动文本兜底（caller 内部处理）
+          void proactiveCaller
+            .callAndReport({
+              actorId,
+              kind: event.kind,
+              importance: event.importance === "critical" ? "critical" : "high",
+              title: event.title,
+              report: event.body,
+              context: event.summary,
+            })
+            .catch((err) => {
+              // callAndReport 内部已覆盖全部降级（disabled/cooldown/no_device/no_response
+              // → 文本兜底）；到这里的外层异常只记日志，防止兜底后二次投递
+              console.log(`[ArbiterV2] 通话异常（忽略）kind=${event.kind}: ${err}`);
+            });
+        } else if (phraseKinds.includes(event.kind)) {
+          void (async () => {
+            const polished = await speechPolisher.polish({
+              kind: event.kind,
+              sessionId: actorId,
+              facts: { title: event.title, body: event.body },
+              fallback: event.body,
+            });
+            submit(polished);
+          })().catch((err) => {
+            // 仅话术生成可失败（回退模板正文）；这里不再二次 submit，防双发
+            console.log(`[ArbiterV2] 话术生成失败，用模板直投 kind=${event.kind}: ${err}`);
+            submit(event.body);
+          });
+        } else {
+          submit(event.body);
+        }
       },
     });
     audit.action = action.action;
@@ -4644,7 +4794,26 @@ export async function createAppServices(): Promise<AppServices> {
   // 投递成功后由 delivery 层按 action.* 前缀自动落入代办足迹台账。
   const messageWatchTrigger = new MessageWatchTrigger({
     submitProposal: (p) => {
-      proactivePipeline.submitProposal(p);
+      // 行程/安排变化 = 内容型场景：LLM 基于消息原话生成主动回复（模板兜底），
+      // 再进统一管道（must 层必达语义不变）
+      void (async () => {
+        if (p.directText) {
+          // 仅话术生成可失败（回退模板）；提交只执行一次，避免异常路径双发
+          p.directText = await speechPolisher.polish({
+            kind: "message_watch",
+            sessionId: p.actorId,
+            facts: {
+              sender: p.detail?.["发件人"] ?? "",
+              excerpt: p.detail?.["原文"] ?? p.summary,
+              verb: (p.evidence.find((e) => e.startsWith("keyword:")) ?? "").slice(8),
+            },
+            fallback: p.directText,
+          }).catch(() => p.directText!);
+        }
+        proactivePipeline.submitProposal(p);
+      })().catch((err) => {
+        console.log(`[MessageWatch] 提案处理失败（忽略）: ${err}`);
+      });
     },
     // MESSAGE_WATCH_IMPORTANCE=critical 时夜间立即投递（默认 high：静默时段顺延到早7点）
     importance:
@@ -4799,6 +4968,17 @@ export async function createAppServices(): Promise<AppServices> {
       calibration: () => costCalibrator.snapshot(),
       evaluatorProbes: () => evaluatorChain.probes(),
       observeOutcome: (outcome) => costCalibrator.observe(outcome),
+      phraseStats: () => speechPolisher.stats(),
+      callStats: () => proactiveCaller.stats(),
+      testCall: (actorId) =>
+        proactiveCaller.callAndReport({
+          actorId,
+          kind: "selftest_call",
+          importance: "high",
+          title: "呼叫链路自检",
+          report: "这是呼叫链路自检：我能主动给你打电话、汇报情况，你也可以直接跟我说话。听得到吗？",
+          context: "这是一次链路验证来电，用户可能会简单应答或直接挂断。",
+        }),
       emitDeviceSignal: (input) => {
         // 每个物理设备 sensorId 一个推送型 feeder（重复注册自动覆盖），信号进
         // 统一内核：去重/落盘/面板计数与内置传感器完全同权
@@ -4826,6 +5006,12 @@ export async function createAppServices(): Promise<AppServices> {
           sensorKernel,
           evaluatorProbes: () => evaluatorChain.probes(),
           calibration: () => costCalibrator.snapshot(),
+          phraseStats: () => speechPolisher.stats(),
+          callStats: () => proactiveCaller.stats(),
+          goalStats: () => ({
+            ready: goalBoard.readyTray().length,
+            goals: goalBoard.readyTray().map((g) => ({ title: g.title, status: g.status })),
+          }),
         }),
     },
     agentActivityStore,

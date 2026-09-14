@@ -24,6 +24,7 @@
  */
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { isHighPrecisionChatText, type RouteDecision } from "./task-router.js";
+import { composeRealtimeSearchQuery } from "./realtime-search-query.js";
 import {
   isIntentLabel,
   parseIntentJson,
@@ -61,7 +62,6 @@ function buildRoutePrompt(
       "",
       "判定要点：",
       "- 实时信息类哪怕没有「查/搜」字样（如「刘浩存最近的消息」「今天A股怎么样」「比特币现在什么价」）也是 realtime_lookup。",
-      "- 问人「最近在哪/在那/在哪个城市/去哪了/行踪」这类位置近况是 realtime_lookup，不是 chat：答准必须现查。search_query 要把「她/他」还原成最近对话里的具体人名再搜（如「她最近在那」→「<人名> 近期 行程」）。",
       "- 天气查询是 realtime_lookup（需要实时数据）；感叹天气（「今天天气真好」）是 chat。",
       "- confidence 表达你对标签判断的把握；判不准就给低分（<0.5），系统会自动走保守平面，不会出错。",
       "- intent=realtime_lookup 时 search_query 必填：结合最近对话解决指代（如「我老婆」指代哪个具体人名、「那家店」是哪家），生成一句完整、具体、可直接搜索的中文查询词；其他 intent 一律给空字符串。",
@@ -130,10 +130,10 @@ export function extractRouteSearchQuery(raw: string | undefined | null): string 
   try {
     const obj = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
     const q = typeof obj.search_query === "string" ? obj.search_query.trim() : "";
-    if (!q) return undefined;
-    // 超长查询截断采用而非整体丢弃（2026-09-13）：丢弃 = realtime 轮整个失去
-    // 前置检索（死点），截断 60 字对搜索引擎足够表达「人名+事件/地点」。
-    return q.length <= 60 ? q : q.slice(0, 60);
+    // 对齐主流 agent（2026-09-13）：查询词全量透传，不设代码截断层——长度质量
+    // 由模型自决（训练对齐）+ 搜索后端自限（超限由引擎报错/自行处理）承担，
+    // 与 ChatGPT/Claude 的 web_search 同构；代码静默切半句反而破坏查询语义。
+    return q || undefined;
   } catch {
     return undefined;
   }
@@ -193,6 +193,10 @@ function parseAuxAnalysis(
  *
  * @param activeTasksSummary 当前会话后台活跃任务摘要（TaskHub 提供），
  *        让路由器把"怎么样了/改成明天"这类消息按任务话题分类。
+ * @param entityContextLines 代码侧指代消解语料（2026-09-13）：记忆档案/profile
+ *        行 + 全角色最近线程消息。只供 realtime 轮 search_query 的实体频次
+ *        统计（composeRealtimeSearchQuery）使用，不进任何 prompt；因此取数
+ *        窗口可以比 recentUserTurns 宽得多。参与路由缓存键（消解结果随语料变化）。
  */
 export async function routeTurnByLlm(
   externalChat: ExternalChatProvider | null,
@@ -200,6 +204,7 @@ export async function routeTurnByLlm(
   text: string,
   recentUserTurns: string[] = [],
   activeTasksSummary?: string,
+  entityContextLines: string[] = [],
 ): Promise<RouteDecision> {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -214,7 +219,7 @@ export async function routeTurnByLlm(
       tier: "flash",
     };
   }
-  const key = JSON.stringify([trimmed, recentUserTurns]);
+  const key = JSON.stringify([trimmed, recentUserTurns, entityContextLines]);
   const hit = cacheGet(key);
   if (hit) return hit;
 
@@ -277,11 +282,39 @@ export async function routeTurnByLlm(
     const budget = plan.budget;
     const tier = plan.tier;
 
+    // realtime 轮搜索词的结构性保证（2026-09-13 根修）：模型输出的 search_query
+    // 只是首选来源，且**必须过代码消解**——真实测试（「她最近在那」轮）发现模型
+    // 会输出「我老婆 最近 在哪」这类代词查询词（合规但没消解指代，搜索引擎拿
+    // 代词只能召回无关结果）。composeRealtimeSearchQuery 对查询词做停用词剥离：
+    // 有实体原样保留；纯代词/角色词则从最近对话回溯实体强制并入；模型缺省时从
+    // 用户原话构造。「判 realtime → 查询词必含实体 → agent-core 必先真搜」
+    // 全程代码保证，不依赖模型自觉。
+    let searchQuery = extractRouteSearchQuery(result);
+    let querySource: "model" | "model+entity_merge" | "fallback_composed" = searchQuery
+      ? "model"
+      : "fallback_composed";
+    if (parsed.intent === "realtime_lookup") {
+      const base = searchQuery ?? trimmed;
+      const composed = composeRealtimeSearchQuery(base, [
+        ...recentUserTurns,
+        ...entityContextLines,
+      ]);
+      if (composed && composed !== base) {
+        reasons.push("search_query:entity_resolved_by_code");
+        if (searchQuery) querySource = "model+entity_merge";
+      }
+      searchQuery = composed || undefined;
+      // 可观测性（2026-09-13）：查询词来源可见，兜底失手才能被监控与回归
+      console.info(
+        `[LlmTaskRouter] realtime search_query (${querySource}): "${searchQuery}"`,
+      );
+    }
+
     const decision: RouteDecision = {
       reasons,
       segmentable: plane === "chat",
       intent: parsed.intent,
-      searchQuery: extractRouteSearchQuery(result),
+      searchQuery,
       confidence: parsed.confidence,
       plane,
       capabilities,

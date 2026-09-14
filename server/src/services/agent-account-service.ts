@@ -12,6 +12,8 @@ export type AgentAccountRecord = {
   createdAt: string;
   /** 自导初始化流程是否已标记完成 */
   setupComplete: boolean;
+  /** 管理员禁用标记；置位后主对话入口拒绝该用户（管理控制台可开关） */
+  disabled?: boolean;
 };
 
 type PersistedAccountRow = AgentAccountRecord & { sessionId?: string };
@@ -43,6 +45,7 @@ export class AgentAccountService {
           ...(a.email ? { email: a.email } : {}),
           createdAt: a.createdAt ?? new Date().toISOString(),
           setupComplete: Boolean(a.setupComplete),
+          ...(a.disabled ? { disabled: true } : {}),
         });
       }
     } catch (e) {
@@ -125,6 +128,26 @@ export class AgentAccountService {
     const r = this.byActorId.get(id);
     if (!r) return undefined;
     r.setupComplete = true;
+    this.byActorId.set(id, r);
+    await this.persist();
+    return r;
+  }
+
+  /** 账号是否被管理员禁用（未注册的主体视为未禁用）。 */
+  isDisabled(actorId: string): boolean {
+    return Boolean(this.byActorId.get(actorId.trim())?.disabled);
+  }
+
+  /**
+   * 管理员禁用/恢复账号。禁用后主对话入口拒绝该用户；账号本身保留，
+   * 恢复启用即回到原状态。账号不存在返回 undefined。
+   */
+  async setDisabled(actorId: string, disabled: boolean): Promise<AgentAccountRecord | undefined> {
+    const id = actorId.trim();
+    const r = this.byActorId.get(id);
+    if (!r) return undefined;
+    if (disabled) r.disabled = true;
+    else delete r.disabled;
     this.byActorId.set(id, r);
     await this.persist();
     return r;

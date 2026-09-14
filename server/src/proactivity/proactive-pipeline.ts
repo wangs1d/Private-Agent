@@ -23,6 +23,12 @@ export type ProactivePipelineDeps = {
     isSuppressed(actorId: string, kind: string, text?: string): { suppressed: boolean; reason: string };
   };
   presence: PresenceService;
+  /**
+   * 最近一次"对话"时刻（对话驱动，非设备活跃）：判定「对话进行中」用。
+   * 未注入时退回 presence.lastActivityAt（设备活跃驱动，桌面同步频繁刷新时
+   * 会把"用户在电脑前"误判成"对话中"，导致社交提案被 90s 一轮无限顺延）。
+   */
+  lastConversationAt?: (actorId: string) => number | null;
   delivery: ProactiveDeliveryService;
   outcomes: OutcomeStore;
   /** 无 directText 提案的 speak 兜底（现有 ProactionCortex 闭环——全管道唯一 LLM 调用点） */
@@ -67,12 +73,21 @@ const POSITIVE = new Set<ProactiveOutcome>(["accepted", "replied", "snoozed"]);
 /** 离线推送重试退避（推送失败后 5min 再试，防 provider 连打；成功即出队不会重复推） */
 const OFFLINE_PUSH_RETRY_MS = 5 * 60_000;
 
+/** 离线挂起重仲裁退避序列：首次挂起不退避（重连后下一次 flush 即达），此后逐级
+ * 拉长封顶 30min——否则设备长期离线时同一提案每 30s 被重新仲裁一次（实测运行
+ * 数据中同一提案被裁决 198 次全是 offline_wait_reconnect），白耗 CPU 并污染决策日志 */
+const OFFLINE_REDECIDE_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+/** 单提案重裁决硬上限：超过即放弃（过期作废语义，原因已留痕） */
+const MAX_REDECISIONS = 200;
+
 export class ProactivePipeline {
   private readonly store: ProposalStore;
   private readonly silenceLog: SilenceLog;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly flushIntervalMs: number;
   private pushSeq = 0;
+  /** dedupKey → 重裁决次数（deferred 类；投递/出队即清零） */
+  private readonly redecides = new Map<string, number>();
 
   constructor(private readonly deps: ProactivePipelineDeps) {
     this.store = new ProposalStore(`${deps.dataPath}/proposals.json`);
@@ -144,6 +159,16 @@ export class ProactivePipeline {
     const rate = this.deps.outcomes.acceptanceRate(prev.kind);
     if (rate !== null && rate > 0.6) this.deps.governor.noteOutcome(prev.kind, true);
     return true;
+  }
+
+  /** 反馈端点用：按 deliveryId 取投递记录（actorId/kind），供话题静音等关联动作 */
+  describeDelivery(deliveryId: string): ReturnType<OutcomeStore["findByDeliveryId"]> {
+    return this.deps.outcomes.findByDeliveryId(deliveryId);
+  }
+
+  /** 显式用户反馈（不经投递记录，如简报卡片上的按钮）：直接回灌频控自适应冷却 */
+  noteKindFeedback(kind: string, positive: boolean): void {
+    this.deps.governor.noteOutcome(kind, positive);
   }
 
   /** 诊断快照（GET /api/proactivity/diagnostics）："为什么发/没发"全程可解释 */
@@ -268,6 +293,7 @@ export class ProactivePipeline {
   private decide(p: ProactiveProposal, at?: number): ArbitrationDecision {
     const decision = arbitrate(p, this.buildContext(p, at));
     this.store.logDecision(decision);
+    if (decision.verdict !== "deferred") this.redecides.delete(p.dedupKey);
     switch (decision.verdict) {
       case "delivered": {
         if (this.dispatch(p)) {
@@ -281,10 +307,29 @@ export class ProactivePipeline {
         }
         break;
       }
-      case "deferred":
-        if (decision.deliverAfter !== undefined) this.store.reschedule(p.dedupKey, decision.deliverAfter);
+      case "deferred": {
+        const now = this.deps.nowFn?.() ?? Date.now();
+        if (decision.reasonChain.includes("offline_wait_reconnect")) {
+          const n = (this.redecides.get(p.dedupKey) ?? 0) + 1;
+          this.redecides.set(p.dedupKey, n);
+          if (n > MAX_REDECISIONS) {
+            // 挂起超限：设备长期离线且提案无保质期——放弃（信息已过时，留痕即可）
+            this.store.take(p.dedupKey);
+            this.redecides.delete(p.dedupKey);
+            console.log(`[ProactivePipeline] 挂起重裁决超限（${MAX_REDECISIONS} 次）放弃 kind=${p.kind} dedupKey=${p.dedupKey}`);
+            break;
+          }
+          // 首次离线挂起不退避（重连后下一次 flush 立即直推）；仍离线才逐级拉长
+          if (n >= 2) {
+            const step = OFFLINE_REDECIDE_BACKOFF_MS[Math.min(n - 2, OFFLINE_REDECIDE_BACKOFF_MS.length - 1)];
+            this.store.reschedule(p.dedupKey, now + step);
+          }
+        } else if (decision.deliverAfter !== undefined) {
+          this.store.reschedule(p.dedupKey, decision.deliverAfter);
+        }
         if (decision.reasonChain.includes("offline_wait_reconnect")) this.attemptOfflinePush(p);
         break;
+      }
       case "silenced":
         // 效用评估后主动选择不动作（区别于 suppressed 的负反馈抑制）：出队 + 沉默日志留痕
         this.store.take(p.dedupKey);
@@ -345,13 +390,19 @@ export class ProactivePipeline {
   private buildContext(p: ProactiveProposal, at?: number): ArbiterContext {
     const now = at ?? this.deps.nowFn?.() ?? Date.now();
     const presence = this.deps.presence.getPresence(p.actorId, now);
-    const last = this.deps.presence.lastActivityAt(p.actorId);
+    // 对话进行中：注入了对话时刻依赖就用它（null=从未对话，绝不算对话中）；
+    // 未注入才退回设备活跃时刻（对话 ≠ 设备活跃——桌面同步会持续刷新活跃）
+    const last = this.deps.lastConversationAt
+      ? this.deps.lastConversationAt(p.actorId)
+      : this.deps.presence.lastActivityAt(p.actorId);
     return {
       now,
       presence,
       inConversation: presence === "active" && last !== null && now - last <= IN_CONVERSATION_WINDOW_MS,
       isSuppressed: (actorId, kind, text) => this.deps.suppression.isSuppressed(actorId, kind, text),
-      socialCanTrigger: (actorId, kind, importance) => this.deps.governor.canTrigger(actorId, kind, importance),
+      // 用户活跃（在设备前）时告知频控：静默时段的低打扰消息不算惊扰（见 arbitrate）
+      socialCanTrigger: (actorId, kind, importance) =>
+        this.deps.governor.canTrigger(actorId, kind, importance, undefined, { awake: presence === "active" }),
     };
   }
 

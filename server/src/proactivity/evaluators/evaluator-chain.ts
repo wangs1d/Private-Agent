@@ -29,8 +29,12 @@ export type AttentionEvent = {
   salience: "high" | "medium" | "low";
   /** ask_first 提案的确认按钮文案（如承诺代催） */
   confirmLabel?: string;
+  /** 事件背景（呼叫场景喂给对话 LLM 的上下文；模板事件可为空） */
+  summary?: string;
   /** 提案保质期 ms（如临日会议提醒在会议开始后即无意义） */
   expiresAt?: number;
+  /** "always" = 该事件优先走真实来电汇报（贾维斯式）；缺省按路由白名单/critical 判定 */
+  callPolicy?: "always";
   actorId?: string;
 };
 
@@ -138,7 +142,12 @@ export class EvaluatorChain {
   private readonly evaluators: Evaluator[] = [];
   private readonly buffers = new Map<SignalStream, Signal[]>();
   private readonly latestByStream = new Map<SignalStream, Signal>();
+  /** 信号消费水位（recent() 只返回此后的信号；每次 flush 推进） */
   private readonly evalWatermark = new Map<string, number>();
+  /** 时间驱动评估器的上次运行时刻（tickDue 判定依据；只有真正运行才推进——
+   * 若复用信号水位，flush 间隔 < tickEveryMs 时 nowMs-wm 永远达不到阈值，
+   * 纯时间驱动评估器（streams:[] 的 digest/commitment/sleep）将永不触发） */
+  private readonly evalRunAt = new Map<string, number>();
   private readonly state = new Map<string, Map<string, unknown>>();
   private readonly eventFingerprints = new Map<string, number>(); // dedupKey → at（LRU）
   private readonly listeners = new Set<(event: AttentionEvent) => void>();
@@ -204,7 +213,11 @@ export class EvaluatorChain {
   register(evaluator: Evaluator): void {
     this.evaluators.push(evaluator);
     this.evalWatermark.set(evaluator.id, 0);
-    this.state.set(evaluator.id, new Map());
+    // 时间驱动评估器回退一个周期：注册后首个 flush 立即评估（与水位 0 的原语义一致）
+    this.evalRunAt.set(evaluator.id, this.nowFn() - (evaluator.tickEveryMs ?? 0));
+    // 保留 restoreState() 恢复的历史状态（register 发生在构造之后，
+    // 无条件 new Map() 会把重启恢复的评估器状态静默清空）
+    if (!this.state.has(evaluator.id)) this.state.set(evaluator.id, new Map());
   }
 
   /** 订阅事件（bootstrap 接仲裁层 + 观察流） */
@@ -256,10 +269,12 @@ export class EvaluatorChain {
       this.evalWatermark.set(evaluator.id, nowMs);
       const recent = (stream: SignalStream): Signal[] =>
         evaluator.streams.includes(stream) ? (this.buffers.get(stream) ?? []).filter((s) => s.at > wm) : [];
-      // 触发条件：订阅流有新信号，或时间驱动到期（tickEveryMs）
-      const tickDue = evaluator.tickEveryMs !== undefined && nowMs - wm >= evaluator.tickEveryMs;
+      // 触发条件：订阅流有新信号，或时间驱动到期（tickEveryMs；以"上次实际运行"为基准）
+      const lastRun = this.evalRunAt.get(evaluator.id) ?? 0;
+      const tickDue = evaluator.tickEveryMs !== undefined && nowMs - lastRun >= evaluator.tickEveryMs;
       const hasFresh = evaluator.streams.some((st) => recent(st).length > 0);
       if (!tickDue && !hasFresh) continue;
+      this.evalRunAt.set(evaluator.id, nowMs);
       try {
         const events = await evaluator.eval({
           now,
@@ -279,7 +294,10 @@ export class EvaluatorChain {
         if (buf.length > STREAM_BUFFER_MAX / 2) this.buffers.set(stream, buf.slice(-50));
       }
     }
-    this.persistState(); // 评估器产生了状态/去重变化 → 节流落盘
+    // 有评估器运行即标记脏（计时器/水位类状态变更不产出事件，也必须落盘）；
+    // 节流（60s）保证写盘频次有界
+    this.stateDirty = true;
+    this.persistState();
   }
 
   private dispatch(event: AttentionEvent): void {

@@ -124,8 +124,9 @@ test("快路径：过劳信号 → act 三步静默执行（可逆+隐式授权+
   await flush();
 
   // 三分支语义（方案 C）：过劳干预全部为可逆+已授权（rhythm 隐式）+高净效用
-  // → execute_silently，直接执行不通知（act 审计留痕）
-  assert.equal(signals.length, 0);
+  // → execute_silently 直接执行；做完轻提一句（告知放了歌/排了提醒）
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].kind, "overwork_care");
 
   const tools = toolCalls.map((c) => c.tool);
   assert.deepEqual(tools, ["media.search", "media.play", "calendar.create_task"]);
@@ -204,8 +205,10 @@ test("通用路径：LLM 判定 speak → 发布 LifeSignal", async () => {
   assert.ok(signals[0].summary.includes("忙得怎么样"));
 });
 
-test("通用路径：LLM 判定 act → 静默执行工具不通知（execute_silently）", async () => {
-  const { signals, toolCalls } = await tickWithDecision(
+test("通用路径：LLM 判定 act → 执行循环跑完种子步骤并轻提一句", async () => {
+  // 循环模式下种子步骤执行后向 LLM 要下一步；测试桩只会复读评估 JSON
+  // （无 action 字段 → 循环自然收束），收尾经 LifeSignal 轻提一句
+  const { signals, toolCalls, llmCalls } = await tickWithDecision(
     JSON.stringify({
       mode: "act",
       kind: "schedule_care",
@@ -217,34 +220,124 @@ test("通用路径：LLM 判定 act → 静默执行工具不通知（execute_si
   );
   assert.equal(toolCalls.length, 1);
   assert.equal(toolCalls[0].tool, "calendar.create_task");
-  assert.equal(signals.length, 0); // 可逆+隐式授权+高净效用 → 静默执行不通知
+  assert.equal(signals.length, 1, "做完轻提一句");
+  assert.ok(signals[0].summary.includes("已悄悄办好"), `收尾文案: ${signals[0].summary}`);
+  assert.ok(llmCalls >= 2, "评估 + 至少一次循环步询问");
 });
 
-test("通用路径：含危险工具的计划 → ask_first 挂起，确认后安全门仍拦截危险工具", async () => {
-  const { hub, signals, toolCalls } = await tickWithDecision(
-    JSON.stringify({
+test("通用路径：循环内危险工具被安全门拦截并反馈 LLM，无害步骤仍执行", async () => {
+  // 评估返回带危险工具的计划；循环 prompt 里桩按阶段应答：
+  // 种子 delete 被拦截反馈 → LLM 改放音乐 → 播完 done
+  let llmCalls = 0;
+  const llmComplete: LlmCompleteFn = async (prompt) => {
+    llmCalls += 1;
+    if (prompt.includes("执行模式（act 循环）")) {
+      if (!prompt.includes("media.play")) {
+        return JSON.stringify({ action: "continue", tool: "media.play", args: { trackId: "t" } });
+      }
+      return JSON.stringify({ action: "done", messageHint: "换个方式完成了" });
+    }
+    return JSON.stringify({
       mode: "act",
       kind: "cleanup",
       importance: "high",
       rationale: "想帮忙清理文件",
       messageHint: "打算清理旧文件",
-      actions: [
-        { tool: "file.delete", args: { path: "/tmp/old" } },
-        { tool: "media.play", args: { trackId: "t" } },
-        { tool: "system.shutdown", args: {} },
-      ],
-    }),
-  );
-  // file.delete 不可逆 → ask_first：未确认前整份计划挂起，确认请求即主动消息
-  assert.deepEqual(toolCalls.map((c) => c.tool), []);
-  assert.equal(signals.length, 1);
-  assert.match(signals[0].title, /^需要确认/);
-  assert.equal(hub.listPendingConfirmations(ACTOR).length, 1);
-
-  // 用户同意 → 执行挂起计划，但黑名单安全门仍兜底：delete/shutdown 永不放行
-  const resolved = await hub.resolveConfirmation(ACTOR, true);
-  assert.equal(resolved.executed, true);
+      actions: [{ tool: "file.delete", args: { path: "/tmp/old" } }],
+    });
+  };
+  const { deps, signals, toolCalls } = makeDeps({ llmComplete });
+  const hub = new ProactivityHub(deps);
+  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  await flush();
+  await hub.onTick(ACTOR, atHour(15));
+  // 危险工具永不执行；LLM 收到拦截反馈后改用无害步骤达成目标
   assert.deepEqual(toolCalls.map((c) => c.tool), ["media.play"]);
+  assert.equal(signals.length, 1, "收尾轻提一句");
+  assert.ok(signals[0].summary.includes("已悄悄办好"));
+  assert.ok(llmCalls >= 3);
+});
+
+// （原"含危险工具计划 → ask_first 挂起"的确认后安全门语义已迁至
+//  proactivity-three-branch.test.ts 的快路径用例；循环路径由
+//  "循环内危险工具被安全门拦截并反馈 LLM"覆盖）
+
+test("通用路径：步骤失败 → LLM 看到真实错误换工具达成目标", async () => {
+  // 种子步骤失败（真实错误喂回历史）→ LLM 换一条路执行成功 → 收尾汇报
+  let llmCalls = 0;
+  const llmComplete: LlmCompleteFn = async (prompt) => {
+    llmCalls += 1;
+    if (prompt.includes("执行模式（act 循环）")) {
+      // 换路后的工具已在历史里成功 → 目标达成
+      if (prompt.includes('"tool":"calendar.create_task"')) {
+        return JSON.stringify({ action: "done", messageHint: "休息已排好" });
+      }
+      return JSON.stringify({ action: "continue", tool: "calendar.create_task", args: { kind: "reminder", title: "休息" } });
+    }
+    return JSON.stringify({
+      mode: "act",
+      kind: "schedule_care",
+      importance: "high",
+      rationale: "用户连轴转，提前排好休息日程",
+      messageHint: "",
+      actions: [{ tool: "calendar.create_event", args: { title: "休息" } }],
+    });
+  };
+  const { deps, signals, toolCalls } = makeDeps({
+    llmComplete,
+    executeTool: async (tool) => {
+      toolCalls.push({ tool, args: {} });
+      if (tool === "calendar.create_event") {
+        return { ok: false, result: { error: "日历 API 无该权限（403）" } };
+      }
+      return { ok: true, result: {} };
+    },
+  } as never);
+  const hub = new ProactivityHub(deps);
+  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  await flush();
+  await hub.onTick(ACTOR, atHour(15));
+  // 失败的方式尝试过一次，随后换路成功
+  assert.deepEqual(toolCalls.map((c) => c.tool), ["calendar.create_event", "calendar.create_task"]);
+  assert.equal(signals.length, 1);
+  assert.ok(signals[0].summary.includes("已悄悄办好"), `收尾文案: ${signals[0].summary}`);
+  assert.ok(signals[0].summary.includes("calendar.create_task"), "汇报含换路后成功的工具");
+});
+
+test("通用路径：连续失败无进展 → 预算内收场并诚实交代没办成", async () => {
+  let llmCalls = 0;
+  const llmComplete: LlmCompleteFn = async (prompt) => {
+    llmCalls += 1;
+    if (prompt.includes("执行模式（act 循环）")) {
+      return JSON.stringify({ action: "continue", tool: "calendar.create_task", args: {} });
+    }
+    return JSON.stringify({
+      mode: "act",
+      kind: "schedule_care",
+      importance: "medium",
+      rationale: "提前排好休息日程",
+      messageHint: "",
+      actions: [{ tool: "calendar.create_event", args: {} }],
+    });
+  };
+  const { deps, signals, toolCalls } = makeDeps({
+    llmComplete,
+    executeTool: async (tool: string) => {
+      toolCalls.push({ tool, args: {} });
+      return { ok: false, result: { error: "服务暂不可用（503）" } };
+    },
+  } as never);
+  const hub = new ProactivityHub(deps);
+  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  await flush();
+  await hub.onTick(ACTOR, atHour(15));
+  // 种子失败 + 1 次换路尝试仍失败（连续 2 次无进展）→ 收场，不无限烧轮次
+  assert.equal(toolCalls.length, 2, `尝试次数有界: ${toolCalls.length}`);
+  assert.equal(llmCalls, 2, "评估 + 一次换路询问，无原地打转");
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].importance, "low", "全部失败的交代降为低打扰档");
+  assert.ok(signals[0].title.includes("没办成"), `诚实文案: ${signals[0].title}`);
+  assert.ok(signals[0].summary.includes("503"), "交代真实卡点");
 });
 
 test("通用路径：LLM 判定 advise → speak 主动投递（不入队）", async () => {

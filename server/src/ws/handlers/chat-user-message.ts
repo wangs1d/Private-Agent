@@ -32,6 +32,8 @@ import {
 } from "../message-batch-processor.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { getChatThreadStore } from "../../external-model/chat-thread-store.js";
+import { getMemoryManagerService } from "../../services/memory-manager-service.js";
+import { getMemoryComponents } from "../../agentic-memory/index.js";
 import {
   isNotesChatSessionId,
   resolvePrimaryChatSessionId,
@@ -565,25 +567,54 @@ async function processBatchedMessage(
   // 拉取失败不阻塞，LLM 路由内部对 provider 异常也有词法降级兜底。
   const cfg = getAgentRuntimeConfig();
   let recentUserTurns: string[] = [];
+  let entityContextLines: string[] = [];
   try {
     const chatSessionId =
       batched.sessionId && typeof batched.sessionId === "string" && isNotesChatSessionId(batched.sessionId)
         ? batched.sessionId
         : resolvePrimaryChatSessionId(msgActor, cfg.masterDelegation.enabled);
     const current = batched.text.trim();
+    // 取 12 条：buildRoutePrompt 内部只注入最近 4 条给路由 LLM（语境足够），
+    // 多取的部分供代码侧指代消解回溯实体（realtime 轮 search_query 的
+    // entity 兜底需要更深的对话窗口，4 条内往往只有代词没有实体名）。
     recentUserTurns = getChatThreadStore()
       .thread(chatSessionId, "")
       .filter((m) => m.role === "user" && typeof m.content === "string" && m.content.trim() && m.content.trim() !== current)
-      .slice(-4)
+      .slice(-12)
       .map((m) => (m.content as string).trim());
+    // 代码侧指代消解语料（2026-09-13）：只进 search_query 实体频次统计，
+    // 不进任何 prompt。实体名（如「刘浩存」）常只出现在更早的 assistant 消息
+    // 与长期记忆档案里——真实线程实证：近 12 条 user 轮全是「她/我老婆」代词，
+    // 实体只在 profile（「关注演员刘浩存（称「老婆」）」）与会话回顾里。
+    // 线程行剥掉开头连续的 [...] 元数据标签（[ts:...|周日|...] / [session-recap]），
+    // 防「周日/assistant」这类标签词以高词频污染实体频次统计（真实测试实证）。
+    const threadAnyRole = getChatThreadStore()
+      .thread(chatSessionId, "")
+      .map((m) => (typeof m.content === "string" ? m.content : "").replace(/^(?:\[[^\]]*\]\s*)+/g, ""))
+      .filter((c) => c.trim() && c.trim() !== current)
+      .slice(-30);
+    // 写时结构化的指代映射（「老婆是刘浩存」形态）：O(1) 精确读取，频次挖掘
+    // 之外的首选实体来源（真实测试的「她→刘浩存」消解由此直达）
+    const referentLines =
+      getMemoryComponents()
+        .factStore?.getActiveFacts(msgActor)
+        .filter((f) => f.field.startsWith("指代·"))
+        .map((f) => `${f.field.replace(/^指代·/, "")}是${f.value}`) ?? [];
+    const profileText = getMemoryManagerService()?.getProfileForPrompt(msgActor) ?? "";
+    entityContextLines = [
+      ...threadAnyRole,
+      ...referentLines,
+      ...(profileText ? [profileText] : []),
+    ];
   } catch {
     recentUserTurns = [];
+    entityContextLines = [];
   }
   // 路由决策以 Promise 下传：WS 层不再串行等待路由 LLM 调用（此前在这里
   // await 最多 3s），agent-core 侧与记忆认知（cognize）并行消费。
   // 面板事件 / 实时流式开关等路由衍生配置在 .then 里就绪——首个主回复 delta
   // 必然晚于路由决策（agent-core 的主 LLM 调用依赖平面/工具束），无竞态。
-  const decisionPromise = deps.runtime.routeTurnForWs(msgActor, batched.text, recentUserTurns);
+  const decisionPromise = deps.runtime.routeTurnForWs(msgActor, batched.text, recentUserTurns, entityContextLines);
   // turn 面板 v2 阶段 0/1（路由结果就绪后补发，不阻塞主链路）
   void decisionPromise
     .then((decision) => {
