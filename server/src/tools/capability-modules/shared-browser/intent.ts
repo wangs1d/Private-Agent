@@ -56,13 +56,45 @@ export const SHARED_BROWSER_INTENT_RULES: ToolIntentRule[] = [
     metadata: {
       aliases: [
         "read page", "page content", "extract text", "读页面", "看看页面",
-        "页面内容", "提取文本", "这个页面写的什么",
+        "页面内容", "提取文本", "这个页面写的什么", "继续读",
       ],
       examples: [
         "看看我浏览器里这个页面写了什么",
         "读一下当前页面的内容",
+        "这一页太长，接着往下读",
       ],
       negativeExamples: ["截个图"],
+    },
+  },
+  {
+    exact: "shared_browser.export_state",
+    metadata: {
+      aliases: [
+        "export login state", "export cookies", "导出登录态", "导出 Cookie",
+        "带去后台继续办", "用我的账号在后台跑",
+      ],
+      examples: [
+        "把这个网站的登录态导出，去后台帮我慢慢比对价格",
+        "用我现在的登录身份在无头浏览器里继续这个任务",
+      ],
+      negativeExamples: ["看看页面内容"],
+    },
+  },
+  {
+    exact: "shared_browser.trusted",
+    metadata: {
+      aliases: [
+        "trusted click", "real click", "可信点击", "真实点击",
+        "过验证的点击", "风控严的网站点一下", "真实键入",
+      ],
+      examples: [
+        "在这个风控严的购票网站上用真实点击帮我选座",
+        "用可信输入帮我在淘宝页面里搜索这个商品",
+      ],
+      negativeExamples: [
+        "在我打开的浏览器里随便看看页面",
+        "后台开个无头浏览器会话",
+      ],
     },
   },
 ];

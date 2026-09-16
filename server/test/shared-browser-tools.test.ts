@@ -1,6 +1,6 @@
 /**
  * shared_browser.* 工具注册 + 离线降级冒烟：
- *   - 6 个工具注册后 schema 可调用
+ *   - 8 个工具注册后 schema 可调用
  *   - 浏览器桥离线时返回明确错误（不抛错、不排队）
  *   - 参数校验前置（缺 url / 非法 action / 缺点击定位参数）
  */
@@ -21,7 +21,7 @@ function makeRegistry(): { registry: ToolRegistry; coordinator: SharedBrowserCoo
   return { registry, coordinator };
 }
 
-test("registers all six shared_browser tools", () => {
+test("registers all eight shared_browser tools", () => {
   const { registry } = makeRegistry();
   const names = new Set(registry.list());
   for (const name of [
@@ -31,6 +31,8 @@ test("registers all six shared_browser tools", () => {
     "shared_browser.type",
     "shared_browser.scroll",
     "shared_browser.read_page",
+    "shared_browser.export_state",
+    "shared_browser.trusted",
   ]) {
     assert.ok(names.has(name), `${name} 未注册`);
   }

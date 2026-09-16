@@ -1,4 +1,7 @@
+import "dart:math" show max;
+
 import "package:flutter/material.dart";
+import "package:flutter/scheduler.dart" show Ticker;
 import "package:webview_windows/webview_windows.dart";
 
 import "../../core/services/shared_browser_host.dart";
@@ -105,6 +108,20 @@ class _BrowserPageState extends State<BrowserPage> {
           builder: (BuildContext context, int pending, _) {
             if (pending <= 0) return const SizedBox.shrink();
             return _AgentStatusBar(cs: cs, action: host.lastAgentAction.value);
+          },
+        ),
+        // 高风险动作确认条（提交/支付类操作需用户点头才执行）
+        ValueListenableBuilder<Object?>(
+          valueListenable: host.confirmRequest,
+          builder: (BuildContext context, Object? request, _) {
+            if (request == null) return const SizedBox.shrink();
+            final SbConfirmRequest req = request as SbConfirmRequest;
+            return _ConfirmBar(
+              cs: cs,
+              request: req,
+              onAllow: () => host.resolveConfirmation(true),
+              onDeny: () => host.resolveConfirmation(false),
+            );
           },
         ),
         ValueListenableBuilder<String>(
@@ -354,8 +371,8 @@ class _HomeSearchBoxState extends State<_HomeSearchBox> {
   }
 }
 
-/// 「试试让 Agent」滚动展示栏：通栏铺满面板宽，横向滚动；
-/// 内容超宽时初始滚动到居中位置，两侧 chips 被边缘裁切（carousel 观感）。
+/// 「试试让 Agent」滚动展示栏：chips 从右往左循环滚动（跑马灯），
+/// 移到末尾无缝回到开头重复；鼠标悬停暂停，移开继续，方便点击。
 class _AgentSuggestionsRow extends StatefulWidget {
   const _AgentSuggestionsRow({
     required this.cs,
@@ -371,37 +388,64 @@ class _AgentSuggestionsRow extends StatefulWidget {
   State<_AgentSuggestionsRow> createState() => _AgentSuggestionsRowState();
 }
 
-class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow> {
+class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
+    with SingleTickerProviderStateMixin {
+  /// 滚动速度（像素/秒，从右往左）。
+  static const double _speedPxPerSec = 32;
+
   final ScrollController _controller = ScrollController();
-  final GlobalKey _contentKey = GlobalKey();
-  bool _centered = false;
+  final GlobalKey _setKey = GlobalKey();
+  Ticker? _ticker;
+  Duration _lastTick = Duration.zero;
+  double _setContentWidth = 0;
+  int _copies = 2;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _centerOnce());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _prepare());
   }
 
   @override
   void dispose() {
+    _ticker?.stop();
     _controller.dispose();
     super.dispose();
   }
 
-  /// 内容超宽时把初始滚动位置停在居中处，让两侧都被裁切，
-  /// 一眼看出是可横滚的展示栏。
-  void _centerOnce() {
-    if (_centered || !mounted || !_controller.hasClients) return;
-    final BuildContext? ctx = _contentKey.currentContext;
-    if (ctx == null) return;
-    final RenderObject? ro = ctx.findRenderObject();
-    if (ro is! RenderBox) return;
-    final double viewport = _controller.position.viewportDimension;
-    final double over = ro.size.width - viewport;
-    _centered = true;
-    if (over > 0) {
-      _controller.jumpTo(over / 2);
+  /// 首帧后测量单组 chips 宽度与可视宽度，决定复制份数后开动跑马灯。
+  /// 复制份数 = max(2, 视口宽/组宽 + 1)，保证循环回跳时右缘不露白。
+  void _prepare() {
+    if (!mounted) return;
+    final BuildContext? ctx = _setKey.currentContext;
+    if (ctx != null) {
+      final RenderObject? ro = ctx.findRenderObject();
+      if (ro is RenderBox) _setContentWidth = ro.size.width;
     }
+    if (_controller.hasClients) {
+      final double viewport = _controller.position.viewportDimension;
+      if (_setContentWidth > 0) {
+        _copies = max(2, (viewport / _setContentWidth).ceil() + 1);
+      }
+    }
+    setState(() {});
+    _startTicker();
+  }
+
+  void _startTicker() {
+    _lastTick = Duration.zero;
+    _ticker ??= createTicker(_onTick)..start();
+  }
+
+  void _onTick(Duration elapsed) {
+    final double deltaSec =
+        (elapsed - _lastTick).inMicroseconds / Duration.microsecondsPerSecond;
+    _lastTick = elapsed;
+    if (_setContentWidth <= 0 || !_controller.hasClients) return;
+    double next = _controller.offset + _speedPxPerSec * deltaSec;
+    // 一组内容滚完即回跳一组宽度：内容成对复制，回跳点视觉无缝
+    if (next >= _setContentWidth) next -= _setContentWidth;
+    _controller.jumpTo(next);
   }
 
   @override
@@ -417,13 +461,34 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow> {
           ),
         ),
     ];
-    return SingleChildScrollView(
-      controller: _controller,
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        key: _contentKey,
+    Widget content = Row(
+      key: _setKey,
+      mainAxisSize: MainAxisSize.min,
+      children: chips,
+    );
+    if (_setContentWidth > 0) {
+      content = Row(
         mainAxisSize: MainAxisSize.min,
-        children: chips,
+        children: <Widget>[
+          for (int i = 0; i < _copies; i++)
+            if (i == 0)
+              content
+            else
+              Row(mainAxisSize: MainAxisSize.min, children: chips),
+        ],
+      );
+    }
+    return MouseRegion(
+      // 悬停暂停跑马灯，方便看清和点击；移开继续
+      onEnter: (_) => _ticker?.stop(),
+      onExit: (_) => _startTicker(),
+      child: ClipRect(
+        child: SingleChildScrollView(
+          controller: _controller,
+          scrollDirection: Axis.horizontal,
+          physics: const NeverScrollableScrollPhysics(),
+          child: content,
+        ),
       ),
     );
   }
@@ -519,6 +584,64 @@ class _AgentStatusBar extends StatelessWidget {
             style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 高风险动作确认条：服务端风险分级判定为提交/支付类操作时浮出，
+/// 用户点「允许」才真正下发到页面；120 秒未决自动视为拒绝。
+class _ConfirmBar extends StatelessWidget {
+  const _ConfirmBar({
+    required this.cs,
+    required this.request,
+    required this.onAllow,
+    required this.onDeny,
+  });
+
+  final ColorScheme cs;
+  final SbConfirmRequest request;
+  final VoidCallback onAllow;
+  final VoidCallback onDeny;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: cs.surfaceContainerHighest.withValues(alpha: 0.96),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: <Widget>[
+            Icon(Icons.verified_user_outlined, size: 16, color: cs.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                "Agent 请求执行「${request.targetSummary}」· ${request.reason}",
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: cs.onSurface),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: onDeny,
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                foregroundColor: cs.onSurfaceVariant,
+              ),
+              child: const Text("拒绝", style: TextStyle(fontSize: 12.5)),
+            ),
+            const SizedBox(width: 2),
+            FilledButton.tonal(
+              onPressed: onAllow,
+              style: FilledButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+              ),
+              child: const Text("允许执行", style: TextStyle(fontSize: 12.5)),
+            ),
+          ],
+        ),
       ),
     );
   }

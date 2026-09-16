@@ -30,6 +30,7 @@ import type { ShoppingOrderService } from "../../services/shopping-order-service
 import type { ShoppingCompareService } from "../../services/shopping-compare-service.js";
 import type { AgentBrowserService } from "../../services/agent-browser-service.js";
 import type { SharedBrowserCoordinator } from "../../services/shared-browser-coordinator.js";
+import type { SharedBrowserCdpGateway } from "../../services/shared-browser/cdp-gateway.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
 import type { ClientPushPort } from "../../ports/client-push-port.js";
 
@@ -180,6 +181,8 @@ export interface CapabilityModuleDeps {
   agentBrowserService: AgentBrowserService;
   /** 共用浏览器桥（用户与 Agent 共用客户端内嵌浏览器的动作转发通道） */
   sharedBrowserCoordinator: SharedBrowserCoordinator;
+  /** 共用浏览器可信输入网关（CDP 桥，可选；未启用时 trusted 工具回退注入路径） */
+  sharedBrowserCdpGateway?: SharedBrowserCdpGateway;
   /** 统一预订编排服务（方案 A：网约车/家政/餐厅共用） */
   bookingService: BookingService;
   /** 图片能力套件(图库/美颜批图),存储根 data/pictures */
@@ -352,7 +355,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       label: "共用浏览器（用户与 Agent 共用客户端浏览器）",
       chatTools: SHARED_BROWSER_CHAT_TOOLS,
       intentRules: SHARED_BROWSER_INTENT_RULES,
-      register: (registry) => registerSharedBrowserTools(registry, { sharedBrowserCoordinator: deps.sharedBrowserCoordinator }),
+      register: (registry) => registerSharedBrowserTools(registry, { sharedBrowserCoordinator: deps.sharedBrowserCoordinator, sharedBrowserCdpGateway: deps.sharedBrowserCdpGateway }),
       category: SHARED_BROWSER_CATEGORY_MAPPING,
     },
     {

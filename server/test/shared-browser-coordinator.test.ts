@@ -36,7 +36,7 @@ test("invoke sends payload and result pairs by jobId", async () => {
   const socket = fakeSocket(sent);
   c.bindExecutor("actor-1", socket);
 
-  const pending = c.invoke("actor-1", "read_page", { includeInteractive: true }, 5000);
+  const pending = c.invoke("actor-1", "read_page", { includeInteractive: true }, { timeoutMs: 5000 });
   assert.equal(sent.length, 1);
   const frame = sent[0] as { type: string; payload: { jobId: string; action: string; params: Record<string, unknown> } };
   assert.equal(frame.type, "shared.browser.invoke");
@@ -108,4 +108,56 @@ test("re-bind overwrites stale executor socket", async () => {
   assert.equal(c.completeFromSocket("actor-1", oldSocket, newJobId, { ok: true }), false);
   assert.equal(c.completeFromSocket("actor-1", newSocket, newJobId, { ok: true }), true);
   assert.equal((await pending).ok, true);
+});
+
+// ── 风险确认门（gate）与 CDP 端点登记 ──────────────────────────────
+
+test("high-risk click attaches gate; low-risk invoke omits it", async () => {
+  const c = new SharedBrowserCoordinator();
+  const sent: object[] = [];
+  const socket = fakeSocket(sent);
+  c.bindExecutor("actor-1", socket);
+
+  const pending = c.invoke(
+    "actor-1",
+    "click",
+    { text: "提交订单" },
+    { gate: { level: "high", reason: "目标疑似提交/支付类操作", targetSummary: "提交订单" } },
+  );
+  const frame = sent[0] as { payload: { gate?: Record<string, unknown> } };
+  assert.equal(frame.payload.gate?.required, true);
+  assert.equal(frame.payload.gate?.level, "high");
+  c.completeFromSocket("actor-1", socket, (frame as never as { payload: { jobId: string } }).payload.jobId, { ok: true });
+  await pending;
+
+  sent.length = 0;
+  const pending2 = c.invoke("actor-1", "click", { text: "下一页" });
+  const frame2 = sent[0] as { payload: { gate?: unknown } };
+  assert.equal(frame2.payload.gate, undefined);
+  c.completeFromSocket("actor-1", socket, (frame2 as never as { payload: { jobId: string } }).payload.jobId, { ok: true });
+  await pending2;
+});
+
+test("timeout audit path: invoke timeout resolves retryable", async () => {
+  const c = new SharedBrowserCoordinator();
+  const socket = fakeSocket();
+  c.bindExecutor("actor-1", socket);
+  const pending = c.invoke("actor-1", "read_page", {}, { timeoutMs: 30 });
+  const r = await pending;
+  assert.equal(r.ok, false);
+  assert.match(String(r.error), /timeout/);
+  assert.equal(r.retryable, true);
+});
+
+test("cdp endpoint set/get and cleared on unbind", async () => {
+  const c = new SharedBrowserCoordinator();
+  const socket = fakeSocket();
+  c.bindExecutor("actor-1", socket);
+  c.setCdpEndpoint("actor-1", "http://127.0.0.1:9222");
+  assert.equal(c.cdpEndpoint("actor-1"), "http://127.0.0.1:9222");
+  c.setCdpEndpoint("actor-1", ""); // 空串 = 清除
+  assert.equal(c.cdpEndpoint("actor-1"), "");
+  c.setCdpEndpoint("actor-1", "http://127.0.0.1:9223");
+  c.unbindIfSocket("actor-1", socket);
+  assert.equal(c.cdpEndpoint("actor-1"), "");
 });

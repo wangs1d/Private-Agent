@@ -44,6 +44,12 @@ export const ClientEventType = {
    */
   BrowserBridgeResult: "browser.bridge.result",
   /**
+   * 共用浏览器桥：客户端上报 CDP 调试端点（payload.endpoint，http://127.0.0.1:<port>）。
+   * 仅在用户显式开启 remote-debugging-port 时发送；服务端 trusted 工具
+   * （Playwright CDP 直连，isTrusted=true 可信输入）据此连接。空 endpoint = 清除。
+   */
+  BrowserBridgeInfo: "browser.bridge.info",
+  /**
    * 手机桥接：消息捕捉批量上报（通知监听/短信等 → 服务端消息聚合中心）。
    * payload.messages 为消息数组，每条带 externalMessageId 供服务端去重；
    * 服务端落库后回 phone.msg.report_ack（按 batchId），手机端凭 ack 出队。

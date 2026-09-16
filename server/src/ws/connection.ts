@@ -1105,6 +1105,32 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        if (event.type === ClientEventType.BrowserBridgeInfo) {
+          // 共用浏览器 CDP 桥：客户端显式开启调试端口时上报端点（空 = 清除）。
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          const endpoint = String((event.payload as Record<string, unknown>)?.endpoint ?? "");
+          // 仅接受本机回环端点，防误配把调试口暴露到非回环地址
+          if (endpoint && !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(endpoint)) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "BAD_BROWSER_BRIDGE_INFO", message: "endpoint 须为本机回环地址" },
+              }),
+            );
+            return;
+          }
+          sharedBrowserCoordinator.setCdpEndpoint(boundActorId, endpoint);
+          return;
+        }
+
         if (event.type === ClientEventType.PhoneMsgReport) {
           // 手机桥接消息捕捉批量上报 → 消息聚合中心落库 → ack 回执供手机端出队。
           if (!boundActorId || !initAsPhoneBridge) {

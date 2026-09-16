@@ -48,6 +48,8 @@ flutter:
     # MapLibre 本地化副本（装载时内联进 html，WebView 零 CDN 等待）
     # emotion-ball 小球表情动画（自包含宿主页，来源 aora-bot，见目录内 ATTRIBUTION.md）
     - assets/emotion_ball/
+    # 共用浏览器注入运行时（framework-free JS，见 docs/shared-browser-architecture.md）
+    - assets/shared_browser/
   fonts:
     - family: MiSans
       fonts:

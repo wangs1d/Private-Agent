@@ -118,7 +118,14 @@ void main() async {
     }
     // 预加载本机访问凭据（token），确保首次 session.init 就能带上
     await AccessCredentialStore.instance.load();
-    unawaited(bootstrapWindowsWebView());
+    // WebView2 环境进程内只初始化一次：若用户开启了共用浏览器 CDP 调试端口
+    // （SharedBrowserHost.remoteDebugPort），必须在这里一并传入，晚于首次
+    // 环境初始化则不再生效。默认 null（CDP 桥关闭）。
+    final int? sbDebugPort = SharedBrowserHost.instance.remoteDebugPort;
+    unawaited(bootstrapWindowsWebView(
+      additionalArguments:
+          sbDebugPort == null ? null : "--remote-debugging-port=$sbDebugPort",
+    ));
     if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
       await windowManager.ensureInitialized();
       // 「固定打开时的大小」：首次启动（无历史）在默认 1280x800 基础上

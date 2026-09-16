@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { AuditService } from "./audit-service.js";
+import type { SharedBrowserRiskAssessment } from "./shared-browser/risk.js";
 
 /**
  * 共用浏览器桥协调器（用户与 Agent 共用同一个客户端内嵌浏览器）。
@@ -12,12 +13,17 @@ import type { AuditService } from "./audit-service.js";
  *
  * 通道契约：
  *   - 绑定：客户端 session.init 带 `browserBridge: true`（聊天主连接自身即执行器）
- *   - 下发：server → client `shared.browser.invoke` { jobId, action, params }
+ *   - 下发：server → client `shared.browser.invoke` { jobId, action, params, gate? }
  *   - 回传：client → server `browser.bridge.result` { jobId, ...result }
+ *   - 信息：client → server `browser.bridge.info` { endpoint }（CDP 桥端点，可选）
  *   - 清理：socket 断开时解绑并快速失败所有挂起任务
  *
- * 安全：所有 invoke 写审计日志（AuditService，category "shared_browser"），
- * timeout 兜底防止工具循环挂起。
+ * 安全：
+ *   - 所有 invoke 写审计日志（AuditService，category "shared_browser"），
+ *     回执补记耗时与结果（成功/失败/拒绝）
+ *   - 风险分级（classifySharedBrowserInvoke）判定为 high 的动作经 gate 字段
+ *     下发，客户端弹确认条，用户允许才执行（确认门在客户端，ws 通道本身已认证）
+ *   - timeout 兜底防止工具循环挂起
  */
 
 export type WsSendLike = {
@@ -30,6 +36,12 @@ export type SharedBrowserResult = {
   [key: string]: unknown;
 };
 
+export interface SharedBrowserInvokeOptions {
+  timeoutMs?: number;
+  /** 高风险确认门（risk.ts 分级结果；required=true 时客户端先弹确认条）。 */
+  gate?: SharedBrowserRiskAssessment;
+}
+
 type PendingJob = {
   resolve: (r: SharedBrowserResult) => void;
   timer: NodeJS.Timeout;
@@ -37,6 +49,7 @@ type PendingJob = {
   jobId: string;
   actorId: string;
   action: string;
+  startedAt: number;
 };
 
 function safeSend(socket: WsSendLike, payload: object) {
@@ -52,6 +65,12 @@ export class SharedBrowserCoordinator {
   private readonly executors = new Map<string, WsSendLike>();
   private readonly pending = new Map<string, PendingJob>();
 
+  /** 各执行端最近上报的页面 URL（风险分级用；browser.bridge.result 附带）。 */
+  private readonly lastUrls = new Map<string, string>();
+
+  /** 各执行端上报的 CDP 调试端点（trusted 工具用；默认空 = CDP 桥未开启）。 */
+  private readonly cdpEndpoints = new Map<string, string>();
+
   /** 审计；缺省时跳过（单测场景）。 */
   constructor(private readonly audit?: AuditService) {}
 
@@ -63,6 +82,7 @@ export class SharedBrowserCoordinator {
   unbindIfSocket(actorId: string, socket: WsSendLike): boolean {
     if (this.executors.get(actorId) !== socket) return false;
     this.executors.delete(actorId);
+    this.cdpEndpoints.delete(actorId);
     for (const [id, job] of this.pending.entries()) {
       if (job.socket === socket) {
         clearTimeout(job.timer);
@@ -78,12 +98,28 @@ export class SharedBrowserCoordinator {
     return this.executors.has(actorId);
   }
 
+  /** 执行端最近上报的页面 URL（无上报时为空串）。 */
+  lastUrl(actorId: string): string {
+    return this.lastUrls.get(actorId) ?? "";
+  }
+
+  /** 客户端经 browser.bridge.info 上报 CDP 端点（空串 = 清除）。 */
+  setCdpEndpoint(actorId: string, endpoint: string) {
+    const trimmed = endpoint.trim();
+    if (!trimmed) this.cdpEndpoints.delete(actorId);
+    else this.cdpEndpoints.set(actorId, trimmed);
+  }
+
+  cdpEndpoint(actorId: string): string {
+    return this.cdpEndpoints.get(actorId) ?? "";
+  }
+
   /** 未绑定时的调用返回立即失败（不抛错），工具层据此回退提示。 */
   invoke(
     actorId: string,
     action: string,
     params: Record<string, unknown> = {},
-    timeoutMs = 30_000,
+    options: SharedBrowserInvokeOptions = {},
   ): Promise<SharedBrowserResult> {
     const socket = this.executors.get(actorId);
     if (!socket) {
@@ -91,26 +127,43 @@ export class SharedBrowserCoordinator {
     }
 
     const jobId = randomUUID();
+    const startedAt = Date.now();
     void this.audit?.record({
       category: "shared_browser",
       action: `invoke:${action}`,
       actorId,
       jobId,
       params,
-      timestamp: Date.now(),
+      gate: options.gate?.level === "high" ? options.gate.reason : undefined,
+      timestamp: startedAt,
     }).catch(() => {});
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(jobId);
+        void this.audit?.record({
+          category: "shared_browser",
+          action: `timeout:${action}`,
+          actorId,
+          jobId,
+          durationMs: Date.now() - startedAt,
+          timestamp: Date.now(),
+        }).catch(() => {});
         resolve({ ok: false, error: "shared browser invoke timeout", retryable: true });
-      }, timeoutMs);
+      }, options.timeoutMs ?? 30_000);
 
-      this.pending.set(jobId, { resolve, timer, socket, jobId, actorId, action });
+      this.pending.set(jobId, { resolve, timer, socket, jobId, actorId, action, startedAt });
 
       safeSend(socket, {
         type: "shared.browser.invoke",
-        payload: { jobId, action, params },
+        payload: {
+          jobId,
+          action,
+          params,
+          ...(options.gate?.level === "high"
+            ? { gate: { required: true, ...options.gate } }
+            : {}),
+        },
       });
     });
   }
@@ -126,6 +179,10 @@ export class SharedBrowserCoordinator {
 
     clearTimeout(job.timer);
     this.pending.delete(jobId);
+    const url = result.url;
+    if (typeof url === "string" && url && !url.startsWith("about:")) {
+      this.lastUrls.set(actorId, url);
+    }
     if (!result.ok) {
       void this.audit?.record({
         category: "shared_browser",
@@ -133,6 +190,19 @@ export class SharedBrowserCoordinator {
         actorId,
         jobId,
         error: String(result.error ?? "unknown"),
+        code: result.code,
+        denied: result.denied === true || undefined,
+        durationMs: Date.now() - job.startedAt,
+        timestamp: Date.now(),
+      }).catch(() => {});
+    } else {
+      void this.audit?.record({
+        category: "shared_browser",
+        action: `done:${job.action}`,
+        actorId,
+        jobId,
+        url,
+        durationMs: Date.now() - job.startedAt,
         timestamp: Date.now(),
       }).catch(() => {});
     }

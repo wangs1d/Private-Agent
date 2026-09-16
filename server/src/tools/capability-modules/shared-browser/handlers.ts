@@ -1,6 +1,8 @@
 import { resolveActorId } from "../../../agent/actor-id.js";
 import type { ToolHandler, ToolRegistry } from "../../tool-registry.js";
 import type { SharedBrowserCoordinator } from "../../../services/shared-browser-coordinator.js";
+import type { SharedBrowserCdpGateway } from "../../../services/shared-browser/cdp-gateway.js";
+import { classifySharedBrowserInvoke } from "../../../services/shared-browser/risk.js";
 
 /**
  * shared_browser.* 工具 handler 集合 + 注册入口。
@@ -9,11 +11,16 @@ import type { SharedBrowserCoordinator } from "../../../services/shared-browser-
  * handler 把动作经 SharedBrowserCoordinator 转发到用户当前打开的浏览器，
  * 用户与 Agent 共用同一个页面（用户的登录态、Cookie 天然可用）。
  *
- * 安全：协调器内部对每次 invoke/failed 写审计日志（category "shared_browser"）；
- * 浏览器在线检查前置（离线时立即失败，不排队）。
+ * 安全：
+ *   - 协调器内部对每次 invoke/done/failed/timeout 写审计日志（category "shared_browser"）
+ *   - 浏览器在线检查前置（离线时立即失败，不排队）
+ *   - click/type 经 classifySharedBrowserInvoke 分级，高风险动作携带 gate
+ *     下发，客户端弹确认条，用户允许才执行
  */
 export interface SharedBrowserModuleDeps {
   sharedBrowserCoordinator: SharedBrowserCoordinator;
+  /** 可信输入网关（CDP 桥）；未启用时 trusted 工具自动回退注入路径。 */
+  sharedBrowserCdpGateway?: SharedBrowserCdpGateway;
 }
 
 function offlineResult() {
@@ -29,6 +36,10 @@ function createInvokeHandler(
   action: string,
   buildParams: (input: Record<string, unknown>) => Record<string, unknown>,
   validate?: (input: Record<string, unknown>) => string | null,
+  opts?: {
+    /** 需要过风险分级确认门的动作（click/type）。 */
+    gated?: boolean;
+  },
 ): ToolHandler {
   return async (input: Record<string, unknown>, context) => {
     const invalid = validate?.(input);
@@ -36,7 +47,16 @@ function createInvokeHandler(
 
     const actorId = resolveActorId(context);
     if (!coordinator.hasExecutor(actorId)) return offlineResult();
-    return coordinator.invoke(actorId, action, buildParams(input));
+
+    const params = buildParams(input);
+    let gate;
+    if (opts?.gated) {
+      const assessed = classifySharedBrowserInvoke(action, params, {
+        url: coordinator.lastUrl(actorId),
+      });
+      if (assessed.level === "high") gate = assessed;
+    }
+    return coordinator.invoke(actorId, action, params, { gate });
   };
 }
 
@@ -49,18 +69,18 @@ export function registerSharedBrowserTools(
   registry: ToolRegistry,
   deps: SharedBrowserModuleDeps,
 ): void {
-  const { sharedBrowserCoordinator } = deps;
+  const { sharedBrowserCoordinator: coordinator } = deps;
 
   registry.register(
     "shared_browser.navigate",
-    createInvokeHandler(sharedBrowserCoordinator, "navigate", (input) => ({
+    createInvokeHandler(coordinator, "navigate", (input) => ({
       url: String(input.url ?? "").trim(),
     }), (input) => (String(input.url ?? "").trim() ? null : "缺少 url")),
   );
 
   registry.register(
     "shared_browser.control",
-    createInvokeHandler(sharedBrowserCoordinator, "control", (input) => ({
+    createInvokeHandler(coordinator, "control", (input) => ({
       action: String(input.action ?? ""),
     }), (input) => {
       const action = String(input.action ?? "");
@@ -72,31 +92,35 @@ export function registerSharedBrowserTools(
 
   registry.register(
     "shared_browser.click",
-    createInvokeHandler(sharedBrowserCoordinator, "click", (input) => ({
+    createInvokeHandler(coordinator, "click", (input) => ({
+      ref: typeof input.ref === "string" ? input.ref : undefined,
       selector: typeof input.selector === "string" ? input.selector : undefined,
       text: typeof input.text === "string" ? input.text : undefined,
       index: typeof input.index === "number" ? input.index : undefined,
+      waitTimeoutMs: typeof input.waitTimeoutMs === "number" ? input.waitTimeoutMs : undefined,
     }), (input) =>
-      (typeof input.selector === "string" && input.selector.trim())
+      (typeof input.ref === "string" && input.ref.trim())
+      || (typeof input.selector === "string" && input.selector.trim())
       || (typeof input.text === "string" && input.text.trim())
       || typeof input.index === "number"
         ? null
-        : "selector / text / index 至少传一个"),
+        : "ref / selector / text / index 至少传一个（优先用 read_page 返回的 ref）", { gated: true }),
   );
 
   registry.register(
     "shared_browser.type",
-    createInvokeHandler(sharedBrowserCoordinator, "type", (input) => ({
+    createInvokeHandler(coordinator, "type", (input) => ({
+      ref: typeof input.ref === "string" ? input.ref : undefined,
       selector: typeof input.selector === "string" ? input.selector : undefined,
       text: String(input.text ?? ""),
       submit: input.submit === true,
       clear: input.clear !== false,
-    }), (input) => (String(input.text ?? "") ? null : "缺少 text")),
+    }), (input) => (String(input.text ?? "") ? null : "缺少 text"), { gated: true }),
   );
 
   registry.register(
     "shared_browser.scroll",
-    createInvokeHandler(sharedBrowserCoordinator, "scroll", (input) => ({
+    createInvokeHandler(coordinator, "scroll", (input) => ({
       deltaY: typeof input.deltaY === "number" ? input.deltaY : undefined,
       to: typeof input.to === "string" ? input.to : undefined,
     })),
@@ -104,12 +128,81 @@ export function registerSharedBrowserTools(
 
   registry.register(
     "shared_browser.read_page",
-    createInvokeHandler(sharedBrowserCoordinator, "read_page", (input) => ({
+    createInvokeHandler(coordinator, "read_page", (input) => ({
       selector: typeof input.selector === "string" && input.selector.trim()
         ? input.selector
         : undefined,
       includeInteractive: input.includeInteractive !== false,
       maxChars: typeof input.maxChars === "number" ? input.maxChars : undefined,
+      offset: typeof input.offset === "number" ? input.offset : undefined,
+      elementLimit: typeof input.elementLimit === "number" ? input.elementLimit : undefined,
     })),
+  );
+
+  registry.register(
+    "shared_browser.export_state",
+    createInvokeHandler(coordinator, "export_state", () => ({})),
+  );
+
+  registry.register(
+    "shared_browser.trusted",
+    // 可信输入（CDP 桥）：客户端开启调试端口且服务端总开关打开时，
+    // 用 Playwright 直连用户浏览器派发 isTrusted=true 的真实输入；
+    // 否则回退注入路径（isTrusted=false 合成事件）并在结果里注明。
+    async (input, context) => {
+      const action = String(input.action ?? "");
+      if (!["click", "type"].includes(action)) {
+        return { ok: false, error: "action 须为 click/type" };
+      }
+      if (!String(input.text ?? input.selector ?? "").trim()) {
+        return { ok: false, error: "text / selector 至少传一个" };
+      }
+      if (action === "type" && !String(input.text ?? "").trim()) {
+        return { ok: false, error: "可信输入须提供 text" };
+      }
+      const actorId = resolveActorId(context);
+      if (!coordinator.hasExecutor(actorId)) return offlineResult();
+
+      const gateway = deps.sharedBrowserCdpGateway;
+      const endpoint = coordinator.cdpEndpoint(actorId);
+      if (gateway?.available && endpoint) {
+        await gateway.connect(endpoint);
+        const result = action === "click"
+          ? await gateway.click({
+              text: typeof input.text === "string" ? input.text : undefined,
+              selector: typeof input.selector === "string" ? input.selector : undefined,
+              timeoutMs: typeof input.timeoutMs === "number" ? input.timeoutMs : undefined,
+            })
+          : await gateway.type({
+              text: String(input.text ?? ""),
+              selector: typeof input.selector === "string" ? input.selector : undefined,
+              submit: input.submit === true,
+              timeoutMs: typeof input.timeoutMs === "number" ? input.timeoutMs : undefined,
+            });
+        if (result.ok) {
+          return { ok: true, trusted: true, note: "真实输入事件（isTrusted=true），抗风控" };
+        }
+        // CDP 失败 → 落回注入路径，附上失败原因
+        const fallback = await coordinator.invoke(actorId, action, {
+          text: typeof input.text === "string" ? input.text : undefined,
+          selector: typeof input.selector === "string" ? input.selector : undefined,
+          submit: input.submit === true,
+        });
+        return { ...fallback, trusted: false, trustedError: result.error };
+      }
+
+      const fallback = await coordinator.invoke(actorId, action, {
+        text: typeof input.text === "string" ? input.text : undefined,
+        selector: typeof input.selector === "string" ? input.selector : undefined,
+        submit: input.submit === true,
+      });
+      return {
+        ...fallback,
+        trusted: false,
+        note: gateway?.available
+          ? "客户端未开启 CDP 调试端口，已回退为普通注入点击"
+          : "服务端未启用 CDP 桥（SHARED_BROWSER_CDP_ENABLED=1），已回退为普通注入点击",
+      };
+    },
   );
 }

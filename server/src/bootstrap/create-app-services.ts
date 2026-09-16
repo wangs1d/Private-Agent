@@ -237,6 +237,7 @@ import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import { SharedBrowserCoordinator } from "../services/shared-browser-coordinator.js";
+import { SharedBrowserCdpGateway } from "../services/shared-browser/cdp-gateway.js";
 import {
   DesktopSceneWatcherService,
   isDesktopSceneWatcherEnabled,
@@ -723,6 +724,9 @@ export async function createAppServices(): Promise<AppServices> {
   // Agent 的 shared_browser.* 动作经此转发到用户正在看的浏览器执行；
   // 所有 invoke/失败写审计（AuditService）。
   const sharedBrowserCoordinator = new SharedBrowserCoordinator(auditService);
+  // 可信输入网关（CDP 桥）：总开关 SHARED_BROWSER_CDP_ENABLED（默认关）；
+  // 客户端显式开启调试端口并上报端点后，trusted 工具用 Playwright 直连用户浏览器。
+  const sharedBrowserCdpGateway = new SharedBrowserCdpGateway();
   // 初始化统一预订服务（方案 A：网约车/家政/餐厅共用编排——两阶段确认 +
   // 单笔/单日限额 + 订单落库 + 承诺板跟踪；Provider 按 BOOKING_MODE 组装）。
   // 承诺板在下方 agentic-memory 装配段构造后经 setCommitmentBoard 注入。
@@ -944,6 +948,7 @@ export async function createAppServices(): Promise<AppServices> {
     shoppingCompareService,
     agentBrowserService,
     sharedBrowserCoordinator,
+    sharedBrowserCdpGateway,
     bookingService,
   };
   setCapabilityModuleDeps(capabilityModuleDeps);

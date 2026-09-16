@@ -235,7 +235,7 @@ class ImageResultMessage extends StatelessWidget {
           // 真实设计：纵向照片卡片，每张下方一行自己的描述
           if (photoCardMode) ...<Widget>[
             const SizedBox(height: 10),
-            for (int i = 0; i < photoItems!.length; i++) ...<Widget>[
+            for (int i = 0; i < photoItems.length; i++) ...<Widget>[
               if (i > 0) const SizedBox(height: 10),
               _PhotoCaptionCard(
                 url: _resolveMediaUrl(photoItems[i].url),
