@@ -5,6 +5,7 @@ import type { ClientLocationWire } from "../types/client-location.js";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import { formatScheduleToolResultForUser } from "../tools/schedule-user-reply.js";
 import { getToolResultProcessor } from "./tool-result-processor.js";
+import { stripMarkersToPlainText } from "./reply-envelope.js";
 import { AssistantRewriterService } from "./assistant-rewriter.js";
 import { dedupeAdjacentLines, normalizeDashTypos } from "../utils/text.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
@@ -18,6 +19,11 @@ export type ChatTurnInput = {
   /** 与 App 一致：记忆、工具、Master Agent、人设 */
   preferFullPipeline?: boolean;
   clientLocation?: ClientLocationWire;
+  /**
+   * 渠道渲染能力（链路统一的出口协商）：rich=保留卡片标记由 App 渲染；
+   * plain=富管线出卡后在出口降级为纯文本（微信桥等）。默认 plain（历史行为）。
+   */
+  capability?: "rich" | "plain";
 };
 
 export type ChatTurnResult = {
@@ -149,17 +155,30 @@ export async function runChatTurnForActor(
 
     // 折叠相邻的重复行（同 WS 路径）：避免 LLM 把工具前导与最终回复写成同一句。
     finalText = dedupeAdjacentLines(finalText);
+
+    // 链路统一（根因修正）：不再与 WS 主链路各跑一套。这里跑同一条富管线
+    // （L1 工具绑定 / L2 模型声明卡 / L3 规则路由，含模型卡片块校验），
+    // 纯文本渠道在出口用 stripMarkersToPlainText 降级序列化——
+    // "决策一次，按渠道能力编码"，替代旧的 plainTextMode 双跑两遍。
+    const capability = input.capability ?? "plain";
     finalText = getToolResultProcessor().processAssistantText(finalText, {
-      plainTextMode: true,
       userText: text,
+      toolName: reply.toolName,
+      toolResult:
+        toolResult?.ok && toolResult.result
+          ? (toolResult.result as Record<string, unknown>)
+          : undefined,
     });
-    finalText = await rewriter.rewriteIfNeeded(text, finalText);
-    finalText = normalizeDashTypos(finalText);
-    finalText = dedupeAdjacentLines(finalText);
-    finalText = getToolResultProcessor().processAssistantText(finalText, {
-      plainTextMode: true,
-      userText: text,
-    });
+    if (capability === "plain") {
+      finalText = stripMarkersToPlainText(finalText);
+      finalText = await rewriter.rewriteIfNeeded(text, finalText);
+      finalText = normalizeDashTypos(finalText);
+      finalText = dedupeAdjacentLines(finalText);
+      finalText = getToolResultProcessor().processAssistantText(finalText, {
+        plainTextMode: true,
+        userText: text,
+      });
+    }
 
     return { ok: true, finalText, messageId };
   } catch (err) {

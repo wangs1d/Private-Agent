@@ -34,7 +34,6 @@
  *   - 纯规则判断，无 LLM 调用，延迟 <1ms
  */
 
-import { aggregateScore } from "./render-scoring.js";
 
 export type RenderHintType =
   | "plain"
@@ -52,13 +51,6 @@ export interface RenderHint {
   reason: string;
   /** 是否因意图关键词触发结构化 */
   intent?: boolean;
-  /** 竞争评分明细（降序）：路由决策可观测、可审计 */
-  scores?: Array<{
-    type: HintCandidateType;
-    contentScore: number;
-    toolScore: number;
-    score: number;
-  }>;
 }
 
 export interface RenderHintContext {
@@ -70,6 +62,9 @@ export interface RenderHintContext {
 
 /** result_card 字数上限：超过则不算"小汇报"场景（整段对话 + 列表 + 追问） */
 const RESULT_CARD_MAX_CHARS = 300;
+
+/** 图片地址（2 条图片对列表判定用，与 display-effect-router 同一识别口径） */
+const IMAGE_URL_RE = /https?:\/\/\S+\.(?:jpg|jpeg|png|webp|gif|bmp)(?:[?#]\S*)?/i;
 /** 结构化富文本字数下限：>300 字符倾向输出 Markdown 富文本 */
 const STRUCTURED_TEXT_MIN_CHARS = 300;
 /** summary_card 字数下限：≥400 字的长内容才考虑折叠 */
@@ -144,30 +139,17 @@ function isImageTool(toolName?: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 消息级展示形态竞争评分（与 display-effect-router 同一套方法论）
+// 渲染形态判定（2026-09-16 打分层退役）：确定性规则链，首条命中即返回。
+//
+// 此前是候选形态并行竞争评分（内容分+工具分、plain 地板、平局序），实践证明
+// 对日常中文对话的命中率极低且不可解释，已整体退役。现在的形态来源：
+//   L1 工具绑定（tool-card-registry / attach* 确定性建卡，不经此处）
+//   L2 模型声明（[RENDER_HINT:] / 卡片 JSON，processor 优先级 0 直通）
+//   规则链（本函数）：只有硬信号才产生形态——工具在场 / KPI 计数 /
+//   长文档折叠 / 列表切卡；无信号一律 plain。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 消息级候选形态：plain 是低于门槛时的回落，不参与评分。 */
-type HintCandidateType = Exclude<RenderHintType, "plain">;
-
-/**
- * 候选显式顺序：既是评分遍历顺序，也是得分并列（含浮点误差）时的平局
- * 兜底次序——与旧优先级链的先后语义一致，但仅在真正同分时生效。
- */
-const HINT_CANDIDATE_ORDER: ReadonlyArray<HintCandidateType> = [
-  "image_text",
-  "search_result",
-  "data_brief",
-  "result_card",
-  "brief",
-  "summary_card",
-  "long_text",
-];
-
-/** 最佳候选聚合分低于该值回落 plain：闲聊/无结构短文不硬塞形态。 */
-const HINT_PLAIN_FLOOR = 0.3;
-
-/** 单次评分的全部信号（各候选评分器共享，只计算一次）。 */
+/** 形态判定共享信号（一次计算，规则链各分支共用）。 */
 interface HintScoringContext {
   text: string;
   len: number;
@@ -206,156 +188,19 @@ function buildHintScoringContext(text: string, ctx?: RenderHintContext): HintSco
   };
 }
 
-/** image_text：识图/OCR 场景唯一——图片工具在场即形态成立（旧优先级 0 语义）。 */
-function scoreImageText(sc: HintScoringContext): number {
-  return sc.isImageTool ? 1 : 0;
-}
-
-/** search_result：搜索工具 + 3-10 条列表；意图/表格在场时让位富文本（旧语义）。
- *  必须有搜索工具信号——搜索结果卡是工具专属卡，无工具时纯列表文本
- *  与 result_card 同分（0.78），会靠平局规则错误抢卡。 */
-function scoreSearchResult(sc: HintScoringContext): number {
-  if (!sc.isSearchTool) return 0;
-  const n = sc.list.itemCount;
-  if (n < 3 || n > 10) return 0;
-  if (sc.hasIntent || sc.hasTable) return 0;
-  return 1;
-}
-
-/** data_brief：数字密集适中长文（≥3 KPI + 60-800 字 + 非长文档）；天气工具让位。 */
-function scoreDataBrief(sc: HintScoringContext): number {
-  if (sc.isWeatherTool) return 0;
-  if (sc.kpiCount < DATA_BRIEF_MIN_KPIS) return 0;
-  if (sc.len < DATA_BRIEF_MIN_CHARS || sc.len > DATA_BRIEF_MAX_CHARS) return 0;
-  if (sc.isLongDoc) return 0;
-  return Math.min(1, 0.7 + sc.kpiCount * 0.05);
-}
-
-/** result_card：短文本 + 列表结构；媒体搜索不限长度；任务完成汇报降一档。 */
-function scoreResultCard(sc: HintScoringContext): number {
-  const n = sc.list.itemCount;
-  let s = 0;
-  if (sc.isMediaSearchTool) {
-    // 媒体搜索结果无论长短都是卡片形态（旧媒体分支无字数/表格限制）
-    if (n >= 3 && n <= 12) s = 1;
-  } else if (sc.len <= RESULT_CARD_MAX_CHARS && !sc.hasTable) {
-    if (n >= 3 && n <= 12) {
-      s = 1;
-    } else if (!sc.hasIntent && TASK_DONE_RE.test(sc.text) && n >= 2) {
-      // 任务完成汇报是明确的场景信号（旧链优先级 2c 先于 brief），分数须
-      // 压过 brief 的引导行+列表形态（0.85）——0.8 会被 brief 翻盘。
-      s = 0.9;
-    } else if (sc.isWeatherTool && (n >= 2 || WEATHER_HINT_RE.test(sc.text))) {
-      s = 0.9;
-    }
-  }
-  // 数字密集（data_brief 形态在场）时让位：数字密集短清单应上数据快报，
-  // 而不是通用小卡（对应旧「data_brief 优先于 result_card」的先后语义）
-  if (
-    s > 0 &&
-    !sc.isWeatherTool &&
-    !sc.isMediaSearchTool &&
-    sc.kpiCount >= DATA_BRIEF_MIN_KPIS &&
-    sc.len >= DATA_BRIEF_MIN_CHARS &&
-    sc.len <= DATA_BRIEF_MAX_CHARS
-  ) {
-    s *= 0.5;
-  }
-  return s;
-}
-
-/** brief：短文本 + 引导行/上下文 + 列表的晨报/资讯结构（意图/表格让位）。 */
-function scoreBrief(sc: HintScoringContext): number {
-  if (sc.len > RESULT_CARD_MAX_CHARS || sc.hasIntent || sc.hasTable) return 0;
-  const n = sc.list.itemCount;
-  const hasLeadLine = sc.list.nonListLines.some(
-    (l) => (l.length <= 30 && /[:：]$/.test(l)) || /^关于|提醒|补充|备注/i.test(l),
-  );
-  if (n >= 2 && hasLeadLine) return 0.85;
-  if (n >= 3 && sc.list.nonListLines.length >= 2) return 0.85;
-  return 0;
-}
-
-/** summary_card：长（≥400 字）+ 结构化（板块/表格/列表+段落混排）→ 折叠摘要。 */
-function scoreSummaryCard(sc: HintScoringContext): number {
-  return sc.len >= SUMMARY_MIN_CHARS && sc.structural.structured ? 1 : 0;
-}
-
 /**
- * long_text：其余长内容（≥300 字）或意图/表格触发的结构化富文本。
- * 意图/表格触发不设字数下限（旧 structuredEligible 语义），但分数压在
- * 「短文本 + 列表」的 result_card 之下——短回复的列表仍优先上卡。
- */
-function scoreLongText(sc: HintScoringContext): number {
-  if (sc.len >= STRUCTURED_TEXT_MIN_CHARS) {
-    return Math.min(0.9, 0.6 + (sc.len - STRUCTURED_TEXT_MIN_CHARS) / 3000);
-  }
-  return sc.hasIntent || sc.hasTable ? 0.75 : 0;
-}
-
-const HINT_CONTENT_SCORERS: Readonly<
-  Record<HintCandidateType, (sc: HintScoringContext) => number>
-> = {
-  image_text: scoreImageText,
-  search_result: scoreSearchResult,
-  data_brief: scoreDataBrief,
-  result_card: scoreResultCard,
-  brief: scoreBrief,
-  summary_card: scoreSummaryCard,
-  long_text: scoreLongText,
-};
-
-/** 工具场景加成：image/search 强工具；weather/媒体搜索只是倾向（不足以单独过 plain 门槛）。 */
-function hintToolScore(type: HintCandidateType, sc: HintScoringContext): number {
-  switch (type) {
-    case "image_text":
-      return sc.isImageTool ? 1 : 0;
-    case "search_result":
-      return sc.isSearchTool ? 1 : 0;
-    case "result_card":
-      return sc.isWeatherTool || sc.isMediaSearchTool ? 0.35 : 0;
-    default:
-      return 0;
-  }
-}
-
-/**
- * 对所有候选形态并行评分，返回按 HINT_CANDIDATE_ORDER 排序的评分明细
- * （仅含 contentScore 或 toolScore 任一 >0 的候选，降序排列供决策）。
- */
-export function scoreRenderHints(sc: HintScoringContext): Array<{
-  type: HintCandidateType;
-  contentScore: number;
-  toolScore: number;
-  score: number;
-}> {
-  const results: Array<{
-    type: HintCandidateType;
-    contentScore: number;
-    toolScore: number;
-    score: number;
-  }> = [];
-  for (const type of HINT_CANDIDATE_ORDER) {
-    const contentScore = HINT_CONTENT_SCORERS[type](sc);
-    const toolScore = hintToolScore(type, sc);
-    if (contentScore <= 0 && toolScore <= 0) continue;
-    results.push({
-      type,
-      contentScore,
-      toolScore,
-      score: aggregateScore(contentScore, toolScore),
-    });
-  }
-  results.sort((a, b) => b.score - a.score);
-  return results;
-}
-
-/**
- * 判断一段 assistant 文本应使用何种渲染形态。
+ * 判断一段 assistant 文本应使用何种渲染形态（确定性规则链，首条命中即返回）。
  *
- * 竞争评分制（无硬优先级链）：候选形态并行评分，内容分为主判据、工具分
- * 兜底/加成，最高分当选；最高分低于 [HINT_PLAIN_FLOOR] 时回落 plain。
- * 评分明细附在 [RenderHint.scores] 上，路由决策可观测、可审计。
+ * 规则顺序即优先级（每条都是硬信号，无评分、无竞争、无 plain 地板）：
+ *   1. image_text    识图/OCR 工具在场（工具绑定语义）
+ *   2. search_result 搜索工具 + 3-10 条列表，且无意图/表格让位
+ *   3. data_brief    ≥3 个 KPI 数据点 + 60~800 字 + 非长文档
+ *   4. result_card   短文本（≤300 字）+ 3-12 条列表（markdown 列表切卡）
+ *   5. summary_card  ≥400 字 + 结构化（板块/表格/列表混排）→ 折叠摘要
+ *   6. long_text     意图/表格触发，或 ≥300 字长文（结构化富文本）
+ *   7. plain         无硬信号 → 纯文本（不硬塞形态）
+ *
+ * brief 不在规则链：定时简报有独立注入路径；对话内 brief 只认 L2 模型声明。
  *
  * @param text LLM 最终输出文本（未经标记注入）
  * @param ctx  上下文（工具名、用户原话等）
@@ -383,30 +228,67 @@ export function classifyRenderHint(
   }
 
   const sc = buildHintScoringContext(trimmed, ctx);
-  const scores = scoreRenderHints(sc);
-  const best = scores.length > 0 ? scores[0]! : null;
+  const hit = (type: RenderHintType, reason: string, intent?: boolean): RenderHint => ({
+    type,
+    reason: `${reason},len=${trimmed.length}`,
+    intent,
+  });
 
-  if (!best || best.score < HINT_PLAIN_FLOOR) {
-    return {
-      type: "plain",
-      reason:
-        `below-floor(top=${best ? `${best.type}=${best.score.toFixed(3)}` : "none"},len=${trimmed.length})`,
-      scores,
-    };
+  // 1. 识图/OCR：工具在场即形态成立
+  if (sc.isImageTool) return hit("image_text", "image-tool-present");
+
+  // 2. 搜索工具 + 3-10 条列表；意图/表格在场时让位富文本
+  if (sc.isSearchTool && !sc.hasIntent && !sc.hasTable) {
+    const n = sc.list.itemCount;
+    if (n >= 3 && n <= 10) return hit("search_result", "search-tool-list");
   }
 
-  const runnerUp = scores.length > 1 ? scores[1]! : null;
-  return {
-    type: best.type,
-    reason:
-      `top=${best.type}(content=${best.contentScore.toFixed(2)},tool=${best.toolScore.toFixed(2)},` +
-      `score=${best.score.toFixed(3)})` +
-      (runnerUp ? ` next=${runnerUp.type}=${runnerUp.score.toFixed(3)}` : "") +
-      `,len=${trimmed.length}`,
-    // long_text 由意图/表格触发时带 intent 标记（processor 据此注入 structured）
-    intent: best.type === "long_text" ? sc.hasIntent || sc.hasTable : undefined,
-    scores,
-  };
+  // 3. 数据快报：数字密集适中长文
+  if (
+    !sc.isWeatherTool &&
+    sc.kpiCount >= DATA_BRIEF_MIN_KPIS &&
+    sc.len >= DATA_BRIEF_MIN_CHARS &&
+    sc.len <= DATA_BRIEF_MAX_CHARS &&
+    !sc.isLongDoc
+  ) {
+    return hit("data_brief", `kpi=${sc.kpiCount}`);
+  }
+
+  // 4. 短文本 + markdown 列表 → 列表切卡（findExtractableCardSegment 承接）
+  if (sc.len <= RESULT_CARD_MAX_CHARS && !sc.hasTable) {
+    const n = sc.list.itemCount;
+    if (n >= 3 && n <= 12) return hit("result_card", `list=${n}`);
+    // 2 条但每条都带图片地址：compare 滑杆/双图对比的标志性载荷（媒体硬信号）
+    if (
+      n === 2 &&
+      sc.list.items.length === 2 &&
+      sc.list.items.every((t) => IMAGE_URL_RE.test(t))
+    ) {
+      return hit("result_card", "image-pair-list");
+    }
+    if (
+      !sc.hasIntent &&
+      n >= 2 &&
+      TASK_DONE_RE.test(sc.text)
+    ) {
+      return hit("result_card", `task-done-list=${n}`);
+    }
+  }
+
+  // 5. 长文档折叠：≥400 字 + 结构化（板块/表格/列表混排）
+  if (sc.len >= SUMMARY_MIN_CHARS && sc.structural.structured) {
+    return hit("summary_card", "long-structured-doc");
+  }
+
+  // 6. 结构化富文本：意图/表格触发（不设字数下限），或 ≥300 字长文
+  if (sc.hasIntent || sc.hasTable) {
+    return hit("long_text", "intent-or-table", true);
+  }
+  if (sc.len >= STRUCTURED_TEXT_MIN_CHARS) {
+    return hit("long_text", `len=${sc.len}`);
+  }
+
+  return { type: "plain", reason: "no-hard-signal" };
 }
 
 /**

@@ -3,10 +3,10 @@ import "package:flutter/material.dart";
 /// 竖向拖动分割条。
 ///
 /// 设计:
-/// - 默认隐藏,鼠标进入时才显示手柄 (hover 才显现)
-/// - 拖动时整个 hit-test 区域(默认 8px)持续可命中
-/// - 手柄视觉: 1px 细线 + 居中 4×16 的胶囊形把手
-/// - 拖动期间高亮,松手后回落到 hover 状态
+/// - **常显灰色分隔缝**（Coze 式双面板隔阂）：整个 hit-test 区域填充分隔色，
+///   让左右两块面板中间始终有一条明显的灰色缝
+/// - 鼠标进入时显现拖拽手柄（居中竖直胶囊），拖动期间高亮
+/// - 拖动期间整个 hit-test 区域(默认 8px)持续可命中
 ///
 /// 用法:
 /// ```dart
@@ -18,6 +18,7 @@ class VerticalDragDivider extends StatefulWidget {
   const VerticalDragDivider({
     super.key,
     required this.onDrag,
+    this.showStrip = true,
     this.width = 8.0,
     this.handleWidth = 4.0,
     this.handleHeight = 32.0,
@@ -25,6 +26,10 @@ class VerticalDragDivider extends StatefulWidget {
 
   /// 拖动回调(累计水平位移,正值向右)
   final ValueChanged<double> onDrag;
+
+  /// 是否显示常显灰色分隔缝（Coze 式）。
+  /// 只在双面板（split）模式为 true；side 窄面板模式不显示缝，仅保留拖拽。
+  final bool showStrip;
 
   /// 整个 hit-test 区域宽度
   final double width;
@@ -42,6 +47,13 @@ class VerticalDragDivider extends StatefulWidget {
 class _VerticalDragDividerState extends State<VerticalDragDivider> {
   bool _hovering = false;
   bool _dragging = false;
+
+  /// 分隔缝底色：常显、明显。深色 #3F3F46 / 暖色 #DDE4EE——
+  /// 在同色的两块面板（聊天 cs.surface / 工具面板）之间拉出清晰的灰缝。
+  Color _stripColor(ColorScheme cs) {
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+    return isDark ? const Color(0xFF3F3F46) : const Color(0xFFDDE4EE);
+  }
 
   Color _lineColor(ColorScheme cs) {
     if (_dragging) return cs.primary.withValues(alpha: 0.55);
@@ -82,7 +94,12 @@ class _VerticalDragDividerState extends State<VerticalDragDivider> {
           child: Stack(
             alignment: Alignment.center,
             children: <Widget>[
-              // 中线
+              // 常显灰色分隔缝（仅双面板模式显示）
+              if (widget.showStrip)
+                Positioned.fill(
+                  child: ColoredBox(color: _stripColor(cs)),
+                ),
+              // 中线（hover / 拖动时显现）
               Container(
                 width: 1,
                 color: _lineColor(cs),

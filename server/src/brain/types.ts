@@ -347,7 +347,6 @@ export interface SensoryListenResult {
 export interface SensoryLookResult {
   screenshot?: string;          // base64 或路径
   description?: string;         // VLM 描述
-  ocrText?: string;             // OCR 文本（如有）
   processedAt: string;
   error?: string;               // 子系统缺失或调用失败时的错误信息
 }

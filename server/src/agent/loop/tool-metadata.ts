@@ -131,6 +131,13 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "agent_browser.extract_text": "web",
   "agent_browser.wait_for": "web",
   "agent_browser.close": "web",
+  // shared_browser（用户与 Agent 共用客户端浏览器，WS 桥转发）
+  "shared_browser.navigate": "web",
+  "shared_browser.control": "web",
+  "shared_browser.click": "web",
+  "shared_browser.type": "web",
+  "shared_browser.scroll": "web",
+  "shared_browser.read_page": "web",
   // shopping
   "shopping.order.search": "life",
   "shopping.order.place": "life",

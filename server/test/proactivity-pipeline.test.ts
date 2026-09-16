@@ -766,3 +766,80 @@ test("arbiter: PROACTIVITY_UTILITY_EVAL=0 时忽略 utility 元数据（一键�
     delete process.env.PROACTIVITY_UTILITY_EVAL;
   }
 });
+
+// ─── 代办足迹：actorId 归一 + 告知/执行语义分层 + 实时推送钩子 ───
+
+test("message_watch: 渠道 scoped actor（xxx@wechat）归一为基础 actor", async () => {
+  const { MessageWatchTrigger } = await import("../src/proactivity/triggers/message-watch-trigger.js");
+  const { resolveChannelScopedSessionId, resolveBaseActorId, isChannelScopedSessionId } =
+    await import("../src/agent/master-chat-session.js");
+  // 契约前置：桥接侧派生的 scoped id 一定能被剥回原样（往返恒等）
+  const scoped = resolveChannelScopedSessionId("session-mvp-001", "wechat");
+  assert.ok(isChannelScopedSessionId(scoped));
+  assert.equal(resolveBaseActorId(scoped), "session-mvp-001");
+
+  const submitted: ProactiveProposal[] = [];
+  const trigger = new MessageWatchTrigger({ submitProposal: (p) => submitted.push(p) });
+  trigger.handleInbound({
+    actorId: scoped, // 桥接无显式绑定 + 渠道隔离时的真实形态
+    platform: "wechat",
+    channelId: "conv-1",
+    text: "下午的评审会议要延迟到4点了",
+    participantName: "王工",
+  });
+  assert.equal(submitted.length, 1);
+  assert.equal(
+    submitted[0]!.actorId,
+    "session-mvp-001",
+    "提案触达与足迹按基础 actor 归属，否则设备收不到、客户端查不到",
+  );
+});
+
+test("ledger: 告知类自动落库默认「已告知」，显式 status 的执行类不覆盖", async () => {
+  const { AgentActivityStore } = await import("../src/proactivity/activity-store.js");
+  const dir = mkdtempSync(join(tmpdir(), "activity-label-"));
+  try {
+    const store = new AgentActivityStore(join(dir, "activities.json"));
+    // 告知类：delivery 层自动落库（不传 status/statusLabel）→「已告知」
+    const informed = store.record({
+      actorId: "user-a", kind: "action.schedule_change",
+      title: "发现日程变动", summary: "王工：评审会延迟到4点",
+    });
+    assert.equal(informed!.status, "changed");
+    assert.equal(informed!.statusLabel, "已告知", "告知类不是「办完了」，文案要如实");
+    // 执行类：工具链显式上报（status=done）→ 不吃「已告知」默认值
+    const executed = store.record({
+      actorId: "user-a", kind: "action.schedule_change",
+      title: "已把评审会改到16:00", summary: "已同步所有与会人", status: "done",
+    });
+    assert.equal(executed!.statusLabel, undefined, "执行类走客户端按 status 推导（已完成）");
+    // 执行类显式 statusLabel 优先
+    const shipping = store.record({
+      actorId: "user-a", kind: "action.purchase",
+      title: "已为你订购牛奶", summary: "950ml ×1", status: "pending", statusLabel: "配送中",
+    });
+    assert.equal(shipping!.statusLabel, "配送中");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ledger: onRecord 钩子逐条触发（dedup 吞掉的不触发）", async () => {
+  const { AgentActivityStore } = await import("../src/proactivity/activity-store.js");
+  const dir = mkdtempSync(join(tmpdir(), "activity-hook-"));
+  try {
+    const store = new AgentActivityStore(join(dir, "activities.json"));
+    const seen: string[] = [];
+    store.onRecord = (a) => seen.push(a.id);
+    const a = store.record({ actorId: "user-a", kind: "action.payment", title: "已缴水费", summary: "8月 ¥36.5" });
+    assert.equal(seen.length, 1);
+    // 新 dedupKey 合法落库 → 推送；同 dedupKey 重报 → record 返回 null，不推送
+    store.record({ actorId: "user-a", kind: "action.payment", title: "x", summary: "y", dedupKey: "water-8月" });
+    assert.equal(seen.length, 2);
+    store.record({ actorId: "user-a", kind: "action.payment", title: "z", summary: "w", dedupKey: "water-8月" });
+    assert.equal(seen.length, 2, "dedup 命中的重报不触发推送");
+    assert.ok(a);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

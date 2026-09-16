@@ -9,7 +9,6 @@ import { routeRender } from "../gateway/index.js";
 import { extractDataBriefPayload } from "./render-hint-service.js";
 import {
   formatAgentResultForChat,
-  formatSemanticResultForChat,
 } from "./agent-result-formatter.js";
 import { hasBlockquote } from "./display-effect-router.js";
 import { tryAttachToolResultCard } from "./tool-card-registry.js";
@@ -30,6 +29,105 @@ function extractLlmRenderHint(text: string): { rawHint: string | null; cleanText
 /** 注入前端 [RENDER_AS:xxx] 标记 */
 function wrapRenderAs(name: string, text: string): string {
   return `[RENDER_AS:${name}]\n${text}`;
+}
+
+const CARD_MARKER_START = "[AGENT_RESULT_CARD_START]";
+const CARD_MARKER_END = "[AGENT_RESULT_CARD_END]";
+
+/** 模型卡片块允许透传的条目级字段（其余字段一律剥掉，防止脏数据透出） */
+const MODEL_CARD_ITEM_FIELDS = [
+  "url", "side", "sideLabel", "source", "thumbnailUrl", "mediaUrl", "pageUrl", "caption",
+] as const;
+
+/**
+ * 校验/归一化模型自声明的卡片块（渲染管线 L2 的服务端验收关卡）。
+ *
+ * L2 激活后（render-protocol-prompt 注入），模型会在正文里直接输出
+ * [AGENT_RESULT_CARD_START]{...}[END] 卡片块。模型输出不可信：
+ *   - JSON 解析失败 / 缺 title / items 为空 → 整块丢弃（残缺块同样丢弃，
+ *     防止半截 JSON 透出前端）；
+ *   - 合法块 → 补齐 avatar/cardId/actions 等默认字段、条目字段白名单过滤、
+ *     条目数截到 12，重建为标准 payload（与 formatAgentResultForChat 产物同构）。
+ *
+ * 纯文本/服务端生成的块（已带 cardId）经此函数幂等不变（重新序列化语义相同）。
+ */
+export function sanitizeModelCardBlocks(text: string): string {
+  if (!text.includes(CARD_MARKER_START)) return text;
+  let out = "";
+  let rest = text;
+  for (let guard = 0; guard < 20; guard++) {
+    const si = rest.indexOf(CARD_MARKER_START);
+    if (si === -1) break;
+    const ei = rest.indexOf(CARD_MARKER_END, si + CARD_MARKER_START.length);
+    const before = rest.slice(0, si);
+    if (ei === -1) {
+      // 残缺块（无 END）：整块丢弃
+      out += before;
+      rest = "";
+      break;
+    }
+    const rawJson = rest.slice(si + CARD_MARKER_START.length, ei).trim();
+    rest = rest.slice(ei + CARD_MARKER_END.length);
+    const normalized = normalizeModelCardJson(rawJson);
+    out += before;
+    if (normalized) {
+      out += `${CARD_MARKER_START}\n${normalized}\n${CARD_MARKER_END}`;
+    }
+  }
+  out += rest;
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** 单个模型卡片 JSON 的校验与归一化；不可用返回 null（调用方整块丢弃） */
+function normalizeModelCardJson(rawJson: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  const title = typeof obj.title === "string" ? obj.title.trim() : "";
+  if (!title) return null;
+  if (!Array.isArray(obj.items) || obj.items.length === 0) return null;
+
+  const items = obj.items
+    .map((it: unknown): Record<string, unknown> | null => {
+      if (typeof it === "string") {
+        return it.trim() ? { type: "num", text: it.trim() } : null;
+      }
+      if (!it || typeof it !== "object") return null;
+      const rec = it as Record<string, unknown>;
+      const text = typeof rec.text === "string" ? rec.text.trim() : "";
+      if (!text) return null;
+      const item: Record<string, unknown> = {
+        type: typeof rec.type === "string" && rec.type.trim() ? rec.type.trim() : "num",
+        text,
+      };
+      for (const key of MODEL_CARD_ITEM_FIELDS) {
+        const v = rec[key];
+        if (typeof v === "string" && v.trim()) item[key] = v.trim();
+      }
+      return item;
+    })
+    .filter((v): v is Record<string, unknown> => !!v)
+    .slice(0, 12);
+  if (items.length === 0) return null;
+
+  const cardType = typeof obj.cardType === "string" ? obj.cardType.trim() : "";
+  const footer = typeof obj.footer === "string" ? obj.footer.trim() : "";
+  return JSON.stringify({
+    avatar: "NB",
+    avatarStyle: "default",
+    title,
+    items,
+    footer,
+    cardType,
+    actions: [],
+    speak: "high",
+    cardId: `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  });
 }
 
 /** 从单行文本中提取 URL */
@@ -154,7 +252,8 @@ function detectRawSearchResultJson(
     trimmed.includes("[CONTENT_SUMMARY_V2_START]") ||
     trimmed.includes("[RENDER_AS:") ||
     trimmed.includes("[VIDEO_MEDIA_START]") ||
-    trimmed.includes("[CHAT_MEDIA_START]")
+    trimmed.includes("[CHAT_MEDIA_START]") ||
+    trimmed.includes("[IMAGE_RESULT_START]")
   ) {
     return null;
   }
@@ -701,9 +800,20 @@ export class ToolResultProcessor {
     // 人性化助手：下方所有分支统一走它，避免重复写 `{ userText }` 参数
     const humanize = (t: string) => humanizeAssistantText(t, { userText: opts?.userText });
 
+    // === -1. 系统内部帧守卫：线程存档里的非用户可见文本不参与任何卡片/形态判定 ===
+    // 真实数据回放发现：[session-recap] 记忆回顾、[后台任务记录]、[上一轮回复中断]
+    // 这类系统帧若流入本管线，会被列表/时间戳特征误判上卡（回放案例：recap 带
+    // 日期列表被判成 progress 卡）。这些文本即使流转也不该有展示形态。
+    if (/^\s*\[(?:session-recap|后台任务记录|上一轮回复中断)/.test(text)) {
+      console.log("[ToolResultProcessor] system_frame: skip render routing");
+      return humanize(text);
+    }
+
     // === 0. 检查 LLM 声明的 [RENDER_HINT:xxx]（优先级最高）===
     const { rawHint: llmHint, cleanText: textAfterLlmHint } = extractLlmRenderHint(text);
-    let workingText = textAfterLlmHint;
+    // L2：模型自声明的卡片块先经校验/归一化（合法补默认值、非法整块丢弃），
+    // 后续所有分支与"已带标记直接放行"看到的都是干净的标准块。
+    let workingText = sanitizeModelCardBlocks(textAfterLlmHint);
     if (llmHint) {
       console.log(`[ToolResultProcessor] LLM declared render_hint: ${llmHint}`);
       switch (llmHint) {
@@ -720,7 +830,9 @@ export class ToolResultProcessor {
     }
 
     const trimmed = workingText.trim();
-    if (!trimmed) return text;
+    // 空文本返回"消毒后"的 workingText（模型坏卡块已被丢弃），不能返回原文——
+    // 否则被 sanitize 丢弃的损坏 JSON 会从早退分支漏回前端。
+    if (!trimmed) return workingText;
 
     // 已带标记的直接放行（避免二次处理）
     if (
@@ -838,13 +950,9 @@ export class ToolResultProcessor {
       }
     }
 
-    // 优先级 3+：brief 简报增强 → 注入 [RENDER_AS:brief]
+    // 优先级 3+：brief 简报形态（L2 模型声明 only；打分退役后不再从散文猜简报）
     if (hint.type === "brief") {
       console.log(`[ToolResultProcessor] brief: ${hint.reason}`);
-      // 简报若实为结构化内容（步骤/指标/时序/对比…），由内容信号直接上更重要
-      // —— 不再一律按"简报"正文类型处理（内容为主判据）
-      const sc = formatSemanticResultForChat(workingText, opts?.toolName);
-      if (sc) return sc;
       return wrapRenderAs("brief", humanize(workingText));
     }
 
@@ -875,28 +983,16 @@ export class ToolResultProcessor {
       }
     }
 
-    // 优先级 4：long_text 长内容（非搜索工具）
+    // 优先级 4：long_text 长内容（非搜索工具）→ 意图触发走结构化富文本，否则纯文本
     if (hint.type === "long_text") {
       console.log(`[ToolResultProcessor] long_text: ${hint.reason}`);
-      // 内容若实际是结构化形态（步骤/指标/时序/对比…），优先上特效卡——
-      // 包括 intent 触发的场景：用户问「明天怎么安排」时回复是条理清晰的
-      // 口语短句，特效卡比 [RENDER_AS:structured] 富文本更贴合内容形态；
-      // 语义评分器自身有形态/意图门控，长 markdown 文档不会误上卡。
-      const sc = formatSemanticResultForChat(workingText, opts?.toolName);
-      if (sc) return sc;
-      // 意图触发的 long_text → 注入 [RENDER_AS:structured]
       if (hint.intent) {
         return wrapRenderAs("structured", humanize(workingText));
       }
       return humanize(workingText);
     }
 
-    // 优先级 5：plain 普通正文
-    // 普通叙述若显示是结构化内容，同样按内容信号上卡；否则保持纯文本
-    {
-      const sc = formatSemanticResultForChat(workingText, opts?.toolName);
-      if (sc) return sc;
-    }
+    // 优先级 5：plain 普通正文（无硬信号 → 纯文本，不硬塞形态）
     return humanize(workingText);
   }
 }

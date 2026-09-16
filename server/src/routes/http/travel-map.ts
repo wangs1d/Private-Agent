@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { travelTileCache } from "../../services/travel-tile-cache.js";
 
 /**
  * 行程规划浏览器页面路由（「行程卡 → 系统浏览器打开」链路）。
@@ -69,15 +70,121 @@ function buildTravelMapHtml(): string {
   return html;
 }
 
+/** 从行程载荷提取中心 + POI 坐标，fire-and-forget 预热底图瓦片（失败静默） */
+function warmTilesForPayload(payload: unknown): void {
+  try {
+    const p = payload as {
+      center?: { latitude?: number; longitude?: number };
+      days?: Array<{ entries?: Array<{ latitude?: number; longitude?: number }> }>;
+    };
+    const center =
+      p.center && Number.isFinite(p.center.latitude) && Number.isFinite(p.center.longitude)
+        ? { latitude: Number(p.center.latitude), longitude: Number(p.center.longitude) }
+        : undefined;
+    const pois = (p.days ?? [])
+      .flatMap((d) => d.entries ?? [])
+      .filter((e) => Number.isFinite(e.latitude) && Number.isFinite(e.longitude))
+      .map((e) => ({ latitude: Number(e.latitude), longitude: Number(e.longitude) }));
+    if (!center && pois.length === 0) return;
+    void travelTileCache
+      .warmDestination(center ?? pois[0]!, pois)
+      .then((r) => console.log(`[TravelMap] 瓦片预热完成: 新拉取${r.fetched} 已缓存${r.hitCache} 失败${r.failed}`))
+      .catch(() => { /* 预热失败不影响主流程 */ });
+  } catch { /* 载荷形状异常时静默跳过 */ }
+}
+
 export function registerTravelMapRoutes(app: FastifyInstance): void {
-  /** GET /travel-map — 行程规划页面（自包含 HTML，浏览器直接打开） */
+  /** GET /travel-map — 行程规划页面（自包含 HTML；内容静态，长缓存加速二次打开） */
   app.get("/travel-map", async (_req, reply) => {
-    reply.header("Cache-Control", "no-store");
+    // HTML 为纯静态自包含资源（行程数据走 /travel-plans/:id 异步取），
+    // 长缓存后二次打开零 HTML 等待；版本更新靠内容变更 + 浏览器常规刷新兜底
+    reply.header("Cache-Control", "public, max-age=86400");
     reply.type("text/html; charset=utf-8");
     return buildTravelMapHtml();
   });
 
-  /** POST /travel-plans — 桌面应用下发行程载荷，返回取数 id */
+  /** GET /travel-map/switch — 标签页复用引导页：广播新行程 id 给已开页面换载 */
+  app.get("/travel-map/switch", async (req, reply) => {
+    const q = req.query as { id?: string };
+    const id = (q.id ?? "").replace(/[^A-Za-z0-9]/g, "");
+    if (!id) return reply.code(400).type("text/plain").send("missing id");
+    reply.header("Cache-Control", "no-store");
+    reply.type("text/html; charset=utf-8");
+    // 已开的行程页监听同一 BroadcastChannel：认领后本引导页自动关闭，
+    // 无已开页面（首次打开）时 400ms 后整页跳转正常行程页
+    return `<!doctype html><meta charset="utf-8"><title>行程切换…</title><body>
+<script>
+(function(){
+  var id=${JSON.stringify(id)};
+  var claimed=false;
+  try{
+    var bc=new BroadcastChannel('pai-travel-plan');
+    bc.onmessage=function(e){
+      if(e.data&&e.data.type==='claimed'&&e.data.id===id)claimed=true;
+    };
+    bc.postMessage({type:'switch',id:id});
+  }catch(e){}
+  setTimeout(function(){
+    if(claimed){document.title='✓ 已切换';try{window.close()}catch(e){}}
+    else{location.replace('/travel-map?id='+id);}
+  },450);
+})();
+</script></body>`;
+  });
+
+  // ══════════ 底图本地代理（瓦片/样式/字形经磁盘缓存，规划完成即预热）══════════
+
+  /** 请求来源绝对地址（worker 内无法解析相对路径，改写 URL 必须带 origin） */
+  const originOf = (req: FastifyRequest): string =>
+    `${req.protocol}://${req.headers.host ?? "127.0.0.1:3000"}`;
+
+  /** GET /travel-basemap/style/dark — Carto 暗色矢量样式（内部 URL 已改写为本地代理） */
+  app.get("/travel-basemap/style/dark", async (req, reply) => {
+    const style = await travelTileCache.darkStyleProxied(originOf(req));
+    if (!style.ok) return reply.code(502).send({ error: "style upstream unavailable" });
+    reply.header("Cache-Control", "no-cache");
+    reply.type("application/json");
+    return style.body;
+  });
+
+  /** GET /travel-basemap/fetch?u= — 白名单上游资源代理（磁盘缓存 + SWR）。
+   *  变体路由 fetch.json / fetch.png：MapLibre 会把 sprite 的扩展名插到 query
+   *  之前（/fetch.json?u=...），这里把后缀补回上游 URL。 */
+  const fetchHandler = (ext: string) => async (req: FastifyRequest, reply: FastifyReply) => {
+    const q = req.query as { u?: string; z?: string; x?: string; y?: string };
+    let u = q.u ?? "";
+    if (!u) return reply.code(400).type("text/plain").send("missing u");
+    if (ext && !/\.(json|png|webp)$/.test(u)) u += ext;
+    // 兜底：若客户端未替换 {z}/{x}/{y} 令牌（留在 query 里），在此替换
+    if (/\{z\}/.test(u)) {
+      const z = q.z ?? "", x = q.x ?? "", y = q.y ?? "";
+      if (z && x && y) u = u.replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
+    }
+    const res = await travelTileCache.fetch(u);
+    if (!res.ok) return reply.code(res.status).type("text/plain").send(res.body.toString());
+    reply.header("X-Tile-Cache", res.fromCache ? "hit" : "miss");
+    // TileJSON 内容改写：tiles.json 里的 tiles[] 是上游绝对地址，不改写会让
+    // MapLibre worker 绕过代理直连 CDN（国内网络下挂起 → 地图永远渲染不出）
+    if (/\.json(\?|$)/.test(u) && res.contentType.includes("json")) {
+      // JSON 清单（style/tiles.json）内容会随改写行为升级：浏览器侧必须可失效，
+      // 服务端磁盘缓存兜底速度（ms 级）
+      reply.header("Cache-Control", "no-cache");
+      reply.type("application/json");
+      return reply.send(travelTileCache.rewriteWhitelistedUrls(res.body.toString("utf-8"), originOf(req)));
+    }
+    // 瓦片/精灵/字形二进制不可变：浏览器 + 服务端双层长缓存
+    reply.header("Cache-Control", "public, max-age=86400");
+    reply.type(res.contentType);
+    return reply.send(res.body);
+  };
+  app.get("/travel-basemap/fetch", fetchHandler(""));
+  app.get("/travel-basemap/fetch.json", fetchHandler(".json"));
+  app.get("/travel-basemap/fetch.png", fetchHandler(".png"));
+
+  /** GET /travel-basemap/stats — 瓦片缓存诊断 */
+  app.get("/travel-basemap/stats", async () => travelTileCache.stats());
+
+  /** POST /travel-plans — 桌面应用下发行程载荷，返回取数 id；顺带预热目的地瓦片 */
   app.post("/travel-plans", async (req: FastifyRequest, reply) => {
     const body = req.body as unknown;
     if (!body || typeof body !== "object") {
@@ -86,6 +193,7 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
     prunePlans();
     const id = randomUUID().replace(/-/g, "").slice(0, 16);
     plans.set(id, { payload: body, createdAt: Date.now() });
+    warmTilesForPayload(body);
     return reply.send({ id, url: `/travel-map?id=${id}` });
   });
 

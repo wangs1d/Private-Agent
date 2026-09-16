@@ -94,7 +94,13 @@ async function main() {
   }
 
   // 2. 启动 Node 服务（2026-09-11：Python tool-router 已删除，检索进程内完成）
-  spawnProcess("node", ["--max-old-space-size=512", "dist/index.js"], { cwd: serverDir });
+  const server = spawnProcess("node", ["--max-old-space-size=512", "dist/index.js"], { cwd: serverDir });
+  // 主服务退出（含崩溃 code≠0）→ 包装进程以相同码退出，交由守护方重启；
+  // 否则包装进程会因残留子进程（如 gateway）继续存活，形成 /health 永久失败的僵尸状态。
+  server.on("exit", (code) => {
+    console.error(`[startup] 主服务退出 (code=${code ?? 0})，包装进程随之退出`);
+    process.exit(code ?? 1);
+  });
 
   process.once("SIGINT", killAll);
   process.once("SIGTERM", killAll);

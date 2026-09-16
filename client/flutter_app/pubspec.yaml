@@ -45,9 +45,7 @@ flutter:
     - assets/agent_avatars/
     - assets/fonts/
     # 旅游行程地图模块（内嵌 MapLibre GL JS 单文件页面）
-    - assets/travel_map/
     # MapLibre 本地化副本（装载时内联进 html，WebView 零 CDN 等待）
-    - assets/travel_map/vendor/
     # emotion-ball 小球表情动画（自包含宿主页，来源 aora-bot，见目录内 ATTRIBUTION.md）
     - assets/emotion_ball/
   fonts:

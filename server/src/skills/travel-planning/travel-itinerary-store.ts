@@ -33,6 +33,11 @@ export interface TravelItinerarySnapshot {
   intro?: string;
   /** 出行随身物品叮嘱（行程卡「记得带」胶囊） */
   packing?: string[];
+  /**
+   * 目的地代表性封面（行程卡海报区背景）：目的地本身的形象照（维基百科条目
+   * 主图优先），前端海报优先于任何条目实拍图使用。解析失败缺省。
+   */
+  coverImage?: string;
   days: Array<{
     date: string;
     /** 与 StoredTravelPlan 共用同一份条目结构（StoredDayItem） */

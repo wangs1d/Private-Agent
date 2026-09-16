@@ -1,5 +1,5 @@
 /**
- * FunASR 自托管 ASR HTTP 服务自启器（与 paddle-ocr-auto-starter 同模式）。
+ * FunASR 自托管 ASR HTTP 服务自启器。
  *
  * 行为：
  *  - 在本机 spawn `python server/scripts/funasr_server.py --host ... --port ...`
@@ -8,7 +8,7 @@
  *  - 设 FUNASR_AUTO_START=0 可关闭
  *  - 启动成功后自动写入 FUNASR_BASE_URL，让 voice-dialogue 的 FunAsrAdapter 立刻可用
  *
- * 与 paddle-ocr 的差异：
+ * 注意：
  *  - 不需要 venv（funasr/torch 走系统 Python 即可）
  *  - 首次启动会从 ModelScope 下载 ~1GB 模型到 ~/.cache/funasr/，无超时限制（设 30min 兜底）
  *  - 不自动跑 install 脚本（依赖装好是前置条件，缺依赖会打印提示并 5s 重连）

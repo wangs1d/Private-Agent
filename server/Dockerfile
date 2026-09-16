@@ -6,6 +6,8 @@ ARG NPM_REGISTRY=https://registry.npmmirror.com
 FROM node:22-alpine AS deps
 WORKDIR /app
 ARG NPM_REGISTRY
+# better-sqlite3 等 native 模块在 musl 上无预编译产物，源码编译需要完整工具链
+RUN apk add --no-cache python3 make g++
 # 这是一个 npm workspace 项目，锁文件在仓库根目录
 COPY package.json package-lock.json ./
 COPY server/package.json server/package.json
@@ -15,6 +17,7 @@ RUN npm config set registry "${NPM_REGISTRY}" && npm ci
 FROM node:22-alpine AS build
 WORKDIR /app
 ARG NPM_REGISTRY
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
 COPY server ./server
 COPY agent-world ./agent-world

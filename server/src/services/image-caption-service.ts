@@ -10,6 +10,9 @@
  * 以 image_url 注入支持视觉的聊天模型（与主对话同一 provider），一次批量调用
  * 按顺序输出 N 句描述，再逐张回填到卡片上。前端把 caption 渲染在对应照片下方。
  *
+ * 文案风格（2026-09-16 用户反馈）：caption 是「氛围感短句」——传达照片的
+ * 光线、色调、情绪与瞬间感；禁止「女子穿…」式穿搭/外观清单描述。
+ *
  * 降级策略（宁可没有，不可错位）：
  *   - 主模型不支持视觉 / 未配置密钥 / 调用失败 / 超时 → 不写 caption，
  *     前端回退到旧的交错排版（正文切段），不会出现"描述与照片无关"的更糟体验。
@@ -41,9 +44,27 @@ const CAPTION_TIMEOUT_MS = 15_000;
 /** 描述长度上限（字符）：一句观感描述足够，超长截断 */
 const CAPTION_MAX_CHARS = 40;
 
+/** 收尾清理：模型输出或截断可能留下「：」「—」等悬空标点（读起来像话没说完） */
+function tidyCaption(raw: string): string {
+  return raw.trim().replace(/[：:—–、，,；;]+$/u, "").trim();
+}
+
 export type CaptionOptions = {
   /** 整体超时（毫秒），默认 15s */
   timeoutMs?: number;
+  /**
+   * 拍摄位置参考（如「上海市徐汇区」）：仅在画面内容与之一致时，
+   * 允许 caption 自然带出地点；画面无法确认时只描述内容，不硬塞地点。
+   */
+  locationHint?: string;
+  /**
+   * caption 生成器注入点（测试用）：默认用内置 VLM 批量看图。
+   * 签名与 describeImagesWithVlm 一致（cards 已过滤为待生成的图片项）。
+   */
+  describeFn?: (
+    cards: MediaCardItem[],
+    timeoutMs: number,
+  ) => Promise<string[]>;
 };
 
 /** 是否启用图片描述生成（环境变量开关，默认开启） */
@@ -93,10 +114,11 @@ export async function captionMediaCards(
   }
 
   const timeoutMs = opts.timeoutMs ?? CAPTION_TIMEOUT_MS;
+  const describe = opts.describeFn ?? ((cards, ms) => describeImagesWithVlm(cards, cfg, ms, opts.locationHint));
   try {
-    const captions = await describeImagesWithVlm(pending, cfg, timeoutMs);
+    const captions = await describe(pending, timeoutMs);
     for (let i = 0; i < pending.length; i++) {
-      const caption = (captions[i] ?? "").trim().slice(0, CAPTION_MAX_CHARS);
+      const caption = tidyCaption((captions[i] ?? "").slice(0, CAPTION_MAX_CHARS));
       if (!caption) continue;
       pending[i].caption = caption;
       const url = (pending[i].thumbnailUrl || pending[i].mediaUrl || "").trim();
@@ -124,11 +146,13 @@ type LlmConfig = { apiKey: string; baseURL: string; model: string };
 /**
  * 一次批量调用视觉模型：按顺序注入 N 张图，要求输出 N 句描述的 JSON 数组。
  * 返回数组与入参卡片一一对应（解析失败/缺项的槽位为空串）。
+ * locationHint 存在时作为拍摄位置参考注入（仅在画面一致时才可带出地点）。
  */
 async function describeImagesWithVlm(
   cards: MediaCardItem[],
   cfg: LlmConfig,
   timeoutMs: number,
+  locationHint?: string,
 ): Promise<string[]> {
   // 1) 逐张取出图片字节（本地 PNG 优先直读文件；远程地址限时下载）
   const images: Array<{ base64: string; mime: string }> = [];
@@ -141,10 +165,13 @@ async function describeImagesWithVlm(
   if (images.length !== cards.length) return [];
 
   // 2) 组装消息：一张图一个 image_url part，顺序即卡片顺序
+  const hint = (locationHint ?? "").trim();
   const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
     {
       type: "text",
-      text: `下面按顺序给出 ${images.length} 张图片，请为每张图片生成一句中文描述，输出 JSON。`,
+      text:
+        `下面按顺序给出 ${images.length} 张图片，请为每张图片生成一句中文描述，输出 JSON。` +
+        (hint ? `\n拍摄位置参考：${hint}（仅当画面与之一致时才可在描述中提及地点）。` : ""),
     },
     ...images.map((img) => ({
       type: "image_url" as const,
@@ -164,13 +191,14 @@ async function describeImagesWithVlm(
       {
         role: "system",
         content: [
-          "你是看图写说明的助手。用户按顺序给若干张图片，你要为每张图片写一句简短中文描述。",
+          "你是为照片写「氛围感」短句的助手。用户按顺序给若干张图片，你要为每张图片写一句传达照片感觉的中文短句。",
           "",
           "要求：",
-          "1. 只描述画面里真实可见的内容：主体是什么、在什么场景/做什么、显著的视觉特征（颜色、风格、构图）。",
-          "2. 每句 12~28 个字的陈述句；不要任何前缀（如「这张图片」「图中」「一张」开头），不要编号。",
-          "3. 严格基于画面本身，不要臆测拍摄地点、品牌或来源，除非画面中明确可见文字或 Logo。",
-          `4. 只输出 JSON：{"captions":["第1张描述","第2张描述",...]}，数组长度必须等于图片张数，顺序与图片顺序一致；不要输出 JSON 以外的任何文字。`,
+          "1. 写这张照片给人的感觉：光线、色调、氛围、情绪、瞬间的生动感（参考语感：「逆光把发丝照得发亮，整个画面都是夏天的松弛感」），让没看图的人也能感受到那一刻。",
+          "2. 禁止写成穿搭/物品清单：不要「女子穿…」「身穿…」「扎着…」「戴着…」式的外观罗列，也不要「服装+发型+氛围」的公式化拼接；人物只作为画面氛围的一部分自然带出，重心永远在感觉上。",
+          "3. 感觉必须来自画面真实可见的内容，可适度渲染但不臆造：不编造具体人名、品牌；能可靠判断场景时（如外滩、山林步道）可把地点自然融入氛围（如「外滩夜风里的霓虹」），判断不了就不提地点。",
+          "4. 每句 12~30 个字的陈述句，收尾干净完整，不要以冒号、破折号等悬空标点结尾；不要任何前缀（如「这张图片」「图中」「一张」开头），不要编号。",
+          `5. 只输出 JSON：{"captions":["第1张描述","第2张描述",...]}，数组长度必须等于图片张数，顺序与图片顺序一致；不要输出 JSON 以外的任何文字。`,
         ].join("\n"),
       },
       { role: "user", content },
@@ -198,7 +226,7 @@ function parseCaptionArray(raw: string, expected: number): string[] {
     const list = Array.isArray(parsed?.captions) ? parsed.captions : [];
     for (let i = 0; i < expected && i < list.length; i++) {
       const v = String(list[i] ?? "").trim();
-      if (v) out[i] = v.slice(0, CAPTION_MAX_CHARS);
+      if (v) out[i] = tidyCaption(v.slice(0, CAPTION_MAX_CHARS));
     }
   } catch {
     // JSON 损坏：整批放弃（返回全空），调用方走无 caption 回退

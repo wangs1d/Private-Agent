@@ -74,6 +74,36 @@ export class AgentAccountService {
     return [...this.byActorId.values()];
   }
 
+  /**
+   * 好友发现/搜索：displayName / userId / email 大小写不敏感子串匹配；
+   * `q` 为空时返回最近注册的账号（浏览模式）。跳过 disabled 账号，
+   * 结果按注册时间倒序，默认 20 条、上限 50 条。
+   */
+  searchAccounts(
+    query: { q?: string; limit?: number; excludeActorId?: string } = {}
+  ): AgentAccountRecord[] {
+    const q = query.q?.trim().toLowerCase() ?? "";
+    const limit = Math.min(Math.max(query.limit ?? 20, 1), 50);
+    const exclude = query.excludeActorId?.trim();
+    const hits: AgentAccountRecord[] = [];
+    for (const a of this.byActorId.values()) {
+      if (a.disabled) continue;
+      if (exclude && a.userId === exclude) continue;
+      if (!q) {
+        hits.push(a);
+        continue;
+      }
+      if (
+        a.displayName.toLowerCase().includes(q) ||
+        a.userId.toLowerCase().includes(q) ||
+        (a.email && a.email.toLowerCase().includes(q))
+      ) {
+        hits.push(a);
+      }
+    }
+    return hits.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+  }
+
   /** 按绑定的验证邮箱反查账号（财务入站邮件记账：收件人 → actorId）。 */
   getByEmail(email: string): AgentAccountRecord | undefined {
     const e = email.trim().toLowerCase();

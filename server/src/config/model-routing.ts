@@ -16,9 +16,10 @@ import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provide
 
 /** 任务分级：按复杂度从低到高 */
 export enum TaskTier {
-  /** flash 档：对话/轻量工具/简单查询 — 使用 DeepSeek Flash（deepseek-chat） */
+  /** flash 档：对话/轻量工具/简单查询 — 使用 DeepSeek V4.1-Flash（deepseek-flash，支持图像理解） */
   FLASH = "flash",
-  /** pro 档：深度推理/子 Agent 委派/多步计划 — 使用 DeepSeek Pro（deepseek-reasoner） */
+  /** pro 档：深度推理/子 Agent 委派/多步计划 — 同 deepseek-flash 但放开思考链
+   *  （deepseek-reasoner 已下线，官方 /models 2026-09 起不再列出） */
   PRO = "pro",
   /** 最简单：情绪识别 L2、技术扫描评估、简单分类 */
   NANO = "nano",
@@ -30,9 +31,9 @@ export enum TaskTier {
 
 /** 默认模型映射 */
 const DEFAULT_MODELS: Record<TaskTier, string> = {
-  [TaskTier.FLASH]: "deepseek-chat",       // DeepSeek Flash（V3 快模型）
-  [TaskTier.PRO]: "deepseek-reasoner", // DeepSeek Pro（R1 推理模型）
-  [TaskTier.NANO]: "gpt-4.1-nano",
+  [TaskTier.FLASH]: "deepseek-flash",      // DeepSeek V4.1-Flash 快模型（支持图像理解）
+  [TaskTier.PRO]: "deepseek-flash",   // 与 FLASH 同模型；PRO 档由 agent-core 显式 disableThinking:false 开思考
+  [TaskTier.NANO]: "",                // 空 = 跟随 provider 主模型（gpt-4.1-nano 在 DeepSeek 端点已无效）
   [TaskTier.MINI]: "gpt-4.1-mini",
   [TaskTier.FULL]: "", // 空字符串表示使用主模型（OPENAI_MODEL / MOONSHOT_MODEL）
 };

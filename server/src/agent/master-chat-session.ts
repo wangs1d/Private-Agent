@@ -74,3 +74,15 @@ export function resolveChannelScopedSessionId(actorId: string, channel: string):
       .replace(/^-+|-+$/g, "") || "bridge";
   return `${actorId}@${normalized}`;
 }
+
+/**
+ * 渠道 scoped 会话 id（`actorId@channel`）剥回基础 actor id；非 scoped 输入原样返回。
+ *
+ * 主动性触达（WS 弹窗/离线推送）与代办足迹台账按**基础 actor** 归属——设备绑定
+ * 和客户端查询（GET /agent/activities?actorId=…）用的都是裸 actorId。渠道 scoped
+ * 会话只隔离对话线程/记忆，不能让「盯梢告知」投递到不存在的 `xxx@wechat` 设备上，
+ * 也不能让足迹记到客户端查不到的归属名下（2026-09-16 修复）。
+ */
+export function resolveBaseActorId(actorId: string): string {
+  return actorId.replace(CHANNEL_SCOPE_RE, "");
+}

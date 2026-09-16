@@ -116,6 +116,7 @@ const RULES: ClassRule[] = [
   { prefix: "code.", domain: "work", action: "execute", risk: "write" },
   { prefix: "desktop.", domain: "work", action: "execute", risk: "write" },
   { prefix: "agent_browser.", domain: "work", action: "execute", risk: "write" },
+  { prefix: "shared_browser.", domain: "work", action: "execute", risk: "write" },
   // ── comms 通讯触达 ──
   { exact: "phone.call_user", domain: "comms", action: "communicate", risk: "outbound" },
   { prefix: "phone.", domain: "comms" },

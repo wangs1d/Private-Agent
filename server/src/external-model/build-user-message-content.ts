@@ -25,8 +25,7 @@ export function openAiUserContentFromTurn(
     const count = frames.length;
     const note =
       `（用户发送了 ${count} 张照片。当前模型无法直接查看图片画面，` +
-      `若下方附有图片 OCR 识别文本请据此回答；` +
-      `否则请如实告知用户无法查看图片，请其用文字描述图片内容或改用支持视觉的模型。）`;
+      `请如实告知用户无法查看图片，请其用文字描述图片内容或改用支持视觉的模型。）`;
     return turn.text ? `${turn.text}\n\n${note}` : note;
   }
   const parts: ChatCompletionContentPart[] = [{ type: "text", text: turn.text }];

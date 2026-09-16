@@ -144,8 +144,10 @@ class _NextbotChatLayoutState extends State<NextbotChatLayout> {
                 ),
               ),
               // 分割条：split 模式已写过，但渲染在 Expanded 之后；
-              // side 模式现在也始终渲染常驻分割条,允许用户调整宽度
+              // side 模式现在也始终渲染常驻分割条,允许用户调整宽度。
+              // 灰色分隔缝只在 split（双面板）模式显示，side 窄面板不显示。
               VerticalDragDivider(
+                showStrip: widget.useSplit,
                 onDrag: widget.useSplit
                     ? (double deltaX) {
                         if (widget.onSplitRatioChanged == null) return;

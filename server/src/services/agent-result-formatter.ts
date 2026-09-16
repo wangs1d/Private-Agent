@@ -29,10 +29,8 @@ import { appendFileSync } from "node:fs";
 
 import { LIST_ITEM_RE } from "./render-hint-service.js";
 import {
-  extractSemanticItems,
   hasBlockquote,
   routeDisplayEffect,
-  routeDisplayEffectByForm,
   scoreDisplayEffects,
   type DisplayRouteInput,
 } from "./display-effect-router.js";
@@ -105,8 +103,21 @@ function inferItemDepth(raw: string): number {
 
 /** 卡片最大列表条数（超过不切；长清单由 fold_list 折叠卡承接，见 display-effect-router） */
 const MAX_CARD_ITEMS = 12;
+
 /** 卡片最小列表条数 */
 const MIN_CARD_ITEMS = 3;
+
+/** 图片地址（图片对窗口判定用，与 display-effect-router 同一识别口径） */
+const IMAGE_URL_RE = /https?:\/\/\S+\.(?:jpg|jpeg|png|webp|gif|bmp)(?:[?#]\S*)?/i;
+
+/**
+ * 图片对窗口：恰好 2 条且每条都带图片地址（A/B 前后对比、双机位对比）。
+ * 这是 compare 滑杆的标志性载荷——媒体证据是硬信号，2 条即可切卡；
+ * 普通 2 条文字清单（散文里极常见）仍不算卡片，避免误切。
+ */
+function isImagePairItems(items: ReadonlyArray<string>): boolean {
+  return items.length === 2 && items.every((t) => IMAGE_URL_RE.test(t));
+}
 
 interface AgentResultPayload {
   avatar: string;
@@ -172,7 +183,7 @@ export function findExtractableCardSegment(text: string): CardSegment | null {
     if (LIST_ITEM_RE.test(raw.trim())) listLineIdx.push(i);
   });
 
-  if (listLineIdx.length < MIN_CARD_ITEMS || listLineIdx.length > MAX_CARD_ITEMS) {
+  if (listLineIdx.length < 2 || listLineIdx.length > MAX_CARD_ITEMS) {
     return null;
   }
 
@@ -262,7 +273,8 @@ export function findExtractableCardSegment(text: string): CardSegment | null {
   const baseDepth = depths.length ? Math.min(...depths) : 0;
   const normDepths = depths.map((d) => d - baseDepth);
 
-  if (items.length < MIN_CARD_ITEMS) return null;
+  // 2 条窗口：仅图片对（compare 滑杆载荷）放行；普通 2 条文字清单不切卡
+  if (items.length < MIN_CARD_ITEMS && !isImagePairItems(items)) return null;
 
   return {
     title,
@@ -645,87 +657,6 @@ export function formatAgentResultForChat(
 
   return parts.join("\n\n");
 }
-
-/**
- * 从普通文本/长文构造「内容语义卡片」。
- *
- * 解决「文本很难被触发」的根因之一：以前只有走 markdown 列表（3-7 条）
- * 的正文才会被格式化成卡片，普通叙述/长文完全不进特效层。这里改用
- * [routeDisplayEffectByForm]（纯形态、无意图加成守门），直接在全文上掐
- * 语义条目并判定，只有「显而易见的结构化内容」（步骤/指标/折叠/时序/
- * 对比/标签等）才生成卡片；普通闲聊因形态分不足返回 null。
- *
- * - 用 [extractSemanticItems] 在全文上提取语义条目（不依赖 `-`/`1.` 列表语法）
- * - title 取首个非空短句（≤40 字，剥前导空格）作为引导
- * - 只对「内容型特效」上卡；quote/工具强卡不在此路径（那些走各自专用提取）
- *
- * @returns `[AGENT_RESULT_CARD_START]` 标记文本；无结构化内容时返回 null。
- */
-export function formatSemanticResultForChat(
-  text: string,
-  toolName?: string,
-): string | null {
-  const trimmed = text?.trim() ?? "";
-  // ≥12 字：两条例程（"上午10点例会，下午3点见客户"≈17 字）能进；一句话闲聊进不来
-  if (trimmed.length < 12) return null;
-
-  const items = extractSemanticItems(trimmed).map((t) => ({ text: t, type: "num" }));
-  // 至少 2 个语义条目；2 条目仅当形态证据最强（timeline/metric，见下方门控）
-  if (items.length < 2) return null;
-
-  const titleLines = trimmed.split(/\r?\n/).map((l) => l.trim());
-  const title = (titleLines.find((l) => l.length > 0 && validTitleLine(l)) ?? "")
-    .slice(0, 40);
-
-  const routeInput = {
-    toolName,
-    title,
-    items,
-    fullText: trimmed,
-  };
-  // 内容意图判定：steps/metric/fold_list/chips/progress/carousel 语义较强可直接信意图；
-  // timeline/compare 的意图词（安排/明天/之后/区别…）在日常对话里出现太频繁，
-  // 必须额外有形态支撑（真正的时间戳/对比结构）才上卡，避免闲聊被误判。
-  let cardType = routeDisplayEffect(routeInput);
-  logRoutingDecision("semantic-card", toolName, cardType, routeInput);
-  if (cardType === "timeline" || cardType === "compare") {
-    if (routeDisplayEffectByForm(routeInput) !== cardType) cardType = "";
-  }
-  if (!CONTENT_CARD_TYPES.has(cardType)) return null;
-  // 2 条目只放行 timeline/metric：两者形态校验本身严格（时间/标签数值全命中）；
-  // 2 条碎句的步骤/对比意图（"先A，再B"）不足以撑卡，保持纯文本
-  if (items.length === 2 && cardType !== "timeline" && cardType !== "metric") return null;
-
-  const payload: AgentResultPayload = {
-    avatar: "NB",
-    avatarStyle: "default",
-    title,
-    items,
-    footer: "",
-    cardType,
-    actions: [],
-    // 内容卡本身是实质内容，默认朗读
-    speak: "high",
-    cardId: `card_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-  };
-  return `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;
-}
-
-/** 内容型特效白名单：普通文本路径只允许这些结构化卡，不覆盖媒体/工具/引用卡。
- *  fold_list 不在此列：纯文本路径的「条目」来自逗号/分号切分的叙述碎片，
- *  一段普通聊天即可凑满 ≥8 条伪清单（真实误判案例：印尼行程追问轮的对话
- *  被切成 fold_list 卡）。真正的长清单几乎必带列表语法，由
- *  findExtractableCardSegment（formatAgentResultForChat）路径承接。 */
-const CONTENT_CARD_TYPES: ReadonlySet<string> = new Set([
-  "steps",
-  "metric",
-  "chips",
-  "timeline",
-  "compare",
-  "comparison_table",
-  "progress",
-  "carousel",
-]);
 
 /** 卡片标题候选行：非列表行、非标题引导行（结尾冒号）、长度适中。 */
 function validTitleLine(l: string): boolean {

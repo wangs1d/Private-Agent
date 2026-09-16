@@ -8,8 +8,8 @@
     },
     "pos-task-done-two-items": {
       "hint": "result_card",
-      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"要改时间随时说。\",\"items\":[{\"text\":\"工作日 07:30 起床闹钟\",\"type\":\"num\"},{\"text\":\"周末 09:00 起床闹钟\",\"type\":\"num\"},{\"text\":\"要改时间随时说。\",\"type\":\"num\"}],\"footer\":\"\",\"cardType\":\"metric\",\"actions\":[],\"speak\":\"high\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
-      "cardType": "metric"
+      "output": "已为你设置好明天的闹钟：\n- 工作日 07:30 起床闹钟\n- 周末 09:00 起床闹钟\n\n要改时间随时说。",
+      "cardType": ""
     },
     "pos-weather-tool-short": {
       "hint": "result_card",
@@ -52,7 +52,7 @@
       "cardType": "carousel"
     },
     "tool-weather-prose-no-list": {
-      "hint": "result_card",
+      "hint": "plain",
       "output": "明天天气不错，温度很舒服，适合出门走走。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"明天晴转多云，适合出行\",\"items\":[{\"type\":\"num\",\"text\":\"晴转多云\"},{\"type\":\"num\",\"text\":\"气温 18–26\"},{\"type\":\"num\",\"text\":\"湿度 62%\"},{\"type\":\"num\",\"text\":\"风速 8 km/h\"},{\"type\":\"num\",\"text\":\"峰值降水概率 10%\"}],\"footer\":\"早晚温差大，建议带件薄外套\",\"cardType\":\"weather\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
       "cardType": "weather"
     },
@@ -72,7 +72,7 @@
       "cardType": ""
     },
     "tool-registered-but-plaintext-mode": {
-      "hint": "result_card",
+      "hint": "plain",
       "output": "明天天气不错，温度很舒服，适合出门走走。",
       "cardType": ""
     },
@@ -87,8 +87,8 @@
       "cardType": ""
     },
     "neg-two-items-no-task-done": {
-      "hint": "brief",
-      "output": "[RENDER_AS:brief]\n冰箱里有这些：\n- 鸡蛋\n- 牛奶",
+      "hint": "plain",
+      "output": "冰箱里有这些：\n- 鸡蛋\n- 牛奶",
       "cardType": ""
     },
     "neg-list-split-by-long-paragraph": {
@@ -113,12 +113,12 @@
     },
     "neg-plaintext-mode-disables-card": {
       "hint": "result_card",
-      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"好的，耳机已下单，预计周六送达。\",\"items\":[{\"text\":\"好的，\",\"type\":\"num\"},{\"text\":\"耳机已下单，\",\"type\":\"num\"},{\"text\":\"预计周六送达。\",\"type\":\"num\"},{\"text\":\"周六上午：去你说过的那家新店探店\",\"type\":\"num\"},{\"text\":\"周六下午：健身 + 采购下周末食材\",\"type\":\"num\"},{\"text\":\"周日：在家看你收藏的那部电影\",\"type\":\"num\"}],\"footer\":\"\",\"cardType\":\"timeline\",\"actions\":[],\"speak\":\"high\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
-      "cardType": "timeline"
+      "output": "好的，耳机已下单，预计周六送达。\n\n本周末行程已为你规划：\n- 周六上午：去你说过的那家新店探店\n- 周六下午：健身 + 采购下周末食材\n- 周日：在家看你收藏的那部电影\n\n需要调整吗？",
+      "cardType": ""
     },
     "neg-already-marked-passthrough": {
       "hint": "plain",
-      "output": "前导说明。\n[AGENT_RESULT_CARD_START]\n{\"title\":\"已有卡片\",\"items\":[{\"type\":\"check\",\"text\":\"条目一\"},{\"type\":\"check\",\"text\":\"条目二\"},{\"type\":\"check\",\"text\":\"条目三\"}],\"footer\":\"\"}\n[AGENT_RESULT_CARD_END]",
+      "output": "前导说明。\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"已有卡片\",\"items\":[{\"type\":\"check\",\"text\":\"条目一\"},{\"type\":\"check\",\"text\":\"条目二\"},{\"type\":\"check\",\"text\":\"条目三\"}],\"footer\":\"\",\"cardType\":\"\",\"actions\":[],\"speak\":\"high\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
       "cardType": ""
     },
     "edge-list-exactly-300-chars": {

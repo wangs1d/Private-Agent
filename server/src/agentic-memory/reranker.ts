@@ -28,6 +28,7 @@ import {
   resolveOpenAiApiKey,
   type MemoryRerankerMode,
 } from "./env.js";
+import { bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 
 /** 单条精排结果：候选下标 → 相关分（0-1） */
 export interface RerankScore {
@@ -117,6 +118,9 @@ async function llmRerankScores(
       // 传给对话端点会被拒（每次调用都降级）
       model: opts.model ?? getAgenticMemoryLlmModel(),
       temperature: 0,
+      // 精排走 800ms 级超时预算：deepseek-flash 默认带思考链，必须显式关掉
+      //（deepseek-chat 时代无需表态，bypassChatRequestExtras 按主模型自动判定）
+      ...bypassChatRequestExtras(),
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: `Query：${query}\n\n候选记忆：\n${listed}` },

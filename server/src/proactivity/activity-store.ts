@@ -1,10 +1,20 @@
-// 助手动态台账：Agent 主动代办结果的唯一落库点（右侧面板「助手动态」卡数据源）。
+// 代办足迹台账：Agent 主动代办与盯梢告知结果的唯一落库点
+// （右侧面板「代办足迹」卡数据源）。
 //
-// 记录的是「代办结果」而非消息摘要——消息摘要仍走对话流（proactive_pipeline 的
-// fan-out 直推），台账只负责可回溯：用户稍后想查"助手到底帮我订了什么/交了哪笔钱"。
+// 定位（2026-09-16 明确）：「可回溯的代办账本」而非通知流——通知实时性由对话流
+// （proactive_pipeline fan-out 弹窗）承担，本台账只回答两类问题：
+//   1. 执行类条目：「助手替我办的事办得怎么样了」（订牛奶/缴水电费/改日程…），
+//      由 Agent 工具链 activity.report 工具在办完后上报，status 走
+//      pending（进行中）→ done/failed（完结）；
+//   2. 告知类条目：「助手替我盯到了什么」（日程变动等入站信号），投递成功后由
+//      delivery 层自动落库，status=changed + statusLabel=「已告知」——它记录的
+//      是「我告诉过你」而非「我办完了」，后续 Agent 真正代办（用户在对话中确认）
+//      时由 activity.report 另行落一条执行类条目，两条构成「盯到 → 办完」的弧线。
+// actorId 归一：一律按基础 actor（裸 id）归属，渠道 scoped 会话在触发器侧已剥回。
+//
 // 写入方：
-//  1. ProactiveDeliveryService 投递成功后，kind 以 "action." 开头的提案自动落库；
-//  2. POST /agent/activities（Agent 工具链在完成代办后手动上报，可携带结构化 detail）。
+//  1. ProactiveDeliveryService 投递成功后，kind 以 "action." 开头的提案自动落库（告知类）；
+//  2. activity.report 工具 / POST /agent/activities（执行类，可携带结构化 detail）。
 // 持久化：单 JSON 文件（persist-file 原子替换），每个 actor 最多保留 MAX_PER_ACTOR 条。
 import { readJson, writeJson } from "./persist-file.js";
 
@@ -48,6 +58,11 @@ const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 export class AgentActivityStore {
   private activities: AgentActivity[];
   private seq = 0;
+  /**
+   * 新条目钩子（装配层注入：向该 actor 的在线设备推 agent.activity_new，驱动
+     客户端足迹卡即时刷新，替代 1 分钟轮询的滞后）。异常由调用方兜底，不落库主链路。
+   */
+  onRecord?: (activity: AgentActivity) => void;
 
   constructor(private readonly filePath: string) {
     this.activities = readJson<AgentActivity[]>(filePath, []);
@@ -72,6 +87,16 @@ export class AgentActivityStore {
     return "done";
   }
 
+  /**
+   * 告知类（change/cancel/delay）自动落库时没有「代办完成」语义——默认状态文案
+   * 用「已告知」而非客户端兜底的「已调整」，向用户如实传达「我盯到了并告诉了你，
+   * 还没替你改」。调用方显式传 status/statusLabel（工具链执行类上报）时不覆盖。
+   */
+  static defaultStatusLabel(kind: string, status?: AgentActivityStatus): string | undefined {
+    if (status !== undefined) return undefined;
+    return AgentActivityStore.statusFromKind(kind) === "changed" ? "已告知" : undefined;
+  }
+
   record(input: RecordActivityInput): AgentActivity | null {
     if (input.dedupKey) {
       const cutoff = Date.now() - DEDUP_WINDOW_MS;
@@ -83,6 +108,8 @@ export class AgentActivityStore {
       );
       if (dup) return null;
     }
+    const status = input.status ?? AgentActivityStore.statusFromKind(input.kind);
+    const autoLabel = AgentActivityStore.defaultStatusLabel(input.kind, input.status);
     const activity: AgentActivity = {
       id: `act_${Date.now().toString(36)}_${(this.seq++).toString(36)}`,
       actorId: input.actorId,
@@ -90,8 +117,8 @@ export class AgentActivityStore {
       category: AgentActivityStore.categoryOf(input.kind),
       title: input.title,
       summary: input.summary,
-      status: input.status ?? AgentActivityStore.statusFromKind(input.kind),
-      ...(input.statusLabel ? { statusLabel: input.statusLabel } : {}),
+      status,
+      ...(input.statusLabel || autoLabel ? { statusLabel: input.statusLabel ?? autoLabel } : {}),
       ...(input.detail && Object.keys(input.detail).length > 0
         ? { detail: input.detail }
         : {}),
@@ -102,6 +129,11 @@ export class AgentActivityStore {
     this.activities.push(activity);
     this.trim();
     this.persist();
+    try {
+      this.onRecord?.(activity);
+    } catch {
+      /* 实时推送失败不影响落库 */
+    }
     return activity;
   }
 

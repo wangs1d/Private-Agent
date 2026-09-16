@@ -136,10 +136,21 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
   /**
    * 构造 extraBody：thinking 开关 + fastProfile（对话面轻量档跳过强制 tool_choice）。
    * 仅用于工具分支（applyExtraBodyToPlainRequest 默认 false，非工具分支不 spread）。
+   *
+   * deepseek-flash（V4.1-Flash）默认带思考链（实测每轮多 200+ reasoning tokens、明显拖慢快档），
+   * 与旧 deepseek-chat 行为不一致：未显式表态时对其下发 thinking:disabled 保持快档语义；
+   * disableThinking === false 视为调用方明确要思考，不附加字段。deepseek-reasoner 思考模型不受影响。
    */
-  protected buildExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> | undefined {
+  protected buildExtraBody(
+    effectiveStreamOpts: AgentStreamOptions,
+    model?: string,
+  ): Record<string, unknown> | undefined {
     const out: Record<string, unknown> = {};
-    if (effectiveStreamOpts.disableThinking) {
+    const m = (model ?? "").toLowerCase();
+    const wantsThinkingOff =
+      effectiveStreamOpts.disableThinking === true ||
+      (effectiveStreamOpts.disableThinking === undefined && m.includes("deepseek-flash"));
+    if (wantsThinkingOff) {
       out.thinking = { type: "disabled" };
     }
     if (effectiveStreamOpts.toolExposureProfile === "contextual" || effectiveStreamOpts.toolExposureProfile === "light") {

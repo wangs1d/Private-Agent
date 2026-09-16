@@ -341,7 +341,6 @@ import {
   extractSemanticItems,
   routeDisplayEffectByForm,
 } from "../src/services/display-effect-router.js";
-import { formatSemanticResultForChat } from "../src/services/agent-result-formatter.js";
 
 test("extractSemanticItems splits narrative without list markers", () => {
   const items = extractSemanticItems(
@@ -371,70 +370,6 @@ test("routeDisplayEffect hits steps for narrative via intent; pure-form misses i
   assert.equal(routeDisplayEffectByForm(input), "");
 });
 
-test("timeline weak-intent without form proof stays plain (no false card)", () => {
-  // 闲聊里出现"安排/明天"等弱意图词，但无真实时间戳形态 → 守卫拦截，保持纯文本
-  const marked = formatSemanticResultForChat(
-    "我帮你把明天的安排记一下，到时候提醒你，你今晚好好休息就行。",
-  );
-  assert.equal(marked, null);
-});
-
-test("timeline with real timestamps gets a card", () => {
-  const marked = formatSemanticResultForChat(
-    "明天的安排：早上9点开会，10点半约客户，中午12点吃饭，下午2点健身。",
-    "schedule.make",
-  );
-  assert.ok(marked, "real timeline content should produce a card");
-  const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
-  assert.ok(m);
-  const payload = JSON.parse(m![1]!);
-  assert.equal(payload.cardType, "timeline");
-});
-
-test("formatSemanticResultForChat builds steps card from narrative", () => {
-  const marked = formatSemanticResultForChat(
-    "做法很简单。先把水烧开，然后放入面条，最后加上调料拌一拌，就可以开吃了。",
-    "cooking.make",
-  );
-  assert.ok(marked, "should produce content card from plain text");
-  const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
-  assert.ok(m);
-  const payload = JSON.parse(m![1]!);
-  assert.equal(payload.cardType, "steps");
-});
-
-test("formatSemanticResultForChat returns null for chit-chat", () => {
-  // 普通闲聊无结构化信号 → 不生成卡片（保持纯文本）
-  assert.equal(
-    formatSemanticResultForChat(
-      "好的，这个问题我记下来了，等我查一下资料再回复你，你稍等一下哦。",
-    ),
-    null,
-  );
-});
-
-test("formatSemanticResultForChat returns null for conversational narrative with single connective", () => {
-  // 真实误判回归（2026-08-29 印尼行程追问轮）：对话叙述只含一个「然后」，
-  // 且逗号碎片能凑满 fold_list 的条目数——修复前被切成碎片卡片。
-  // 修复：steps 意图需 ≥2 个不同顺序引导词；fold_list 移出纯文本路径白名单。
-  assert.equal(
-    formatSemanticResultForChat(
-      "雅加达开个头不错，第一天先落地歇脚嘛。不过雅加达本身海景一般，待两天就够了。\n\n" +
-        "我的想法是：雅加达2天然后飞巴厘岛或者去日惹，剩下5天好好玩。\n\n" +
-        "你更想海滩晒太阳，还是历史文化加自然风光？这个你定，我按你的偏好排。",
-    ),
-    null,
-  );
-  // 单个「怎么弄」的闲聊问句同样不上卡（教程词单独出现降为 0.5，不足以建卡）
-  assert.equal(
-    formatSemanticResultForChat(
-      "这个报名流程有点复杂啊，到底要怎么弄才对，你之前办过吗？跟我说说呗。",
-    ),
-    null,
-  );
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
 // 路由精度回归（2026-08-30 文本效果路由优化）：内容必须落到对应的效果
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -549,132 +484,14 @@ test("e2e: travel numbered plan routes to travel_itinerary card", () => {
   assert.equal(extractCardType(marked), "travel_itinerary");
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 真实对话触发率回归（2026-08-30）：口语化回复（无 markdown 列表）必须能上卡
-// ─────────────────────────────────────────────────────────────────────────────
-
-function semanticCard(text: string, toolName?: string): string {
-  const marked = formatSemanticResultForChat(text, toolName);
-  assert.ok(marked, `should produce a card: ${text}`);
-  const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
-  assert.ok(m, "card block should exist");
-  return JSON.parse(m![1]!).cardType;
-}
-
-test("real-dialog: 2-item schedule with clock times becomes timeline card", () => {
-  assert.equal(
-    semanticCard("上午10点部门例会，下午3点见客户。"),
-    "timeline",
-  );
-});
-
-test("real-dialog: 先/再/最后 narrative steps become steps card", () => {
-  assert.equal(semanticCard("先把数据导出，再清洗一遍，最后跑模型。"), "steps");
-});
-
-test("real-dialog: inline Chinese-numeral enumeration becomes steps card", () => {
-  // 修复前：isValidSemanticEntry 把「二、续签合同」当标题引导行丢弃，
-  // 只剩首段，凑不出条目集
-  assert.equal(
-    semanticCard("本周要办三件事：一、交报表；二、续签合同；三、回复客户邮件。"),
-    "steps",
-  );
-});
-
-test("real-dialog: colloquial label+value+unit list becomes metric card", () => {
-  // 修复前：条目带尾部句读（"重量199克，"），尾部锚定的形态校验全灭
-  assert.equal(
-    semanticCard("这款屏幕尺寸是6.7英寸，重量199克，峰值亮度2000尼特。"),
-    "metric",
-  );
-});
-
-test("real-dialog: two colon metric items become metric card", () => {
-  assert.equal(semanticCard("屏幕尺寸：6.7英寸，重量：199g。"), "metric");
-});
-
-test("real-dialog: bare A/B labeled items become comparison_table card", () => {
-  // 修复前：compare 意图（区别/怎么选）有分但缺形态证据，被 ByForm 门拦下，
-  // 即使路由到 compare 也因无图在前端静默回退通用卡；
-  // 修复后：A/B 成对条目直接上 comparison_table 双栏对比卡。
-  assert.equal(
-    semanticCard("两款手机的区别主要在屏幕和续航。A便宜些，B性能强，看你怎么选。"),
-    "comparison_table",
-  );
-});
-
-test("real-dialog: 2-item day-word-only narrative stays plain (no clock)", () => {
-  // 2 条目 timeline 门槛收紧：必须带钟点，日期泛指（明天/后天）不算
-  assert.equal(formatSemanticResultForChat("明天上午可能下雨，后天下午就放晴了。"), null);
-});
-
-test("real-dialog: 2-item step-ish narrative stays plain", () => {
-  // 2 条目只放行 timeline/metric；「先A，再B」两步闲聊不上卡
-  assert.equal(formatSemanticResultForChat("先把碗筷收好，再擦一遍桌子。"), null);
-});
-
-test("real-dialog: 第X天 narrative itinerary becomes timeline card", () => {
-  // 修复前：TIME_MARK_RE 不认「第X天」，多日行程叙事上不了时间轴
-  assert.equal(
-    semanticCard("第一天去乌布看梯田，第二天去圣泉寺，第三天金巴兰看日落。"),
-    "timeline",
-  );
-});
-
-test("real-dialog: date-range plan becomes timeline card", () => {
-  // 2 条目守门认精确日期（X月X号），泛指日期（明天/后天）仍不上卡
-  assert.equal(semanticCard("3月5号出发，3月8号回程。"), "timeline");
-});
-
 test("real-dialog: 8+ item markdown list folds into fold_list card", () => {
-  // 修复前：routeRender 的 result_card 上限 7 条，8-12 条 markdown 清单
-  // 永远上不了卡（带意图词的问句还会被推去 structured 富文本）
+  // 列表切卡路径保留：markdown 列表是确定性结构信号，非散文打分
   const items = Array.from({ length: 8 }, (_, i) => `- 物品${i + 1}`).join("\n");
   assert.equal(
-    extractCardType(formatAgentResultForChat(`采购清单：\n${items}`, undefined)),
+    extractCardType(formatAgentResultForChat(`采购清单：\n${items}`)),
     "fold_list",
   );
 });
-
-test("real-dialog: 顿号 enumeration becomes chips card", () => {
-  // 修复前：顿号不在子句切分符里（语义路径看不见并列项）；
-  // 修复后切分、且尾顿号/短名词句号被剥掉，chips 标点护栏不再误伤
-  assert.equal(
-    semanticCard("去超市需要买：苹果、香蕉、橙子、牛奶、鸡蛋。"),
-    "chips",
-  );
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// steps 意图标记回归（2026-09-02「性感一点的女生照片」案例）：
-// 「先/再」是口语最高频的连接词，不构成步骤语义——修复前含「你先看看…
-// 我再往红毯那边翻翻」的纯闲聊被切成 8 条编号碎片上步骤卡。
-// ─────────────────────────────────────────────────────────────────────────────
-
-test("steps intent ignores 先/再 connectives (photo-chat regression)", () => {
-  const reply =
-    "给你找了几张景甜的，偏温婉甜美那一挂，也有套海蓝色亮片薄纱裙的，带点清凉性感味。" +
-    "你先看看合不合口味。要是想要更性感火辣的那种，我再往红毯活动造型那边翻翻。";
-  const items = extractSemanticItems(reply).map((text) => ({ text, type: "num" }));
-  // 全文只有「先/再」两个口语连接词 → steps 意图分为 0，不路由到 steps
-  const type = routeDisplayEffect({ title: "", items, fullText: reply });
-  assert.ok(type !== "steps", `闲聊不应上步骤卡，实际: ${type}`);
-  // 闲聊文本整体不上任何内容卡（保持纯文本聊天节奏）
-  assert.equal(formatSemanticResultForChat(reply), null);
-});
-
-test("steps intent still fires on strong sequence markers", () => {
-  // 「先A，然后B，最后C」含 然后+最后 两个强标记 → 步骤语义保留
-  const marked = formatSemanticResultForChat(
-    "先把水烧开，然后放入面条，最后加上调料拌一拌，就可以开吃了。",
-    "cooking.make",
-  );
-  assert.ok(marked, "强顺序标记的叙述仍应上步骤卡");
-  const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
-  assert.ok(m);
-  assert.equal(JSON.parse(m![1]!).cardType, "steps");
-});
-
 // ── 财务能力域（finance.*）工具路由 ──────────────────────────────
 
 test("finance tools route to their domain cards", () => {

@@ -40,6 +40,8 @@ export class EmbodimentAutonomyService {
   constructor(private readonly wsRegistry: ClientPushPort) {
     this.enabled = envAutonomyEnabled();
     this.tickTimer = setInterval(() => this.tick(), 4500);
+    // 不阻塞进程退出：长生命周期服务内无行为差异，仅避免事件循环被空转定时器钉住
+    this.tickTimer.unref();
   }
 
   dispose(): void {

@@ -61,7 +61,7 @@ top-N 候选（含 schema）→ LLM tool_call → ToolRegistry.execute（本地�
 - stdio：`tool-router-adapter.ts` spawn `bridge_worker.py`，按行 JSON-RPC（60s 命令超时）。
 
 检索收口后**该链路已不存在**。当前 Python 在运行时的角色仅剩模型推理类 sidecar
-（PaddleOCR，HTTP）。跨进程通信约定见 §6 军规：常驻 HTTP 服务、无状态、可降级、
+（FunASR 语音识别，HTTP；PaddleOCR 已于 2026-09 移除）。跨进程通信约定见 §6 军规：常驻 HTTP 服务、无状态、可降级、
 严格预算——不再使用按需 spawn 与 stdio 长连接。
 
 ## 5. 跨进程边界军规（从 tool-router 事故固化）

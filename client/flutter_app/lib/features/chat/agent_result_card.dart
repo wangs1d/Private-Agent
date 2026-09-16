@@ -1150,8 +1150,9 @@ class _MediaCard extends StatelessWidget {
 ///   - 不再罗列 Day 1/2/3 摘要（与规划界面重复），换成目的地一句话简介
 ///     + 「记得带」随身物品叮嘱，卡片自身先回答「去哪玩 / 要带什么」；
 ///   - 卡片加大（maxWidth 460，气泡宽度在 chat_page 对行程卡放宽），
-///     背景取行程中第一个有实拍图的景点（attraction 优先），压深色渐变
-///     保证白字可读；无图/加载失败退回深青渐变，不闪占位框；
+///     背景优先取目的地代表性封面（服务端维基百科条目主图——目的地本身的
+///     形象照，最具代表性），无封面退回第一个有实拍图的景点（attraction
+///     优先），压深色渐变保证白字可读；无图/加载失败退回深青渐变，不闪占位框；
 ///   - 无结构化 travelPlan 的历史消息优雅降级：简介/叮嘱行整体隐藏，
 ///     海报走渐变兜底，布局不破损。
 class _TravelItineraryCard extends StatelessWidget {
@@ -1502,9 +1503,13 @@ class _TravelItineraryCard extends StatelessWidget {
     );
   }
 
-  /// 收集行程条目实拍图（去重）：海报选取 + 点击预览画廊共用。
+  /// 收集行程实拍图（去重）：海报选取 + 点击预览画廊共用。
+  /// 目的地代表性封面（plan.coverImage）排在最前——海报默认展示它，
+  /// 画廊从封面起播才能与海报点击的图对齐。
   static List<String> _collectImages(TravelPlanData plan) {
     final List<String> urls = <String>[];
+    final String cover = plan.coverImage.trim();
+    if (cover.isNotEmpty) urls.add(cover);
     for (final TravelPlanDay day in plan.days) {
       for (final TravelDayEntry e in day.entries) {
         for (final String img in e.images) {
@@ -1515,9 +1520,12 @@ class _TravelItineraryCard extends StatelessWidget {
     return urls;
   }
 
-  /// 海报图：优先第一个有实拍图的景点（attraction），其次任意有图条目；
+  /// 海报图：优先目的地代表性封面（目的地本身的形象照，最具代表性且真实）；
+  /// 未携带封面时退回第一个有实拍图的景点（attraction），其次任意有图条目；
   /// 全无图返回 null（走渐变兜底）。
   static String? _pickPosterImage(TravelPlanData plan) {
+    final String cover = plan.coverImage.trim();
+    if (cover.isNotEmpty) return cover;
     String? firstAny;
     for (final TravelPlanDay day in plan.days) {
       for (final TravelDayEntry e in day.entries) {

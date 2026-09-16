@@ -209,6 +209,7 @@ import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
+import { registerAgentActivityTools } from "../tools/agent-activity-tools.js";
 import { registerEmbodimentTools } from "../tools/embodiment-tools.js";
 import {
   EmbodimentAutonomyService,
@@ -235,6 +236,7 @@ import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
 import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
+import { SharedBrowserCoordinator } from "../services/shared-browser-coordinator.js";
 import {
   DesktopSceneWatcherService,
   isDesktopSceneWatcherEnabled,
@@ -717,6 +719,10 @@ export async function createAppServices(): Promise<AppServices> {
     browserSessionService,
     audit: auditService,
   });
+  // 共用浏览器桥：用户与 Agent 共用客户端内嵌浏览器（WebView2）。
+  // Agent 的 shared_browser.* 动作经此转发到用户正在看的浏览器执行；
+  // 所有 invoke/失败写审计（AuditService）。
+  const sharedBrowserCoordinator = new SharedBrowserCoordinator(auditService);
   // 初始化统一预订服务（方案 A：网约车/家政/餐厅共用编排——两阶段确认 +
   // 单笔/单日限额 + 订单落库 + 承诺板跟踪；Provider 按 BOOKING_MODE 组装）。
   // 承诺板在下方 agentic-memory 装配段构造后经 setCommitmentBoard 注入。
@@ -937,6 +943,7 @@ export async function createAppServices(): Promise<AppServices> {
     shoppingOrderService,
     shoppingCompareService,
     agentBrowserService,
+    sharedBrowserCoordinator,
     bookingService,
   };
   setCapabilityModuleDeps(capabilityModuleDeps);
@@ -2551,6 +2558,7 @@ export async function createAppServices(): Promise<AppServices> {
       desktopPresenceSignalService.handleTaskResult(actorId, payload);
     },
   });
+
   // vision 工具族需要 desktopBridgeCoordinator 才能走 desktop:bridge 截图路径，
   // 必须在 desktopBridgeCoordinator 实例化后注册。
   registerVisionTools(toolRegistry, visionPeriodicScheduler, deviceRegistry, desktopBridgeCoordinator);
@@ -4480,6 +4488,24 @@ export async function createAppServices(): Promise<AppServices> {
   const agentActivityStore = new AgentActivityStore(
     join(process.cwd(), "data", "proactivity", "activities.json"),
   );
+  // 足迹卡实时刷新：新条目落库即向该 actor 在线设备推 agent.activity_new
+  // （客户端收到后立即重拉台账，替代 1 分钟轮询的滞后；离线时推丢由轮询兜底）
+  agentActivityStore.onRecord = (activity) => {
+    wsConnectionRegistry.trySend(
+      activity.actorId,
+      JSON.stringify({
+        type: "agent.activity_new",
+        payload: {
+          activityId: activity.id,
+          kind: activity.kind,
+          title: activity.title,
+          status: activity.status,
+        },
+      }),
+    );
+  };
+  // 代办足迹执行类上报工具：Agent 办完代办（订牛奶/缴费/改日程…）后自主调用落账
+  registerAgentActivityTools(toolRegistry, agentActivityStore);
   // 站内信：平台/运营侧 → 用户收件箱（data/inbox/{actorId}.json 持久化 + 在线 WS 直推）
   const inboxService = new InboxService({
     rootDir: join(process.cwd(), "data", "inbox"),
@@ -5086,6 +5112,7 @@ export async function createAppServices(): Promise<AppServices> {
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
+    sharedBrowserCoordinator,
     messageHubService,
     locationCoordinator,
     locationIngest,

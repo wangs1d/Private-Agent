@@ -21,6 +21,12 @@
 export interface ToolCardItem {
   type: "check" | "warn" | "num";
   text: string;
+  /** 搜索结果卡等场景的跳转链接（前端 _SearchResultCard 整条可点击） */
+  url?: string;
+  source?: string;
+  /** A/B 对比类条目的分侧标注 */
+  side?: string;
+  sideLabel?: string;
 }
 
 export interface ToolCardPayload {
@@ -50,6 +56,17 @@ function shortTime(value: unknown): string {
 }
 
 const BUILDERS: Record<string, ToolCardBuilder> = {
+  /**
+   * search_web / info.search → search_result 卡（L1 确定性绑定）。
+   *
+   * 搜索是最高频的结构化工具，此前依赖 routeRender 的 search_result hint 从
+   * LLM 修正文里切卡（模型写成散文就漏）；现在直接从工具回执 items 构建，
+   * 模型口头回复只作前导。items 形态与 detectRawSearchResultJson 的抢救
+   * 目标一致（title/url/snippet/source），前端 _SearchResultCard 直接消费。
+   */
+  "search_web": (r) => buildSearchCardFromItems(r.items),
+  "info.search": (r) => buildSearchCardFromItems(r.items),
+
   "weather.get_local": (r) => {
     const weatherText = str(r.weatherText);
     const summary = str(r.summary);
@@ -176,6 +193,35 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   },
 };
 
+/** 搜索回执 items → search_result 卡 payload；空结果返回 null（回退文本路由） */
+function buildSearchCardFromItems(rawItems: unknown): ToolCardPayload | null {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const items: ToolCardItem[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawItems) {
+    if (items.length >= 8) break;
+    if (!raw || typeof raw !== "object") continue;
+    const rec = raw as Record<string, unknown>;
+    const title = str(rec.title);
+    const url = str(rec.url);
+    if (!title && !url) continue;
+    if (url && seen.has(url)) continue;
+    if (url) seen.add(url);
+    const snippet = str(rec.snippet);
+    const source = str(rec.source);
+    const desc = [snippet, source ? `来源:${source}` : ""].filter(Boolean).join("  ");
+    const text = desc ? `${title || url}: ${desc}` : title || url;
+    items.push({ type: "num", text, url: url || undefined, source: source || undefined });
+  }
+  if (items.length === 0) return null;
+  return {
+    title: "搜索结果",
+    items,
+    footer: `共 ${items.length} 条结果`,
+    cardType: "search_result",
+  };
+}
+
 /** 查注册 builder；未注册返回 null */
 export function lookupToolCardBuilder(toolName: string): ToolCardBuilder | null {
   return BUILDERS[toolName.trim()] ?? null;
@@ -195,14 +241,75 @@ export function buildToolCard(
   }
 }
 
-/** 已带结构化标记的正文不重复附卡（防双重包裹，与 travel/media 同语义） */
+/**
+ * 工具循环路径的天气结果确定性附卡（L1）。
+ *
+ * 与 attachSearchResultCardFromExecuted 同理：weather.get_local 已并入进程内
+ * 延迟目录检索（不强制路由），常规对话轮 LLM 在 tool-loop 内自主调用天气工具，
+ * 末轮只输出口语正文、reply.toolName 为空 → 单工具直跑路径的
+ * processAssistantText({toolName,toolResult}) 拿不到回执，天气卡恒附不上
+ * （真实回归：天气回答恒为纯文本）。这里从 onExternalToolExecuted 聚合的
+ * 真实结果建 weather 卡；多次调用（多地对比）合并为一张多地卡，每个城市一行。
+ * 正文已带结构化标记时不动（单工具直跑路径已附卡，防双重包裹）。
+ */
+export function attachWeatherResultCardFromExecuted(
+  text: string,
+  executed: ReadonlyArray<{ toolName: string; result: Record<string, unknown> }>,
+): string {
+  if (containsStructuredMarker(text)) return text;
+  const weatherResults = executed
+    .filter((mt) => mt.toolName === "weather.get_local")
+    .map((mt) => mt.result);
+  if (weatherResults.length === 0) return text;
+  const payload =
+    weatherResults.length === 1
+      ? buildToolCard("weather.get_local", weatherResults[0])
+      : buildMergedWeatherCard(weatherResults);
+  if (!payload || payload.items.length === 0) return text;
+  return buildCardMarker(payload, text);
+}
+
+/** 多次天气调用 → 一张多地 weather 卡：每个城市一行「地点 天气，气温」，建议取最后一条 */
+function buildMergedWeatherCard(
+  results: ReadonlyArray<Record<string, unknown>>,
+): ToolCardPayload | null {
+  const items: ToolCardItem[] = [];
+  let title = "";
+  let footer = "";
+  for (const r of results) {
+    const location = str(r.locationLabel);
+    const weatherText = str(r.weatherText) || str(r.summary);
+    const range = str(r.todayRangeC);
+    const rain = num(r.peakRainPct);
+    if (!weatherText && !range) continue;
+    const parts = [weatherText, range ? `气温 ${range}` : ""].filter(Boolean);
+    if (rain != null) parts.push(`降水 ${rain}%`);
+    items.push({
+      type: "num",
+      text: `${location ? location + " " : ""}${parts.join("，")}`,
+    });
+    if (!title) title = str(r.summary) || (location ? `${location} 天气实况` : "天气实况");
+    footer = str(r.clothingAdvice) || footer;
+  }
+  if (items.length === 0) return null;
+  return {
+    title: results.length > 1 ? "多地天气" : title,
+    items,
+    footer: footer || undefined,
+    cardType: "weather",
+  };
+}
+
+/**
+ * 已带「卡片/摘要类」标记的正文不重复附卡（防双重包裹）。
+ * 注意 [RENDER_AS:xxx]（structured/brief 等正文形态声明）**不在拦截集**：
+ * 富文本正文 + 尾部来源卡是并存的正确形态（结构化回答不排斥附上搜索来源），
+ * 此前整段拦截会让带意图词的搜索轮次永远丢卡（真实场景回归发现）。
+ */
 const STRUCTURED_MARKERS = [
   "[AGENT_RESULT_CARD_START]",
   "[CONTENT_SUMMARY_V2_START]",
-  "[RENDER_AS:",
-  "[DATA_BRIEF_START]",
-  "[VIDEO_MEDIA_START]",
-  "[CHAT_MEDIA_START]",
+  "[IMAGE_RESULT_START]",
 ];
 
 function containsStructuredMarker(text: string): boolean {
@@ -244,5 +351,39 @@ export function tryAttachToolResultCard(
   if (containsStructuredMarker(text)) return null;
   const payload = buildToolCard(toolName, toolResult);
   if (!payload || payload.items.length === 0) return null;
+  return buildCardMarker(payload, text);
+}
+
+/**
+ * 工具循环路径的搜索结果确定性附卡（L1）。
+ *
+ * tool-loop 内执行的 search_web/info.search 不经过 reply.toolName/toolResult
+ * （与媒体/行程同理），必须从 onExternalToolExecuted 聚合的真实结果附卡。
+ * 多次搜索的条目按 url 去重合并为一张 search_result 卡（上限 8 条），
+ * 避免逐次附卡刷屏。正文已带结构化标记时不动（优先级让位给 L2/其他 L1 路径）。
+ */
+export function attachSearchResultCardFromExecuted(
+  text: string,
+  executed: ReadonlyArray<{ toolName: string; result: Record<string, unknown> }>,
+): string {
+  if (containsStructuredMarker(text)) return text;
+  const searchResults = executed.filter((mt) =>
+    mt.toolName === "search_web" || mt.toolName === "info.search",
+  );
+  if (searchResults.length === 0) return text;
+  const merged: unknown[] = [];
+  const seen = new Set<string>();
+  for (const mt of searchResults) {
+    const items = Array.isArray(mt.result.items) ? mt.result.items : [];
+    for (const it of items) {
+      if (merged.length >= 12) break;
+      const url = it && typeof it === "object" ? str((it as Record<string, unknown>).url) : "";
+      if (url && seen.has(url)) continue;
+      if (url) seen.add(url);
+      merged.push(it);
+    }
+  }
+  const payload = buildSearchCardFromItems(merged);
+  if (!payload || payload.items.length === 0) return text;
   return buildCardMarker(payload, text);
 }

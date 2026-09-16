@@ -9,7 +9,7 @@ import {
 } from "./chat-thread-store.js";
 import type { ChatThreadStore } from "./chat-thread-store.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
-import { modelSupportsVision, ocrImageText } from "./vision-support.js";
+import { modelSupportsVision } from "./vision-support.js";
 import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
@@ -172,8 +172,12 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
    * 构造 extraBody（如 thinking 开关 / fastProfile）。
    * 默认返回 undefined（不附加任何字段）。子类按 provider 特性覆写。
    * 该返回值同时用于工具分支（传给 toolLoop）和非工具分支（按 applyExtraBodyToPlainRequest 决定是否 spread）。
+   * model 为本轮已解析的模型名（modelOverride 已生效），供按模型差异化构造（如 deepseek-flash 默认关思考）。
    */
-  protected buildExtraBody(_effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> | undefined {
+  protected buildExtraBody(
+    _effectiveStreamOpts: AgentStreamOptions,
+    _model?: string,
+  ): Record<string, unknown> | undefined {
     return undefined;
   }
 
@@ -276,24 +280,11 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
 
     // ★ 防串台关键步骤 1：user 消息时间戳注入 + clientMessageId 标记（固化，子类无法跳过）
     // 用户照片注入分流：纯文本模型（deepseek-chat 等）无法接收 image_url，注入会直接
-    // 报 400 导致整轮失败——照片"发不进对话"。此处先尽力把照片 OCR 成文本（失败静默），
-    // 再由 openAiUserContentFromTurn 按模型能力决定：视觉模型注入 image_url，非视觉降级文本。
-    let contentTurn = userTurn;
-    if (userTurn.visionFrames?.length && !modelSupportsVision(model)) {
-      const ocrParts: string[] = [];
-      const ocrResults = await Promise.allSettled(
-        userTurn.visionFrames.slice(0, 2).map((f) => ocrImageText(f.dataBase64, f.mimeType)),
-      );
-      for (const r of ocrResults) {
-        if (r.status === "fulfilled" && r.value) ocrParts.push(r.value);
-      }
-      if (ocrParts.length > 0) {
-        contentTurn = { ...userTurn, text: `${userTurn.text}\n\n${ocrParts.join("\n\n")}` };
-      }
-    }
+    // 报 400 导致整轮失败。openAiUserContentFromTurn 按模型能力决定：
+    // 视觉模型注入 image_url，非视觉模型降级为"存在照片"的文本说明（PaddleOCR 已移除）。
     const userMsg = {
       role: "user",
-      content: annotateUserContentForLlm(openAiUserContentFromTurn(contentTurn, { model })),
+      content: annotateUserContentForLlm(openAiUserContentFromTurn(userTurn, { model })),
     } as ChatCompletionMessageParam;
     tagUserMessageClientId(userMsg, userTurn.clientMessageId);
     msgs.push(userMsg);
@@ -305,7 +296,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     }
 
     const effectiveStreamOpts = this.resolveEffectiveStreamOpts(streamOpts);
-    const extraBody = this.buildExtraBody(effectiveStreamOpts);
+    const extraBody = this.buildExtraBody(effectiveStreamOpts, model);
 
     // ★ 时间戳根治视图（2026-09-03）：发往 LLM 的副本剥掉历史正文首行的 [ts:] 前缀，
     //   并在末尾前注入「对话时间轴」system 块。存储层（msgs）前缀原样保留（按天裁剪 /

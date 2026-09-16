@@ -388,10 +388,10 @@ export const HINT_CORPUS: HintCase[] = [
     expected: "data_brief",
   },
   {
-    name: "weather tool + weather shape → result_card",
+    name: "weather tool prose (no list/kpi) → plain（打分层退役，天气卡由 L1 工具绑定承接）",
     text: "今天晴，气温 25°C，微风。",
     toolName: "weather.get_local",
-    expected: "result_card",
+    expected: "plain",
   },
   {
     name: "short text + 3-12 list items → result_card",
@@ -410,9 +410,9 @@ export const HINT_CORPUS: HintCase[] = [
     expected: "result_card",
   },
   {
-    name: "lead + list short → brief",
+    name: "lead + 2-item list → plain（brief 退役只认 L2 声明；2 条目低于切卡门槛）",
     text: "今日待办：\n- 回复客户邮件\n- 提交报销单",
-    expected: "brief",
+    expected: "plain",
   },
   {
     name: "long structured (≥400) → summary_card (isLongDoc beats data_brief)",

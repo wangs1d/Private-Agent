@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from .bridge import SphereOverlayBridge
+from .qwebchannel_support import load_qwebchannel_js as _load_qwebchannel_js
 from .win32_utils import (
     apply_desk_pet_shell,
     get_work_area,
@@ -79,11 +80,14 @@ class SphereConfig:
     avatar_dist: str = "../agent-sphere-avatar/dist"
 
 
-# 注入前端 WebChannel 初始化脚本 + window.sphereOverlay 包装
+# 注入前端 WebChannel 初始化脚本 + window.sphereOverlay 包装。
+# 注意：QWebChannel 构造器由 build() 注入的 qwebchannel.js 脚本（QWebEngineScript，
+# DocumentCreation 时机）提供——注入是异步的，页面可能先于此就绪，故 retry 条件
+# 必须同时等待两者。
 WEBCHANNEL_INIT = r"""
 (function () {
     function setup() {
-        if (typeof qt === 'undefined' || !qt.webChannelTransport) {
+        if (typeof qt === 'undefined' || !qt.webChannelTransport || typeof QWebChannel === 'undefined') {
             setTimeout(setup, 30);
             return;
         }
@@ -151,7 +155,11 @@ class WsClient(QThread):
     command = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, cfg: SphereConfig, parent: Optional[QObject] = None) -> None:
+    def __init__(
+        self,
+        cfg: SphereConfig,
+        parent: Optional[QObject] = None,
+    ) -> None:
         super().__init__(parent)
         self.cfg = cfg
         self._send_queue: list[dict] = []
@@ -282,13 +290,22 @@ class SphereMainWindow(QMainWindow):
         self._channel.registerObject("sphereOverlay", self._bridge)
         page.setWebChannel(self._channel)
 
-        # 注入初始化脚本
-        script = WEBCHANNEL_INIT.replace("\n", " ")
-        page.runJavaScript(script)
+        # 桥初始化：loadFinished 后按序注入 qwebchannel.js + 初始化脚本
+        # （加载前 runJavaScript 可能落在 about:blank 上被导航丢弃）
+        self._view.loadFinished.connect(self._inject_bridge_init)
 
         # 加载页面
         url = self._build_overlay_url()
         self._view.load(QUrl(url))
+
+    def _inject_bridge_init(self, ok: bool) -> None:
+        if not ok:
+            return
+        page = self._view.page()
+        qwc = _load_qwebchannel_js()
+        if qwc:
+            page.runJavaScript(qwc)
+        page.runJavaScript(WEBCHANNEL_INIT.replace("\n", " "))
 
     def _build_overlay_url(self) -> str:
         base = self.cfg.dev_url
@@ -420,6 +437,8 @@ class ScheduleWindow(QMainWindow):
             self.resize(SCHEDULE_WIDTH_COLLAPSED, SCHEDULE_HEIGHT_COLLAPSED)
         else:
             self.resize(SCHEDULE_WIDTH, SCHEDULE_HEIGHT_EXPANDED)
+
+
 
 
 class SphereOverlayApp(QApplication):

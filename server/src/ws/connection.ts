@@ -45,6 +45,10 @@ import {
 } from "../task-plane/task-events.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
+import type {
+  SharedBrowserCoordinator,
+  SharedBrowserResult,
+} from "../services/shared-browser-coordinator.js";
 import type { MessageHubPlatform, MessageHubService } from "../services/message-hub-service.js";
 import type { LocationCoordinator } from "../services/location-coordinator.js";
 import type { LocationIngestPipeline } from "../services/location-ingest-pipeline.js";
@@ -184,6 +188,8 @@ export type WsRouteDeps = {
   unifiedIdempotencyService: UnifiedIdempotencyService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
+  /** 共用浏览器桥：用户与 Agent 共用客户端内嵌浏览器的动作转发通道 */
+  sharedBrowserCoordinator: SharedBrowserCoordinator;
   /** 消息聚合中心：手机桥接 phone.msg.report 批量落库用；null=未装配 */
   messageHubService?: MessageHubService | null;
   /** 按需位置协调器：Agent 需要位置时向客户端请求实时 GPS */
@@ -224,6 +230,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
+    sharedBrowserCoordinator,
     messageHubService,
     locationCoordinator,
     locationIngest,
@@ -361,6 +368,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         locationCoordinator.unbindSocket(socket);
         if (boundActorId) {
           phoneBridgeCoordinator.unbindIfSocket(boundActorId, socket);
+          sharedBrowserCoordinator.unbindIfSocket(boundActorId, socket);
         }
         phoneBridgeCoordinator.cancelPendingForSocket(socket);
         // 终端互连平台：清理该 socket 上绑定的设备
@@ -788,6 +796,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           if (boundActorId && boundActorId !== actorId) {
             wsConnectionRegistry.unregister(boundActorId, socket);
           }
+          if (boundActorId) {
+            sharedBrowserCoordinator.unbindIfSocket(boundActorId, socket);
+          }
           boundActorId = actorId;
           initAsDesktopBridge = isDesktopBridgeChannel;
           initAsPhoneBridge = isPhoneBridgeChannel;
@@ -819,6 +830,17 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             // 持续模式（方案 A）：下发定时上报配置，客户端按 intervalSec 回传
             // client.location_report(source:"continuous")；ondemand 不发，客户端无定时器
             locationCoordinator.sendTrackingConfig(socket);
+            // 共用浏览器桥：客户端声明 browserBridge 时把本连接绑为浏览器执行器
+            //（用户与 Agent 共用同一个 WebView2 浏览器；重连后随 session.init 重绑）
+            if (payload.browserBridge === true) {
+              sharedBrowserCoordinator.bindExecutor(actorId, socket);
+              socket.send(
+                JSON.stringify({
+                  type: ServerEventType.SharedBrowserSync,
+                  payload: { sharedBrowserOnline: true, updatedAt: new Date().toISOString() },
+                }),
+              );
+            }
           } else if (isDesktopBridgeChannel && !desktopBridgeCoordinator.requiresRegisterToken()) {
             desktopBridgeCoordinator.bindExecutor(actorId, socket);
             socket.send(
@@ -1042,6 +1064,44 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           phoneBridgeCoordinator.completeFromSocket(boundActorId, socket, jobId, pl as PhoneBridgeResult);
+          return;
+        }
+
+        if (event.type === ClientEventType.BrowserBridgeResult) {
+          const pl = event.payload as Record<string, unknown>;
+          const jobId = String(pl.jobId ?? "").trim();
+          if (!jobId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "BAD_BROWSER_BRIDGE_RESULT", message: "缺少 jobId" },
+              }),
+            );
+            return;
+          }
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          const ok = sharedBrowserCoordinator.completeFromSocket(
+            boundActorId,
+            socket,
+            jobId,
+            pl as SharedBrowserResult,
+          );
+          if (!ok) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "BROWSER_BRIDGE_JOB_UNKNOWN", message: "jobId 与当前连接不匹配或已结束" },
+              }),
+            );
+          }
           return;
         }
 

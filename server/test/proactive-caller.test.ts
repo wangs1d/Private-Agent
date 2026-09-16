@@ -48,6 +48,13 @@ function mockLlm(replies: string[]) {
   return Object.assign(fn, { calls: () => i });
 }
 
+/** 钉在本地上午 10:30，避开 23–7 静默时段：测试结果与运行时刻解耦（夜里跑也通过） */
+const DAYTIME_MS = (() => {
+  const d = new Date();
+  d.setHours(10, 30, 0, 0);
+  return d.getTime();
+})();
+
 function makeCaller(phone: VirtualPhoneService, turnLlm: unknown, opts: { env?: Record<string, string> } = {}) {
   for (const [k, v] of Object.entries(opts.env ?? {})) process.env[k] = v;
   const outcomes: Array<{ kind: string; outcome: CallOutcome; transcript: Array<{ role: string; content: string }> }> = [];
@@ -56,6 +63,7 @@ function makeCaller(phone: VirtualPhoneService, turnLlm: unknown, opts: { env?: 
     virtualPhone: phone,
     turnLlm: turnLlm as never,
     dataPath: mkdtempSync(join(tmpdir(), "caller-")),
+    nowFn: () => DAYTIME_MS,
     fallbackTextDelivery: (_actorId, _title, text) => fallbacks.push(text),
     onOutcome: (input) =>
       outcomes.push({ kind: input.kind, outcome: input.outcome, transcript: input.transcript }),

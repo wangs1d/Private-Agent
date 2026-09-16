@@ -330,7 +330,7 @@ const CAPABILITY_TOOL_PREFIXES: Record<string, string[]> = {
     "agent.",
     "surface.",
   ],
-  desktop: ["desktop", "agent_browser", "screen"],
+  desktop: ["desktop", "agent_browser", "shared_browser", "screen"],
 };
 
 /** 元工具/能力查询桥：任何裁剪集合都保留，保证延迟目录（tool_discover→tool_call）可达。 */

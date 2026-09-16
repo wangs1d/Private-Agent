@@ -5,9 +5,15 @@
 //   → onInbound 回调 → 本触发器识别 → ProactivePipeline.submitProposal()
 //   → 仲裁投递（对话流摘要弹窗）+ action.* 台账落库（「代办足迹」卡）。
 //
+// actorId 归一：渠道隔离的入站会话 id 形如 `actorId@wechat`（对话线程/记忆按
+// 渠道隔离），但主动提案的触达目标（WS 设备）与代办足迹台账都按**基础 actor**
+// 归属——客户端查询带的是裸 actorId，设备也绑定在裸 actorId 上。此处统一剥回
+// 基础 actor，否则提案投不出去、足迹客户端也查不到。
+//
 // 识别策略（v1 零 LLM，确定性规则）：日程变动动词 ×（日程语境词 | 时间表达）双条件
 // 命中才提案，黑名单先行排除通知/营销噪声；同会话 10 分钟冷却 + dedupKey 指纹防重。
 import { createHash } from "node:crypto";
+import { resolveBaseActorId } from "../../agent/master-chat-session.js";
 import type { MessageHubInboundInput } from "../../services/message-hub-service.js";
 import type { ProactiveProposal } from "../pipeline-types.js";
 
@@ -53,8 +59,10 @@ export class MessageWatchTrigger {
       const verb = detectScheduleChange(input.text);
       if (verb == null) return;
 
+      // 触达与足迹按基础 actor 归属（渠道 scoped 会话只隔离对话，不隔离主动性）
+      const actorId = resolveBaseActorId(input.actorId);
       const now = (this.deps.now ?? Date.now)();
-      const cooldownKey = `${input.actorId}:${input.channelId}`;
+      const cooldownKey = `${actorId}:${input.channelId}`;
       const last = this.lastProposalAt.get(cooldownKey);
       if (last != null && now - last < PER_CONVERSATION_COOLDOWN_MS) return;
       this.lastProposalAt.set(cooldownKey, now);
@@ -66,13 +74,13 @@ export class MessageWatchTrigger {
         excerpt = excerpt.slice(sender.length + 1).trim();
       }
       const fingerprint = createHash("sha1")
-        .update(`${input.actorId}|${input.channelId}|${excerpt}`)
+        .update(`${actorId}|${input.channelId}|${excerpt}`)
         .digest("hex")
         .slice(0, 16);
 
       this.deps.submitProposal({
         proposalId: `mw_${fingerprint}`,
-        actorId: input.actorId,
+        actorId,
         // action.* 前缀：投递成功后由投递层自动落入代办足迹台账
         kind: "action.schedule_change",
         tier: "must",

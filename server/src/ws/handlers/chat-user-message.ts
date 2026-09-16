@@ -14,6 +14,7 @@ import {
   type VisionWireInput,
 } from "../../vision/sanitize-vision-frames.js";
 import { formatStatusForDisplay, normalizeDashTypos, stripSentencesAlreadySaid } from "../../utils/text.js";
+import { createStreamMarkerGuard } from "../../utils/stream-marker-guard.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { subscribeTravelProgress } from "../../skills/travel-planning/travel-progress-bus.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
@@ -47,7 +48,12 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, attachTravelItineraryCard, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, stripMediaCardMarker, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, stripMediaCardMarker, type MediaCardItem } from "../../services/tool-result-processor.js";
+import {
+  lookupToolCardBuilder,
+} from "../../services/tool-card-registry.js";
+import { attachDeterministicCards, type ExecutedToolReceipt } from "../../services/deterministic-card-chain.js";
+import { buildVisionPhotoCards, attachImageResultPhotos } from "../../services/vision-photo-cards.js";
 import { captionMediaCards, isImageCaptionEnabled } from "../../services/image-caption-service.js";
 import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
@@ -532,12 +538,19 @@ async function processBatchedMessage(
   // - 整块恰好是一帧/一串帧（复述的帧独立成块时）→ 整块丢弃；
   // - 首块额外做全量整行清洗（兜底模型把帧复述在正文中间的行）。
   // 剥离容忍残缺帧（[ts 后断行/丢冒号），杜绝"严格正则匹配不上所以漏网"。
+  // 流式标记防泄漏 guard（L2 配套，见 stream-marker-guard.ts 文件头）
+  const streamMarkerGuard = createStreamMarkerGuard();
   const sendAssistantChunk = (chunk: string, phase: "interim" | "stream" = "stream"): void => {
     if (isStale()) return;
     chunkSeq += 1;
     let cleanedChunk = stripLeadingTimestampFrames(chunk);
     if (chunkSeq === 1) cleanedChunk = stripAllTimestampFrameLines(cleanedChunk);
     if (isOnlyTimestampFrames(cleanedChunk)) cleanedChunk = "";
+    // 展示形式标记防泄漏（L2 配套）：模型声明的 [RENDER_HINT]/卡片 JSON 块等
+    // 只允许随 assistant_done 的 finalText 一次性解析渲染，流式阶段一律扣下，
+    // 避免打字机气泡闪现原始标记/JSON。
+    cleanedChunk = streamMarkerGuard.feed(cleanedChunk);
+    if (!cleanedChunk) return;
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantChunk,
@@ -825,6 +838,27 @@ async function processBatchedMessage(
     toolName: string;
     result: Record<string, unknown>;
   }> = [];
+  // 搜索类工具（tool-loop 路径）的真实结果聚合：search_web/info.search 的
+  // search_result 卡由此确定性附卡（L1），不依赖 LLM 抄写列表（与媒体/行程同理）
+  const executedSearchToolResults: Array<{
+    toolName: string;
+    result: Record<string, unknown>;
+  }> = [];
+  // 天气工具（tool-loop 路径）的真实结果聚合：weather.get_local 不强制路由，
+  // LLM 末轮只输出正文不带工具声明 → 单工具直跑路径拿不到回执、天气卡恒为
+  // 纯文本。这里与搜索/媒体同理从回调捕获，done 阶段确定性附 weather 卡。
+  const executedWeatherToolResults: Array<{
+    toolName: string;
+    result: Record<string, unknown>;
+  }> = [];
+  // 其余注册工具（wallet/calendar/shopping…）的真实结果聚合：注册表 builder
+  // 同样只在单工具直跑路径（reply.toolName 有值）被消费，tool-loop 轮次全部
+  // 漏卡。按执行顺序捕获，done 阶段取第一张建成功的卡；搜索/天气有专属
+  // 合并附卡路径，捕获时排除防重复。
+  const executedRegistryToolResults: Array<ExecutedToolReceipt> = [];
+  // 视频抓取（video.grab）的真实结果聚合：媒体标记此前只接 reply.toolName
+  // 直跑路径，loop 轮次解析到可播放视频也不会带 [RENDER_AS:video] 标记。
+  const executedVideoToolResults: Array<ExecutedToolReceipt> = [];
   // 行程规划工具（tool-loop 路径）：LLM 末轮通常只输出正文不带工具声明，
   // reply.toolName/toolResult 均为空 → attachTravelItineraryCard 拿不到原始
   // 结果、行程卡永远附不上（右侧面板不自动展开）。这里从 onExternalToolExecuted
@@ -896,6 +930,45 @@ async function processBatchedMessage(
         );
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
+        // 捕获搜索类工具的真实结果，供 done 阶段确定性附 search_result 卡（L1）
+        if (
+          info.ok &&
+          info.result &&
+          (info.toolName === "search_web" || info.toolName === "info.search")
+        ) {
+          executedSearchToolResults.push({
+            toolName: info.toolName,
+            result: info.result as Record<string, unknown>,
+          });
+        }
+        // 捕获天气工具的真实结果，供 done 阶段确定性附 weather 卡（L1，与搜索同理）
+        if (info.ok && info.result && info.toolName === "weather.get_local") {
+          executedWeatherToolResults.push({
+            toolName: info.toolName,
+            result: info.result as Record<string, unknown>,
+          });
+        }
+        // 捕获其余注册工具（wallet/calendar/shopping…）的真实结果（L1，同上）
+        if (
+          info.ok &&
+          info.result &&
+          lookupToolCardBuilder(info.toolName) &&
+          info.toolName !== "search_web" &&
+          info.toolName !== "info.search" &&
+          info.toolName !== "weather.get_local"
+        ) {
+          executedRegistryToolResults.push({
+            toolName: info.toolName,
+            result: info.result as Record<string, unknown>,
+          });
+        }
+        // 捕获视频抓取的真实结果，供 done 阶段附加 [RENDER_AS:video] 媒体标记
+        if (info.ok && info.result && info.toolName === "video.grab") {
+          executedVideoToolResults.push({
+            toolName: info.toolName,
+            result: info.result as Record<string, unknown>,
+          });
+        }
         // 捕获媒体搜索工具的真实结果，供 done 阶段构建 mediaCards（见上方说明）
         if (info.ok && info.result && info.toolName === "travel.plan-itinerary") {
           executedTravelPlanResult = info.result as Record<string, unknown>;
@@ -1098,6 +1171,9 @@ async function processBatchedMessage(
     }
 
     // 主回复流结束：把分段器缓冲中剩余的半截文本作为最后一段推送
+    // （guard 中被误扣的非标记残段先放行；标记/卡片块内容 flush 时已丢弃）
+    const guardResidual = streamMarkerGuard.flush();
+    if (guardResidual) streamSegmenter.feed(guardResidual);
     await streamSegmenter.flushFinal();
 
     if (isStale()) return;
@@ -1209,10 +1285,24 @@ async function processBatchedMessage(
         travelCardResult = recentPlan as unknown as Record<string, unknown>;
       }
     }
-    finalText = attachTravelItineraryCard(finalText, travelCardToolName, travelCardResult);
-    // 视频抓取：附加可播放媒体标记（[RENDER_AS:video] + [VIDEO_MEDIA_START]），
-    // 前端据此真实内联播放代理后的视频流
-    finalText = attachVideoMediaMarker(finalText, reply.toolName, toolResult?.result);
+    // done 阶段确定性附卡链（L1）：行程 → 天气 → 搜索 → 其余注册工具 → 视频，
+    // 顺序与优先级见 deterministic-card-chain.ts；各 attach 自带结构化标记
+    // guard，先附上的卡生效、后续自动让位。视频回执 loop 捕获优先、直跑兜底。
+    const videoReceipts: Array<ExecutedToolReceipt> =
+      executedVideoToolResults.length > 0
+        ? executedVideoToolResults
+        : reply.toolName === "video.grab" && toolResult?.result
+          ? [{ toolName: reply.toolName, result: toolResult.result as Record<string, unknown> }]
+          : [];
+    finalText = attachDeterministicCards({
+      text: finalText,
+      travelToolName: travelCardToolName,
+      travelResult: travelCardResult,
+      weatherResults: executedWeatherToolResults,
+      searchResults: executedSearchToolResults,
+      registryResults: executedRegistryToolResults,
+      videoResults: videoReceipts,
+    });
     // 结构化媒体卡片（Coze 式架构）：与 LLM 文本解耦，作为独立字段下发。
     // 前端直接读取 chat.assistant_done 的 mediaCards 字段渲染缩略图，
     // 不再依赖从 LLM 文本解析 [AGENT_RESULT_CARD_START] 标记。
@@ -1276,6 +1366,28 @@ async function processBatchedMessage(
     // 提升最终回复文本中图片地址为可见缩略图（mediaCards 为空时的最后兜底）
     if (mediaCards.length === 0) {
       finalText = promoteImageUrlsToMedia(finalText);
+    }
+
+    // 识图照片卡（Coze 式「一图一句」，用户要求的 image_result 真实设计）：
+    // 用户本轮发来的照片（visionFrames，此前只进模型上下文从不落盘）逐张落盘，
+    // VLM 逐张看图生成「画面内容 + 可推断拍摄场景/地点」的一句话描述，
+    // 以 [IMAGE_RESULT_START] 结构化块确定性附着——照片与描述绑定下发，
+    // 客户端渲染为「照片卡片 + 下方描述」，不再展示「结论 + 要点」散文形态。
+    if (batched.visionFrames?.length) {
+      try {
+        const photoItems = await buildVisionPhotoCards({
+          actorId: msgActor,
+          frames: batched.visionFrames,
+          locationHint: batched.clientLocation?.label?.trim() || undefined,
+        });
+        finalText = attachImageResultPhotos(finalText, photoItems);
+      } catch (err) {
+        console.info(
+          `[chat] 识图照片卡构建失败（忽略，照片不入卡）: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
 
     // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，

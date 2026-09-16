@@ -193,6 +193,7 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   code_sandbox: ["code."],
   shopping_order: ["shopping.order."],
   agent_browser: ["agent_browser."],
+  shared_browser: ["shared_browser."],
 };
 
 /** 判断工具名是否被某个 pattern 命中 */

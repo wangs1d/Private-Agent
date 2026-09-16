@@ -63,7 +63,10 @@ class TravelPlanBrowserLauncher {
       if (id.isEmpty) return false;
 
       final Uri pageUri = base.replace(
-        path: "${base.path}/travel-map".replaceAll("//", "/"),
+        // 引导页而非直接开行程页：已有行程页打开时经 BroadcastChannel 认领并
+        // 热换载数据（地图不重新 Boot），引导页自动关闭——标签页复用零冷启动；
+        // 无已开页面时引导页 450ms 后自行跳转到正常行程页
+        path: "${base.path}/travel-map/switch".replaceAll("//", "/"),
         queryParameters: <String, String>{"id": id},
       );
       return launchUrl(pageUri, mode: LaunchMode.externalApplication);

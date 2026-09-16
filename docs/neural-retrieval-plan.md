@@ -9,7 +9,7 @@
 
 - **分层增强，逐级可关**：BM25 词面 → embedding 语义 → cross-encoder 精排，
   每级独立开关与预算；任何一级失败/超时自动落到下一级，检索永不阻塞。
-- **常驻 sidecar，HTTP JSON**：本地 FastAPI 服务（同 PaddleOCR 模式），
+- **常驻 sidecar，HTTP JSON**：本地 FastAPI 服务（同 FunASR 模式），
   不按需 spawn、不用 gRPC（内网单机延迟差 <1ms，可 curl 调试更重要）。
 - **状态归 Node**：模型无状态；缓存/学习状态在 TS 侧（磁盘 + 内存）。
 - **可评估**：每级用 golden 召回集（`test/tool-discover-golden-recall.test.ts`）

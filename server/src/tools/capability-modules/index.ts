@@ -29,6 +29,7 @@ import type { CodeSandboxService } from "../../services/code-sandbox-service.js"
 import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
 import type { ShoppingCompareService } from "../../services/shopping-compare-service.js";
 import type { AgentBrowserService } from "../../services/agent-browser-service.js";
+import type { SharedBrowserCoordinator } from "../../services/shared-browser-coordinator.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
 import type { ClientPushPort } from "../../ports/client-push-port.js";
 
@@ -91,6 +92,12 @@ import {
   AGENT_BROWSER_CATEGORY_MAPPING,
   registerAgentBrowserTools,
 } from "./agent-browser/index.js";
+import {
+  SHARED_BROWSER_CHAT_TOOLS,
+  SHARED_BROWSER_INTENT_RULES,
+  SHARED_BROWSER_CATEGORY_MAPPING,
+  registerSharedBrowserTools,
+} from "./shared-browser/index.js";
 import {
   RIDE_HAILING_CHAT_TOOLS,
   RIDE_HAILING_INTENT_RULES,
@@ -171,6 +178,8 @@ export interface CapabilityModuleDeps {
   /** 购物比价服务（跨平台同款比价 + 降价监控 + 调研比价，只读零副作用） */
   shoppingCompareService: ShoppingCompareService;
   agentBrowserService: AgentBrowserService;
+  /** 共用浏览器桥（用户与 Agent 共用客户端内嵌浏览器的动作转发通道） */
+  sharedBrowserCoordinator: SharedBrowserCoordinator;
   /** 统一预订编排服务（方案 A：网约车/家政/餐厅共用） */
   bookingService: BookingService;
   /** 图片能力套件(图库/美颜批图),存储根 data/pictures */
@@ -337,6 +346,14 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       intentRules: AGENT_BROWSER_INTENT_RULES,
       register: (registry) => registerAgentBrowserTools(registry, { agentBrowserService: deps.agentBrowserService }),
       category: AGENT_BROWSER_CATEGORY_MAPPING,
+    },
+    {
+      domain: "shared_browser",
+      label: "共用浏览器（用户与 Agent 共用客户端浏览器）",
+      chatTools: SHARED_BROWSER_CHAT_TOOLS,
+      intentRules: SHARED_BROWSER_INTENT_RULES,
+      register: (registry) => registerSharedBrowserTools(registry, { sharedBrowserCoordinator: deps.sharedBrowserCoordinator }),
+      category: SHARED_BROWSER_CATEGORY_MAPPING,
     },
     {
       domain: "ride_hailing",

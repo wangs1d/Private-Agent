@@ -42,7 +42,7 @@ function minimaxExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<strin
  * - M2.x（M2 / M2.1 / M2.5 / M2.7）：思考无法关闭（thinking 开关被 accept 但仍思考）；
  * - M3：多模态模型但 OpenAI 兼容端点暂不接受 image_url（500 system error 1033），
  *   思考默认 adaptive、同样无法经 reasoning_split 之外的手段关闭。
- * 综上统一按纯文本 provider 处理（照片走基类 OCR 降级），思考一律经
+ * 综上统一按纯文本 provider 处理（照片降级为文本说明，视觉理解依赖视觉模型），思考一律经
  * `reasoning_split` 分流到 `reasoning_content`，与流式基建的字段嗅探对齐。
  *
  * 继承 {@link AbstractChatProvider}：防串台（foldCompletedToolChains 根源折叠）、时间戳注入、

@@ -87,7 +87,7 @@ schedule 等）。gateway 是无状态隧道，不持有任何会话/记忆状�
 - `process.env.PORT` 重定向为内部端口：桌面桥自连、sidecar 等一切「自己端口」引用随之走内部；
 - 内部 HTTP/WS 监听 `127.0.0.1:3211`；链路 `127.0.0.1:3210`
   （`startRuntimeLinkServer`，token 鉴权 `RUNTIME_LINK_TOKEN`）；
-- 自主任务恢复、BrainCenter 错误上报接管、FunASR/PaddleOCR 侧车照旧。
+- 自主任务恢复、BrainCenter 错误上报接管、FunASR 侧车照旧（PaddleOCR 侧车已于 2026-09 移除，图片理解走视觉模型）。
 
 ### gateway-main.ts（可替换外壳）
 

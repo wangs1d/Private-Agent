@@ -156,16 +156,22 @@ function defaultFailoverChainLegacy(): string {
 /**
  * 旁路直答 LLM（滚动摘要 / 记忆决策 / 画像聚合等走裸 OpenAI SDK 的调用）的请求附加参数。
  *
- * MiniMax M 系默认强制思考，且思考计入 max_tokens 预算：旁路调用多为小 max_tokens
- * 的结构化输出，不关思考会导致 `<think>` 混入 content（裸 SDK 无 reasoning_split
- * 分流）或正文被思考饿死。M3 支持 `thinking: {"type": "disabled"}`（实测
- * reasoning_tokens=0）；M2.x 会 accept 但仍思考——旁路模型建议保持 M3 或接受脏输出。
- * 非 MiniMax provider 返回空对象，保持对 OpenAI/DeepSeek 零侵入。
+ * 两类默认开思考的模型需要显式关闭（裸 SDK 无 reasoning_split 分流，思考会拖慢/
+ * 顶掉小 max_tokens 的结构化输出）：
+ * - MiniMax M 系默认强制思考，且思考计入 max_tokens 预算：旁路调用多为小 max_tokens
+ *   的结构化输出，不关思考会导致 `<think>` 混入 content 或正文被思考饿死。M3 支持
+ *   `thinking: {"type": "disabled"}`（实测 reasoning_tokens=0）；M2.x 会 accept 但仍思考。
+ * - DeepSeek deepseek-flash（V4.1-Flash）2026-09 起为主模型且默认带思考链（实测
+ *   简单任务多 200+ reasoning_tokens）：deepseek-chat 无思考语义时代旁路调用从不需要
+ *   表态，迁移后必须显式关闭，否则记忆精排等 800ms 级超时热路径全部拖爆。
+ * 其余 provider 返回空对象，保持零侵入。
  */
 export function bypassChatRequestExtras(
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, unknown> {
-  return resolvePrimaryExternalModelBinding(env)?.providerId === "minimax"
+  const binding = resolvePrimaryExternalModelBinding(env);
+  const model = (binding?.model ?? env.OPENAI_MODEL ?? "").toLowerCase();
+  return binding?.providerId === "minimax" || model.includes("deepseek-flash")
     ? { thinking: { type: "disabled" } as const }
     : {};
 }

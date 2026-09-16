@@ -2240,9 +2240,11 @@ if (route.plane === "task") {
         : baseStreamOpts.maxThreadMessages,
       // 透传中断信号:用户发新消息时 abort,provider 底层 fetch 真正中断 HTTP 流式
       ...(opts?.signal ? { signal: opts.signal } : {}),
-      // 2026-08-02 模型路由：根据 Fast/Complex 模式选择对应模型
-      // Fast → deepseek-chat（Flash），Complex → deepseek-reasoner（Pro）
+      // 2026-08-02 模型路由：Fast/Complex 同用 deepseek-flash（deepseek-reasoner 已下线），
+      // 差异只在思考链——PRO 档显式 disableThinking:false 放开思考（provider 对 flash
+      // 未显式表态时默认下发 thinking:disabled，保快档秒回语义）。
       ...buildModelOverrideOpts(resolvedTier),
+      ...(resolvedTier === TaskTier.PRO ? { disableThinking: false } : {}),
     };
 
     let full = "";

@@ -220,8 +220,12 @@ Widget buildMessageBody(
   // 旧数据恢复：mediaCards 持久化之前的历史消息，照片是以「文本内嵌图片链接」存进
   // text 的（markdown 图 / /agent/images/ 代理路径 / http 图片扩展名）。重启后这些
   // 消息 mediaCards 为空，这里从正文把图片链接重新恢复成纯图廊，避免旧照片消失。
+  // 带显式 [RENDER_AS:] 声明的消息不参与旧数据恢复——形态声明是权威路由
+  // （否则识图照片卡 payload 里的 /agent/images URL 会被误判成旧消息内嵌图）。
+  final bool hasExplicitRenderForm =
+      _extractRenderAsMarker(message.text) != null;
   final List<String> recoveredImageUrls =
-      (mediaCards == null || mediaCards.isEmpty)
+      (mediaCards == null || mediaCards.isEmpty) && !hasExplicitRenderForm
           ? _extractLegacyImageUrls(message.text)
           : const <String>[];
   if ((mediaCards != null && mediaCards.isNotEmpty) ||

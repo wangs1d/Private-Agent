@@ -1,0 +1,131 @@
+/**
+ * 流式输出标记防泄漏 guard（渲染管线 L2 的配套件）。
+ *
+ * 背景：L2 激活后，LLM 会在回复正文里输出展示形式标记
+ * （[RENDER_HINT:xxx] / [AGENT_RESULT_CARD_START]{...}[END] / [RENDER_AS:xxx] /
+ *  [DATA_BRIEF_START] / [VIDEO_MEDIA_START] / [CONTENT_SUMMARY_V2_START] 等）。
+ * 这些标记在 assistant_done 的 finalText 里由前端确定性解析渲染，但流式阶段
+ * delta 是原样推给用户打字机气泡的——标记/卡片 JSON 会以脏文本闪现在屏幕上。
+ *
+ * 本 guard 挂在 chunk 出口（sendAssistantChunk）：
+ *   - 独占一行的标记：扣下不发（finalText 里权威存在，done 时统一渲染）；
+ *   - 卡片 JSON 块：从 CARD_START 行进入丢弃态，直到 CARD_END 行，整块丢弃；
+ *   - 行内嵌的完整标记 token：就地剥离，剩余文本照发；
+ *   - 误伤保护：疑似半截标记的残段只扣留到断行/流结束，普通文本原样放行。
+ *
+ * 用法：
+ *   const guard = createStreamMarkerGuard();
+ *   chunk 出口：safe = guard.feed(chunk)   // 可能为空串
+ *   流结束前：  rest = guard.flush()       // 放行误扣残段；标记一律丢弃
+ */
+
+/** 完整标记 token（无论是否独占一行）。注意：仅用于 replace，勿用于 test（/g 状态）。 */
+const MARKER_TOKEN_RE =
+  /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|CHAT_MEDIA_START|CHAT_MEDIA_END|IMAGE_RESULT_START|IMAGE_RESULT_END)\]/g;
+
+/** 独占一行的全大写方括号标记（防御未来新增的服务端标记类型） */
+const MARKER_LINE_RE = /^[ \t]*\[[A-Z_]+(?::[A-Za-z_]+)?\][ \t]*$/;
+
+const CARD_START_LINE = "[AGENT_RESULT_CARD_START]";
+const CARD_END_LINE = "[AGENT_RESULT_CARD_END]";
+
+/** 已知标记起始段：残段命中其前缀才继续扣留（普通方括号文本不受影响） */
+const MARKER_HEADS = [
+  "[RENDER_HINT:",
+  "[RENDER_AS:",
+  "[AGENT_RESULT_CARD_",
+  "[DATA_BRIEF_",
+  "[VIDEO_MEDIA_",
+  "[CONTENT_SUMMARY_V2_",
+  "[CHAT_MEDIA_",
+  "[IMAGE_RESULT_",
+  "[RENDER_", "[AGENT_", "[DATA_", "[VIDEO_", "[CONTENT_", "[CHAT_", "[IMAGE_",
+];
+
+/** 尾部残段是否"可能正在变成标记"：只有最后一个 [ 尚未闭合、且前缀命中已知标记时才扣留。
+ *  已闭合的完整标记 token（如 "[RENDER_HINT:brief] 后接正文"）交给 judgeLine 就地剥离，不扣留。 */
+function tailCouldBecomeMarker(text: string): boolean {
+  const idx = text.lastIndexOf("[");
+  if (idx === -1) return false;
+  const tail = text.slice(idx);
+  if (tail.includes("]")) return false;
+  return MARKER_HEADS.some((h) => h.startsWith(tail) || tail.startsWith(h));
+}
+
+export interface StreamMarkerGuard {
+  /** 喂入一段 delta，返回当前可以安全推给用户的部分（可能为空串） */
+  feed(chunk: string): string;
+  /** 流结束：放行被误扣的普通残段；标记/卡片块内容一律丢弃 */
+  flush(): string;
+}
+
+export function createStreamMarkerGuard(): StreamMarkerGuard {
+  let pending = ""; // 尚未裁决的尾部残段（未断行，或疑似半截标记）
+  let inCardBlock = false; // 已见 CARD_START，丢弃直到 CARD_END
+
+  /** 裁决一行完整文本；返回 null 表示整行丢弃，否则返回可发文本（无换行符） */
+  const judgeLine = (line: string): string | null => {
+    if (inCardBlock) {
+      if (line.trim() === CARD_END_LINE) inCardBlock = false;
+      return null;
+    }
+    if (line.trim() === CARD_START_LINE) {
+      inCardBlock = true;
+      return null;
+    }
+    const stripped = line.replace(MARKER_TOKEN_RE, "");
+    if (stripped !== line) {
+      // 行内嵌标记被剥离：剩余纯空白则整行丢弃，否则发剩余文本
+      return stripped.trim() ? stripped : null;
+    }
+    if (MARKER_LINE_RE.test(line)) return null;
+    return line;
+  };
+
+  const process = (text: string, isFinal: boolean): string => {
+    let out = "";
+    let rest = text;
+    for (;;) {
+      const nl = rest.indexOf("\n");
+      if (nl === -1) break;
+      const line = rest.slice(0, nl);
+      rest = rest.slice(nl + 1);
+      const judged = judgeLine(line);
+      if (judged !== null) out += judged + "\n";
+    }
+    if (rest === "") {
+      pending = "";
+      return out;
+    }
+    if (!isFinal && tailCouldBecomeMarker(rest)) {
+      // 残段可能是半截标记：整段扣留，等下一段 delta 补全后裁决
+      pending = rest;
+      return out;
+    }
+    const judged = judgeLine(rest);
+    pending = "";
+    if (judged !== null) out += judged;
+    return out;
+  };
+
+  return {
+    feed(chunk: string): string {
+      if (!chunk) return "";
+      return process(pending + chunk, false);
+    },
+    flush(): string {
+      if (inCardBlock) {
+        // 未闭合的卡片块：全部丢弃（残缺 JSON 不可透出）
+        pending = "";
+        inCardBlock = false;
+        return "";
+      }
+      if (!pending) return "";
+      const rest = pending;
+      pending = "";
+      if (tailCouldBecomeMarker(rest)) return ""; // 疑似半截标记，宁可不发
+      const judged = judgeLine(rest);
+      return judged ?? "";
+    },
+  };
+}

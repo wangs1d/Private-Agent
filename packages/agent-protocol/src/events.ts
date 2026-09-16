@@ -39,6 +39,11 @@ export const ClientEventType = {
   /** 手机桥接：执行完成后回传结果（与 phone.bridge.invoke 的 jobId 对应）。 */
   PhoneBridgeResult: "phone.bridge.result",
   /**
+   * 共用浏览器桥：客户端（聊天主通道 session.init 带 browserBridge:true 绑定）
+   * 执行完 shared.browser.invoke 下发的动作后回传结果（jobId 对应）。
+   */
+  BrowserBridgeResult: "browser.bridge.result",
+  /**
    * 手机桥接：消息捕捉批量上报（通知监听/短信等 → 服务端消息聚合中心）。
    * payload.messages 为消息数组，每条带 externalMessageId 供服务端去重；
    * 服务端落库后回 phone.msg.report_ack（按 batchId），手机端凭 ack 出队。
@@ -200,6 +205,10 @@ export const ServerEventType = {
   PhoneBridgeInvoke: "phone.bridge.invoke",
   /** 手机桥接状态同步 */
   PhoneBridgeSync: "phone.bridge.sync",
+  /** 发往客户端：让用户正在看的浏览器（WebView2）执行一个动作（导航/点击/输入/读页） */
+  SharedBrowserInvoke: "shared.browser.invoke",
+  /** 共用浏览器桥在线状态同步（随 session.init 绑定后下发） */
+  SharedBrowserSync: "shared.browser.sync",
   /** 发往手机端：消息捕捉批量上报已落库（payload.batchId + accepted/duplicate 计数），手机端凭此出队 */
   PhoneMsgReportAck: "phone.msg.report_ack",
   /** 球形 Agent 权威视觉状态（mood/energy/caption/委派 phase） */

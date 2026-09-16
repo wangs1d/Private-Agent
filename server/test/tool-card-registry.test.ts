@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   buildToolCard,
   tryAttachToolResultCard,
+  attachWeatherResultCardFromExecuted,
 } from "../src/services/tool-card-registry.js";
 
 test("weather: full fields → weather card payload", () => {
@@ -92,5 +93,74 @@ test("tryAttach: 正文已含结构化标记 → null（防双重包裹）", () 
   assert.equal(
     tryAttachToolResultCard(marked, "wallet.get_balance", { balance: 1 }),
     null,
+  );
+});
+
+test("attachWeatherFromExecuted: tool-loop 天气回执 → weather 卡", () => {
+  const out = attachWeatherResultCardFromExecuted(
+    "王哥，明天有毛毛雨，出门带把伞。",
+    [
+      {
+        toolName: "weather.get_local",
+        result: {
+          ok: true,
+          summary: "明天兴义有毛毛雨",
+          weatherText: "毛毛雨",
+          todayRangeC: "19–25",
+          humidityPct: 88,
+          peakRainPct: 92,
+          clothingAdvice: "出门带把伞，薄外套够了",
+          locationLabel: "贵州 · 兴义",
+        },
+      },
+    ],
+  );
+  assert.ok(out.startsWith("王哥，明天有毛毛雨，出门带把伞。"));
+  assert.ok(out.includes("[AGENT_RESULT_CARD_START]"));
+  assert.ok(out.includes('"cardType":"weather"'));
+  assert.ok(out.includes("峰值降水概率 92%"));
+});
+
+test("attachWeatherFromExecuted: 多地调用 → 合并为一张多地卡", () => {
+  const out = attachWeatherResultCardFromExecuted("两地都看过了。", [
+    {
+      toolName: "weather.get_local",
+      result: { weatherText: "晴", todayRangeC: "20–28", locationLabel: "上海" },
+    },
+    {
+      toolName: "weather.get_local",
+      result: {
+        weatherText: "小雨",
+        todayRangeC: "18–24",
+        peakRainPct: 70,
+        clothingAdvice: "带伞",
+        locationLabel: "杭州",
+      },
+    },
+  ]);
+  assert.ok(out.includes("[AGENT_RESULT_CARD_START]"));
+  assert.ok(out.includes('"cardType":"weather"'));
+  assert.ok(out.includes("上海 晴"));
+  assert.ok(out.includes("杭州 小雨"));
+  assert.ok(out.includes("带伞"));
+});
+
+test("attachWeatherFromExecuted: 无天气回执/正文已带标记 → 原文返回", () => {
+  assert.equal(
+    attachWeatherResultCardFromExecuted("普通回复。", [
+      { toolName: "search_web", result: { items: [] } },
+    ]),
+    "普通回复。",
+  );
+  const marked =
+    "已带卡。[AGENT_RESULT_CARD_START]\n{}\n[AGENT_RESULT_CARD_END]";
+  assert.equal(
+    attachWeatherResultCardFromExecuted(marked, [
+      {
+        toolName: "weather.get_local",
+        result: { weatherText: "晴" },
+      },
+    ]),
+    marked,
   );
 });

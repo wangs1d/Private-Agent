@@ -97,6 +97,7 @@ class RightSidePanel extends StatefulWidget {
     this.onPhone,
     this.onMessages,
     this.onGallery,
+    this.onBrowser,
     this.onReportLocation,
     this.messagesUnread = 0,
   });
@@ -109,6 +110,9 @@ class RightSidePanel extends StatefulWidget {
 
   /// 「图库」工具入口（照片浏览/上传/删除）。
   final VoidCallback? onGallery;
+
+  /// 「浏览器」工具入口（用户与 Agent 共用的内嵌浏览器）。
+  final VoidCallback? onBrowser;
 
   /// 站内信未读总数（供「消息」工具渲染角标；0 不显示）。
   final int messagesUnread;
@@ -1149,6 +1153,11 @@ class _RightSidePanelState extends State<RightSidePanel> {
           icon: Icons.photo_library_outlined,
           label: "图库",
           onTap: widget.onGallery),
+      _ToolSpec(
+          id: "browser",
+          icon: Icons.public_outlined,
+          label: "浏览器",
+          onTap: widget.onBrowser),
     ];
   }
 

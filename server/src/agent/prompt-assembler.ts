@@ -1,4 +1,5 @@
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
+import { RENDER_PROTOCOL_PROMPT } from "../services/render-protocol-prompt.js";
 
 /**
  * Prompt 单一组装出口（2026-08-28 注入路径统一重构）。
@@ -323,9 +324,13 @@ export function assembleSystemPrompt(
   const { stablePrefix, dynamicContext } = assembleLayeredSections(memory);
   const base = finalizedBaseSystem.trim();
   if (stablePrefix.length === 0 && dynamicContext.length === 0) {
-    return { fullSystemPrompt: base, stableSystemPrompt: base };
+    // 无记忆上下文（minimal/fast）也必须携带展示形式协议——它是输出格式约定，
+    // 与记忆无关（L2 生成时结构化的唯一启用通道）。
+    const withProtocol = [base, RENDER_PROTOCOL_PROMPT].join("\n\n").trim();
+    return { fullSystemPrompt: withProtocol, stableSystemPrompt: withProtocol };
   }
-  const stableSystemPrompt = [base, GLOBAL_MEMORY_RULE, ...stablePrefix]
+  // 协议块置于全局规则之后、记忆稳定层之前：内容与轮次无关，前缀缓存友好。
+  const stableSystemPrompt = [base, GLOBAL_MEMORY_RULE, RENDER_PROTOCOL_PROMPT, ...stablePrefix]
     .join("\n\n")
     .trim();
   const dynamicSystemPrompt = dynamicContext.join("\n\n").trim() || undefined;

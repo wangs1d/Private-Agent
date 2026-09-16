@@ -18,6 +18,7 @@ import type { SkillDefinition } from "../types.js";
 import type { PlanningService, PlannedDay, POISummary } from "./travel-planning-service.js";
 import { travelItineraryStore } from "./travel-itinerary-store.js";
 import { travelPlanStore, type StoredTravelPlan } from "./travel-plan-store.js";
+import { travelTileCache } from "../../services/travel-tile-cache.js";
 import {
   pricingService,
   formatQuotePriceInfo,
@@ -99,6 +100,10 @@ function refreshItinerarySnapshot(plan: StoredTravelPlan): void {
     startDate: plan.startDate,
     endDate: plan.endDate,
     center: plan.center,
+    // 海报区字段随编辑后冷层回读保留（封面/简介/叮嘱），海报不因编辑退回兜底
+    ...(plan.intro ? { intro: plan.intro } : {}),
+    ...(plan.packing ? { packing: plan.packing } : {}),
+    ...(plan.coverImage ? { coverImage: plan.coverImage } : {}),
     days: plan.days.map((day) => ({
       date: day.date,
       items: day.items.map((item) => ({ ...item })),
@@ -255,6 +260,19 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           preferences: mergedPrefs.length > 0 ? mergedPrefs : undefined,
         });
         const quality = typeof result.dataQuality === "string" ? result.dataQuality : "real";
+        // 规划完成即预热底图瓦片（fire-and-forget）：用户点开行程地图时瓦片已在
+        // 本机缓存，弱网/离线也秒开。失败静默，不阻塞规划主流程。
+        try {
+          const warmPois = result.days
+            .flatMap((d) => d.items)
+            .filter((it) => Number.isFinite(it.latitude) && Number.isFinite(it.longitude))
+            .slice(0, 40)
+            .map((it) => ({ latitude: it.latitude, longitude: it.longitude }));
+          void travelTileCache
+            .warmDestination(result.center, warmPois)
+            .then((r) => console.log(`[Travel] 目的地瓦片预热完成: 新拉取${r.fetched} 已缓存${r.hitCache} 失败${r.failed}`))
+            .catch(() => { /* 预热失败不影响规划 */ });
+        } catch { /* 预热构建失败静默 */ }
         // 写入结构化行程数据桥：travel_itinerary 卡前端可直接消费，无需文本正则
         travelItineraryStore.set({
           toolName: "travel.plan-itinerary",
@@ -270,6 +288,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           // 行程卡海报区文案：目的地一句话简介 + 出行随身物品叮嘱
           intro: result.travelInfo?.intro,
           packing: result.travelInfo?.packing,
+          // 行程卡海报区背景：目的地代表性封面（维基百科主图优先，见规划服务）
+          coverImage: result.coverImage,
           days: mapDaysToStored(result.days),
           // 候选 POI 池：全量酒店/餐厅/景点摘要（含未排入日程的备选），前端地图一并展示
           pois: mapPoisToStored(result.pois),
@@ -292,6 +312,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           // 卡片海报区文案与候选 POI 池：冷层补齐后，planId 直读建卡（A4）不缺数据
           intro: result.travelInfo?.intro,
           packing: result.travelInfo?.packing,
+          coverImage: result.coverImage,
           pois: mapPoisToStored(result.pois),
           totalCost: (result as { pricingSummary?: { totalFinal?: number } }).pricingSummary
             ?.totalFinal,

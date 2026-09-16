@@ -216,6 +216,7 @@ class TravelPlanData {
     this.centerLongitude,
     this.intro = "",
     this.packing = const <String>[],
+    this.coverImage = "",
     this.preferences = const <String>[],
     this.footer = "",
     this.rawItems = const <String>[],
@@ -241,6 +242,12 @@ class TravelPlanData {
 
   /// 出行随身物品叮嘱（行程卡「记得带」胶囊；文本兜底时为空，前端隐藏该行）。
   final List<String> packing;
+
+  /// 目的地代表性封面（服务端维基百科条目主图优先，已 resolve 为绝对地址）。
+  /// 海报背景优先于任何条目实拍图——它是目的地本身的形象照，而非某个 POI 的
+  /// 照片；空串表示服务端未解析到，海报退回条目实拍/渐变兜底。
+  final String coverImage;
+
   final List<String> preferences;
   final List<TravelPlanDay> days;
   final String footer;
@@ -312,6 +319,7 @@ class TravelPlanData {
       centerLatitude: (tp["center"]?["latitude"] as num?)?.toDouble(),
       centerLongitude: (tp["center"]?["longitude"] as num?)?.toDouble(),
       intro: tp["intro"]?.toString() ?? "",
+      coverImage: resolveTravelMediaUrl(tp["coverImage"]?.toString() ?? ""),
       isStructured: true,
       dataQuality: tp["dataQuality"]?.toString() ?? "real",
       version: (tp["version"] as num?)?.toInt(),

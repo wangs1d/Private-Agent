@@ -38,6 +38,7 @@ import {
   PROACTIVITY_FEEDBACK_CHAT_TOOLS,
 } from "../tools/proactivity-feedback-tools.js";
 import { CARE_REMINDER_CHAT_TOOLS } from "../tools/care-reminder-tools.js";
+import { AGENT_ACTIVITY_CHAT_TOOLS } from "../tools/agent-activity-tools.js";
 import { COMMITMENT_CHAT_TOOLS } from "../tools/commitment-tools.js";
 import { GEOFENCE_CHAT_TOOLS } from "../tools/geofence-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
@@ -53,7 +54,7 @@ import {
   getObservationPack,
   type ArchivedObservation,
 } from "./observation-pack.js";
-import { modelSupportsVision, ocrScreenshot } from "./vision-support.js";
+import { modelSupportsVision } from "./vision-support.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import {
@@ -154,6 +155,13 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   "agent_browser.extract_text": 5000,
   "agent_browser.wait_for": 300,
   "agent_browser.close": 200,
+  // shared_browser.* —— 经 WS 桥转发到客户端浏览器执行，read_page 为主要信息获取工具
+  "shared_browser.navigate": 600,
+  "shared_browser.control": 300,
+  "shared_browser.click": 300,
+  "shared_browser.type": 300,
+  "shared_browser.scroll": 300,
+  "shared_browser.read_page": 5000,
 };
 
 // strip_keys：只去掉纯元数据字段，保留 LLM 决策需要的字段。
@@ -304,6 +312,9 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   if (registryToolName === "agent_browser.open") return 60_000;
   if (registryToolName === "agent_browser.wait_for") return 65_000;
   if (registryToolName.startsWith("agent_browser.")) return 30_000;
+  // shared_browser.* 经 WS 桥转发到客户端浏览器执行（含往返 + 页面加载），超时须覆盖协调器 30s
+  if (registryToolName === "shared_browser.navigate") return 45_000;
+  if (registryToolName.startsWith("shared_browser.")) return 35_000;
   // 按工具类别分级超时：快工具给短超时，防止上游慢响应把整个 turn 卡到 30s
   const classTimeouts: Record<string, number> = {
     "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
@@ -791,6 +802,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...AGENT_TASKS_CHAT_TOOLS,
     ...RHYTHM_REMINDER_CHAT_TOOLS,
     ...PROACTIVITY_FEEDBACK_CHAT_TOOLS,
+    ...AGENT_ACTIVITY_CHAT_TOOLS,
     ...PROACTIVITY_CONFIRM_CHAT_TOOLS,
     ...CARE_REMINDER_CHAT_TOOLS,
     ...COMMITMENT_CHAT_TOOLS,
@@ -963,6 +975,13 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     category: 'life',
     keywords: ['待办', '还有什么任务', '任务列表', '任务进度', '跑完了吗', '进行到哪', '任务状态'],
     toolNames: ['agent.tasks.list']
+  },
+  {
+    // 代办足迹执行类上报：用户让 Agent 办事（订/买/缴/改/约/代发）的轮次里
+    // 暴露 activity.report，办完后模型自主调用落一条执行类条目（右侧「代办足迹」卡）
+    category: 'life',
+    keywords: ['帮我订', '帮我买', '帮我缴', '帮我约', '帮我改', '代购', '代订', '代办', '订牛奶', '缴水电', '交水电', '帮我发消息', '订花', '订餐', '挂号', '足迹'],
+    toolNames: ['activity.report']
   },
   {
     category: 'capability',
@@ -2311,7 +2330,7 @@ export async function streamCompletionWithTools(
           resultForWire = exec.result;
         }
         // 自动检测工具结果中的图片(imageBase64)。
-        // 视觉模型 → 转成多模态 image_url 注入;非视觉模型 → 调用 PaddleOCR 识别文本+坐标。
+        // 视觉模型 → 转成多模态 image_url 注入;非视觉模型 → 注明图片未解析（PaddleOCR 已移除）。
         if (
           exec.ok &&
           resultForWire &&
@@ -2330,11 +2349,9 @@ export async function streamCompletionWithTools(
             };
             injectFrames = injectFrames ? [...injectFrames, frame] : [frame];
           } else {
-            // 非视觉模型:调用 PaddleOCR 识别文本+坐标,作为视觉替代
-            const ocrText = await ocrScreenshot(b64, mime);
-            if (ocrText) {
-              (rw as Record<string, unknown>).ocrText = ocrText;
-            }
+            // 非视觉模型:明确告知图片未解析,避免模型误以为自己看过图
+            (rw as Record<string, unknown>).imageNote =
+              "（图片未解析：当前模型不支持视觉输入，无法读取图片内容）";
           }
           // 移除 base64 数据,避免压缩后以文本形式重复注入
           resultForWire = { ...rw };
@@ -2413,12 +2430,12 @@ export async function streamCompletionWithTools(
         });
       }
       const toolContent = compacted.content;
-      // 非视觉模型截图后追加 OCR 识别结果(文本+坐标),让 LLM 能"看到"屏幕内容
-      const ocrText = settled.status === "fulfilled"
-        ? (settled.value.resultForWire as Record<string, unknown>)?.ocrText
+      // 非视觉模型收到含图工具结果时,附"图片未解析"说明,让 LLM 明确自己看不到画面
+      const imageNote = settled.status === "fulfilled"
+        ? (settled.value.resultForWire as Record<string, unknown>)?.imageNote
         : undefined;
-      const fullToolContent = typeof ocrText === "string" && ocrText.trim()
-        ? `${toolContent}\n\n${ocrText}`
+      const fullToolContent = typeof imageNote === "string" && imageNote.trim()
+        ? `${toolContent}\n\n${imageNote}`
         : toolContent;
       // 对成功的工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
       // 只追加在本波最后一条成功消息上（内容与具体工具无关，逐条重复纯烧 token）。

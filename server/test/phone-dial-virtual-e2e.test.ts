@@ -184,6 +184,13 @@ const stubs = {
   agentMemorySyncService: {},
   unifiedIdempotencyService: {},
   desktopBridgeCoordinator: { unbindIfSocket: () => false, cancelPendingForSocket: () => {} },
+  // 共用浏览器桥（connection.ts 关闭/重绑路径必调）：虚拟拨号轮不触发 browserBridge，
+  // mock 仅需保证清理路径不抛错
+  sharedBrowserCoordinator: {
+    unbindIfSocket: () => false,
+    bindExecutor: () => {},
+    completeFromSocket: () => false,
+  },
   locationIngest: null,
   virtualPhoneService: {},
   virtualPhoneIncomingCoordinator: {},

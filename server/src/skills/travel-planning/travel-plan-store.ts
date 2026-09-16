@@ -64,6 +64,8 @@ export interface StoredTravelPlan {
   intro?: string;
   /** 出行随身物品叮嘱（行程卡「记得带」胶囊） */
   packing?: string[];
+  /** 目的地代表性封面（行程卡海报区背景；冷层回读建卡时随 travelPlan 下发） */
+  coverImage?: string;
   /** 候选 POI 池（含未排入日程的备选，前端地图常驻展示） */
   pois?: Array<{
     id?: string;

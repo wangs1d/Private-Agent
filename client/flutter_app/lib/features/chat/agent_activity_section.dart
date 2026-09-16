@@ -10,12 +10,29 @@ const Color _kAccentBlue = Color(0xFF18D6F3);
 const Color _kAccentGreen = Color(0xFF1ED7A6);
 const Color _kAccentOrange = Color(0xFFD7B85A);
 
-/// 代办足迹卡：右侧面板顶部区块，展示 Agent 主动代办/盯梢告知的结果台账
-/// （订牛奶 / 缴水电费 / 改日程…）。
+/// 代办足迹实时刷新总线：服务端每落一条新足迹，经 WS `agent.activity_new`
+/// 推送到客户端（main.dart 分发），这里 bump 版本号，所有挂载中的足迹卡
+/// 立即重拉台账——替代只靠 1 分钟轮询的滞后。
+class AgentActivityBus {
+  AgentActivityBus._();
+
+  static final ValueNotifier<int> version = ValueNotifier<int>(0);
+
+  static void notify() => version.value++;
+}
+
+/// 代办足迹卡：右侧面板顶部区块，展示 Agent 的可回溯代办账本。
+///
+/// 定位（与后端 server/src/proactivity/activity-store.ts 对齐）：「可回溯的
+/// 代办账本」而非通知流——通知实时性由聊天流承担，本卡回答两类问题：
+///   1. 执行类条目：「助手替我办的事办得怎么样了」（订牛奶/缴费/改日程…，
+///      statusLabel 如 配送中/已完成）；
+///   2. 告知类条目：「助手替我盯到了什么」（如日程变动，statusLabel=已告知）。
 ///
 /// 与对话流的分工：主动消息摘要仍实时推入聊天（必看），本卡只做「可回溯
-/// 的代办账本」——未读条目用品牌色竖条 + 染色底 + 状态 pill 醒目提示，
-/// 展示 2 秒后自动置已读降噪为灰阶。
+/// 的代办账本」——未读条目用品牌色竖条 + 染色底 + 状态 pill 醒目提示。
+/// 刷新：挂载时拉取 + 每分钟轮询兜底 + 收到服务端 `agent.activity_new`
+/// 推送（AgentActivityBus）时立即重拉，消除轮询滞后。
 class AgentActivitySection extends StatefulWidget {
   const AgentActivitySection({super.key});
 
@@ -45,13 +62,20 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
     )..repeat(reverse: true);
     _load();
     _refreshTimer = Timer.periodic(_refreshInterval, (_) => _load());
+    AgentActivityBus.version.addListener(_onExternalRefresh);
   }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
     _breatheController.dispose();
+    AgentActivityBus.version.removeListener(_onExternalRefresh);
     super.dispose();
+  }
+
+  /// 服务端推送的新足迹 → 立即重拉（去抖交给服务端逐条推送的节奏）
+  void _onExternalRefresh() {
+    if (mounted) _load();
   }
 
   Future<void> _load() async {
@@ -558,6 +582,11 @@ class AgentActivityApi {
   /// 最近一次 fetch 是否成功（区分「真的没有足迹」与「网络不可用」）
   static bool lastFetchOk = true;
 
+  /// 测试注入口：注入 MockClient 后 fetch/markRead 走桩，不触网
+  static http.Client? clientOverride;
+
+  static http.Client get _client => clientOverride ?? http.Client();
+
   static Future<List<AgentActivity>> fetch({int limit = 20}) async {
     lastFetchOk = false;
     try {
@@ -566,7 +595,7 @@ class AgentActivityApi {
         "actorId": ApiConfig.effectiveActorId,
         "limit": "$limit",
       });
-      final http.Response res = await http
+      final http.Response res = await _client
           .get(uri, headers: const <String, String>{"Accept": "application/json"})
           .timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) return const <AgentActivity>[];
@@ -587,7 +616,7 @@ class AgentActivityApi {
   static Future<bool> markRead({List<String>? ids}) async {
     try {
       final Uri uri = Uri.parse("${ApiConfig.httpBase}/agent/activities/read");
-      final http.Response res = await http
+      final http.Response res = await _client
           .post(
             uri,
             headers: const <String, String>{"Content-Type": "application/json"},

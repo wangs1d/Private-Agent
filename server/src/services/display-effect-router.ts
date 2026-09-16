@@ -236,8 +236,11 @@ const STEP_MARK_RE =
 /** 步骤语义标题：标题含教程/流程等词时降低步骤标记的命中门槛。 */
 const STEP_TITLE_RE = /(教程|步骤|流程|怎么弄|怎么操作|怎么设置|怎么用|操作指南|攻略|安装|配置|入门)/i;
 
-/** 数值信号：百分比（45%）或分数（90/100）。 */
-const VALUE_RE = /(?:\d+(?:\.\d+)?)\s*%|(?:\d+(?:\.\d+)?)\s*\/\s*(?:\d+(?:\.\d+)?)/;
+/** 数值信号：百分比（45%）或分数（90/100）。
+ *  分数形态要求前后紧邻字符不是数字或斜杠——排除日期（2026/09/13 里的 09/13）
+ *  被误判为分数导致时间戳/日期文本误上 progress 卡（真实回放案例）。 */
+const VALUE_RE =
+  /(?:\d+(?:\.\d+)?)\s*%|(?<![\d/.])\d{1,3}\s*\/\s*\d{1,3}(?![\d/])/;
 
 /** metric 条目：短标签 + 冒号 + 数值（可带 ≤6 字符单位），无百分比。 */
 const METRIC_ITEM_RE = /^[^：:，,。！？\n]{1,14}[：:]\s*[+-]?\d[\d,.，]*\s*\S{0,6}$/;
@@ -322,7 +325,7 @@ const CANDIDATE_ORDER: ReadonlyArray<DisplayEffectType> = [
 function scoreSteps(input: DisplayRouteInput): number {
   const items = input.items;
   const n = items.length;
-  if (n < 3) return 0;
+  if (n < 2) return 0;
   const stepHits = items.filter((it) => STEP_MARK_RE.test(it.text.trim())).length;
   const r = ratio(stepHits, n);
   let score = 0;
@@ -330,6 +333,12 @@ function scoreSteps(input: DisplayRouteInput): number {
   else if (STEP_TITLE_RE.test(input.title) && r >= 0.4) score = Math.min(r + 0.1, 0.8);
   // 条目前缀被剥离的纯顺序编号列表（numberedItemRatio ≥0.8）也是步骤语义
   if ((input.numberedItemRatio ?? 0) >= 0.8) score = Math.max(score, 1);
+  // 2 条目门槛收紧：显式步骤标记全命中，或原文编号行占比 ≥0.8（前缀已被
+  // extractSemanticItems 剥掉时的编号证据），两形态证据都是硬的，给 0.8 档；
+  // 防「先A，再B」式口语碎句上卡。
+  if (n === 2) {
+    return r === 1 || (input.numberedItemRatio ?? 0) >= 0.8 ? Math.max(score, 0.8) : 0;
+  }
   return score;
 }
 

@@ -44,8 +44,21 @@ AgentResultData _structuredPlanData() {
   );
 }
 
-AgentResultData _textFallbackData() {
+/// 在结构化行程上注入目的地代表性封面（服务端维基百科条目主图优先下发）。
+AgentResultData _coverPlanData() {
+  final Map<String, dynamic> tp = Map<String, dynamic>.from(
+    _structuredPlanData().travelPlan!,
+  )..["coverImage"] = "/agent/images/destination-cover.jpg";
   return AgentResultData(
+    cardType: "travel_itinerary",
+    title: "马尔代夫5日游·海岛/休闲",
+    items: _structuredPlanData().items,
+    footer: "共 5 天 · 1 项安排",
+    travelPlan: tp,
+  );
+}
+
+AgentResultData _textFallbackData() {  return AgentResultData(
     cardType: "travel_itinerary",
     title: "马尔代夫5日游·海岛/休闲",
     items: <AgentResultItem>[
@@ -104,6 +117,24 @@ void main() {
     // 用户反馈核心：卡面不再罗列 Day 摘要（明细只在规划界面）
     expect(find.textContaining("Day 1"), findsNothing);
     expect(find.textContaining("Day 2"), findsNothing);
+  });
+
+  testWidgets("海报背景优先目的地代表性封面（目的地形象照），而非首个有图景点", (WidgetTester tester) async {
+    await pumpCard(tester, _coverPlanData());
+
+    // 海报 Image 是卡内第一个 Image；其 URL 必须是封面，绝不是任何条目实拍
+    final Iterable<Image> images = tester.widgetList<Image>(find.byType(Image));
+    expect(images, isNotEmpty);
+    final NetworkImage poster = images.first.image as NetworkImage;
+    expect(poster.url, contains("destination-cover.jpg"));
+    expect(poster.url, isNot(contains("/poster.jpg")));
+  });
+
+  testWidgets("无封面时退回首个有图景点实拍（兼容旧数据）", (WidgetTester tester) async {
+    await pumpCard(tester, _structuredPlanData());
+
+    final Image poster = tester.widget<Image>(find.byType(Image).first);
+    expect((poster.image as NetworkImage).url, contains("/poster.jpg"));
   });
 
   testWidgets("无结构化 travelPlan 的历史消息优雅降级：简介/叮嘱隐藏，按钮与海报骨架仍在", (WidgetTester tester) async {

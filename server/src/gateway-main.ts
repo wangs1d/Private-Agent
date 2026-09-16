@@ -193,6 +193,13 @@ const shutdown = (): void => {
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
 
+// 与 runtime-main 同策略：未处理 rejection 只记录不退出——gateway 是对外入口，
+// 单次旁路异常不应击穿整个边缘进程（uncaughtException 仍按 Node 默认崩溃）。
+process.on("unhandledRejection", (reason: unknown) => {
+  const msg = reason instanceof Error ? reason.message : String(reason ?? "unknown");
+  console.error("[gateway][WARN] unhandledRejection:", msg);
+});
+
 await app.listen({ port: topology.gatewayPort, host: "0.0.0.0" });
 console.log(
   `[gateway] ws/http -> http://127.0.0.1:${topology.gatewayPort} (tunnel → ${runtimeHttpOrigin}) | health: /__gateway/health`,

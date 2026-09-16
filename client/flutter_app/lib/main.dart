@@ -37,16 +37,19 @@ import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/window_bounds_preference.dart";
+import "core/services/shared_browser_host.dart";
 import "core/services/ws_chat_service.dart";
 import "core/services/inbox_api.dart";
 import "core/services/schedule_floating_launcher.dart";
 import "core/utils/play_url_utils.dart";
 import "features/catalog/catalog_page.dart";
 import "features/help/feedback_page.dart";
+import "features/browser/browser_page.dart";
 import "features/gallery/gallery_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
 import "features/chat/agent_profile_page.dart";
+import "features/chat/agent_activity_section.dart" show AgentActivityBus;
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/travel_plan_launcher.dart";
@@ -243,6 +246,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 用户从相册/文件选取、待发的图（可多张，优先于摄像头帧）)
   final List<VisionWireFrame> _pendingGalleryFrames = <VisionWireFrame>[];
+
+  /// 本会话已发送用户消息的配图字节（按 messageId），供气泡渲染缩略图，
+  /// 让用户确认「图发出去了、发的是这几张」。仅内存态不持久化，
+  /// 超出上限丢最旧；历史加载的消息在气泡上回退为「配图 ×N」文案。
+  final Map<String, List<Uint8List>> _sentGalleryImageBytes =
+      <String, List<Uint8List>>{};
+
+  /// 发送失败（WS 未就绪 sendEvent 被拒）的用户消息 id，气泡头部显示「未发出」。
+  final Set<String> _failedUserMessageIds = <String>{};
 
   final List<ChatMessage> _messages = <ChatMessage>[];
   final Map<String, int> _assistantMessageIndexById = <String, int>{};
@@ -453,6 +465,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 共用浏览器桥：浏览器宿主经本 ws 回传 browser.bridge.result（jobId 配对）
+    SharedBrowserHost.instance.bindSend(_ws.sendEvent);
     // 桌面端独立来电悬浮窗事件绑定
     // 所有来电（无论来源）统一走同一套回调
     // accept  : 用户点了接听 → 拉起主窗 + 等待 call_connecting
@@ -807,6 +821,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               <String, dynamic>{};
       try {
         _syncAgentSphereFromWs(type, payload);
+        // 共用浏览器桥：Agent 的 shared_browser.* 动作转发到内嵌浏览器执行，
+        // 结果经 browser.bridge.result 回传（jobId 配对；未命中类型内部直接返回）
+        unawaited(SharedBrowserHost.instance.handleServerEvent(type, payload));
         // 服务端按需请求实时位置：Agent 需要位置时（如天气工具）才拉一次 GPS。
         if (type == "agent.location_request") {
           final String jobId = payload["jobId"]?.toString() ?? "";
@@ -882,6 +899,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 ),
               ),
             );
+          }
+        }
+        if (type == "ws_connected") {
+          // 重连成功：WS 服务层刚把断线期间积压的出站事件（含标记过
+          // 「未发出」的消息）补发出去，红标随之撤销，不再误导用户。
+          if (_failedUserMessageIds.isNotEmpty) {
+            setState(_failedUserMessageIds.clear);
           }
         }
         if (type == "error.event") {
@@ -1608,6 +1632,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               }
             });
           }
+        }
+        // ====== 代办足迹实时刷新：服务端落一条新足迹即推送，右侧面板立即重拉 ======
+        if (type == "agent.activity_new") {
+          AgentActivityBus.notify();
         }
         // ====== 站内信：平台/运营侧推送（服务端已落盘必达，此处只做即时提醒） ======
         if (type == "inbox.message") {
@@ -2679,11 +2707,28 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  void _clearPendingGalleryFrames() {
-    if (_pendingGalleryFrames.isEmpty) {
+  /// 移除一张待发相册图（输入框缩略图右上角 ×）。
+  void _removePendingGalleryImage(int index) {
+    if (index < 0 || index >= _pendingGalleryFrames.length) {
       return;
     }
-    setState(_pendingGalleryFrames.clear);
+    setState(() {
+      _pendingGalleryFrames.removeAt(index);
+    });
+  }
+
+  static Uint8List _asUint8List(List<int> bytes) =>
+      bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+
+  void _rememberSentGalleryImages(String messageId, List<Uint8List> images) {
+    if (images.isEmpty) {
+      return;
+    }
+    // 长会话内存护栏：只保留最近 40 条带图消息的缩略字节。
+    while (_sentGalleryImageBytes.length >= 40) {
+      _sentGalleryImageBytes.remove(_sentGalleryImageBytes.keys.first);
+    }
+    _sentGalleryImageBytes[messageId] = images;
   }
 
   Future<void> _reportEmbodimentState() async {
@@ -2727,6 +2772,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       "sessionId": ApiConfig.sessionId,
       "deviceId": "local-device",
       "userAlias": "owner",
+      // 共用浏览器桥：本连接即浏览器执行器（Agent 与用户共用 WebView2）
+      "browserBridge": true,
       // 访问鉴权（ACCESS_AUTH_REQUIRED）开启时服务端校验此 token；
       // 未绑定/未开启时为 null，服务端行为不变。
       if (AccessCredentialStore.instance.token != null)
@@ -2780,6 +2827,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       timestamp: DateTime.now(),
       attachmentImageCount: attachCount,
     );
+
+    // 气泡缩略图字节：发送前先记下，气泡一出现就能看到发了哪几张图；
+    // sendEvent 失败时配合 _failedUserMessageIds 显示「未发出」。
+    if (attachmentFrames != null && attachmentFrames.isNotEmpty) {
+      _rememberSentGalleryImages(
+        userMessage.messageId,
+        <Uint8List>[
+          for (final VisionWireFrame f in attachmentFrames)
+            _asUint8List(f.bytes),
+        ],
+      );
+    }
 
     // Phase 2：保存重试文本，供 429 回压时指数退避重发
     _pendingRetryText = effectiveText;
@@ -2850,6 +2909,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _pendingAgentUserMessageId = null;
       _clearAgentProcessingState();
       if (mounted) {
+        setState(() {
+          _failedUserMessageIds.add(userMessage.messageId);
+        });
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
           const SnackBar(content: Text("消息未发出：与服务器的连接尚未就绪")),
         );
@@ -3078,6 +3140,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 保存 side 模式下的原右面板宽度，关闭时恢复
       _previousRightPanelWidth = _rightPanelWidth;
       _splitRatio = RightPanelKind.gallery.defaultSplitRatio;
+    });
+  }
+
+  /// 常用工具「浏览器」入口：打开用户与 Agent 共用的内嵌浏览器面板。
+  void _openBrowserPanel() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.browser;
+      // 保存当前 splitRatio，关闭时恢复
+      _previousSplitRatio = _splitRatio;
+      // 保存 side 模式下的原右面板宽度，关闭时恢复
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.browser.defaultSplitRatio;
     });
   }
 
@@ -5193,6 +5268,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         onPhone: _openPhoneDevicesDialog,
         onMessages: _openMessagesPanel,
         onGallery: _openGalleryPanel,
+        onBrowser: _openBrowserPanel,
         messagesUnread: _unreadByPlatform.values.fold(0, (int a, int b) => a + b),
         // 天气面板实时位置 → 上报服务端缓存，供 Agent 按需复用（无 jobId 纯上报）
         onReportLocation: (location) {
@@ -5319,6 +5395,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       case RightPanelKind.gallery:
         // 嵌入模式：面板顶栏已有"图库"标题，图库页不再渲染自带 AppBar
         return const GalleryPage(embedded: true);
+      case RightPanelKind.browser:
+        // 用户与 Agent 共用的内嵌浏览器（WebView2 进程级单例，页面常驻）；
+        // 主页「试试让 Agent」chips 把任务文本直接发进对话
+        return BrowserPage(
+          embedded: true,
+          onAgentTask: (String task) => _sendMessage(text: task),
+        );
       case RightPanelKind.catalog:
         // 能力面板：CatalogPage 自带 AppBar（页面自治，不依赖面板顶栏标题）
         return CatalogPage(apiClient: _catalogApi);
@@ -5361,9 +5444,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       agentMoodStyle: _agentProfile.moodStyle,
       agentAvatarPreset: _agentProfile.avatarPreset,
       agentProfile: _agentProfile,
-      galleryPendingCount: _pendingGalleryFrames.length,
+      galleryPendingImages: <Uint8List>[
+        for (final VisionWireFrame f in _pendingGalleryFrames)
+          _asUint8List(f.bytes),
+      ],
       onPickGalleryImage: _pickGalleryImage,
-      onClearGalleryImages: _clearPendingGalleryFrames,
+      onRemoveGalleryImage: _removePendingGalleryImage,
+      resolveUserGalleryImages: (String messageId) =>
+          _sentGalleryImageBytes[messageId],
+      failedUserMessageIds: _failedUserMessageIds,
       isAgentProcessing: _isAgentProcessing,
       agentStatusLine: _agentStatusLine,
       agentStatusPercent: _agentStatusPercent,

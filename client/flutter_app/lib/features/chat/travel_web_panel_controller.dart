@@ -4,7 +4,7 @@ import "dart:convert";
 import "travel_map_controller.dart" show TravelRouteSegment;
 import "travel_plan_models.dart";
 
-/// 整页 WebView 行程面板（assets/travel_map/panel.html）的桥接控制器。
+/// 整页 WebView 行程面板（本机 server /travel-map?host=1 页面）的桥接控制器。
 ///
 /// 桥协议：
 /// - Dart → JS：`window.__travelPanel.xxx(...)` 经 executeScript 调用；
@@ -114,6 +114,13 @@ class TravelWebPanelController {
   }
 
   // ── 出站：Dart → JS（未 attach / 未就绪时入队或 no-op）──────────────
+
+  /// 注入本机 server 瓦片代理基址：WebView(about:blank) 无 origin，panel.html
+  /// 的相对路径代理不可用，必须给绝对地址。底图资源随后走 server 本地缓存
+  /// （首次拉取落盘、规划完成预热），弱网/离线也秒开。空串=不可用走 CDN。
+  void setTileProxy(String base) {
+    _send("setTileProxy", base);
+  }
 
   /// 同步 App 主题变体（'dark' | 'warm'）：网页切换深/浅色令牌组，
   /// 并把地图底图明暗对齐到当前主题（卫星为显式选择不受影响）。

@@ -52,6 +52,23 @@ const friendQuerySchema = z
   })
   .superRefine(accountActorRefine);
 
+/** 自动同意开关 */
+const autoAcceptSchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    enabled: z.boolean(),
+  })
+  .superRefine(accountActorRefine);
+
+/** 发现/搜索 */
+const discoverQuerySchema = friendQuerySchema.and(
+  z.object({
+    q: z.string().max(100).optional(),
+    limit: z.coerce.number().int().min(1).max(50).optional(),
+  })
+);
+
 function accountActorFromBody(data: { userId?: string; sessionId?: string }): string {
   const u = data.userId?.trim() ?? "";
   const s = data.sessionId?.trim() ?? "";
@@ -240,5 +257,65 @@ export function registerFriendRoutes(
 
     const areFriends = friendService.areFriends(actorId, targetActorId);
     return { ok: true, areFriends };
+  });
+
+  /**
+   * 查询本 actor 的好友请求自动同意开关
+   * GET /friends/auto-accept
+   */
+  app.get("/friends/auto-accept", async (request, reply) => {
+    const parsed = friendQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+
+    const actorId = accountActorFromBody(parsed.data);
+    return { ok: true, autoAccept: friendService.isAutoAccept(actorId) };
+  });
+
+  /**
+   * 设置本 actor 的好友请求自动同意开关。
+   * agent 好友（服务端托管、无人手动响应）打开后即可被其他用户直接添加。
+   * POST /friends/auto-accept
+   */
+  app.post("/friends/auto-accept", async (request, reply) => {
+    const parsed = autoAcceptSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+
+    const actorId = accountActorFromBody(parsed.data);
+    friendService.setAutoAccept(actorId, parsed.data.enabled);
+    return { ok: true, autoAccept: parsed.data.enabled };
+  });
+
+  /**
+   * 发现/搜索可添加的用户（按昵称 / id / 邮箱子串匹配，q 为空时按最近注册浏览）。
+   * 每个结果标注与当前用户的好友关系状态及对方是否开启了自动同意。
+   * GET /friends/discover
+   */
+  app.get("/friends/discover", async (request, reply) => {
+    const parsed = discoverQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+
+    const actorId = accountActorFromBody(parsed.data);
+    const accounts = agentAccountService.searchAccounts({
+      q: parsed.data.q,
+      limit: parsed.data.limit,
+      excludeActorId: actorId,
+    });
+
+    const results = accounts.map((a) => ({
+      actorId: a.userId,
+      displayName: a.displayName,
+      email: a.email ?? null,
+      createdAt: a.createdAt,
+      friendship: friendService.friendshipStatus(actorId, a.userId),
+      autoAccept: friendService.isAutoAccept(a.userId),
+    }));
+
+    return { ok: true, results };
   });
 }

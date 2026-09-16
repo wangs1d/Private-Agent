@@ -1,5 +1,7 @@
 # ====================================================================
-# Redirect C: cache to D: drive (paddle / pip / npm / temp / flutter / etc.)
+# Redirect C: cache to D: drive (pip / npm / temp / flutter / etc.)
+# Root kept at D:\paddle for backward compat; PaddleOCR was removed 2026-09 —
+# leftover D:\paddle\paddleocr / D:\paddle\paddlex model dirs can be deleted manually.
 # Run as Administrator.  Idempotent: safe to re-run.
 # ====================================================================
 $ErrorActionPreference = "Stop"
@@ -39,12 +41,10 @@ function Make-Junction([string]$link, [string]$target) {
 }
 
 Write-Host "=== [1/4] build D: directory tree ==="
-@( "$PADDLE\paddlex", "$PADDLE\paddleocr", "$PADDLE\pip", "$PADDLE\hf", "$PADDLE\hf\hub", "$PADDLE\tmp", "$PADDLE\pub" ) | ForEach-Object { Ensure-Dir $_ }
+@( "$PADDLE\pip", "$PADDLE\hf", "$PADDLE\hf\hub", "$PADDLE\tmp", "$PADDLE\pub" ) | ForEach-Object { Ensure-Dir $_ }
 @( "$CACHE\npm", "$CACHE\nuget", "$CACHE\temp", "$CACHE\flutter", "$CACHE\vscode", "$CACHE\gradle" ) | ForEach-Object { Ensure-Dir $_ }
 
 Write-Host "=== [2/4] move existing C: caches to D: ==="
-Move-Cache "C:\Users\Administrator\.paddlex"        "$PADDLE\paddlex"
-Move-Cache "C:\Users\Administrator\.paddleocr"      "$PADDLE\paddleocr"
 Move-Cache "C:\Users\Administrator\AppData\Local\pip" "$PADDLE\pip"
 Move-Cache "C:\Users\Administrator\.nuget"          "$CACHE\nuget"
 Move-Cache "C:\Users\Administrator\AppData\Local\npm-cache" "$CACHE\npm"
@@ -55,8 +55,6 @@ Move-Cache "C:\Users\Administrator\.vscode"         "$CACHE\vscode"
 Move-Cache "C:\Users\Administrator\.gradle"         "$CACHE\gradle"
 
 Write-Host "=== [3/4] make junctions (C: -> D:) ==="
-Make-Junction "C:\Users\Administrator\.paddlex"        "$PADDLE\paddlex"
-Make-Junction "C:\Users\Administrator\.paddleocr"      "$PADDLE\paddleocr"
 Make-Junction "C:\Users\Administrator\AppData\Local\pip" "$PADDLE\pip"
 Make-Junction "C:\Users\Administrator\.nuget"          "$CACHE\nuget"
 Make-Junction "C:\Users\Administrator\AppData\Local\npm-cache" "$CACHE\npm"
@@ -70,10 +68,6 @@ Make-Junction "C:\Users\Administrator\.cache\huggingface" "$PADDLE\hf"
 
 Write-Host "=== [4/4] write user env vars (D: paths) ==="
 [Environment]::SetEnvironmentVariable("PIP_CACHE_DIR",         "$PADDLE\pip",       "User")
-[Environment]::SetEnvironmentVariable("PADDLE_OCR_MODEL_DIR",  "$PADDLE\paddleocr", "User")
-[Environment]::SetEnvironmentVariable("PPOCR_HOME",            "$PADDLE\paddleocr", "User")
-[Environment]::SetEnvironmentVariable("PADDLE_PDX_CACHE_HOME", "$PADDLE\paddlex",  "User")
-[Environment]::SetEnvironmentVariable("PADDLE_TMP_DIR",        "$PADDLE\tmp",       "User")
 [Environment]::SetEnvironmentVariable("HF_HOME",               "$PADDLE\hf",        "User")
 [Environment]::SetEnvironmentVariable("HUGGINGFACE_HUB_CACHE", "$PADDLE\hf\hub",   "User")
 [Environment]::SetEnvironmentVariable("TEMP",                  "$PADDLE\tmp",       "User")

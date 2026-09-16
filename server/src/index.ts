@@ -20,7 +20,6 @@ import { createExternalChatProviderFromEnv } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
-import { startPaddleOcrServer } from "./services/paddle-ocr-auto-starter.js";
 import { startFunasrServer } from "./services/funasr-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import {
@@ -152,9 +151,6 @@ const stopDesktopBridge = startDesktopBridgeAutoClient({
   port: runtime.port,
   log: (line) => services.app.log.info(line),
 });
-const stopPaddleOcr = startPaddleOcrServer({
-  log: (line) => services.app.log.info(line),
-});
 const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
   ? (() => {
       const bridge = readWechatClawBridgeConfig(process.env);
@@ -192,7 +188,6 @@ const performShutdown = (): void => {
   );
   services.webhookService.stop();
   stopDesktopBridge();
-  stopPaddleOcr();
   stopFunasrEarly();
   stopOpenClawModelSync();
   void services.app.close().finally(() => process.exit(0));

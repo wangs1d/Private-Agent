@@ -4,15 +4,19 @@ import "dart:ui" show Color;
 
 import "package:webview_windows/webview_windows.dart";
 
-import "travel_map_assets.dart";
+import "../../core/config/api_config.dart";
 import "travel_web_panel_controller.dart";
 
 /// 整页 WebView 行程面板的进程级共享宿主（单例）。
 ///
 /// webview_windows 为 Composition 模式：控制器持有渲染纹理，可被不同挂载点
 /// （右侧面板 / 全屏页）按需渲染同一内容。面板与全屏共用同一实例 ——
-/// 打开/关闭面板、进出全屏都不再重新加载地图（HTML + MapLibre 常驻），
+/// 打开/关闭面板、进出全屏都不再重新加载地图（页面常驻），
 /// 仅在 loadPlan 时切换数据。
+///
+/// 页面单一来源：加载本机 server 的 /travel-map?host=1（不再打包第二份
+/// HTML 资产）。宿主模式下数据由 Dart 桥 loadPlan 注入，不走 ?id= 取数；
+/// 实拍图/瓦片代理与页面同源直连，无需任何地址注入。
 ///
 /// 预加载：[preload] 后台初始化（隐藏渲染），首次打开面板零等待。
 ///
@@ -73,11 +77,33 @@ class TravelWebPanelHost {
         controller.handleWebMessage,
       );
 
-      // 加载内嵌整页面板（MapLibre 已随包本地内联，零 CDN 等待）
-      final String html = await loadTravelMapHtml(
-        "assets/travel_map/panel.html",
+      // 加载本机 server 页面（单一来源）。host 模式：数据由 Dart 桥 loadPlan
+      // 注入，页面不显示"未携带行程参数"空态。
+      final Uri base = Uri.parse(ApiConfig.httpBase);
+      final Uri pageUri = base.replace(
+        path: "${base.path}/travel-map".replaceAll("//", "/"),
+        queryParameters: <String, String>{"host": "1"},
       );
-      await webviewController.loadStringContent(html);
+      await webviewController.loadUrl(pageUri.toString());
+
+      // 等待页面脚本就绪（server 未启动/未就绪时导航不完成，executeScript
+      // 会持续抛错）。约 12s 宽限，覆盖应用启动时 server 的拉起窗口。
+      var pageReady = false;
+      for (var attempt = 0; attempt < 24; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        try {
+          final String probe = await webviewController
+              .executeScript("window.__travelPanel ? '1' : '0'");
+          if (probe.contains('1')) {
+            pageReady = true;
+            break;
+          }
+        } catch (_) {/* 页面尚未就绪，继续等 */}
+      }
+      if (!pageReady) {
+        _error = "行程页面加载失败：本机服务未就绪（$pageUri）\n请确认应用服务已启动后重开行程";
+        return;
+      }
 
       // Dart → JS：注入脚本执行器（loadPlan 由各面板挂载点下发，未就绪时入队）
       await controller.attach(

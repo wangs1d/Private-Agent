@@ -1,3 +1,5 @@
+import "dart:convert";
+
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
@@ -5,16 +7,18 @@ import "../../core/services/image_preview_launcher.dart";
 import "content_summary_detail_formatter.dart";
 import "media_thumbnail.dart";
 
-/// 识图结果外壳（[RENDER_AS:image_result] 的专属渲染）
+/// 识图结果外壳（[RENDER_AS:image_result] 的专属渲染）。
 ///
-/// 服务端对 vision/OCR 工具结果注入 `[RENDER_AS:image_result]`，正文是
-/// 「结论 + 图片引用 + 要点」的混排文本。此组件把结构显式化为：
-///   1. 头部徽标（🔍 识图结果）
-///   2. 照片预览廊（从正文抽取图片链接 → 缩略图，点击开右侧大图预览）
-///   3. 一句话结论（首行短句）
-///   4. 要点细节（其余正文走结构化 Markdown 渲染：列表/表格/代码块）
+/// 真实设计（2026-09-15 用户确认，Coze 式「一图一句」）：
+/// **每张照片下面只有对当前照片的简单介绍**——画面内容 + 可推断的拍摄场景/地点。
 ///
-/// 若正文里没有任何图片链接，则退化为 徽标 + 结论/要点，不展示图廊。
+/// 服务端在识图轮次确定性附着的结构化块（照片与描述绑定，不依赖 LLM 正文）：
+///   [IMAGE_RESULT_START]
+///   {"items":[{"url":"/agent/images/a/x.jpg","caption":"书桌上的一只橘猫，正趴着睡觉"}]}
+///   [IMAGE_RESULT_END]
+///
+/// 含该块时渲染为：🔍徽标 + 纵向照片卡片（每张照片下方一行自己的描述）；
+/// 无块时回退旧形态（缩略图横廊 + 结论 + 要点正文），历史消息不受影响。
 class ImageResultMessage extends StatelessWidget {
   const ImageResultMessage({
     super.key,
@@ -29,12 +33,36 @@ class ImageResultMessage extends StatelessWidget {
   final TextTheme textTheme;
   final bool showCursor;
 
+  static final RegExp _payloadBlock = RegExp(
+    r"\[IMAGE_RESULT_START\]([\s\S]*?)\[IMAGE_RESULT_END\]",
+  );
   static final RegExp _imgMarkdown = RegExp(r'!\[[^\]]*\]\(([^)\s]+)\)');
   static final RegExp _imgPath = RegExp(r'(/agent/images/[A-Za-z0-9_\-.%/]+)');
   static final RegExp _imgHttp = RegExp(
     r'(https?://[A-Za-z0-9_\-./:%?&=@#~+]+\.(?:png|jpe?g|gif|webp|avif)(?:[?&][A-Za-z0-9_\-./:%?&=@#~+]+)?)',
     caseSensitive: false,
   );
+
+  /// 解析结构化照片卡块；不存在/解析失败返回 null（调用方回退旧渲染）。
+  static List<({String url, String caption})>? parsePhotoItems(String text) {
+    final Match? m = _payloadBlock.firstMatch(text);
+    if (m == null) return null;
+    try {
+      final dynamic decoded = jsonDecode(m.group(1)?.trim() ?? "");
+      if (decoded is! Map<String, dynamic>) return null;
+      final List<dynamic> rawItems = decoded["items"] as List<dynamic>? ?? <dynamic>[];
+      final List<({String url, String caption})> out = <({String url, String caption})>[];
+      for (final dynamic it in rawItems) {
+        if (it is! Map<String, dynamic>) continue;
+        final String url = (it["url"] ?? "").toString().trim();
+        if (url.isEmpty) continue;
+        out.add((url: url, caption: (it["caption"] ?? "").toString().trim()));
+      }
+      return out;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// 抽取正文中的图片链接（markdown 图 / 代理路径 / http 图片），去重、最多 6 张。
   static List<String> _extractImageUrls(String text) {
@@ -117,10 +145,18 @@ class ImageResultMessage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final String normalized = text.replaceAll("\r\n", "\n").trim();
-    final List<String> rawUrls = _extractImageUrls(normalized);
+    final List<({String url, String caption})>? photoItems = parsePhotoItems(normalized);
+    final String textWithoutPayload = photoItems == null
+        ? normalized
+        : normalized.replaceAll(_payloadBlock, "").trim();
+
+    final List<String> rawUrls = _extractImageUrls(textWithoutPayload);
     final List<String> urls = rawUrls.map(_resolveMediaUrl).toList();
-    final String textOnly = _stripImageTokens(normalized);
-    final String? lead = _extractLead(textOnly);
+    final String textOnly = _stripImageTokens(textWithoutPayload);
+
+    // 真实设计：结构化照片卡在场 → 只渲染「照片 + 各自描述」，不再输出结论/要点
+    final bool photoCardMode = photoItems != null && photoItems.isNotEmpty;
+    final String? lead = photoCardMode ? null : _extractLead(textOnly);
 
     final String body = lead == null
         ? textOnly
@@ -132,7 +168,12 @@ class ImageResultMessage extends StatelessWidget {
             .join("\n")
             .trim();
 
-    final bool hasContent = urls.isNotEmpty || textOnly.isNotEmpty;
+    // 照片卡模式下正文整段收敛（用户要求：照片下只有各自的介绍）
+    final String bodyAfterPhotos =
+        photoCardMode || lead != null ? "" : body;
+
+    final bool hasContent =
+        photoCardMode || urls.isNotEmpty || textOnly.isNotEmpty;
     if (!hasContent && !showCursor) {
       return const SizedBox.shrink();
     }
@@ -174,7 +215,7 @@ class ImageResultMessage extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                     Text(
-                      "识图结果${urls.isNotEmpty ? " · ${urls.length} 图" : ""}",
+                      "识图结果 · ${(photoItems?.length ?? urls.length)} 图",
                       style: textTheme.labelSmall?.copyWith(
                             color: cs.primary,
                             fontWeight: FontWeight.w700,
@@ -191,8 +232,31 @@ class ImageResultMessage extends StatelessWidget {
               ),
             ],
           ),
-          // 照片预览廊
-          if (urls.isNotEmpty) ...<Widget>[
+          // 真实设计：纵向照片卡片，每张下方一行自己的描述
+          if (photoCardMode) ...<Widget>[
+            const SizedBox(height: 10),
+            for (int i = 0; i < photoItems!.length; i++) ...<Widget>[
+              if (i > 0) const SizedBox(height: 10),
+              _PhotoCaptionCard(
+                url: _resolveMediaUrl(photoItems[i].url),
+                caption: photoItems[i].caption,
+                cs: cs,
+                captionStyle: textTheme.bodySmall?.copyWith(
+                      color: cs.onSurfaceVariant,
+                      height: 1.4,
+                    ) ??
+                    TextStyle(
+                      fontSize: 12,
+                      color: cs.onSurfaceVariant,
+                      height: 1.4,
+                    ),
+                gallery: photoItems.map((p) => _resolveMediaUrl(p.url)).toList(),
+                index: i,
+              ),
+            ],
+          ]
+          // 旧形态回退：缩略图横廊（历史消息 / 无结构化块）
+          else if (urls.isNotEmpty) ...<Widget>[
             const SizedBox(height: 10),
             SizedBox(
               height: 96,
@@ -223,7 +287,7 @@ class ImageResultMessage extends StatelessWidget {
               ),
             ),
           ],
-          // 一句话结论
+          // 一句话结论（仅旧形态）
           if (lead != null && lead.isNotEmpty) ...<Widget>[
             if (urls.isNotEmpty) const SizedBox(height: 10),
             Container(
@@ -250,11 +314,11 @@ class ImageResultMessage extends StatelessWidget {
               ),
             ),
           ],
-          // 要点细节
-          if (body.isNotEmpty) ...<Widget>[
+          // 要点细节（照片卡模式下整段收敛：照片下只有各自的介绍）
+          if (bodyAfterPhotos.isNotEmpty) ...<Widget>[
             if (lead != null && lead.isNotEmpty || urls.isNotEmpty)
               const SizedBox(height: 8),
-            ...formatContentSummaryDetailLines(body, cs, textTheme),
+            ...formatContentSummaryDetailLines(bodyAfterPhotos, cs, textTheme),
           ],
           if (showCursor)
             Padding(
@@ -269,6 +333,87 @@ class ImageResultMessage extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// 单张照片卡：照片（自然宽高比，点击开大图）+ 下方一行该照片自己的描述。
+class _PhotoCaptionCard extends StatelessWidget {
+  const _PhotoCaptionCard({
+    required this.url,
+    required this.caption,
+    required this.cs,
+    required this.captionStyle,
+    required this.gallery,
+    required this.index,
+  });
+
+  final String url;
+  final String caption;
+  final ColorScheme cs;
+  final TextStyle captionStyle;
+  final List<String> gallery;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        GestureDetector(
+          onTap: () => ImagePreviewLauncher.open(
+            url: url,
+            title: "识图预览",
+            gallery: gallery,
+            index: index,
+            anchorContext: context,
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: Image.network(
+                url,
+                width: double.infinity,
+                fit: BoxFit.cover,
+                alignment: Alignment.topCenter,
+                errorBuilder: (_, __, ___) => Container(
+                  height: 120,
+                  color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+                  alignment: Alignment.center,
+                  child: Icon(
+                    Icons.image_outlined,
+                    size: 28,
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.5),
+                  ),
+                ),
+                loadingBuilder: (BuildContext context, Widget child,
+                    ImageChunkEvent? progress) {
+                  if (progress == null) return child;
+                  return Container(
+                    height: 160,
+                    color: cs.surfaceContainerHighest.withValues(alpha: 0.3),
+                    alignment: Alignment.center,
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: cs.primary.withValues(alpha: 0.6),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+        if (caption.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 6),
+          Text(caption, style: captionStyle),
+        ],
+      ],
     );
   }
 }

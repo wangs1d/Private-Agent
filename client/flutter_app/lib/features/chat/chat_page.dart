@@ -42,9 +42,11 @@ class ChatPage extends StatefulWidget {
     this.agentAvatarPreset,
     this.agentProfile,
     this.onOpenAgentProfile,
-    this.galleryPendingCount = 0,
+    this.galleryPendingImages = const <Uint8List>[],
     this.onPickGalleryImage,
-    this.onClearGalleryImages,
+    this.onRemoveGalleryImage,
+    this.resolveUserGalleryImages,
+    this.failedUserMessageIds = const <String>{},
     this.onEnterVoiceMode,
     this.onOpenVoiceDuplex,
     this.isAgentProcessing = false,
@@ -110,10 +112,19 @@ class ChatPage extends StatefulWidget {
   final AgentProfileData? agentProfile;
   final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
 
-  /// 已选相册图张数，待发。
-  final int galleryPendingCount;
+  /// 已选相册图（待发）的字节：输入框上方渲染缩略图，让用户确认到底选了哪些图。
+  final List<Uint8List> galleryPendingImages;
   final VoidCallback? onPickGalleryImage;
-  final VoidCallback? onClearGalleryImages;
+
+  /// 移除某一张待发相册图（缩略图右上角 ×）。
+  final void Function(int index)? onRemoveGalleryImage;
+
+  /// 按 messageId 取本会话内已发送用户消息的配图字节（内存态）。
+  /// 返回 null/空时气泡回退为「配图 ×N」文案（历史加载的消息没有字节）。
+  final List<Uint8List>? Function(String messageId)? resolveUserGalleryImages;
+
+  /// 发送失败（WS 未就绪被拒）的用户消息 id 集合，气泡头部显示「未发出」徽标。
+  final Set<String> failedUserMessageIds;
 
   /// 进入语音模式的回调
   final VoidCallback? onEnterVoiceMode;
@@ -859,6 +870,86 @@ class _ChatPageState extends State<ChatPage>
     );
   }
 
+  /// 待发相册图缩略图条：挂在输入框内部最左侧（豆包样式）。
+  /// 最多占输入框 45% 宽（由调用方按行宽算好传入），超出的横向滚动；
+  /// 每张右上角 × 可单独移除。
+  Widget _buildPendingGalleryStrip(ColorScheme cs, double maxWidth) {
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            for (int i = 0; i < widget.galleryPendingImages.length; i++)
+              _buildPendingGalleryThumb(
+                cs,
+                i,
+                widget.galleryPendingImages[i],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 待发相册图的缩略图：56px 圆角图 + 右上角悬浮 ×（移除单张）。
+  /// cacheWidth 限了解码尺寸，多张大图也不至于把内存吃满。
+  Widget _buildPendingGalleryThumb(ColorScheme cs, int index, Uint8List bytes) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: <Widget>[
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Image.memory(
+              bytes,
+              width: 56,
+              height: 56,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              cacheWidth: 160,
+              errorBuilder: (_, __, ___) => Container(
+                width: 56,
+                height: 56,
+                color: cs.surfaceContainerHighest,
+                child: Icon(Icons.broken_image_outlined,
+                    size: 18, color: cs.onSurfaceVariant),
+              ),
+            ),
+          ),
+          Positioned(
+            top: -5,
+            right: -5,
+            child: GestureDetector(
+              onTap: () => widget.onRemoveGalleryImage?.call(index),
+              child: Container(
+                width: 18,
+                height: 18,
+                decoration: BoxDecoration(
+                  color: cs.surface,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: cs.outline.withValues(alpha: 0.5),
+                  ),
+                  boxShadow: <BoxShadow>[
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.15),
+                      blurRadius: 4,
+                    ),
+                  ],
+                ),
+                child: Icon(Icons.close_rounded,
+                    size: 12, color: cs.onSurfaceVariant),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ═══════════════════════════════════════════════════════════
   // 输入框内统一的图标按钮样式
   // ═══════════════════════════════════════════════════════════
@@ -1055,6 +1146,10 @@ class _ChatPageState extends State<ChatPage>
       mainMessage: mainMessage,
       isUser: isUser,
       isQueued: widget.queuedMessageIds.contains(mainMessage.messageId),
+      isFailed: widget.failedUserMessageIds.contains(mainMessage.messageId),
+      userGalleryImages: isUser
+          ? widget.resolveUserGalleryImages?.call(mainMessage.messageId)
+          : null,
       contentSummary: contentSummary,
       agentName: widget.agentName,
       agentAvatarUrl: widget.agentAvatarUrl,
@@ -1241,32 +1336,6 @@ class _ChatPageState extends State<ChatPage>
                           ],
                         ),
                       ),
-                    if (widget.galleryPendingCount > 0)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: Row(
-                          children: <Widget>[
-                            Expanded(
-                              child: Text(
-                                widget.galleryPendingCount > 1
-                                    ? "已选 ${widget.galleryPendingCount} 张图，发送时传给 Agent"
-                                    : "已选图片，发送时传给 Agent",
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .labelMedium
-                                    ?.copyWith(
-                                      color: cs.primary,
-                                    ),
-                              ),
-                            ),
-                            if (widget.onClearGalleryImages != null)
-                              TextButton(
-                                onPressed: widget.onClearGalleryImages,
-                                child: const Text("清除"),
-                              ),
-                          ],
-                        ),
-                      ),
                     // 滚动到底部按钮（用户滑动时显示）—— 使用 ValueListenableBuilder 避免整树重建
                     ValueListenableBuilder<bool>(
                       valueListenable: _isUserScrollingNotifier,
@@ -1419,11 +1488,27 @@ class _ChatPageState extends State<ChatPage>
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
-                                // 第一行：输入框 + 发送/停止按钮
-                                Row(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: <Widget>[
-                                    // 中间：输入框
+                                // 第一行：[待发缩略图（最左侧，豆包样式）] + 输入框 + 发送/停止按钮
+                                // 有待发图时行高被缩略图撑起，文字/按钮改为垂直居中更自然
+                                // LayoutBuilder 在 Row 内会拿到无界宽度，须包在 Row 外
+                                // 算出可用宽度，供缩略图条按比例限宽。
+                                LayoutBuilder(
+                                  builder:
+                                      (BuildContext context, BoxConstraints b) {
+                                    return Row(
+                                      crossAxisAlignment: widget
+                                              .galleryPendingImages.isNotEmpty
+                                          ? CrossAxisAlignment.center
+                                          : CrossAxisAlignment.end,
+                                      children: <Widget>[
+                                        // 最左侧：待发相册图缩略图（挂在输入框内部，与文字同行）
+                                        if (widget.galleryPendingImages
+                                            .isNotEmpty)
+                                          _buildPendingGalleryStrip(
+                                            cs,
+                                            b.maxWidth * 0.45,
+                                          ),
+                                        // 中间：输入框
                                     Expanded(
                                       child: Padding(
                                         padding: const EdgeInsets.symmetric(
@@ -1529,7 +1614,9 @@ class _ChatPageState extends State<ChatPage>
                                         );
                                       },
                                     ),
-                                  ],
+                                      ],
+                                    );
+                                  },
                                 ),
                                 // 第二行：辅助功能按钮（左下：上传图片；右下：语音/通话）
                                 Padding(
@@ -1669,6 +1756,8 @@ class _HoverableMessageWidget extends StatelessWidget {
     required this.mainMessage,
     required this.isUser,
     required this.isQueued,
+    required this.isFailed,
+    required this.userGalleryImages,
     required this.cardPadding,
     this.contentSummary,
     this.agentName,
@@ -1707,6 +1796,12 @@ class _HoverableMessageWidget extends StatelessWidget {
 
   /// 该用户消息是否仍在排队（等待 Agent 依次处理），控制「排队中」徽标
   final bool isQueued;
+
+  /// 该用户消息是否发送失败（WS 未就绪被拒），控制「未发出」徽标
+  final bool isFailed;
+
+  /// 该用户消息随发的相册图字节（内存态，历史加载为 null）
+  final List<Uint8List>? userGalleryImages;
   final EdgeInsets cardPadding;
   final ContentSummaryParseResult? contentSummary;
   final String? agentName;
@@ -1759,6 +1854,8 @@ class _HoverableMessageWidget extends StatelessWidget {
       mainMessage: mainMessage,
       isUser: isUser,
       isQueued: isQueued,
+      isFailed: isFailed,
+      userGalleryImages: userGalleryImages,
       cardPadding: cardPadding,
       contentSummary: contentSummary,
       agentName: agentName,
@@ -1790,6 +1887,8 @@ class _HoverableMessageContent extends StatefulWidget {
     required this.mainMessage,
     required this.isUser,
     required this.isQueued,
+    required this.isFailed,
+    required this.userGalleryImages,
     required this.cardPadding,
     this.contentSummary,
     this.agentName,
@@ -1818,6 +1917,12 @@ class _HoverableMessageContent extends StatefulWidget {
 
   /// 该用户消息是否仍在排队（等待 Agent 依次处理），控制「排队中」徽标
   final bool isQueued;
+
+  /// 该用户消息是否发送失败（WS 未就绪被拒），控制「未发出」徽标
+  final bool isFailed;
+
+  /// 该用户消息随发的相册图字节（内存态，历史加载为 null）
+  final List<Uint8List>? userGalleryImages;
   final EdgeInsets cardPadding;
   final ContentSummaryParseResult? contentSummary;
   final String? agentName;
@@ -2098,6 +2203,26 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     );
 
     if (widget.isUser) {
+      // 「未发出」徽标：WS 未就绪 sendEvent 被拒时标记，红色提示用户这条
+      // （含配图）没有真的到服务器，需检查连接后重发。
+      if (widget.isFailed) {
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 2, right: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.error_outline, size: 11, color: cs.error),
+              const SizedBox(width: 3),
+              Text(
+                "未发出",
+                style: timeStyle.copyWith(color: cs.error),
+              ),
+              const SizedBox(width: 6),
+              Text(timeStr, style: timeStyle),
+            ],
+          ),
+        );
+      }
       // 排队中徽标：处理中收到的新消息按发送顺序排队，逐条处理；
       // 服务端开始处理该条（chat.turn_started 晋级）后父组件会移出集合。
       if (widget.isQueued) {
@@ -2225,6 +2350,36 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     );
   }
 
+  /// 已发送用户消息的配图缩略图（本会话内存字节）。
+  /// 用 Wrap 自动换行；cacheWidth 限解码尺寸避免多张原图撑爆内存。
+  Widget _buildSentGalleryThumbnails(List<Uint8List> images, ColorScheme cs) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: <Widget>[
+        for (final Uint8List bytes in images)
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.memory(
+              bytes,
+              width: 72,
+              height: 72,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              cacheWidth: 200,
+              errorBuilder: (_, __, ___) => Container(
+                width: 72,
+                height: 72,
+                color: cs.surfaceContainerHighest,
+                child: Icon(Icons.broken_image_outlined,
+                    size: 18, color: cs.onSurfaceVariant),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   /// 构建消息卡片（支持高亮态）。
   ///
   /// 视觉分层：用户消息保留主题色气泡；Agent 消息用扣子（Coze）式描边容器——
@@ -2290,7 +2445,18 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              if (widget.mainMessage.attachmentImageCount > 0)
+              if (widget.isUser &&
+                  widget.userGalleryImages != null &&
+                  widget.userGalleryImages!.isNotEmpty)
+                // 本会话发出的用户消息：直接渲染配图缩略图，用户能确认
+                // 「图确实发出去了、发的是这几张」。字节仅在内存，
+                // 重启/历史加载后走下方「配图 ×N」文案回退。
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 5),
+                  child: _buildSentGalleryThumbnails(
+                      widget.userGalleryImages!, cs),
+                )
+              else if (widget.mainMessage.attachmentImageCount > 0)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 3),
                   child: Row(
