@@ -19,7 +19,12 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm ci --prefix server || (cd server && npm install)
+        run: npm ci
+      - name: Build workspace packages
+        run: |
+          npm run build --prefix agent-world
+          npm run build --prefix packages/agent-protocol
+          npm run build --prefix packages/picture
       - name: Neural A/B comparison
         working-directory: server
         env:
