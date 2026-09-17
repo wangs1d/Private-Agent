@@ -52,6 +52,13 @@ export type LlmAuditStage =
   | "task_plane_complex"
   /** 夜间单遍巩固器（P1：事实提升 + 新行留存评分一次调用） */
   | "nightly_unified"
+  /**
+   * 工具结果压缩打点（2026-09-17 WP0：非 LLM 调用，记压缩前/后规模）。
+   * 约定：inputChars/outputChars = 压缩前/压缩后字符（inputTokens/outputTokens
+   * 为同系数折算），toolName 标明来源工具。用于量化 compactToolOutputForLlm 主干道的
+   * 每工具节省率（scripts/analyze-token-audit.mjs 按此聚合）。
+   */
+  | "tool_result_compaction"
   /** 其他（外部科技扫描等低频旁路） */
   | "other";
 
@@ -61,6 +68,8 @@ export type LlmUsageRecord = {
   sessionId?: string;
   stage: LlmAuditStage;
   model?: string;
+  /** 来源工具名（仅 tool_result_compaction 打点使用，其余环节无此值）。 */
+  toolName?: string;
   inputChars: number;
   outputChars: number;
   inputTokens: number;
@@ -206,6 +215,8 @@ export function recordLlmUsageByChars(args: {
   actorId?: string;
   sessionId?: string;
   model?: string;
+  /** 来源工具名（仅 tool_result_compaction 打点使用） */
+  toolName?: string;
   /** API 真实返回的 prefix cache 命中 token 数（可选，仅主链路从响应 usage 采集） */
   promptCacheHitTokens?: number;
   /** API 真实返回的 prefix cache 未命中 token 数（可选） */
@@ -222,10 +233,30 @@ export function recordLlmUsageByChars(args: {
     actorId: args.actorId,
     sessionId: args.sessionId,
     model: args.model,
+    toolName: args.toolName,
     promptCacheHitTokens: args.promptCacheHitTokens,
     promptCacheMissTokens: args.promptCacheMissTokens,
     apiPromptTokens: args.apiPromptTokens,
     apiCompletionTokens: args.apiCompletionTokens,
+  });
+}
+
+/**
+ * 工具结果压缩打点（WP0，2026-09-17）：每次 compactToolOutputForLlm 调一条，
+ * 记录压缩前/后字符，量化各工具的压缩节省率。非 LLM 调用，纯观测。
+ */
+export function recordToolCompactionByChars(args: {
+  toolName: string;
+  sessionId?: string;
+  rawChars: number;
+  compactChars: number;
+}): void {
+  recordLlmUsageByChars({
+    stage: "tool_result_compaction",
+    toolName: args.toolName,
+    sessionId: args.sessionId,
+    inputChars: args.rawChars,
+    outputChars: args.compactChars,
   });
 }
 

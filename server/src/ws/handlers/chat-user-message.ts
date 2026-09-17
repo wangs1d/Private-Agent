@@ -26,6 +26,7 @@ import {
   embodimentThinking,
 } from "../../services/agent-embodiment.js";
 import { getEmbodimentAutonomy } from "../../services/embodiment-autonomy-service.js";
+import type { PhoneCallCoordinator } from "../../services/phone-call-coordinator.js";
 import {
   MessageBatchProcessor,
   type BatchedMessage,
@@ -52,12 +53,15 @@ import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, ded
 import {
   lookupToolCardBuilder,
 } from "../../services/tool-card-registry.js";
-import { attachDeterministicCards, type ExecutedToolReceipt } from "../../services/deterministic-card-chain.js";
+import {
+  attachDeterministicCards,
+  resolveTravelReceipt,
+  type ExecutedToolReceipt,
+} from "../../services/deterministic-card-chain.js";
 import { buildVisionPhotoCards, attachImageResultPhotos } from "../../services/vision-photo-cards.js";
 import { captionMediaCards, isImageCaptionEnabled } from "../../services/image-caption-service.js";
-import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
-import { buildReplyBlocks } from "../../services/reply-envelope.js";
+import { buildReplyBlocks, normalizeReplyCardLayout } from "../../services/reply-envelope.js";
 import {
   isOnlyTimestampFrames,
   stripAllTimestampFrameLines,
@@ -275,6 +279,12 @@ export type ChatUserMessageHandlerDeps = {
   voiceCapabilityService?: VoiceCapabilityService;
   /** 语音消息落盘服务（可选；用于解析 audio 消息的本地文件路径） */
   voiceMessageService?: VoiceMessageService;
+  /**
+   * 电话代办协调器（可选）：等待确认期间用户文本明确「确认拨打」时的
+   * 兜底确认入口（确认卡按钮渲染失败/旧客户端场景）。权威确认仍是
+   * connection.ts 在 chat.user_action 原点记录的卡片点击。
+   */
+  phoneCallCoordinator?: PhoneCallCoordinator;
 };
 
 export type ChatUserMessageContext = {
@@ -434,6 +444,10 @@ export async function handleChatUserMessageEvent(
       }),
     );
   }
+
+  // 电话代办文本兜底确认：会话等待确认期间，用户文本明确「确认拨打」时记录确认
+  // （与确认卡点击同效；正则严格短语匹配，避免误伤无关场景的「确认」）。fire-and-forget。
+  deps.phoneCallCoordinator?.observeUserText(msgActor, effectiveText);
 
   void deps.auditService
     .record({
@@ -1255,36 +1269,23 @@ async function processBatchedMessage(
           : undefined,
     });
     // 旅游行程确定性附卡：工具返回已瘦身，LLM 口头回复不再携带明细、也写不出
-    // 能被切卡的逐日列表，卡片由代码直接从工具原始结果生成（autoOpen=true，
-    // 前端 assistant_done 收到即自动展开双面板；卡片保留在消息中供回看）。
-    // 正文已有卡片标记时不重复附加。
-    let travelCardToolName = reply.toolName
-      ?? (executedTravelPlanResult ? "travel.plan-itinerary" : undefined);
-    let travelCardResult = toolResult?.result ?? executedTravelPlanResult;
-    if (travelCardToolName === "travel.plan-itinerary") {
-      // 工具回执是瘦身摘要（只有 id/title，无 days）：按 planId 从冷层取完整行程供附卡
-      const planId = String(
-        (travelCardResult as Record<string, unknown> | undefined)?.id ?? "",
-      ).trim();
-      const fullPlan = planId ? travelPlanStore.get(planId) : null;
-      if (fullPlan) travelCardResult = fullPlan as unknown as Record<string, unknown>;
-    }
-    if (!travelCardToolName && !travelCardResult) {
-      // tool-loop 内执行的工具不经过 onExternalToolExecuted（回调只覆盖单工具直跑路径），
-      // 这里从行程冷层确定性回捞：只认「最近 60s 内生成」的行程（工具成功即落盘，
-      // 附卡在其后几秒内执行），正文点名目的地时优先，避免把旧行程误挂到后续闲聊轮。
-      const candidates = travelPlanStore
-        .listSummaries(5)
-        .filter((s) => Date.now() - s.createdAt < 60 * 1000);
-      const picked =
-        candidates.find((s) => s.destination && finalText.includes(s.destination)) ??
-        candidates[0];
-      const recentPlan = picked ? travelPlanStore.get(picked.planId) : null;
-      if (recentPlan) {
-        travelCardToolName = "travel.plan-itinerary";
-        travelCardResult = recentPlan as unknown as Record<string, unknown>;
-      }
-    }
+    // 能被切卡的逐日列表，卡片由代码直接从行程原始数据生成（autoOpen=false，
+    // 行程以回复末尾的独立规划卡呈现：卡面直接逐日展示安排，不自动弹出双面板，
+    // 用户点卡片按钮可进面板看完整明细；卡片保留在消息中供回看）。
+    // 回执裁决统一走 resolveTravelReceipt：直跑回执 / onToolExecuted 捕获 /
+    // 冷层近窗回捞三路归一——此前 reply.toolName 是其他工具（如
+    // travel.destination-info）会短路掉冷层回捞，行程卡整轮漏发；
+    // planId 补全量数据由 attachTravelItineraryCard 内部完成。
+    const travelReceiptResolution = resolveTravelReceipt({
+      replyToolName: reply.toolName,
+      replyToolResult:
+        toolResult?.ok && toolResult.result
+          ? (toolResult.result as Record<string, unknown>)
+          : undefined,
+      executedReceipt: executedTravelPlanResult,
+      goal: batched.text,
+      finalText,
+    });
     // done 阶段确定性附卡链（L1）：行程 → 天气 → 搜索 → 其余注册工具 → 视频，
     // 顺序与优先级见 deterministic-card-chain.ts；各 attach 自带结构化标记
     // guard，先附上的卡生效、后续自动让位。视频回执 loop 捕获优先、直跑兜底。
@@ -1296,8 +1297,8 @@ async function processBatchedMessage(
           : [];
     finalText = attachDeterministicCards({
       text: finalText,
-      travelToolName: travelCardToolName,
-      travelResult: travelCardResult,
+      travelToolName: travelReceiptResolution.toolName,
+      travelResult: travelReceiptResolution.result,
       weatherResults: executedWeatherToolResults,
       searchResults: executedSearchToolResults,
       registryResults: executedRegistryToolResults,
@@ -1444,6 +1445,12 @@ async function processBatchedMessage(
     // 兜底再剥一次 DSML 工具调用标记：极少数情况下 DSML 跨多个 chunk 拼接后正则未在 adapter 层
     // 命中（极端异步路径），这里二次清理避免内部格式透出到用户可见消息。
     finalText = stripDsmlToolCallMarkup(finalText);
+
+    // 卡片版式归一化：旅游规划回复固定三段式——模型总览卡置首、正文居中、
+    // 行程卡独立收尾在最后（无行程卡的回复不重排，卡保持在模型落笔位置）。
+    // done 载荷、落库文本与 blocks 派生共用这份归一化后的 finalText，
+    // 见 normalizeReplyCardLayout。
+    finalText = normalizeReplyCardLayout(finalText);
 
     // 回复信封（A 阶段）：finalText 里的卡片标记在服务端确定性拆成 blocks，
     // 随 done 可选下发。text 仍是唯一事实源，blocks 是派生视图——旧客户端

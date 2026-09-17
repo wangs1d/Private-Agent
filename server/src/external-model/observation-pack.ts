@@ -1,13 +1,16 @@
 /**
- * ObservationPack：大体积工具结果的句柄化存储 + obs_recall 分页读回。
+ * ObservationPack：大体积工具结果的句柄化存储 + obs_recall 读回。
  *
  * 借鉴 NVlabs/SoL-Pi 的 ObservationPack 机制（MIT）：
  * 工具结果被 compactToolOutputForLlm 压缩 / foldOldWaveToolChains 折叠后，原文此前
  * 永久离开模型上下文——模型需要细节时只能重新执行原工具（再付一次延迟与费用，
  * 且非幂等工具有副作用风险）。本模块在压缩发生时把完整原文归档为稳定句柄
- * （obs_N），并暴露 obs_recall 工具按 offset/limit 分页读回：
+ * （obs_N），并暴露 obs_recall 工具读回：
  *  - 归档在压缩点（openai-compatible-tool-loop 主执行路径）完成，附一行读回提示；
  *  - replan 折叠摘要逐行追加句柄标注，模型可按句柄回读旧波原文；
+ *  - WP1（借鉴 codebase-memory-mcp「结构索引+定向读取」）：归档时用 content-map
+ *    构建确定性结构索引，obs_recall 支持 mode="outline" 看目录、query=关键词
+ *    定向跳转，替代线性盲翻页；无 map/无 query 时保持原 offset/limit 分页不变；
  *  - 存储有上限（条数 / 总字符 / 会话数），超限 FIFO 淘汰最旧条目；
  *  - 读不到（句柄失效/不存在）时返回可恢复错误，模型重跑原工具即可，无静默丢数据。
  *
@@ -15,6 +18,8 @@
  * streamCompletionWithTools 的执行器分发处直接服务，不进 ToolRegistry、
  * 不走超时竞速与确定性重试管线（读回是纯内存切片）。
  */
+
+import { buildContentMap, renderOutline, resolveQueryWindow, type SemanticHint } from "./content-map.js";
 
 /** obs_recall 的注册表名（无 `.`，API 名与注册表名一致）。 */
 export const OBS_RECALL_TOOL_NAME = "obs_recall";
@@ -38,6 +43,17 @@ export interface ArchivedObservation {
   /** 完整原文（compactToolOutputForLlm 的 rawText，即 strip 后的 JSON 序列化文本）。 */
   text: string;
   chars: number;
+  /**
+   * 确定性结构索引（WP1，content-map.ts）：归档时构建，供 obs_recall 的
+   * mode="outline" 与 query=关键词 定向读取。构建失败时缺省（走线性分页）。
+   */
+  map?: import("./content-map.js").ContentMap;
+  /**
+   * 与 map.sections 按下标对齐的节向量（WP1.1 精确度优化）：归档后由注入的
+   * embedder 异步富集，recall(query) 时与 query 向量做余弦混合打分。
+   * 未富集/富集失败时缺省（纯词面打分）。
+   */
+  sectionVectors?: Float32Array[];
   /** 归档时的 tool_call_id（折叠摘要按它反查句柄；桥接路径可能没有）。 */
   toolCallId?: string;
   archivedAt: number;
@@ -57,9 +73,18 @@ export type ObsRecallOutcome =
         /** null 表示已到末尾；否则提示模型用该 offset 继续。 */
         nextOffset: number | null;
         text: string;
+        /** mode="outline" 时返回结构索引文本（此时 text 为空）。 */
+        kind?: string;
+        outline?: string;
+        /** query 定向读取时命中的节标题（按得分降序，最多 3 个）。 */
+        matched?: string[];
+        /** 次优候选节标题——top 窗口没找到答案时换词重试的导航提示。 */
+        alternatives?: string[];
+        /** top 窗口缺直接证据（零词面命中且语义弱），建议换关键词或线性翻页。 */
+        lowConfidence?: boolean;
       };
     }
-  | { ok: false; error: string };
+  | { ok: false, error: string };
 
 export class ObservationPack {
   private seq = 0;
@@ -93,14 +118,26 @@ export class ObservationPack {
       this.dropEntry(oldestId);
     }
     const id = `obs_${++this.seq}`;
+    // WP1：归档时顺带构建确定性结构索引（几百字符；失败不影响归档本身）
+    let map: ArchivedObservation["map"];
+    try {
+      map = buildContentMap(rawText);
+    } catch {
+      map = undefined;
+    }
     const entry: ArchivedObservation = {
       id,
       toolName,
       text: rawText,
       chars: rawText.length,
+      ...(map ? { map } : {}),
       ...(toolCallId ? { toolCallId } : {}),
       archivedAt: Date.now(),
     };
+    // WP1.1：有结构索引时异步富集节向量（不阻塞归档与主链路；失败静默退化词面打分）
+    if (map && map.sections.length > 0) {
+      void enrichEntryVectors(entry);
+    }
     this.entries.set(id, entry);
     this.totalChars += entry.chars;
     if (toolCallId) this.byToolCallId.set(toolCallId, id);
@@ -113,8 +150,12 @@ export class ObservationPack {
   }
 
   /**
-   * 分页读回。offset/limit 做防御性归一（负数/浮点/越界），切片不劈开
-   * surrogate pair（emoji 等增补平面字符），返回值携带 nextOffset 供续页。
+   * 读回。三种模式（WP1）：
+   *  - mode="outline"：返回确定性结构索引（不返回正文），模型先看目录再定向读；
+   *  - 带 query：按 ContentMap 打分定位最相关节，直接返回该窗口（定向跳转）；
+   *  - 默认（无 mode/query）：与原行为完全一致，按 offset/limit 线性分页。
+   * offset/limit 做防御性归一（负数/浮点/越界），切片不劈开 surrogate pair，
+   * 返回值携带 nextOffset 供续页。
    */
   recall(args: unknown): ObsRecallOutcome {
     const parsedId =
@@ -128,13 +169,74 @@ export class ObservationPack {
     if (!entry) {
       return { ok: false, error: this.unknownIdError(parsedId) };
     }
-    const rawOffset = (args as { offset?: unknown }).offset;
     const rawLimit = (args as { limit?: unknown }).limit;
-    let offset = Number.parseInt(String(rawOffset ?? "0"), 10);
-    if (!Number.isFinite(offset) || offset < 0) offset = 0;
     let limit = Number.parseInt(String(rawLimit ?? OBS_RECALL_DEFAULT_LIMIT_CHARS), 10);
     if (!Number.isFinite(limit) || limit <= 0) limit = OBS_RECALL_DEFAULT_LIMIT_CHARS;
     limit = Math.min(limit, OBS_RECALL_MAX_LIMIT_CHARS);
+
+    const mode =
+      typeof (args as { mode?: unknown }).mode === "string"
+        ? ((args as { mode: string }).mode as "outline" | "text")
+        : "text";
+    const query =
+      typeof (args as { query?: unknown }).query === "string"
+        ? ((args as { query: string }).query as string).trim()
+        : "";
+
+    if (mode === "outline") {
+      if (!entry.map) {
+        return { ok: false, error: `${parsedId} 无结构索引（内容过短或构建失败），请用 offset/limit 分页读回。` };
+      }
+      return {
+        ok: true,
+        result: {
+          ok: true,
+          id: entry.id,
+          tool: entry.toolName,
+          totalChars: entry.chars,
+          offset: 0,
+          returnedChars: 0,
+          nextOffset: null,
+          text: "",
+          kind: entry.map.kind,
+          outline: renderOutline(entry.map),
+        },
+      };
+    }
+
+    // text 模式：query 定向跳转 → 无 query 或无 map 时退回线性分页
+    let windowOffset: number | null = null;
+    let matched: string[] | undefined;
+    let alternatives: string[] | undefined;
+    let lowConfidence: boolean | undefined;
+    if (query && entry.map) {
+      try {
+        // WP1.1：调用方可注入预计算的 query 向量（tool-loop 在分发前异步取得），
+        // 与归档时富集的节向量做混合打分；任一侧缺失自动退化为纯词面
+        const semantic: SemanticHint | undefined =
+          entry.sectionVectors && isVectorLike((args as { queryVector?: unknown }).queryVector)
+            ? { queryVector: (args as { queryVector: ArrayLike<number> }).queryVector, sectionVectors: entry.sectionVectors }
+            : undefined;
+        const window = resolveQueryWindow(entry.map, entry.text, query, limit, semantic);
+        if (window) {
+          windowOffset = window.offset;
+          matched = window.matchedTitles;
+          if (window.alternatives && window.alternatives.length > 0) alternatives = window.alternatives;
+          if (window.lowConfidence) lowConfidence = true;
+        }
+      } catch {
+        windowOffset = null;
+      }
+    }
+
+    let offset: number;
+    if (windowOffset !== null) {
+      offset = windowOffset;
+    } else {
+      const rawOffset = (args as { offset?: unknown }).offset;
+      offset = Number.parseInt(String(rawOffset ?? "0"), 10);
+      if (!Number.isFinite(offset) || offset < 0) offset = 0;
+    }
 
     const clampedOffset = Math.min(offset, entry.chars);
     const slice = safeSliceText(entry.text, clampedOffset, clampedOffset + limit);
@@ -150,6 +252,9 @@ export class ObservationPack {
         returnedChars: slice.text.length,
         nextOffset,
         text: slice.text,
+        ...(matched ? { matched } : {}),
+        ...(alternatives ? { alternatives } : {}),
+        ...(lowConfidence ? { lowConfidence } : {}),
       },
     };
   }
@@ -213,12 +318,112 @@ export function archiveIfWorthwhile(
   return pack.archive(toolName, toolCallId, rawText);
 }
 
-/** 追加在压缩后 tool 消息尾部的读回提示（一行，~70 字符）。 */
+/** 追加在压缩后 tool 消息尾部的读回提示（一行）。带结构索引时附带定向读法。 */
 export function buildObservationRecallHint(obs: ArchivedObservation): string {
+  if (obs.map && obs.map.sections.length > 0) {
+    return (
+      `[obs_recall 可用] 本条结果已压缩（原文 ${obs.chars} 字符）。` +
+      `先看结构：obs_recall(id="${obs.id}", mode="outline")；` +
+      `或带关键词定向读取：obs_recall(id="${obs.id}", query="关键词", limit=4000)。` +
+      `query 未命中时改用结果原文中的关键词重试。不要重新执行原工具。`
+    );
+  }
   return (
     `[obs_recall 可用] 本条结果已压缩（原文 ${obs.chars} 字符）。` +
     `需要更多细节时调用 obs_recall(id="${obs.id}", offset=0, limit=4000) 分页读回原文，不要重新执行原工具。`
   );
+}
+
+// ── WP1.1 语义富集：可注入 embedder + 归档后异步节向量 + query 向量 ──
+// 降级链：未注入/端点缺失/请求失败 → 无向量 → obs_recall 自动退化为纯词面打分。
+
+/** 批量嵌入接口：返回向量与输入一一对应；失败/不可用时返回 null（不抛错）。 */
+export type ObservationEmbedder = (texts: string[]) => Promise<Float32Array[] | null>;
+
+let obsEmbedder: ObservationEmbedder | null = null;
+/** 真实端点接线状态：true=已尝试（无论成败），失败后按间隔重试。 */
+let wired = false;
+let lastWireFailedAt = 0;
+const WIRE_RETRY_MS = 5 * 60 * 1000;
+/** 单节参与嵌入的文本长度上限（标题 + 节头，控制成本）。 */
+const EMBED_TEXT_CHARS = 512;
+
+/** 注入嵌入实现（测试注入 mock；生产由本模块自动接线 OpenAI 兼容端点）。传 null 卸载。 */
+export function setObservationEmbedder(fn: ObservationEmbedder | null): void {
+  obsEmbedder = fn;
+  wired = true; // 显式注入视为最终决定，不再自动接线
+}
+
+function isVectorLike(v: unknown): v is ArrayLike<number> {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof (v as { length?: unknown }).length === "number" &&
+    (v as { length: number }).length > 0
+  );
+}
+
+/** 自动接线：显式开启 AGENT_OBS_CONTENT_EMBEDDING 且配置了 OpenAI 兼容端点时才启用
+ * （默认关——灰度哲学：语义增强按需开启，测试环境零网络请求）。 */
+async function ensureEmbedderWired(): Promise<ObservationEmbedder | null> {
+  if (obsEmbedder) return obsEmbedder;
+  if (wired && Date.now() - lastWireFailedAt < WIRE_RETRY_MS) return null;
+  wired = true;
+  const flag = process.env.AGENT_OBS_CONTENT_EMBEDDING?.trim().toLowerCase();
+  if (!(flag === "1" || flag === "true" || flag === "on")) return null;
+  try {
+    const { resolveEmbeddingEndpoint, fetchOpenAiCompatibleEmbeddings } = await import(
+      "../services/openai-embedding-client.js"
+    );
+    if (!resolveEmbeddingEndpoint()) return null;
+    obsEmbedder = async (texts: string[]) => {
+      try {
+        const { vectors } = await fetchOpenAiCompatibleEmbeddings({ inputs: texts, timeoutMs: 8_000 });
+        return vectors.map((v) => Float32Array.from(v));
+      } catch {
+        lastWireFailedAt = Date.now();
+        return null;
+      }
+    };
+    return obsEmbedder;
+  } catch {
+    lastWireFailedAt = Date.now();
+    return null;
+  }
+}
+
+/** 归档后异步富集节向量（fire-and-forget；任何失败静默，词面打分兜底）。 */
+async function enrichEntryVectors(entry: ArchivedObservation): Promise<void> {
+  const embedder = await ensureEmbedderWired();
+  if (!embedder || !entry.map) return;
+  try {
+    const texts = entry.map.sections.map(
+      (s) => `${s.title} ${entry.text.slice(s.offset, s.offset + Math.min(s.chars, EMBED_TEXT_CHARS))}`,
+    );
+    const vectors = await embedder(texts);
+    if (vectors && vectors.length === entry.map.sections.length) {
+      entry.sectionVectors = vectors;
+    }
+  } catch {
+    /* 静默：保持无向量，词面打分兜底 */
+  }
+}
+
+/**
+ * 取 query 向量（tool-loop 在分发 obs_recall 前调用；无 embedder/失败返回 null）。
+ * 嵌入客户端自带 TTL 缓存，同一 query 重复读回不重复计费。
+ */
+export async function embedObsQuery(query: string): Promise<Float32Array | null> {
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+  const embedder = await ensureEmbedderWired();
+  if (!embedder) return null;
+  try {
+    const vectors = await embedder([trimmed]);
+    return vectors?.[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ── 会话级复用：同一 session 的后续对话轮可读回此前轮次归档的结果 ──

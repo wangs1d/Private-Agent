@@ -3,8 +3,8 @@ import "package:flutter/material.dart";
 /// 竖向拖动分割条。
 ///
 /// 设计:
-/// - **常显灰色分隔缝**（Coze 式双面板隔阂）：整个 hit-test 区域填充分隔色，
-///   让左右两块面板中间始终有一条明显的灰色缝
+/// - **常显淡分隔缝**：整个 hit-test 区域填一条比面板底色仅亮/暗约 2–4%
+///   的过渡带，把左右两块面板淡淡地隔开，不形成明显的灰缝
 /// - 鼠标进入时显现拖拽手柄（居中竖直胶囊），拖动期间高亮
 /// - 拖动期间整个 hit-test 区域(默认 8px)持续可命中
 ///
@@ -27,7 +27,7 @@ class VerticalDragDivider extends StatefulWidget {
   /// 拖动回调(累计水平位移,正值向右)
   final ValueChanged<double> onDrag;
 
-  /// 是否显示常显灰色分隔缝（Coze 式）。
+  /// 是否显示常显淡分隔缝。
   /// 只在双面板（split）模式为 true；side 窄面板模式不显示缝，仅保留拖拽。
   final bool showStrip;
 
@@ -48,11 +48,13 @@ class _VerticalDragDividerState extends State<VerticalDragDivider> {
   bool _hovering = false;
   bool _dragging = false;
 
-  /// 分隔缝底色：常显、明显。深色 #3F3F46 / 暖色 #DDE4EE——
-  /// 在同色的两块面板（聊天 cs.surface / 工具面板）之间拉出清晰的灰缝。
+  /// 分隔缝底色：极淡。从面板底色（cs.surface）派生——深色下向白色
+  /// 混 2%、浅色下向黑色混 4%，只留下一条若隐若现的浅缝而非明显灰带。
   Color _stripColor(ColorScheme cs) {
     final bool isDark = Theme.of(context).brightness == Brightness.dark;
-    return isDark ? const Color(0xFF3F3F46) : const Color(0xFFDDE4EE);
+    return isDark
+        ? Color.lerp(cs.surface, Colors.white, 0.02)!
+        : Color.lerp(cs.surface, Colors.black, 0.04)!;
   }
 
   Color _lineColor(ColorScheme cs) {

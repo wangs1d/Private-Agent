@@ -37,6 +37,24 @@ class ContentSummaryItem {
   bool get hasContent => title.isNotEmpty || (snippet?.isNotEmpty ?? false);
 }
 
+/// 气泡简洁要点（服务端 briefPoints）：折叠卡上方展示的概要内容，
+/// 详细正文在折叠卡对应的右侧面板/弹窗中。
+class ContentSummaryBriefPoint {
+  const ContentSummaryBriefPoint({required this.icon, required this.text});
+
+  final String icon;
+  final String text;
+
+  factory ContentSummaryBriefPoint.fromJson(Map<String, dynamic> json) {
+    return ContentSummaryBriefPoint(
+      icon: json["icon"]?.toString() ?? "•",
+      text: json["text"]?.toString() ?? "",
+    );
+  }
+
+  bool get hasContent => text.trim().isNotEmpty;
+}
+
 class ContentSummaryDataV2 {
   const ContentSummaryDataV2({
     required this.id,
@@ -45,6 +63,7 @@ class ContentSummaryDataV2 {
     required this.cardIcon,
     required this.cardLabel,
     required this.briefCount,
+    this.briefPoints = const <ContentSummaryBriefPoint>[],
     this.detailContent,
     this.sections,
     this.metadata,
@@ -56,12 +75,15 @@ class ContentSummaryDataV2 {
   final String cardIcon;
   final String cardLabel;
   final int briefCount;
+  final List<ContentSummaryBriefPoint> briefPoints;
   final String? detailContent;
   final List<ContentSummarySectionInfo>? sections;
   final Map<String, dynamic>? metadata;
 
   factory ContentSummaryDataV2.fromJson(Map<String, dynamic> json) {
     final List<dynamic>? rawSections = json["sections"] as List<dynamic>?;
+    final List<dynamic>? rawBriefPoints =
+        json["briefPoints"] as List<dynamic>?;
     return ContentSummaryDataV2(
       id: json["id"]?.toString() ?? "",
       category: json["category"]?.toString() ?? "general",
@@ -69,6 +91,15 @@ class ContentSummaryDataV2 {
       cardIcon: json["cardIcon"]?.toString() ?? "☰",
       cardLabel: json["cardLabel"]?.toString() ?? "详情",
       briefCount: _asInt(json["briefCount"]),
+      briefPoints: (rawBriefPoints ?? const <dynamic>[])
+          .whereType<Map>()
+          .map(
+            (Map raw) => ContentSummaryBriefPoint.fromJson(
+              raw.cast<String, dynamic>(),
+            ),
+          )
+          .where((ContentSummaryBriefPoint p) => p.hasContent)
+          .toList(),
       detailContent: json["detailContent"]?.toString(),
       sections: rawSections
           ?.whereType<Map<String, dynamic>>()
@@ -150,6 +181,54 @@ class ContentSummaryParser {
     "数据表",
   };
 
+  /// 展示形态声明标记行（[RENDER_HINT:xxx] / [RENDER_AS:xxx]）——只属于
+  /// 渲染路由信号，不属于正文。历史落库消息的 detailContent 可能残留
+  /// （服务端旧版只剥离文本开头的标记），展示时整行剥离。
+  static final RegExp _renderDeclarationLine =
+      RegExp(r"^\[RENDER_(?:HINT|AS):\w+\]$");
+
+  /// 详情正文消毒：剥离裸露的形态标记行 + 删除与卡片标题重复的首行导语
+  /// （标题即取自正文首行时，面板/弹窗顶栏已展示标题，正文不再复读）。
+  /// 服务端 2026-09 起生成即消毒，此处兜底历史消息。
+  static String sanitizeDetailContent(String content, String title) {
+    if (content.trim().isEmpty) return content;
+
+    // YAML front matter（首行 --- 到下一个 --- 之间，AIGC 标识等元数据）
+    // 不属于正文，剥离；后续出现的 --- 是板块分隔线，保留给渲染器。
+    String text = content;
+    final List<String> rawLines = text.trimLeft().split("\n");
+    if (rawLines.first.trim() == "---") {
+      for (int i = 1; i < rawLines.length; i++) {
+        if (rawLines[i].trim() == "---") {
+          text = rawLines.skip(i + 1).join("\n");
+          break;
+        }
+      }
+    }
+
+    final String titleTrim = title.trim();
+    final List<String> lines = text
+        .split("\n")
+        .where((String line) => !_renderDeclarationLine.hasMatch(line.trim()))
+        .toList();
+    if (titleTrim.isEmpty) {
+      return lines.join("\n").trim();
+    }
+    final int firstIdx =
+        lines.indexWhere((String line) => line.trim().isNotEmpty);
+    if (firstIdx == -1) return lines.join("\n").trim();
+    final String first = lines[firstIdx].trim();
+    final String firstSansHash =
+        first.replaceFirst(RegExp(r"^#{1,3}\s+"), "").trim();
+    final bool echoed = first == titleTrim ||
+        firstSansHash == titleTrim ||
+        (titleTrim.length >= 12 && first.contains(titleTrim));
+    if (echoed) {
+      lines.removeAt(firstIdx);
+    }
+    return lines.join("\n").trim();
+  }
+
   @Deprecated("Use taskSubject(summary) for display copy")
   static String categoryLabel(String category, String cardLabel) {
     final String fromCard = cardLabel.trim();
@@ -200,16 +279,9 @@ class ContentSummaryParser {
         briefText = extracted.remaining.trim();
       }
 
-      // 精简区缺失时生成概括性介绍（不复用详情正文结构）
-      if (briefText.trim().isEmpty && summary.detailContent?.isNotEmpty == true) {
-        briefText = _generateOverviewBrief(summary);
-      } else if (briefText.trim().length < 24 &&
-          summary.detailContent?.isNotEmpty == true) {
-        final String overview = _generateOverviewBrief(summary);
-        if (overview.length > briefText.trim().length) {
-          briefText = overview;
-        }
-      }
+      // 冗余守卫：briefText 不再自动补概要。卡片自身已展示 label + title，
+      // 详情点击后在右侧双面板查看；在卡片前再垫一段生成文案属于冗余设计。
+      // 服务端自 2026-09 起也不再输出 titleLine，briefText 通常为空。
 
       return ContentSummaryParseResult(
         summary: summary,
@@ -366,52 +438,6 @@ class ContentSummaryParser {
     } catch (_) {
       return const <ContentSummaryItem>[];
     }
-  }
-
-  /// 生成概括性介绍（非详情正文摘录）
-  static String _generateOverviewBrief(ContentSummaryDataV2 summary) {
-    final String? detailContent = summary.detailContent;
-    if (detailContent == null || detailContent.trim().isEmpty) {
-      return "";
-    }
-
-    final String subject = ContentSummaryParser.taskSubject(summary);
-    final int wordCount = summary.metadata?["wordCount"] as int? ??
-        detailContent.length;
-    final List<String> parts = <String>[];
-
-    final String title = summary.title.trim();
-    final bool hasHeadline =
-        title.isNotEmpty &&
-        title.length > 2 &&
-        !title.contains("_") &&
-        title != subject;
-
-    final String headlineHint =
-        hasHeadline ? "（${_truncate(title, 36)}）" : "";
-
-    parts.add("【$subject】全文约 $wordCount 字$headlineHint。以下为概要，完整内容见下方详情卡。");
-
-    if (summary.sections != null && summary.sections!.length > 1) {
-      final List<String> titles = summary.sections!
-          .map((ContentSummarySectionInfo s) => s.title.trim())
-          .where((String t) => t.isNotEmpty)
-          .toList();
-      if (titles.length <= 4) {
-        parts.add("主要涵盖：${titles.join("、")}。");
-      } else {
-        parts.add(
-          "主要涵盖 ${titles.length} 个部分：${titles.take(3).join("、")}等。",
-        );
-      }
-    }
-
-    return parts.join("\n");
-  }
-
-  static String _truncate(String text, int maxLen) {
-    if (text.length <= maxLen) return text;
-    return "${text.substring(0, maxLen - 3)}...";
   }
 }
 

@@ -31,6 +31,7 @@ import type { ShoppingCompareService } from "../../services/shopping-compare-ser
 import type { AgentBrowserService } from "../../services/agent-browser-service.js";
 import type { SharedBrowserCoordinator } from "../../services/shared-browser-coordinator.js";
 import type { SharedBrowserCdpGateway } from "../../services/shared-browser/cdp-gateway.js";
+import type { PhoneCallCoordinator } from "../../services/phone-call-coordinator.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
 import type { ClientPushPort } from "../../ports/client-push-port.js";
 
@@ -124,6 +125,9 @@ import {
   registerTravelBookingTools,
 } from "./travel-booking/index.js";
 import {
+  buildPhoneCallModule,
+} from "./phone-call/index.js";
+import {
   PICTURE_INTENT_RULES,
   registerPictureModuleTools,
 } from "./picture/index.js";
@@ -185,6 +189,8 @@ export interface CapabilityModuleDeps {
   sharedBrowserCdpGateway?: SharedBrowserCdpGateway;
   /** 统一预订编排服务（方案 A：网约车/家政/餐厅共用） */
   bookingService: BookingService;
+  /** 电话代办协调器（phone_call.*：真实外呼确认门/频控/状态机/结果回填） */
+  phoneCallCoordinator: PhoneCallCoordinator;
   /** 图片能力套件(图库/美颜批图),存储根 data/pictures */
   pictureKit: PictureKit;
 }
@@ -390,6 +396,9 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       register: (registry) => registerTravelBookingTools(registry, { bookingService: deps.bookingService }),
       category: TRAVEL_BOOKING_CATEGORY_MAPPING,
     },
+    // 电话代办：模块自带 PHONE_CALL_ENABLED 开关门控（关闭时 schema/执行器/intent 全空，
+    // 对 LLM 不可见且无漂移），故直接复用 buildPhoneCallModule。
+    buildPhoneCallModule({ phoneCallCoordinator: deps.phoneCallCoordinator }),
     {
       domain: "picture",
       label: "图片图库",

@@ -43,13 +43,24 @@ export const SKILL_VIEW_CHAT_TOOL: ChatCompletionTool = {
       "读取指定技能的详情。procedural 技能返回 SKILL.md 全文" +
       "（含 ## When to Use / ## Procedure / ## Pitfalls / ## Verification 四个章节）；" +
       "code 技能返回元数据。用于按需加载技能全文（渐进式召回 Level 1），" +
-      "确认某技能与当前任务相关后再调用。",
+      "确认某技能与当前任务相关后再调用。" +
+      "大文档建议两步读：先 mode=\"outline\" 看章节目录，再用 section=\"章节标题\" 只读所需章节，" +
+      "避免整份文档挤占上下文（章节仅供导航，引用细节前须读对应章节原文）。",
     parameters: {
       type: "object",
       properties: {
         name: {
           type: "string",
           description: "技能名（namespace.action 格式，如 'devops.deploy_k8s'）",
+        },
+        mode: {
+          type: "string",
+          enum: ["full", "outline"],
+          description: "full=全文（默认）；outline=仅返回章节目录（标题+字数），不返回正文",
+        },
+        section: {
+          type: "string",
+          description: "章节标题（如 \"Pitfalls\" 或中文标题，支持部分匹配）。给出时只返回该章节内容",
         },
       },
       required: ["name"],
@@ -145,34 +156,101 @@ export function registerSkillManageTools(
         version: m.version,
       })),
       hint:
-        "procedural 技能需用 skill.view 读取全文后作为上下文使用；code 技能可直接调用执行。",
+        "procedural 技能需用 skill.view 读取后作为上下文使用（大文档可先 mode=\"outline\" 看章节目录再按 section 读，省上下文）；code 技能可直接调用执行。",
     };
   });
 
-  // ========== skill.view：按需加载全文（渐进式召回 Level 1） ==========
+  // ========== skill.view：按需加载（渐进式召回 Level 1；WP4 支持分节读） ==========
   registry.register("skill.view", async (input) => {
     const name = String(input.name ?? "").trim();
     if (!name) {
       return { ok: false, error: "请提供技能名（name）" };
     }
+    const mode = String(input.mode ?? "full");
+    const section = String(input.section ?? "").trim();
 
-    // procedural 技能：返回全文
+    // procedural 技能：全文 / outline / section 三种读法
     if (skillManager.isProceduralSkill(name)) {
       const result = skillManager.getProceduralSkillDoc(name);
       if (!result.ok) {
         return { ok: false, error: result.error };
       }
+      const doc = result.doc ?? "";
+      const metadata = {
+        name: result.metadata?.name,
+        description: result.metadata?.description,
+        tags: result.metadata?.tags,
+        version: result.metadata?.version,
+      };
+
+      // WP4（借鉴 codebase-memory-mcp「结构索引+定向读取」）：确定性章节抽取
+      // （复用 content-map 的 markdown 标题切节，无 LLM），大文档按节读省 token
+      if (mode === "outline" || section) {
+        const { buildContentMap, resolveQueryWindow } = await import(
+          "../external-model/content-map.js"
+        );
+        const map = buildContentMap(doc);
+        if (mode === "outline" && !section) {
+          const { renderOutline } = await import("../external-model/content-map.js");
+          return {
+            ok: true,
+            skillType: "procedural",
+            name,
+            mode: "outline",
+            docChars: doc.length,
+            outline: renderOutline(map),
+            metadata,
+            hint: "章节目录仅供导航。用 section=\"章节标题\" 读取所需章节；引用细节前必须读对应章节原文。",
+          };
+        }
+        if (!map.sections.length) {
+          return { ok: false, error: "该技能文档无章节结构（无 markdown 标题），请用 mode=\"full\" 读全文。" };
+        }
+        // 章节定位：先精确/前缀匹配标题，未命中再用 query 窗口定位（容错短语）
+        const lower = section.toLowerCase();
+        const hit =
+          map.sections.find((s) => s.title.toLowerCase() === lower) ??
+          map.sections.find((s) => s.title.toLowerCase().startsWith(lower) || s.title.toLowerCase().includes(lower));
+        if (hit) {
+          const body = doc.slice(hit.offset, hit.offset + hit.chars);
+          return {
+            ok: true,
+            skillType: "procedural",
+            name,
+            mode: "section",
+            section: hit.title,
+            sectionChars: hit.chars,
+            docChars: doc.length,
+            content: body,
+            metadata,
+          };
+        }
+        const win = resolveQueryWindow(map, doc, section, 3000);
+        if (win) {
+          return {
+            ok: true,
+            skillType: "procedural",
+            name,
+            mode: "section",
+            section: win.matchedTitles[0] ?? section,
+            sectionChars: win.chars,
+            docChars: doc.length,
+            content: doc.slice(win.offset, win.offset + win.chars),
+            metadata,
+          };
+        }
+        return {
+          ok: false,
+          error: `未找到章节「${section}」。可先 mode="outline" 查看章节目录，或 mode="full" 读全文。`,
+        };
+      }
+
       return {
         ok: true,
         skillType: "procedural",
         name,
-        doc: result.doc,
-        metadata: {
-          name: result.metadata?.name,
-          description: result.metadata?.description,
-          tags: result.metadata?.tags,
-          version: result.metadata?.version,
-        },
+        doc,
+        metadata,
       };
     }
 

@@ -36,7 +36,10 @@ export type SearchApiConfig = {
 // 默认 5000ms 给 API，剩余预算留给爬虫兜底；SEARCH_API_TIMEOUT_MS 可调。
 const SEARCH_API_TIMEOUT_MS =
   Number.parseInt(process.env.SEARCH_API_TIMEOUT_MS ?? "5000", 10) || 5000;
-const ANYSEARCH_ENDPOINT = "https://api.anysearch.com/v1/search";
+const ANYSEARCH_ENDPOINT =
+  (process.env.ANYSEARCH_ENDPOINT ?? "").trim() || "https://api.anysearch.com/v1/search";
+// 能力拓扑查询端点：与搜索端点同源（/v1/search → /v1/sub-domains）
+const ANYSEARCH_SUB_DOMAINS_ENDPOINT = ANYSEARCH_ENDPOINT.replace(/\/v1\/search$/, "/v1/sub-domains");
 const DEFAULT_BING_ENDPOINT = "https://api.cognitive.microsoft.com/bing/v7.0/search";
 
 function normalizeProvider(raw: string | undefined): SearchApiProviderType {
@@ -150,12 +153,131 @@ export async function searchImagesViaSearchApi(
       return searchSerperImages(keyword, boundedLimit, cfg.apiKey);
     case "bing":
       return searchBingImages(keyword, boundedLimit, cfg.apiKey, cfg.bingEndpoint);
-    // Jina / AnySearch 无稳定的图片搜索端点 → 返回空数组，回退到爬图片网页兜底。
+    // Jina 无图片搜索端点 → 返回空数组，回退到爬图片网页兜底。
     case "jina":
+      return [];
+    // AnySearch：/v1/search 按 tag={domain}.{sub_domain} 路由垂直搜索。图片能力
+    // 服务端灰度开放中（2026-09-17 实测能力拓扑仅 code/finance/travel），这里做
+    // 能力自发现：开放后自动切走必应爬页兜底，无需改代码；详见 searchAnySearchImages。
     case "anysearch":
+      return searchAnySearchImages(keyword, boundedLimit, cfg);
     default:
       return [];
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AnySearch 图片垂直搜索（能力自发现）
+//
+// AnySearch 的图片搜索不是独立端点，而是 /v1/search + tag={domain}.{sub_domain}
+// 的垂直路由。tag 取值由 GET /v1/sub-domains?domain=image 下发——能力未对当前
+// key 开放时该请求返回 code:-1「Capabilities temporarily unavailable」。
+// 因此这里按 10 分钟窗口探测一次（结果正负都缓存）：
+//   - 探测到 image 域有 sub_domain → 用 ${domain}.${sub_domain} 作为 tag 搜图；
+//   - 未开放 → 返回 []，调用方回退必应爬页兜底（现状不变）；
+//   - ANYSEARCH_IMAGE_TAG 环境变量可显式指定 tag 强制启用，=off 关闭探测。
+// 结果字段按未来垂直扩展容错解析（image_url/media_url/thumbnail… 均兼容）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ANYSEARCH_IMAGE_PROBE_TTL_MS = 10 * 60 * 1000;
+const ANYSEARCH_IMAGE_PROBE_TIMEOUT_MS = 2_500;
+const ANYSEARCH_IMAGE_PROBE_DOMAINS = ["image", "images", "photo"] as const;
+let anysearchImageProbe: { at: number; tag: string | null } | null = null;
+
+/** 仅供测试：清空 AnySearch 图片能力探测缓存，隔离用例间的模块级状态。 */
+export function resetAnySearchImageProbeForTests(): void {
+  anysearchImageProbe = null;
+}
+
+async function resolveAnySearchImageTag(cfg: SearchApiConfig): Promise<string | null> {
+  const forced = (process.env.ANYSEARCH_IMAGE_TAG ?? "").trim();
+  if (forced) return forced.toLowerCase() === "off" ? null : forced;
+
+  if (anysearchImageProbe && Date.now() - anysearchImageProbe.at < ANYSEARCH_IMAGE_PROBE_TTL_MS) {
+    return anysearchImageProbe.tag;
+  }
+  let tag: string | null = null;
+  for (const domain of ANYSEARCH_IMAGE_PROBE_DOMAINS) {
+    const json = await requestJson(
+      `${ANYSEARCH_SUB_DOMAINS_ENDPOINT}?domain=${domain}`,
+      { method: "GET", headers: { authorization: `Bearer ${cfg.apiKey}` } },
+      ANYSEARCH_IMAGE_PROBE_TIMEOUT_MS,
+    );
+    if (!isObj(json)) break; // 端点不可达同样视为不可用：连续探测最多 3×2.5s 会拖垮本次调用预算
+    if (json.code !== 0) break; // 能力拓扑服务端明确拒绝（未开放），无需再试其他域名
+    const data = json.data;
+    if (!isObj(data) || !Array.isArray(data.domains)) continue;
+    const entry = data.domains.filter(isObj).find((d) => str(d.domain) === domain);
+    const subs = entry && Array.isArray(entry.sub_domains) ? entry.sub_domains.filter(isObj) : [];
+    const first = subs.map((s) => str(s.sub_domain)).find(Boolean);
+    if (first) {
+      tag = `${domain}.${first}`;
+      break;
+    }
+  }
+  anysearchImageProbe = { at: Date.now(), tag };
+  if (!tag) {
+    console.warn(
+      `[SearchApi] AnySearch 图片垂直能力未开放（探测 ${ANYSEARCH_IMAGE_PROBE_DOMAINS.join("/")} 域均不可用），` +
+        `search_images 暂走必应爬页兜底；能力开放后 ${Math.round(ANYSEARCH_IMAGE_PROBE_TTL_MS / 60_000)} 分钟内自动切换，` +
+        `或设 ANYSEARCH_IMAGE_TAG=<tag> 强制启用`,
+    );
+  }
+  return tag;
+}
+
+async function searchAnySearchImages(
+  query: string,
+  limit: number,
+  cfg: SearchApiConfig,
+): Promise<ImageApiItem[]> {
+  const tag = await resolveAnySearchImageTag(cfg);
+  if (!tag) return [];
+  const json = await requestJson(ANYSEARCH_ENDPOINT, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${cfg.apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      // 官方约束 max_results 1–10
+      max_results: Math.max(1, Math.min(10, limit)),
+      tag,
+      zone: cfg.anysearchZone === "intl" ? "intl" : "cn",
+      language: cfg.anysearchLang,
+    }),
+  });
+  if (!isObj(json)) return [];
+  if (json.code !== 0) {
+    console.warn(
+      `[SearchApi] AnySearch 图片垂直失败 code=${String(json.code)} msg=${String(json.message ?? "")} tag=${tag} query="${query.slice(0, 40)}"`,
+    );
+    return [];
+  }
+  const data = json.data;
+  if (!isObj(data) || !Array.isArray(data.results)) return [];
+  const out: ImageApiItem[] = [];
+  const seen = new Set<string>();
+  for (const item of data.results) {
+    if (!isObj(item)) continue;
+    const rec = item as Record<string, unknown>;
+    const mediaUrl =
+      str(rec.image_url) || str(rec.imageUrl) || str(rec.media_url) || str(rec.mediaUrl) ||
+      str(rec.thumbnail) || str(rec.thumbnail_url) || str(rec.url);
+    const low = mediaUrl.toLowerCase();
+    if (!mediaUrl || !/^https?:\/\//i.test(mediaUrl) || seen.has(low)) continue;
+    seen.add(low);
+    out.push({
+      title: str(rec.title) || query,
+      mediaUrl,
+      thumbnailUrl:
+        str(rec.thumbnail_url) || str(rec.thumbnailUrl) || str(rec.thumbnail) || mediaUrl,
+      pageUrl: str(rec.page_url) || str(rec.pageUrl) || str(rec.source_url) || str(rec.link),
+    });
+    if (out.length >= limit) break;
+  }
+  return out.length > 0 ? withSource(out, "AnySearch") : [];
 }
 
 async function searchTavilyImages(query: string, limit: number, apiKey: string): Promise<ImageApiItem[]> {

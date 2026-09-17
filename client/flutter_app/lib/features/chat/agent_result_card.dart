@@ -1207,6 +1207,12 @@ class _TravelItineraryCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
+                  // ── 每日安排（行程卡即独立规划卡：卡面直读逐日安排，
+                  // 用户不点开面板也能在消息里看规划）──
+                  if (data.items.isNotEmpty) ...<Widget>[
+                    _buildDaySummaryList(),
+                    const SizedBox(height: 10),
+                  ],
                   // ── 出行叮嘱（记得带）──
                   if (plan.packing.isNotEmpty) ...<Widget>[
                     _buildPackingRow(plan.packing, palette),
@@ -1443,6 +1449,42 @@ class _TravelItineraryCard extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  /// 「每日安排」逐日列表（Day N · 日期：亮点 → 亮点，服务端
+  /// buildTravelDaySummaryItems 生成）：行程卡以独立规划卡形式直接展示
+  /// 逐日安排，用户在消息里即可看规划；完整明细仍可点按钮进双面板查看。
+  Widget _buildDaySummaryList() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        for (int i = 0; i < data.items.length; i++)
+          Padding(
+            padding: EdgeInsets.only(bottom: i == data.items.length - 1 ? 0 : 6),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: _ItemMark(type: data.items[i].type, colorScheme: cs),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    data.items[i].text,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.5,
+                      color: cs.onSurface.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 

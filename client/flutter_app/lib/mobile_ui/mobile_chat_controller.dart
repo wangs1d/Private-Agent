@@ -267,12 +267,14 @@ class MobileChatController extends ChangeNotifier {
       );
     }
     final String finalText = payload["finalText"]?.toString() ?? "";
-    // 结构化媒体卡片 / 交错渲染块：与桌面端一致，前端据此渲染卡片与图文交错，
-    // 不再把 `[AGENT_RESULT_CARD_START]` 等标记当纯文本展示。
+    // 结构化媒体卡片 / 交错渲染块 / 回复信封块：与桌面端一致，前端据此渲染
+    // 卡片与图文交错，不再把 `[AGENT_RESULT_CARD_START]` 等标记当纯文本展示。
     final List<Map<String, dynamic>>? mediaCards =
         _parseStructuredList(payload, "mediaCards");
     final List<Map<String, dynamic>>? renderBlocks =
         _parseStructuredList(payload, "renderBlocks");
+    final List<Map<String, dynamic>>? replyBlocks =
+        _parseStructuredList(payload, "blocks");
     if (idx < 0) {
       // 没有流式占位:直接落一条最终消息
       messages.add(ChatMessage(
@@ -283,6 +285,7 @@ class MobileChatController extends ChangeNotifier {
         timestamp: DateTime.now(),
         mediaCards: mediaCards,
         renderBlocks: renderBlocks,
+        replyBlocks: replyBlocks,
       ));
     } else {
       final ChatMessage prev = messages[idx];
@@ -295,6 +298,7 @@ class MobileChatController extends ChangeNotifier {
         streaming: false,
         mediaCards: mediaCards ?? prev.mediaCards,
         renderBlocks: renderBlocks ?? prev.renderBlocks,
+        replyBlocks: replyBlocks ?? prev.replyBlocks,
       );
     }
     _streamingMessageId = null;

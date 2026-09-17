@@ -141,6 +141,7 @@ import { ImageGenerationService } from "../services/image-generation-service.js"
 import { FileProcessingService } from "../services/file-processing-service.js";
 import { EmailSmsService } from "../services/email-sms-service.js";
 import { MediaMusicService } from "../services/media-music-service.js";
+import { MailWatchService } from "../services/mail-watch-service.js";
 import { HealthFitnessService } from "../services/health-fitness-service.js";
 import { FinanceDeepService } from "../services/finance-deep-service.js";
 import { SubscriptionAuditService } from "../services/subscription-audit-service.js";
@@ -259,6 +260,7 @@ import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerPhoneBridgeTools } from "../tools/phone-bridge-tools.js";
 import { registerMessageHubTools } from "../tools/message-hub-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
+import { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
 import { registerVideoTools } from "../tools/video-tools.js";
@@ -780,6 +782,26 @@ export async function createAppServices(): Promise<AppServices> {
     invoke: (actorId, action, params) => phoneBridgeCoordinator.invoke(actorId, action, params),
   });
 
+  // 电话代办协调器（phone_call.* 工具族）：agent 代用户向第三方真人拨真实电话。
+  // 默认 PHONE_CALL_ENABLED=false（工具对 LLM 不可见）；确认门权威证据在
+  // connection.ts 的 chat.user_action 原点记录。站内信回执在 inboxService
+  // 构造后经 setInbox 晚绑定（见下方装配段）。
+  const phoneCallCoordinator = new PhoneCallCoordinator({
+    bridge: {
+      hasExecutor: (actorId) => phoneBridgeCoordinator.hasExecutor(actorId),
+      invoke: (actorId, action, params, timeoutMs) =>
+        phoneBridgeCoordinator.invoke(actorId, action, params, timeoutMs),
+    },
+    pushPort: {
+      trySend: (actorId, data) => wsConnectionRegistry.trySend(actorId, data),
+    },
+    audit: auditService,
+    logger: {
+      info: (msg) => app.log.info(msg),
+      warn: (msg) => app.log.warn(msg),
+    },
+  });
+
   // 初始化智能提醒系统（弹窗 → TTS闹钟 → 电话呼叫 三级升级链）
   const intelligentReminder = createIntelligentReminderSystem({
     toolRegistry,
@@ -790,6 +812,26 @@ export async function createAppServices(): Promise<AppServices> {
     sendToClient: async (userId, payload) => {
       await wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
     },
+    // 设备分级触达（2026-09-18）：按连接登记的 deviceClass 区分电脑端/移动端，
+    // 两端全离线时升级链直达 推送→短信→微信 离线必达，不再假装 WS 弹窗成功
+    getDevicePresence: (userId) => ({
+      desktopOnline: wsConnectionRegistry.hasDeviceClass(userId, "desktop"),
+      mobileOnline: wsConnectionRegistry.hasDeviceClass(userId, "mobile"),
+    }),
+    // 离线必达主力：手机系统级推送（proactivePushService 在下方装配段创建，
+    // 回调在提醒触发时才执行，届时必已初始化）
+    offlinePush: (input) => proactivePushService.push(input),
+    // 离线末级兜底：真实短信。收件人取 REMINDER_SMS_TO（私人管家单主人场景）；
+    // 号码未配置或阿里云 SMS 凭证不齐时如实失败，链路继续落微信/站内信
+    offlineSms: async (_userId, text) => {
+      const to = (process.env.REMINDER_SMS_TO ?? "").trim();
+      if (!to || !emailSmsService.isSmsEnabled()) {
+        return { ok: false, reason: "sms_not_configured" };
+      }
+      return emailSmsService.sendSms({ to, text, templateParams: JSON.stringify({ content: text }) });
+    },
+    // 升级链持久化：提醒实例与升级计时落盘，重启后恢复并补升级（此前重启即蒸发）
+    statePath: join(process.cwd(), "data", "intelligent-reminder", "active-reminders.json"),
     onContactOutcome: (params) => {
       const channel =
         params.channel === "popup"
@@ -808,6 +850,11 @@ export async function createAppServices(): Promise<AppServices> {
     logger: app.log,
   });
   await intelligentReminder.userResponsePersistence.load();
+  // 恢复重启前残留的升级链（错过升级时刻的提醒立即补升级）
+  const restoredReminders = await intelligentReminder.reminderService.load();
+  if (restoredReminders > 0) {
+    app.log.info(`[reminder] 已从磁盘恢复 ${restoredReminders} 条提醒实例（含升级计时）`);
+  }
 
   scheduleTaskService.setTaskChangeHandler(async (action, task) => {
     notifyScheduleTasksChanged(
@@ -950,6 +997,7 @@ export async function createAppServices(): Promise<AppServices> {
     sharedBrowserCoordinator,
     sharedBrowserCdpGateway,
     bookingService,
+    phoneCallCoordinator,
   };
   setCapabilityModuleDeps(capabilityModuleDeps);
   // 意图规则 = 能力模块静态规则 + Feature Catalog 生活域检索词（12 域 aliases）
@@ -4323,6 +4371,36 @@ export async function createAppServices(): Promise<AppServices> {
   shoppingCompareService.start();
   console.log("[Bootstrap] 购物降价监控已装配（shopping.compare.watch）");
 
+  // ─── 用户邮箱盯梢（MailWatch，2026-09-18"Agent 帮用户盯消息"地基）───
+  // IMAP 轮询 → 重要性分级（VIP 白名单/确定性关键词规则）：
+  //   critical/high → ProactivityHub 主动提醒（life_reminder kind 走频控，speak 闭环）；
+  //   全部邮件     → message-hub 落库（platform=email，进消息中心统计）。
+  // MAIL_WATCH_ENABLED=0 或配置不齐时 start() 如实 no-op，状态查 mailWatchService.status()。
+  const mailWatchService = new MailWatchService({
+    env: process.env,
+    messageHub: messageHubService,
+    onNewMessage: (mail, classification) => {
+      if (classification.importance === "normal") return;
+      proactivityHub.submitIntent({
+        actorId: mail.actorId,
+        kind: "life_reminder",
+        importance: classification.importance === "critical" ? "high" : "medium",
+        title: `邮件：${mail.subject || "（无主题）"}`,
+        summary:
+          `收到来自 ${mail.from} 的${classification.importance === "critical" ? "重要" : "需要关注"}邮件` +
+          `「${mail.subject || "（无主题）"}」` +
+          `${mail.textSnippet ? `，开头内容：${mail.textSnippet.slice(0, 120)}` : ""}。` +
+          `像助手汇报要事一样自然提起，问用户要不要现在处理；不要复述成资讯播报。`,
+        mode: "speak",
+        source: "email",
+      });
+    },
+  });
+  mailWatchService.start();
+  console.log(
+    `[Bootstrap] 邮箱盯梢 ${mailWatchService.status().running ? "已启动" : "未启用（MAIL_WATCH_ENABLED/MAIL_WATCH_HOST/USER/PASS）"}`,
+  );
+
   // ─── Task 16 消费管家闭环装配（场景B）───
   // 工具执行成功 → hookBus tool.executed → 自动入账（finance-deep）
   // → 预算超支检测（life_reminder 单次提醒）→ 每月 1 日上月消费月报
@@ -4515,6 +4593,10 @@ export async function createAppServices(): Promise<AppServices> {
   const inboxService = new InboxService({
     rootDir: join(process.cwd(), "data", "inbox"),
     wsRegistry: wsConnectionRegistry,
+  });
+  // 电话代办结果回执的必达通道（晚绑定：inboxService 构造晚于 coordinator）
+  phoneCallCoordinator.setInbox({
+    send: (input) => inboxService.send(input),
   });
   // 分级触达通道补齐：离线推送（push 服务刚创建）+ 静默执行台账（晚绑定闭包）
   reachChannels.sendPush = (input) =>
@@ -5131,6 +5213,7 @@ export async function createAppServices(): Promise<AppServices> {
     morningBriefingScheduler,
     eveningDigestScheduler,
     accessAuthService,
+    phoneCallCoordinator,
   });
 
   // MCP 工具异步加载，onReady 时已就绪：二次刷新目录（幂等）

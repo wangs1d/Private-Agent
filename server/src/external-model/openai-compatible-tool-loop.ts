@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import { recordLlmUsageByChars, type LlmAuditStage } from "../services/llm-token-audit.js";
+import { recordLlmUsageByChars, recordToolCompactionByChars, type LlmAuditStage } from "../services/llm-token-audit.js";
 import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
@@ -51,6 +51,7 @@ import {
   OBS_RECALL_TOOL_NAME,
   archiveIfWorthwhile,
   buildObservationRecallHint,
+  embedObsQuery,
   getObservationPack,
   type ArchivedObservation,
 } from "./observation-pack.js";
@@ -162,6 +163,14 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   "shared_browser.type": 300,
   "shared_browser.scroll": 300,
   "shared_browser.read_page": 5000,
+  // phone_call.* —— prepare 携带确认卡 cardMarker（~600 字符）须完整回传给模型原样转发；
+  // status/list/finish 返回会话快照/结果摘要，均为小体积结构化 JSON
+  "phone_call.prepare": 1800,
+  "phone_call.start": 700,
+  "phone_call.status": 1100,
+  "phone_call.finish": 1200,
+  "phone_call.list": 1000,
+  "phone_call.cancel": 400,
 };
 
 // strip_keys：只去掉纯元数据字段，保留 LLM 决策需要的字段。
@@ -315,12 +324,19 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   // shared_browser.* 经 WS 桥转发到客户端浏览器执行（含往返 + 页面加载），超时须覆盖协调器 30s
   if (registryToolName === "shared_browser.navigate") return 45_000;
   if (registryToolName.startsWith("shared_browser.")) return 35_000;
+  // phone_call.start 须等手机桥 dial 回执（含手机端全屏二次确认，桥超时 45s），
+  // 外层须 ≥ 桥超时；通话本体绝不放进工具调用（start 立即返回 callId+状态）
+  if (registryToolName === "phone_call.start") return 60_000;
+  if (registryToolName.startsWith("phone_call.")) return 20_000;
   // 按工具类别分级超时：快工具给短超时，防止上游慢响应把整个 turn 卡到 30s
   const classTimeouts: Record<string, number> = {
     "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
     "weather.get_local": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
     "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
-    "search_images": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
+    // 图片搜索独立 12s 档：内部链路是「结果页抓取 ≤5s + 图片转存硬预算 6.5s ≈ 11.5s」，
+    // 按外圈 12s 设计。曾共享 search_web 的 6.5s 档，慢源查询（如「科莫多」这类图片
+    // 多在境外站 CDN 的小众目的地）必被外层击杀、items 归零，LLM 只能回「搜索超时」。
+    "search_images": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_IMAGES_MS ?? "12000", 10),
     // 视频搜索双源并行（Bing 直抓 10s + B站接口 8s），6.5s 共享档会在正常返回前掐断
     "search_videos": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_VIDEOS_MS ?? "12000", 10),
     "video.grab": Number.parseInt(process.env.TOOL_TIMEOUT_VIDEO_GRAB_MS ?? "25000", 10),
@@ -1294,13 +1310,15 @@ const PLAN_EXECUTE_MAX_WAVES_DEFAULT = (() => {
 const NEED_MORE_TOOLS_MARKER = "NEED_MORE_TOOLS";
 
 /**
- * 规划调用输出 token 上限（仅「非思考」模型生效，思考模型的 reasoning 空间不被压缩）。
- * 防止规划轮模型输出冗长正文（非 tool_calls）时烧 token；正常回答长度远低于该值。
- * 可用环境变量 `PLAN_CALL_MAX_OUTPUT_TOKENS` 调整，设 0 关闭。
+ * 规划/循环内调用的可选输出 token 上限（仅「非思考」模型生效，思考模型的 reasoning
+ * 空间不被压缩）。默认**不封顶**：历史上默认 3000，长回复（多来源汇总/攻略排版）会被
+ * finish_reason=length 硬截成半句且无人检查，属静默截断。
+ * 环境变量 `PLAN_CALL_MAX_OUTPUT_TOKENS` 设正整数可重新启用上限；未设 / 非法 / 0 均
+ * 表示不封顶（0 = 显式关闭，旧实现 `raw >= 256` 会把 0 回落成 3000，已修复）。
  */
-const PLAN_CALL_MAX_OUTPUT_TOKENS = (() => {
+const PLAN_CALL_MAX_OUTPUT_TOKENS: number | undefined = (() => {
   const raw = Number.parseInt(process.env.PLAN_CALL_MAX_OUTPUT_TOKENS ?? "", 10);
-  return Number.isFinite(raw) && raw >= 256 ? raw : 3000;
+  return Number.isFinite(raw) && raw > 0 ? raw : undefined;
 })();
 
 /**
@@ -1670,10 +1688,12 @@ export async function streamCompletionWithTools(
     let retriedToolCallIdError = false;
     let retriedToolChoice = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
-    // ③/④ 规划轮：非思考模型走非流式 + 输出上限（协议更省、usage 确定、防正文烧 token）；
-    // 思考模型（deepseek-reasoner 等）保持流式 + 不限 max_tokens，避免压缩 reasoning 空间。
+    // ③/④ 规划轮：非思考模型走非流式（协议更省、usage 确定、防正文烧 token）；
+    // 思考模型（deepseek-reasoner 等）保持流式。输出上限默认不设（长回复不会被
+    // max_tokens 硬截半句）；调用方显式传 maxOutputTokens 或设了
+    // PLAN_CALL_MAX_OUTPUT_TOKENS（正整数）时才封顶。
     const planNonStreaming = PLAN_NON_STREAMING && thinkingDisabled;
-    const planMaxTokens = options?.maxOutputTokens
+    const planMaxTokens: number | undefined = options?.maxOutputTokens
       ? options.maxOutputTokens
       : thinkingDisabled
         ? PLAN_CALL_MAX_OUTPUT_TOKENS
@@ -2188,7 +2208,18 @@ export async function streamCompletionWithTools(
         // ObservationPack（SoL-Pi 借鉴）：obs_recall 在循环层直接服务——纯内存切片，
         // 不进 ToolRegistry、不走超时竞速/确定性重试管线（与 tool_search 桥接同类）。
         if (targetToolName === OBS_RECALL_TOOL_NAME) {
-          const recall = obsPack.recall(targetArgs);
+          // WP1.1：带 query 时先取语义向量（端点未配置/失败返回 null → 纯词面打分）
+          let recallArgs: Record<string, unknown> = targetArgs;
+          const recallQuery = typeof targetArgs?.query === "string" ? targetArgs.query.trim() : "";
+          if (recallQuery) {
+            try {
+              const queryVector = await embedObsQuery(recallQuery);
+              if (queryVector) recallArgs = { ...targetArgs, queryVector };
+            } catch {
+              /* 语义增强失败静默，词面打分兜底 */
+            }
+          }
+          const recall = obsPack.recall(recallArgs);
           const exec: ToolExecOutcome = recall.ok
             ? { ok: true, result: recall.result }
             : { ok: false, result: { error: recall.error, errorCode: UnifiedErrorCode.ToolArgsMalformed } };
@@ -2377,6 +2408,17 @@ export async function streamCompletionWithTools(
             compacted.content,
           );
         }
+        // WP0 压缩遥测：记每工具压缩前/后规模（analyze-token-audit.mjs 按工具聚合节省率）。
+        try {
+          recordToolCompactionByChars({
+            toolName: targetToolName,
+            sessionId: options?.audit?.sessionId,
+            rawChars: compacted.rawBytes,
+            compactChars: compacted.compactBytes,
+          });
+        } catch {
+          /* 遥测失败静默 */
+        }
         return {
           exec,
           compacted,
@@ -2544,10 +2586,11 @@ export async function streamCompletionWithTools(
   async function runSchemaLessSummary(
     escapeAllowed: boolean,
   ): Promise<{ text: string; needMore: boolean }> {
-    // summary 输出预算：跟随调用方的 maxOutputTokens（fast 主链路默认不设限），
-    // 未配置时给 2000 兜底，保证多来源汇总有展开空间
+    // summary 输出预算：跟随调用方的 maxOutputTokens；未配置时**不封顶**。
+    // 历史上未配置时兜底 2000，多来源汇总/长攻略被 finish_reason=length 硬截半句
+    // （该 finish_reason 全链路无人检查，属静默截断），已删除兜底上限。
     const summaryMaxTokens =
-      options?.maxOutputTokens && options.maxOutputTokens > 0 ? options.maxOutputTokens : 2000;
+      options?.maxOutputTokens && options.maxOutputTokens > 0 ? options.maxOutputTokens : undefined;
     try {
       // 过滤无效 assistant message：OpenAI API 要求 assistant 消息必须有 content 或 tool_calls
       const sanitizedMessages = messages.filter((m) => {
@@ -2636,10 +2679,15 @@ export async function streamCompletionWithTools(
         model,
         messages: summaryMessages,
         temperature: 0.5,
-        // 输出上限跟随调用方配置；默认 2000 保证盘点/汇总类回答有充分展开空间。
-        // 之前硬编码 800，把多来源汇总硬截成一小段，是「回复潦草」的直接原因之一
-        // （主链路设计是默认不限 max_tokens，见 agent-core fastMaxOutputTokens 注释）。
+        // 输出上限跟随调用方配置；未配置时不传 max_tokens（不封顶）。
+        // 之前硬编码 800 又改兜底 2000，都会把长汇总硬截半句（主链路设计是
+        // 默认不限 max_tokens，见 agent-core chatLaneMaxOutputTokens 注释）。
         ...(summaryMaxTokens ? { max_tokens: summaryMaxTokens } : {}),
+        // thinking 开关与循环内请求（见下方 wave 循环 request 的 extraBody spread）
+        // 对齐：deepseek-flash 默认带思考链，循环内经 extraBody 关思考，这里此前漏传，
+        // 思考 token 挤占输出预算且明显拖慢收尾。同样直接 spread 到顶层（SDK 不识别
+        // Python 风格 extra_body 字段）。
+        ...(options?.extraBody ?? {}),
         stream: true,
       }, options?.signal ? { signal: options.signal } : undefined);
 

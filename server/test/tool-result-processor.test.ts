@@ -248,12 +248,15 @@ function buildRawToolResult(): Record<string, unknown> {
   };
 }
 
-test("attach: plain LLM reply + raw tool result → card appended with autoOpen and full media fields", () => {
-  const reply = "帮你排好啦，马尔代夫 2 天，第一天住水上屋，细节看右边面板～";
+test("attach: plain LLM reply + raw tool result → card appended (autoOpen=false, plan on card face)", () => {
+  const reply = "帮你排好啦，马尔代夫 2 天，第一天住水上屋，安排直接看下面行程卡～";
   const out = attachTravelItineraryCard(reply, "travel.plan-itinerary", buildRawToolResult());
   const card = parseCard(out);
   assert.equal(card.cardType, "travel_itinerary");
-  assert.equal(card.autoOpen, true, "实时规划卡应携带 autoOpen");
+  // 2026-09-17：行程以回复末尾的独立规划卡呈现，不再自动弹出双面板
+  assert.equal(card.autoOpen, false, "行程卡不应自动展开双面板");
+  // 卡面逐日展示安排（Day 摘要条目）
+  assert.ok(Array.isArray(card.items) && card.items.length > 0, "卡面应携带逐日安排条目");
   // LLM 口头回复保留为卡前导
   assert.ok(out.startsWith(reply));
   // 原始工具结果的全量字段透传（坐标/图片/评论）
@@ -314,7 +317,7 @@ test("strip: travel_itinerary card preserved even among generic blocks (autoOpen
 
 // ─────────────────────────────────────────────────────────────────────────────
 // attachTravelItineraryCard：正文已有「非行程」卡片时仍要附行程卡
-// （通用卡没有 autoOpen/结构化数据，缺卡会让右侧双面板无法自动展开）
+// （通用卡没有结构化数据，缺卡会让行程卡缺逐日安排与面板数据）
 // ─────────────────────────────────────────────────────────────────────────────
 
 test("attach: generic card in reply → travel card still appended after it", () => {
@@ -322,14 +325,14 @@ test("attach: generic card in reply → travel card still appended after it", ()
     "行程好了\n[AGENT_RESULT_CARD_START]\n{\"cardType\":\"\",\"title\":\"LLM 列表卡\"}\n[AGENT_RESULT_CARD_END]";
   const out = attachTravelItineraryCard(reply, "travel.plan-itinerary", buildRawToolResult());
   assert.ok(out.startsWith(reply), "原正文（含通用卡）保留在前");
-  // 附加的行程卡在通用卡之后，且携带 autoOpen 与结构化数据
+  // 附加的行程卡在通用卡之后，携带结构化数据且不自动展开双面板
   const second = out.indexOf("[AGENT_RESULT_CARD_START]", reply.length - 1);
   assert.ok(second !== -1, "应追加第二张卡");
   const card = JSON.parse(
     out.slice(second + "[AGENT_RESULT_CARD_START]".length, out.indexOf("[AGENT_RESULT_CARD_END]", second)).trim(),
   );
   assert.equal(card.cardType, "travel_itinerary");
-  assert.equal(card.autoOpen, true);
+  assert.equal(card.autoOpen, false);
 });
 
 test("attach: existing travel_itinerary card → still no double card", () => {

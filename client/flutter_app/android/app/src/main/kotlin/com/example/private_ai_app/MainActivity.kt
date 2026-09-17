@@ -10,6 +10,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.plugins.add(MobileBriefingPlugin(this))
         flutterEngine.plugins.add(PhoneBridgePlugin())
+        flutterEngine.plugins.add(MobilePushPlugin())
         flutterEngine.plugins.add(MessageCapturePlugin())
     }
 

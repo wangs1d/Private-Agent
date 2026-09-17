@@ -1,13 +1,14 @@
 {
   "sessions": {
-    "actor-2": {
-      "revision": 4,
+    "actor-1": {
+      "revision": 3,
       "entries": {
-        "memory_summary": "[2026-09-15T18:25:28.757Z] [topic:general] I will continue following up on the context fix\n[2026-09-15T18:25:28.758Z] [topic:general] todo: verify continuity after 100 messages\n[2026-09-15T18:25:28.758Z] [topic:general] todo: prepare regression notes for memory rollout",
+        "memory_summary": "[2026-09-17T18:17:15.654Z] [topic:general] user prefers concise answers\n[2026-09-17T18:17:15.666Z] [topic:general] I will continue following up on this fix\n[2026-09-17T18:17:15.675Z] [topic:general] my project is a Flutter chat context repair",
         "memory_summary_forgotten": "",
-        "memory_commitments": "",
-        "session_recap": "[2026-09-15T18:25:28.758Z] [topic:general] todo: prepare regression notes for memory rollout",
-        "memory_open_loops": "[2026-09-15T18:25:28.758Z] [topic:general] todo: prepare regression notes for memory rollout"
+        "memory_preferences": "[2026-09-17T18:17:15.657Z] [topic:general] user prefers concise answers",
+        "session_recap": "[2026-09-17T18:17:15.657Z] [topic:general] user prefers concise answers\n[2026-09-17T18:17:15.667Z] [topic:general] I will continue following up on this fix\n[2026-09-17T18:17:15.675Z] [topic:general] my project is a Flutter chat context repair",
+        "memory_commitments": "[2026-09-17T18:17:15.667Z] [topic:general] I will continue following up on this fix",
+        "memory_facts": "[2026-09-17T18:17:15.675Z] [topic:general] my project is a Flutter chat context repair"
       }
     }
   }

@@ -3,9 +3,9 @@ import "package:flutter/material.dart";
 import "../../core/theme/app_typography.dart";
 
 import "../../core/models/chat_models.dart";
+import "../../core/services/content_summary_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
-import "../../core/utils/markdown_strip.dart";
 import "agent_action_choice_card.dart";
 import "agent_result_card.dart";
 import "assistant_brief_message.dart";
@@ -40,7 +40,8 @@ Widget buildMessageBody(
   /// 仅作用于纯文本分支（卡片/摘要仍用完整原文解析）。
   String? typewriterRawText,
 
-  /// 是否在文本末尾显示闪烁光标（打字机进行中）
+  /// 是否处于打字机打字中：光标常驻，闪烁节奏由渲染层的
+  /// [_BlinkingCursor] 自带（480ms），布局不随闪烁跳动。
   bool typewriterCursor = false,
 }) {
   if (isUser) {
@@ -60,10 +61,10 @@ Widget buildMessageBody(
   final List<Map<String, dynamic>>? replyBlocks = message.replyBlocks;
   if (replyBlocks != null && replyBlocks.isNotEmpty) {
     final List<Widget> blockWidgets = <Widget>[];
-    final TextStyle bodyStyle = Theme.of(context).textTheme.bodyMedium!.copyWith(
-          color: cs.onSurface.withValues(alpha: 0.85),
-          height: AppTypography.bodyLineHeight,
-        );
+    final TextStyle bodyStyle = AppTypography.assistantBody(
+      Theme.of(context).textTheme,
+      cs,
+    );
     for (final Map<String, dynamic> block in replyBlocks) {
       final String type = block["type"]?.toString() ?? "text";
       if (type == "card") {
@@ -73,7 +74,7 @@ Widget buildMessageBody(
         final int idx = blockWidgets.length;
         blockWidgets.add(
           Padding(
-            padding: EdgeInsets.only(top: idx == 0 ? 0 : 6),
+            padding: EdgeInsets.only(top: idx == 0 ? 0 : AppTypography.space3),
             child: data.actions.isNotEmpty
                 ? AgentActionChoiceCard(
                     data: data,
@@ -99,46 +100,70 @@ Widget buildMessageBody(
     }
   }
 
-  // 智能体结果卡片（任务总结 / 工具调用结果）优先级最高，
-  // 命中后剥离标记，剩余文本以小字附在卡片下方。
+  // 智能体结果卡片：正文解析回退路径（历史消息无 replyBlocks 时走这里）。
+  // 与新版服务端一致的版式——「总览卡置首、正文居中、行程卡独立收尾」：
+  // 按标记在原文中的位置展开为 text/card 序列渲染，多卡不合并不丢弃
+  // （此前单卡优先会把模型总览卡整个丢掉）。
   //
   // actions 非空时,渲染为带按钮的"选择型卡片"——专门给用户做快速决策
   // (如「周六去 / 忽略」「订阅 / 稍后再说」),点击会触发 onUserAction。
   // actions 为空时,保持原有"纯汇报"卡片样式不变。
-  final AgentResultParseResult agentResult = AgentResultParser.parse(message.text);
-  if (agentResult.data != null) {
-    final AgentResultData data = agentResult.data!;
-    final String remaining = _visibleAgentResultRemaining(data, agentResult.cleanedText);
-    final Widget card = data.actions.isNotEmpty
-        ? AgentActionChoiceCard(
-            data: data,
-            onAction: onUserAction == null
-                ? null
-                : (AgentResultAction a) => onUserAction(a, cardData: data),
-          )
-        : AgentResultCard(
-            data: data,
-            onUserAction: onUserAction,
-          );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        card,
-        if (remaining.isNotEmpty)
+  final List<AgentResultBlock> resultBlocks = AgentResultParser.parseBlocks(
+    message.text,
+  );
+  // 只要文本含完整卡片标记就进入本分支：损坏的卡片块在 parseBlocks 里被
+  // 静默跳过（防脏 JSON 漏进正文），纯正文段照常渲染。
+  final bool hasCardMarker = message.text.contains(AgentResultParser.startMarker);
+  if (hasCardMarker && resultBlocks.isNotEmpty) {
+    final List<Widget> blockWidgets = <Widget>[];
+    for (final AgentResultBlock block in resultBlocks) {
+      if (block.isCard) {
+        final AgentResultData data = block.data!;
+        final int idx = blockWidgets.length;
+        blockWidgets.add(
           Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: buildInlineMarkdownText(
-              remaining,
-              Theme.of(context).textTheme.bodyMedium!.copyWith(
-                    color: cs.onSurface.withValues(alpha: 0.85),
-                    height: AppTypography.bodyLineHeight,
+            padding: EdgeInsets.only(top: idx == 0 ? 0 : AppTypography.space3),
+            child: data.actions.isNotEmpty
+                ? AgentActionChoiceCard(
+                    data: data,
+                    onAction: onUserAction == null
+                        ? null
+                        : (AgentResultAction a) => onUserAction(a, cardData: data),
+                  )
+                : AgentResultCard(
+                    data: data,
+                    onUserAction: onUserAction,
                   ),
-              cs: cs,
-            ),
           ),
-      ],
-    );
+        );
+        continue;
+      }
+      // 剥模型自带的展示形态声明行（[RENDER_AS:xxx]/[RENDER_HINT:xxx]）：
+      // 声明是渲染路由信号，不属于正文——含卡片的消息走不到下方 RENDER_AS
+      // 分支，声明行会原样漏进正文，这里在正文段里整行剥离。
+      final String prose = _stripRenderDeclarationLines(block.text ?? "");
+      if (prose.isEmpty) continue;
+      if (blockWidgets.isNotEmpty) {
+        blockWidgets.add(const SizedBox(height: AppTypography.space2));
+      }
+      // 卡旁正文可能是完整结构化 markdown（模型按 structured 范式写的
+      // 标题/表格/列表），用结构化正文渲染器；纯叙述时其内部自动回退
+      // 内联排版，与旧行为等价。
+      blockWidgets.add(
+        StructuredAssistantMessageBody(
+          text: prose,
+          cs: cs,
+          textTheme: Theme.of(context).textTheme,
+        ),
+      );
+    }
+    if (blockWidgets.isNotEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: blockWidgets,
+      );
+    }
   }
 
   // 交错渲染块（renderBlocks）：服务端已按「分组关键词在正文中的出现位置」
@@ -148,10 +173,10 @@ Widget buildMessageBody(
   final List<Map<String, dynamic>>? renderBlocks = message.renderBlocks;
   if (renderBlocks != null && renderBlocks.isNotEmpty) {
     final List<Widget> blockWidgets = <Widget>[];
-    final TextStyle bodyStyle = Theme.of(context).textTheme.bodyMedium!.copyWith(
-          color: cs.onSurface.withValues(alpha: 0.85),
-          height: AppTypography.bodyLineHeight,
-        );
+    final TextStyle bodyStyle = AppTypography.assistantBody(
+      Theme.of(context).textTheme,
+      cs,
+    );
     for (final Map<String, dynamic> block in renderBlocks) {
       final String type = block["type"]?.toString() ?? "text";
       if (type == "media") {
@@ -171,14 +196,14 @@ Widget buildMessageBody(
         if (isSmallCluster) {
           blockWidgets.add(
             Padding(
-              padding: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.only(top: AppTypography.space2),
               child: MediaInlineRow(items: items, cs: cs),
             ),
           );
         } else {
           blockWidgets.add(
             Padding(
-              padding: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.only(top: AppTypography.space3),
               child: AgentResultCard(
                 data: AgentResultData(
                   cardType: "media",
@@ -260,13 +285,10 @@ Widget buildMessageBody(
         AgentResultCard(data: mediaData),
         if (displayText.trim().isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 8),
+            padding: const EdgeInsets.only(top: AppTypography.space2),
             child: buildInlineMarkdownText(
               displayText,
-              Theme.of(context).textTheme.bodyMedium!.copyWith(
-                    color: cs.onSurface.withValues(alpha: 0.85),
-                    height: AppTypography.bodyLineHeight,
-                  ),
+              AppTypography.assistantBody(Theme.of(context).textTheme, cs),
               cs: cs,
             ),
           ),
@@ -330,13 +352,10 @@ Widget buildMessageBody(
                 AgentInlineVideoPlayer(data: parsed.media!),
                 if (parsed.cleaned.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(top: 8),
+                    padding: const EdgeInsets.only(top: AppTypography.space2),
                     child: buildInlineMarkdownText(
                       parsed.cleaned,
-                      Theme.of(context).textTheme.bodyMedium!.copyWith(
-                            color: cs.onSurface.withValues(alpha: 0.85),
-                            height: AppTypography.bodyLineHeight,
-                          ),
+                      AppTypography.assistantBody(Theme.of(context).textTheme, cs),
                       cs: cs,
                     ),
                   ),
@@ -357,21 +376,28 @@ Widget buildMessageBody(
     }
   }
 
-  if (contentSummary?.summary != null) {
+  final ContentSummaryDataV2? summary = contentSummary?.summary;
+  if (summary != null) {
     return ContentSummaryMessageBody(
-      summary: contentSummary!.summary!,
-      briefText: contentSummary.briefText,
+      summary: summary,
+      briefText: contentSummary!.briefText,
       extraText: contentSummary.cleanedText,
       structuredItems: contentSummary.structuredItems,
-      onCardTap: () => ContentSummaryDetailModal.show(
-        context,
-        contentSummary.summary!,
-      ),
+      onCardTap: () {
+        // 宽屏：详情复用右侧双面板继续展示；无面板宿主（如手机端）回退弹窗
+        if (!ContentSummaryLauncher.open(summary)) {
+          ContentSummaryDetailModal.show(context, summary);
+        }
+      },
     );
   }
 
+  // 最终兜底分支：剥展示形态声明行（[RENDER_HINT:xxx]/[RENDER_AS:xxx]）再渲染。
+  // 权威的 [RENDER_AS:xxx] 路由在上方分支已消费；走到这里的是无路由标记的
+  // 正文——历史消息（任务面旧结果等）残留的声明行按字面漏出的根因，渲染前
+  // 兜底剥离，已落库的历史消息也能显示干净。
   return StructuredAssistantMessageBody(
-    text: typewriterRawText ?? message.text,
+    text: _stripRenderDeclarationLines(typewriterRawText ?? message.text),
     cs: cs,
     textTheme: Theme.of(context).textTheme,
     showCursor: typewriterCursor,
@@ -419,9 +445,34 @@ String? _extractRenderAsMarker(String text) {
   return m?.group(1);
 }
 
-/// 剥离文本开头的 `[RENDER_AS:xxx]` 标记。
+/// 剥离展示形态声明行（[RENDER_AS:xxx] / [RENDER_HINT:xxx]，整行独占时删行，
+/// 与服务端 stripRenderDeclarationLines 同口径），其余文本原样返回。
+String _stripRenderDeclarationLines(String text) {
+  if (!text.contains("[RENDER_")) return text;
+  final RegExp declarationLine = RegExp(r'^\s*\[RENDER_(?:HINT|AS):\w+\]\s*$');
+  return text
+      .split('\n')
+      .where((String line) => !declarationLine.hasMatch(line))
+      .join('\n')
+      .trim();
+}
+
+/// 剥离文本开头的 `[RENDER_AS:xxx]` 标记，并清理正文中残留的形态声明标记
+/// （模型照抄历史消息格式把声明复述在中段/结尾时，服务端旧版未剥、随历史
+/// 消息落库；服务端 2026-09 起生成即消毒，这里兜底历史消息）。
 String _stripRenderAsMarker(String text) {
-  return text.replaceFirst(RegExp(r'^\[RENDER_AS:\w+\]\s*'), '');
+  final String withoutLeading =
+      text.replaceFirst(RegExp(r'^\[RENDER_AS:\w+\]\s*'), '');
+  if (!withoutLeading.contains('[RENDER_')) return withoutLeading;
+  final RegExp token = RegExp(r'\[RENDER_(?:HINT|AS):\w+\]');
+  final List<String> cleanedLines = <String>[];
+  for (final String line in withoutLeading.split('\n')) {
+    final String stripped = line.replaceAll(token, '');
+    // 声明独占一行 → 整行丢弃；行内嵌声明 → 就地剥离，保留其余文本
+    if (stripped.trim().isEmpty && line.trim().isNotEmpty) continue;
+    cleanedLines.add(stripped);
+  }
+  return cleanedLines.join('\n').trim();
 }
 
 // 旧数据恢复用：识别正文里内嵌的图片链接（markdown 图 / /agent/images/ 路径 / http 图片）。
@@ -471,47 +522,4 @@ String _stripLegacyImageLines(String text) {
       .join('\n')
       .replaceAll(RegExp(r'\n{3,}'), '\n\n')
       .trim();
-}
-
-String _visibleAgentResultRemaining(
-  AgentResultData data,
-  String rawText,
-) {
-  final List<String> lines = rawText
-      .split(RegExp(r'\n+'))
-      .map((String line) => line.trim())
-      .where((String line) => line.isNotEmpty)
-      .toList(growable: false);
-  if (lines.isEmpty) return "";
-
-  final Set<String> cardTexts = <String>{
-    _normalizeAgentResultText(data.title),
-    for (final AgentResultItem item in data.items)
-      _normalizeAgentResultText(item.text),
-    _normalizeAgentResultText(data.footer),
-  }..removeWhere((String text) => text.length < 6);
-
-  if (cardTexts.isEmpty) return rawText.trim();
-
-  final List<String> kept = <String>[];
-  for (final String line in lines) {
-    final String normalizedLine = _normalizeAgentResultText(line);
-    if (normalizedLine.isEmpty) continue;
-    final bool repeatsCardText = cardTexts.any((String cardText) {
-      final int lengthDelta = (normalizedLine.length - cardText.length).abs();
-      return normalizedLine == cardText ||
-          (cardText.contains(normalizedLine) && lengthDelta <= 8) ||
-          (normalizedLine.contains(cardText) && lengthDelta <= 8);
-    });
-    if (!repeatsCardText) kept.add(line);
-  }
-
-  return kept.join("\n\n").trim();
-}
-
-String _normalizeAgentResultText(String text) {
-  return stripMarkdown(text)
-      .toLowerCase()
-      .replaceAll(RegExp(r'\s+'), '')
-      .replaceAll(RegExp(r'''[，。！？、；：,.!?;:()\[\]{}"'`~\-_*#>]+'''), '');
 }

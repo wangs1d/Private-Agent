@@ -478,17 +478,12 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
         ],
       );
     }
-    return MouseRegion(
-      // 悬停暂停跑马灯，方便看清和点击；移开继续
-      onEnter: (_) => _ticker?.stop(),
-      onExit: (_) => _startTicker(),
-      child: ClipRect(
-        child: SingleChildScrollView(
-          controller: _controller,
-          scrollDirection: Axis.horizontal,
-          physics: const NeverScrollableScrollPhysics(),
-          child: content,
-        ),
+    return ClipRect(
+      child: SingleChildScrollView(
+        controller: _controller,
+        scrollDirection: Axis.horizontal,
+        physics: const NeverScrollableScrollPhysics(),
+        child: content,
       ),
     );
   }

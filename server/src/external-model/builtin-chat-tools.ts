@@ -1072,7 +1072,9 @@ export const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [  {
 
 /**
  * ObservationPack 读回工具（借鉴 NVlabs/SoL-Pi，MIT）：被压缩/折叠的大体积工具结果
- * 归档为稳定句柄（obs_N）后，模型用本工具分页读回原文，替代「重新执行原工具」。
+ * 归档为稳定句柄（obs_N）后，模型用本工具读回原文，替代「重新执行原工具」。
+ * WP1：支持 outline 看结构目录、query 关键词定向读取（借鉴 codebase-memory-mcp
+ * 「先查结构再取片段」），替代盲翻页。
  * 执行在 openai-compatible-tool-loop 循环层（不进 ToolRegistry，chat-tool-drift 豁免）。
  */
 export const OBS_RECALL_CHAT_TOOL: ChatCompletionTool = {
@@ -1080,14 +1082,26 @@ export const OBS_RECALL_CHAT_TOOL: ChatCompletionTool = {
   function: {
     name: "obs_recall",
     description:
-      "读回此前被压缩或折叠的工具结果原文（分页）。当早前结果摘要缺少你需要的细节（具体数字、URL、正文段落）时，" +
-      "用结果提示中给出的 id（形如 obs_1）分页读回，按 nextOffset 翻页，读完即作答。" +
-      "不要用它读回近期完整可见的结果，也不要为了「确认」而重复读回同一段。",
+      "读回此前被压缩或折叠的工具结果原文。当早前结果摘要缺少你需要的细节（具体数字、URL、正文段落）时，" +
+      "用结果提示中给出的 id（形如 obs_1）：先 mode=\"outline\" 看结构目录，或直接 query=\"关键词\" 定向读取相关段落" +
+      "（推荐，一次命中，避免逐页翻找）；也可用 offset/limit 按 nextOffset 线性翻页。读完即作答。" +
+      "query 结果带 lowConfidence=true 或没找到目标时，改用结果原文中的关键词重试一次，或按 alternatives 提示的节名换词再试。" +
+      "不要用它读回近期完整可见的结果，也不要为了「确认」而重复读回同一段。outline 仅供导航，" +
+      "引用具体细节前必须读取对应段落原文。",
     parameters: {
       type: "object",
       properties: {
         id: { type: "string", description: "待读回的结果句柄（见工具结果或折叠摘要中的 obs_recall 提示）" },
-        offset: { type: "integer", description: "起始字符偏移，默认 0（续页用上一页返回的 nextOffset）" },
+        mode: {
+          type: "string",
+          enum: ["text", "outline"],
+          description: "text=读原文（默认）；outline=返回该结果的结构目录（标题/键/段落列表，不含正文），便于先定位再读",
+        },
+        query: {
+          type: "string",
+          description: "关键词（可中文短语）。给出时直接返回内容中最相关的段落窗口，替代盲翻页",
+        },
+        offset: { type: "integer", description: "起始字符偏移，默认 0（续页用上一页返回的 nextOffset；query 模式忽略此参数）" },
         limit: { type: "integer", description: "本次读回的字符数，默认 4000，上限 12000" },
       },
       required: ["id"],

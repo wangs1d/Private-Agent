@@ -24,11 +24,79 @@ import {
   attachTravelItineraryCard,
   attachVideoMediaMarker,
 } from "./tool-result-processor.js";
+import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 
 /** 一次真实工具执行的回执（来自 onExternalToolExecuted 或直跑 toolResult）。 */
 export interface ExecutedToolReceipt {
   toolName: string;
   result: Record<string, unknown>;
+}
+
+/** 行程回执裁决产物：toolName/result 成对，拿不到行程时均为 undefined。 */
+export interface TravelReceiptResolution {
+  toolName?: "travel.plan-itinerary";
+  result?: Record<string, unknown>;
+}
+
+const DEFAULT_TRAVEL_FALLBACK_WINDOW_MS = 60 * 1000;
+
+/**
+ * done 阶段行程回执裁决（单一事实源）：WS 对话路径与任务面收尾共用。
+ *
+ * 行程卡是确定性附卡（不依赖 LLM 转发），但「拿到行程原始数据」的链路有
+ * 多条且都会漏拍：直跑回执挂在 reply.toolName，tool-loop 执行靠
+ * onToolExecuted 捕获，而缓存重放 / 升级段边缘 / 旧构建 hook 断线时捕获
+ * 会是空的——此前任务面收尾没有兜底，卡片就永远附不上（漏卡根因）。
+ * 这里按优先级统一裁决：
+ *   1. 本轮真实执行回执（直跑 toolResult 或 onToolExecuted 捕获，等价）；
+ *      回执是瘦身摘要也直接放行——attachTravelItineraryCard 内部会按
+ *      planId 从冷层补全量 days；
+ *   2. 捕获为空 → 冷层近窗回捞兜底：只认窗口内新生成的行程，
+ *      正文/目标点名目的地优先，否则取最新一份（规划轮正文可能不含
+ *      目的地全名）。窗口默认 60s，任务面可放宽（执行可能排队）。
+ */
+export function resolveTravelReceipt(input: {
+  replyToolName?: string;
+  replyToolResult?: Record<string, unknown>;
+  executedReceipt?: Record<string, unknown>;
+  goal?: string;
+  finalText?: string;
+  fallbackWindowMs?: number;
+  nowMs?: number;
+}): TravelReceiptResolution {
+  const now = input.nowMs ?? Date.now();
+
+  // 1. 本轮真实执行回执优先
+  const executed =
+    input.executedReceipt ??
+    (input.replyToolName === "travel.plan-itinerary"
+      ? input.replyToolResult
+      : undefined);
+  if (executed && typeof executed === "object") {
+    // 本轮确实尝试过规划：成功才附卡，失败不回捞旧行程误挂到失败轮
+    if (typeof executed.ok !== "boolean" || executed.ok) {
+      return { toolName: "travel.plan-itinerary", result: executed };
+    }
+    return {};
+  }
+
+  // 2. 冷层近窗回捞（捕获漏拍兜底）
+  const window = input.fallbackWindowMs ?? DEFAULT_TRAVEL_FALLBACK_WINDOW_MS;
+  const candidates = travelPlanStore
+    .listSummaries(5)
+    .filter((s) => now - s.createdAt < window);
+  if (candidates.length === 0) return {};
+  const haystack = `${input.goal ?? ""}\n${input.finalText ?? ""}`;
+  const picked =
+    candidates.find(
+      (s) => s.destination && haystack.includes(s.destination),
+    ) ?? candidates[0];
+  const plan = travelPlanStore.get(picked.planId);
+  if (!plan || plan.days.length === 0) return {};
+  return {
+    toolName: "travel.plan-itinerary",
+    result: plan as unknown as Record<string, unknown>,
+  };
 }
 
 export interface DeterministicCardChainInput {

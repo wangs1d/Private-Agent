@@ -1,6 +1,11 @@
 import type { ToolHandler, ToolContext, ToolRegistry } from "../../tool-registry.js";
+import { join } from "node:path";
 import { resolveActorId } from "../../../agent/actor-id.js";
 import type { CodeSandboxService } from "../../../services/code-sandbox-service.js";
+import {
+  getSandboxWorkspaceIndex,
+  WORKSPACE_MAP_MAX_FILES,
+} from "../../../services/sandbox-workspace-index.js";
 
 /**
  * code-sandbox 工具 handler 工厂集合 + 注册入口。
@@ -240,10 +245,22 @@ export function createCodeListFilesHandler(
   };
 }
 
-/** code.read_file —— 读取工作目录文件。 */
+/**
+ * code.read_file —— 读取工作目录文件（WP3：三种读法）。
+ *
+ *  - mode="full"：读全文（旧行为，显式选择）；
+ *  - mode="range"：按 offset/limit 读片段（大文件分段读）；
+ *  - 默认（无 mode）：≤2000 字符直接全文；更大时返回结构目录 outline + 头部预览，
+ *    让模型先看结构再定向读——借鉴 codebase-memory-mcp「outline 先于原文」。
+ */
 export function createCodeReadFileHandler(
   service: CodeSandboxService,
 ): ToolHandler {
+  const OUTLINE_THRESHOLD_CHARS = 2_000;
+  const RANGE_DEFAULT_LIMIT = 4_000;
+  const RANGE_MAX_LIMIT = 16_000;
+  const PREVIEW_CHARS = 300;
+
   return async (input: Record<string, unknown>, context: ToolContext) => {
     const workspaceId = typeof input.workspaceId === "string" ? input.workspaceId.trim() : "";
     const fileName = typeof input.fileName === "string" ? input.fileName.trim() : "";
@@ -255,12 +272,139 @@ export function createCodeReadFileHandler(
     if (!result.ok) {
       return { ok: false, error: result.error };
     }
+    const content = result.content ?? "";
+    const mode = typeof input.mode === "string" ? input.mode : "";
+
+    // mode="full"：显式全文（能力不变）
+    if (mode === "full") {
+      return {
+        ok: true,
+        path: result.path,
+        mode: "full",
+        content,
+        size: result.size,
+        summary: `读取文件 ${result.path} 全文（${result.size} 字节）`,
+      };
+    }
+
+    // mode="range"：分段读
+    if (mode === "range") {
+      let offset = Number.parseInt(String(input.offset ?? 0), 10);
+      if (!Number.isFinite(offset) || offset < 0) offset = 0;
+      let limit = Number.parseInt(String(input.limit ?? RANGE_DEFAULT_LIMIT), 10);
+      if (!Number.isFinite(limit) || limit <= 0) limit = RANGE_DEFAULT_LIMIT;
+      limit = Math.min(limit, RANGE_MAX_LIMIT);
+      const start = Math.min(offset, content.length);
+      const slice = content.slice(start, start + limit);
+      return {
+        ok: true,
+        path: result.path,
+        mode: "range",
+        totalChars: content.length,
+        offset: start,
+        returnedChars: slice.length,
+        nextOffset: start + slice.length < content.length ? start + slice.length : null,
+        content: slice,
+        size: result.size,
+        summary: `读取 ${result.path} 片段 [${start}, ${start + slice.length})（全文 ${content.length} 字符）`,
+      };
+    }
+
+    // 默认：小文件全文；大文件 outline-first（结构目录 + 预览 + 定向读指引）
+    if (content.length <= OUTLINE_THRESHOLD_CHARS) {
+      return {
+        ok: true,
+        path: result.path,
+        mode: "full",
+        content,
+        size: result.size,
+        summary: `读取文件 ${result.path}（${result.size} 字节）`,
+      };
+    }
+    const wsPath = service.resolveWorkspacePath(actorId, workspaceId);
+    const index = getSandboxWorkspaceIndex();
+    const outlineInfo = wsPath
+      ? await index.getFileOutline(wsPath, fileName, join(wsPath, fileName))
+      : null;
+    if (!outlineInfo) {
+      // 索引构建失败 → 保守回退全文（能力不降级，只是不省 token）
+      return {
+        ok: true,
+        path: result.path,
+        mode: "full",
+        content,
+        size: result.size,
+        summary: `读取文件 ${result.path}（${result.size} 字节）`,
+      };
+    }
     return {
       ok: true,
       path: result.path,
-      content: result.content,
+      mode: "outline",
+      kind: outlineInfo.kind,
+      totalChars: content.length,
+      preview: content.slice(0, PREVIEW_CHARS),
+      outline: outlineInfo.outline,
+      hint:
+        `文件较大（${content.length} 字符），已返回结构目录。` +
+        `用 mode="range" + offset/limit 读取具体段落，或明确需要时 mode="full" 读全文。` +
+        `outline 仅供导航，引用细节前必须先读取对应段落原文。`,
       size: result.size,
-      summary: `读取文件 ${result.path}（${result.size} 字节）`,
+      summary: `返回 ${result.path} 结构目录（全文 ${content.length} 字符，未注入全文）`,
+    };
+  };
+}
+
+/**
+ * code.workspace_map —— 工作区结构地图（WP3，借鉴 codebase-memory-mcp 的
+ * get_architecture）：一次调用返回全部文件的结构概要，替代「list_files →
+ * 逐个 read_file 盲读」的探索循环。
+ */
+export function createWorkspaceMapHandler(
+  service: CodeSandboxService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const workspaceId = typeof input.workspaceId === "string" ? input.workspaceId.trim() : "";
+    if (!workspaceId) return { ok: false, error: "缺少 workspaceId" };
+    const actorId = resolveActorId(context);
+    const wsPath = service.resolveWorkspacePath(actorId, workspaceId);
+    if (!wsPath) return { ok: false, error: "无效的工作目录标识（路径穿越被拒）" };
+
+    const files = await service.listFiles(actorId, workspaceId);
+    const failed = files.filter((f) => !f.ok);
+    if (failed.length > 0 && files.length === failed.length) {
+      return { ok: false, error: failed[0]?.error ?? "列出文件失败" };
+    }
+    const index = getSandboxWorkspaceIndex();
+    const entries: Array<Record<string, unknown>> = [];
+    let cachedCount = 0;
+    for (const f of files.filter((f) => f.ok).slice(0, WORKSPACE_MAP_MAX_FILES)) {
+      if (!f.path) continue;
+      const outline = await index.getFileOutline(wsPath, f.path, join(wsPath, f.path));
+      if (outline) {
+        if (outline.cached) cachedCount++;
+        entries.push({
+          path: outline.path,
+          size: outline.size,
+          kind: outline.kind,
+          outline: outline.outline,
+          ...(outline.headTruncated ? { headTruncated: true } : {}),
+        });
+      } else {
+        entries.push({ path: f.path, size: f.size, kind: "unknown", outline: "（索引构建失败，用 code.read_file 读取）" });
+      }
+    }
+    return {
+      ok: true,
+      fileCount: entries.length,
+      truncated: files.filter((f) => f.ok).length > WORKSPACE_MAP_MAX_FILES,
+      cachedCount,
+      files: entries,
+      workspacePath: wsPath,
+      hint:
+        `outline 仅供导航。需要某文件的细节时：小文件直接 code.read_file；` +
+        `大文件用 code.read_file 的 mode="range" + offset（offset 见 outline 中的 [行] 标注）分段读取。`,
+      summary: `工作区地图：${entries.length} 个文件（${cachedCount} 个命中增量缓存）`,
     };
   };
 }
@@ -307,4 +451,5 @@ export function registerCodeSandboxTools(
   registry.register("code.list_files", createCodeListFilesHandler(codeSandboxService));
   registry.register("code.read_file", createCodeReadFileHandler(codeSandboxService));
   registry.register("code.write_file", createCodeWriteFileHandler(codeSandboxService));
+  registry.register("code.workspace_map", createWorkspaceMapHandler(codeSandboxService));
 }

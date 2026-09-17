@@ -71,10 +71,26 @@ export function createMediaPlayHandler(mediaMusicService: MediaMusicService): To
       ? `${trackInfo.name}${trackInfo.artist ? " - " + trackInfo.artist : ""}`
       : `track#${trackId}`;
 
+    // 诚实化（URL 解析）：无版权/接口失败时事件照发（客户端能收到"无法播放"状态），
+    // 但工具返回值必须如实告知模型——否则模型会宣称"歌已经在放了"，实际没声。
+    if (result.urlError) {
+      return {
+        ok: true,
+        pushed: result.pushed,
+        trackId,
+        urlError: result.urlError,
+        summary: result.pushed
+          ? `已向客户端下发 ${display} 的播放指令，但播放 URL 解析失败：${result.urlError}。` +
+            "客户端无法真正出声，请如实告知用户该曲目当前不可播放（可换其他曲目）。"
+          : `已记录播放状态，但用户当前离线，且播放 URL 解析失败：${result.urlError}。`,
+      };
+    }
+
     return {
       ok: true,
       pushed: result.pushed,
       trackId,
+      url: result.url,
       summary: result.pushed
         ? `已下发播放指令到用户客户端：${display}。客户端会自动播放。`
         : `已记录播放状态，但用户当前离线（未连接 WebSocket），上线后可重发。`,

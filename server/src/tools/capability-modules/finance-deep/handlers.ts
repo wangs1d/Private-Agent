@@ -16,23 +16,42 @@ import type {
   BillStatus,
 } from "../../../services/bill-management-service.js";
 import { billCadenceLabel } from "../../../services/bill-management-service.js";
+import {
+  detectBillStatementFormat,
+  parseBillStatement,
+} from "../../../services/finance-bill-file-parser.js";
+import type { BillStatementSource } from "../../../services/finance-bill-file-parser.js";
 /**
  * finance.import_transactions 工具 handler。
  *
- * 解析 json / csv 文本，调用 {@link FinanceDeepService.importTransactions} 批量入库。
+ * 三条解析链路：
+ *   1. 支付宝/微信账单导出（detectBillStatementFormat 识别）→ 确定性解析
+ *      （{@link parseBillStatement}，零 LLM），交易单号作幂等键去重后入账；
+ *   2. json 数组；
+ *   3. 通用 date,amount,type,… 表头 CSV（parseCsv）。
+ * 账单识别优先于显式 format 参数：账单格式是固定公开格式，确定性解析不依赖
+ * 模型抽取，LLM 传错 format 也不至于把账单当普通 CSV 解析失败。
  * 未分类（category 为空或非法）由 service 内部按 description 关键词自动分类。
  */
 export function createFinanceImportTransactionsHandler(
   service: FinanceDeepService,
 ): ToolHandler {
   return async (input: Record<string, unknown>, context: ToolContext) => {
-    const format = String(input.format ?? "").trim();
-    if (format !== "json" && format !== "csv") {
-      return { ok: false, error: "format 必须为 json 或 csv" };
-    }
     const data = typeof input.data === "string" ? input.data : "";
     if (!data.trim()) {
       return { ok: false, error: "缺少 data（数据内容）" };
+    }
+
+    // 支付宝/微信账单导出：确定性解析（零 LLM）。source 固定标 alipay/wechat，
+    // 不采信 input.source——账单格式是识别出来的，比 LLM 声明的更可信。
+    const billFormat = detectBillStatementFormat(data);
+    if (billFormat !== "unknown") {
+      return await importBillStatement(service, context, data, billFormat);
+    }
+
+    const format = String(input.format ?? "").trim();
+    if (format !== "json" && format !== "csv") {
+      return { ok: false, error: "format 必须为 json 或 csv" };
     }
 
     let items: FinanceTransaction[] = [];
@@ -95,6 +114,78 @@ export function createFinanceImportTransactionsHandler(
       total: items.length,
       summary: `成功导入 ${added} 条交易记录（共解析 ${items.length} 条）`,
     };
+  };
+}
+
+/**
+ * 支付宝/微信账单导出文本入账（确定性解析 + 交易单号幂等去重）。
+ *
+ * 幂等键：解析器把平台交易单号写进记录 id（`alipay:<交易号>` / `wechat:<交易单号>`），
+ * 入账前与账本中同时间段已有记录的 id 比对——重复导入同一份账单不会产生重复记录
+ * （FinanceDeepService.importTransactions 本身不按 id 去重，所以在这里过滤）。
+ */
+async function importBillStatement(
+  service: FinanceDeepService,
+  context: ToolContext,
+  data: string,
+  source: BillStatementSource,
+): Promise<Record<string, unknown>> {
+  const parsed = parseBillStatement(data);
+  const sourceLabel = source === "alipay" ? "支付宝" : "微信";
+
+  if (parsed.transactions.length === 0) {
+    // 诚实失败：识别出来了但一行都没入成账，把跳过原因原样交回，不编造数据
+    return {
+      ok: false,
+      error:
+        `已识别为${sourceLabel}账单导出，但未解析出可入账交易` +
+        (parsed.skipped.length > 0 ? `（跳过 ${parsed.skipped.length} 行，原因见 skippedRows）` : ""),
+      warnings: parsed.warnings,
+      skippedRows: parsed.skipped,
+    };
+  }
+
+  const actorId = resolveActorId(context);
+
+  // 与账本已有记录按 id 去重：只取解析出的时间范围（±1 天容差），避免全量扫描
+  const timestamps = parsed.transactions
+    .map((t) => Date.parse(t.date))
+    .filter((ts) => Number.isFinite(ts));
+  const existingIds = new Set<string>();
+  if (timestamps.length > 0) {
+    const existing = service.getTransactions(
+      actorId,
+      new Date(Math.min(...timestamps) - 86_400_000).toISOString(),
+      new Date(Math.max(...timestamps) + 86_400_000).toISOString(),
+      undefined,
+      10_000,
+    );
+    for (const tx of existing) existingIds.add(tx.id);
+  }
+  const fresh = parsed.transactions.filter((t) => !existingIds.has(t.id));
+  const added = await service.importTransactions(actorId, fresh);
+  const duplicates = parsed.transactions.length - fresh.length;
+
+  const detailBits: string[] = [];
+  if (duplicates > 0) detailBits.push(`${duplicates} 笔此前已入账、按交易单号去重跳过`);
+  if (parsed.skipped.length > 0) detailBits.push(`跳过 ${parsed.skipped.length} 行`);
+  let summary =
+    `已从${sourceLabel}账单入账 ${added} 笔（共解析 ${parsed.transactions.length} 笔` +
+    (detailBits.length > 0 ? `，${detailBits.join("，")}` : "") +
+    "）";
+  if (parsed.warnings.length > 0) {
+    summary += `。注意：${parsed.warnings.join("；")}`;
+  }
+
+  return {
+    ok: true,
+    source,
+    imported: added,
+    total: parsed.transactions.length,
+    duplicatesSkipped: duplicates,
+    skippedRows: parsed.skipped,
+    warnings: parsed.warnings,
+    summary,
   };
 }
 

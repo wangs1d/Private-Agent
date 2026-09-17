@@ -38,6 +38,25 @@ abstract final class AppTypography {
   static const double micro = 11;
 
   // ═══════════════════════════════════════════════════════════
+  // 间距阶梯(唯一允许使用的档位,消灭 5/6/7/10 之类碎片化取值)
+  // ═══════════════════════════════════════════════════════════
+
+  /// 紧贴元素:行内小组件、列表项内微调
+  static const double space1 = 4;
+
+  /// 同组元素:列表项之间、段落之间
+  static const double space2 = 8;
+
+  /// 邻组元素:正文与卡片、卡片与卡片之间
+  static const double space3 = 12;
+
+  /// 大板块间距 / 容器内边距
+  static const double space4 = 16;
+
+  /// 页面级留白
+  static const double space5 = 24;
+
+  // ═══════════════════════════════════════════════════════════
   // 行高(4 档)
   // ═══════════════════════════════════════════════════════════
 
@@ -91,6 +110,28 @@ abstract final class AppTypography {
       fontFamily: monoFontFamily,
       fontSize: (base.fontSize ?? body) - 1,
       backgroundColor: background,
+    );
+  }
+
+  /// 行内 code 前景样式(无底色版本):底色与圆角由容器绘制,
+  /// 见 content_summary_detail_formatter 的行内 code WidgetSpan。
+  static TextStyle inlineCodeForeground(TextStyle base) {
+    return base.copyWith(
+      fontFamily: monoFontFamily,
+      fontSize: (base.fontSize ?? body) - 1,
+    );
+  }
+
+  /// 行内 code 底色圆角的圆角半径。
+  static const double inlineCodeRadius = 4;
+
+  /// 助手正文的唯一来源:onSurface 全不透明 + 1.6 行高。
+  /// 此前 replyBlocks 路径 0.85 透明度、结构化路径全不透明,同屏两种灰度;
+  /// 统一从这里取,消灭双轨。
+  static TextStyle assistantBody(TextTheme textTheme, ColorScheme cs) {
+    return textTheme.bodyMedium!.copyWith(
+      color: cs.onSurface,
+      height: bodyLineHeight,
     );
   }
 }

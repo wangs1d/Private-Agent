@@ -265,8 +265,10 @@ export const ServerEventType = {
   AgentVoiceMessage: "agent.voice.message",
   /**
    * 媒体音乐播放控制 —— `media.*` 工具族触发。
-   * 客户端收到后执行实际播放 / 暂停 / 恢复 / 停止；服务端仅下发控制信令，
-   * 不代理音频流（避免版权与带宽问题）。
+   * 客户端收到后执行实际播放 / 暂停 / 恢复 / 停止；服务端负责按 trackId 解析
+   * 可播放 URL 并随 agent.media.play 下发（客户端不自行拉流地址）。
+   * URL 解析失败（无版权/超时）时事件仍下发（payload 带 urlError），客户端应
+   * 如实展示"无法播放"，不得假成功。
    */
   AgentMediaPlay: "agent.media.play",
   AgentMediaPause: "agent.media.pause",
@@ -332,7 +334,67 @@ export const ServerEventType = {
    * payload: { messageId, title, body, kind?, importance?, fromActorId?, createdAt }
    */
   InboxMessage: "inbox.message",
+
+  // ============================================================
+  // 电话代办（phone_call.* 工具族：真实 PSTN 外呼）事件族。
+  // 与既有两族严格区分（命名即语义，详见 docs/phone-call-architecture.md §〇）：
+  //   agent.phone.*  = 虚拟电话（站内应用内互拨，无 PSTN）
+  //   phone.bridge.* = 设备桥 RPC（拨号/短信/定位…），非通话会话
+  //   phone_call.*   = 本族：agent 代用户向第三方真人的真实外呼会话
+  // ============================================================
+
+  /**
+   * 真实外呼会话状态变更（awaiting_confirm/confirmed/dialing/active/summarized/
+   * cancelled/expired/failed）。客户端可据此展示轻量状态提示；P0 客户端未实现
+   * 消费逻辑时安全忽略（不影响确认卡/结果卡等聊天内渲染通道）。
+   */
+  PhoneCallStatusUpdate: "phone_call.status_update",
+  /**
+   * 真实外呼确认卡请求：服务端在 phone_call.prepare 后推送（含脱敏号码、目标、
+   * 话术要点）。聊天内的权威确认入口是回复文本中的确认卡（AgentActionChoiceCard，
+   * 点击经 chat.user_action 回传）；本事件仅作辅助提示通道。
+   */
+  PhoneCallConfirmRequest: "phone_call.confirm_request",
 } as const;
+
+/** phone_call.status_update 载荷：真实外呼会话状态快照 */
+export type PhoneCallStatusUpdatePayload = {
+  callId: string;
+  state:
+    | "awaiting_confirm"
+    | "cancelled"
+    | "expired"
+    | "dialing"
+    | "active"
+    | "summarized"
+    | "failed";
+  /** 被叫号码（脱敏，如 138****5678） */
+  numberMasked: string;
+  contactName?: string;
+  /** 一句话通话目标 */
+  goal: string;
+  outcome?: string;
+  /** 拒绝/取消原因（确认超时/静默时段/频控/手机端取消…） */
+  rejectReason?: string;
+  /** 确认已记录（awaiting_confirm 阶段收到 confirmed=true 表示可拨打） */
+  confirmed?: boolean;
+  updatedAt: string;
+};
+
+/** phone_call.confirm_request 载荷：拨号确认请求（辅助提示通道） */
+export type PhoneCallConfirmRequestPayload = {
+  callId: string;
+  numberMasked: string;
+  contactName?: string;
+  goal: string;
+  /** 已知要素（人数/时间/订单号…） */
+  facts?: Record<string, unknown>;
+  /** 必须问清的事项 */
+  mustAsk?: string[];
+  /** 确认卡上的按钮约定：phone_call_confirm / phone_call_cancel（payload.callId 回传） */
+  actionIds: string[];
+  createdAt: string;
+};
 
 /** inbox.message 载荷：站内信（平台→用户收件箱） */
 export type InboxMessagePayload = {
@@ -345,6 +407,31 @@ export type InboxMessagePayload = {
   fromActorId?: string;
   /** ISO 时间戳 */
   createdAt: string;
+};
+
+/**
+ * agent.media.play 载荷：媒体音乐播放指令。
+ *
+ * 服务端已按 trackId 解析好可播放 URL（网易云 song/enhance/player/url），
+ * 客户端拿到 `url` 直接播放即可，无需自行拉流地址。
+ * `url === null` 表示服务端解析失败（无版权/仅 VIP/上游超时），此时
+ * `urlError` 说明原因——客户端应如实提示"无法播放"，不得假装在放。
+ */
+export type AgentMediaPlayPayload = {
+  actorId: string;
+  trackId: string;
+  /** 曲目名（搜索元数据缺失时为 null，客户端可显示 trackId 兜底） */
+  title: string | null;
+  artist: string | null;
+  album?: string | null;
+  /** 可播放音频 URL；解析失败为 null（原因见 urlError） */
+  url: string | null;
+  /** 曲目时长（毫秒）；未知为 null */
+  durationMs: number | null;
+  /** URL 解析失败原因（无版权/接口超时等）；仅 url 为 null 时存在 */
+  urlError?: string;
+  /** ISO 时间戳 */
+  timestamp: string;
 };
 
 // ============================================================

@@ -9,7 +9,10 @@ import {
   type PlatformStat,
 } from "./message-hub-sqlite-store.js";
 
-export type MessageHubPlatform = "wechat" | "qq" | "feishu" | "sms" | "generic";
+// "email"：IMAP 轮询收件（mail-watch-service）接入的入站邮件平台，
+// 复用既有 ingestInbound 落库/判重/未读计数链路（external_message_id 用
+// "mailwatch:<账号>:<uid>" 形态，与网关 webhook 的 messageId 天然不冲突）。
+export type MessageHubPlatform = "wechat" | "qq" | "feishu" | "sms" | "email" | "generic";
 export type MessageHubDirection = "inbound" | "outbound";
 export type MessageHubImportance = "high" | "normal";
 

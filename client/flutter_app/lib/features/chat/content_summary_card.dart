@@ -1,7 +1,9 @@
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
+import "../../core/theme/app_typography.dart";
 import "../../core/utils/content_summary_parser.dart";
+import "accent_panel.dart";
 import "content_summary_detail_formatter.dart";
 
 class ContentSummaryMessageBody extends StatelessWidget {
@@ -23,24 +25,39 @@ class ContentSummaryMessageBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    final TextStyle bodyStyle = Theme.of(context).textTheme.bodyMedium!.copyWith(
-          color: cs.onSurface,
-          height: 1.6,
-        );
+    final TextStyle bodyStyle = AppTypography.assistantBody(
+      Theme.of(context).textTheme,
+      cs,
+    );
+
+    // 冗余守卫：历史消息的 brief 可能就是卡片的「label：title」原文（旧版
+    // 服务端会在卡前重复输出同一行文案），此时不再渲染，标题由卡片自身展示；
+    // 新消息服务端已不再输出该行，brief 通常为空或为真实的前导说明。
+    final String brief = briefText.trim();
+    final String cardTitle = summary.title.trim();
+    final bool briefDuplicatesCard =
+        cardTitle.isNotEmpty && brief.contains(cardTitle);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        if (briefText.trim().isNotEmpty)
+        if (brief.isNotEmpty && !briefDuplicatesCard) ...<Widget>[
           _BriefContentPreview(
-            content: briefText.trim(),
+            content: brief,
             style: bodyStyle,
           ),
-        if (briefText.trim().isNotEmpty) const SizedBox(height: 10),
+          const SizedBox(height: AppTypography.space3),
+        ],
+        // 简洁要点（服务端 briefPoints）：折叠卡外的概要正文，
+        // 详细内容点卡片在右侧面板/弹窗查看
+        if (summary.briefPoints.isNotEmpty) ...<Widget>[
+          _BriefPointsList(points: summary.briefPoints),
+          const SizedBox(height: AppTypography.space3),
+        ],
         if (structuredItems.isNotEmpty) ...<Widget>[
           _StructuredItemsPanel(items: structuredItems),
-          const SizedBox(height: 10),
+          const SizedBox(height: AppTypography.space3),
         ],
         ContentSummaryDetailCard(
           summary: summary,
@@ -48,9 +65,53 @@ class ContentSummaryMessageBody extends StatelessWidget {
         ),
         if (extraText.trim().isNotEmpty &&
             extraText.trim() != briefText.trim()) ...<Widget>[
-          const SizedBox(height: 8),
+          const SizedBox(height: AppTypography.space2),
           buildInlineMarkdownText(extraText.trim(), bodyStyle, cs: cs),
         ],
+      ],
+    );
+  }
+}
+
+/// 简洁要点列表：折叠卡上方的概要正文（icon + 单行内联 markdown）。
+class _BriefPointsList extends StatelessWidget {
+  const _BriefPointsList({required this.points});
+
+  final List<ContentSummaryBriefPoint> points;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final TextStyle style = Theme.of(context).textTheme.bodyMedium!.copyWith(
+          color: cs.onSurface,
+          height: AppTypography.bodyLineHeight,
+        );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        for (final ContentSummaryBriefPoint point in points)
+          Padding(
+            padding: const EdgeInsets.only(bottom: AppTypography.space1),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                SizedBox(
+                  width: 20,
+                  child: Text(
+                    point.icon,
+                    style: const TextStyle(fontSize: 13),
+                    textAlign: TextAlign.start,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: buildInlineMarkdownText(point.text, style, cs: cs),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }
@@ -161,26 +222,13 @@ class _BriefContentPreview extends StatelessWidget {
     final bool hasBulletPoints = lines.any((line) => line.trim().startsWith("•"));
 
     if (!hasBulletPoints) {
-      // 纯文本模式：直接显示，添加轻微背景色突出摘要性质
-      return Container(
+      // 纯文本模式：直接显示，轻微底色突出摘要性质（与引用块同源面板组件）
+      return AccentPanel(
+        cs: cs,
+        accentAlpha: 0.45,
+        fillAlpha: 0.12,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: cs.primaryContainer.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(8),
-          border: Border(
-            left: BorderSide(
-              color: cs.primary.withValues(alpha: 0.3),
-              width: 3,
-            ),
-          ),
-        ),
-        child: buildInlineMarkdownText(
-          content,
-          style.copyWith(
-            color: cs.onSurface.withValues(alpha: 0.9),
-          ),
-          cs: cs,
-        ),
+        child: buildInlineMarkdownText(content, style, cs: cs),
       );
     }
 
@@ -213,8 +261,7 @@ class _BriefContentPreview extends StatelessWidget {
                   child: buildInlineMarkdownText(
                     itemText,
                     style.copyWith(
-                      color: cs.onSurface.withValues(alpha: 0.9),
-                      height: 1.5,
+                      height: AppTypography.bodyLineHeight,
                     ),
                     cs: cs,
                   ),
@@ -225,7 +272,7 @@ class _BriefContentPreview extends StatelessWidget {
         }
 
         return Padding(
-          padding: const EdgeInsets.only(bottom: 4),
+          padding: const EdgeInsets.only(bottom: AppTypography.space1),
           child: buildInlineMarkdownText(
             trimmed,
             style.copyWith(
@@ -255,19 +302,12 @@ class _StructuredItemsPanel extends StatelessWidget {
     final List<ContentSummaryItem> visible = items.take(maxVisible).toList();
     final int overflow = items.length - visible.length;
 
-    return Container(
-      width: double.infinity,
+    return AccentPanel(
+      cs: cs,
+      accentAlpha: 0.45,
+      fillAlpha: 0.18,
+      radius: 10,
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-      decoration: BoxDecoration(
-        color: cs.primaryContainer.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(10),
-        border: Border(
-          left: BorderSide(
-            color: cs.primary.withValues(alpha: 0.45),
-            width: 3,
-          ),
-        ),
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -296,7 +336,7 @@ class _StructuredItemsPanel extends StatelessWidget {
           ),
           ...visible.map(
             (ContentSummaryItem item) => Padding(
-              padding: const EdgeInsets.only(bottom: 6),
+              padding: const EdgeInsets.only(bottom: AppTypography.space1),
               child: _StructuredItemRow(item: item),
             ),
           ),
@@ -306,8 +346,8 @@ class _StructuredItemsPanel extends StatelessWidget {
               child: Text(
                 "…还有 $overflow 条，详见详情卡",
                 style: TextStyle(
-                  fontSize: 12,
-                  color: cs.onSurfaceVariant.withValues(alpha: 0.8),
+                  fontSize: AppTypography.caption,
+                  color: cs.onSurfaceVariant,
                 ),
               ),
             ),
@@ -356,11 +396,8 @@ class _StructuredItemRow extends StatelessWidget {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: textTheme.bodyMedium?.copyWith(
-                      color: item.url != null
-                          ? cs.primary.withValues(alpha: 0.95)
-                          : cs.onSurface.withValues(alpha: 0.9),
+                      color: item.url != null ? cs.primary : cs.onSurface,
                       fontWeight: FontWeight.w600,
-                      height: 1.35,
                     ),
                   ),
                   if ((item.snippet ?? "").isNotEmpty) ...<Widget>[
@@ -369,7 +406,7 @@ class _StructuredItemRow extends StatelessWidget {
                       item.snippet!,
                       textTheme.bodySmall!.copyWith(
                         color: cs.onSurfaceVariant,
-                        height: 1.45,
+                        height: AppTypography.bodyLineHeight,
                       ),
                       cs: cs,
                     ),
@@ -381,8 +418,8 @@ class _StructuredItemRow extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: textTheme.labelSmall?.copyWith(
-                        color: cs.onSurfaceVariant.withValues(alpha: 0.72),
-                        fontSize: 11,
+                        color: cs.onSurfaceVariant,
+                        fontSize: AppTypography.micro,
                       ),
                     ),
                   ],

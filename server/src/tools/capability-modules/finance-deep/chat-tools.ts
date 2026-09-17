@@ -37,23 +37,32 @@ export const FINANCE_DEEP_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "finance.import_transactions",
       description:
         "批量导入交易记录到用户账本，落盘到 data/finance/{actorId}/transactions.json。\n" +
-        "支持两种格式：\n" +
+        "支持三种输入（系统按内容自动识别，账单导出走确定性解析、不依赖模型抽取）：\n" +
+        "  - 支付宝/微信账单导出：用户直接粘贴「支付宝交易记录明细查询 / 支付宝交易明细清单」\n" +
+        "    或「微信支付账单明细」导出的 CSV 原文（含说明头与表头，format 传 csv 即可）。\n" +
+        "    系统自动识别并逐列解析：只入账成功状态交易；退款（已退款/已全额退款/退款成功）、\n" +
+        "    等待付款、不计收支（零钱充值/提现等资金自有账户间转移）行自动跳过并在结果中说明；\n" +
+        "    平台交易单号作为幂等键，重复导入同一份账单不会重复入账。\n" +
         "  - json：JSON 数组字符串，每个元素 { date, amount, type, category?, merchant?, description?, source? }\n" +
         "  - csv：CSV 文本，首行表头 date,amount,type,category,merchant,description（后三个可空）\n" +
         "未分类（category 为空或非法）会自动按 description 关键词分类。\n" +
-        "适用场景：用户粘贴一段账单 / 银行流水 / 支付宝微信导出。",
+        "适用场景：用户粘贴支付宝/微信账单导出内容、一段账单 / 银行流水等。注意：用户上传的\n" +
+        "账单导出文件原文请完整放入 data，不要自行改写金额、日期或状态，以免解析失真。",
       parameters: {
         type: "object",
         properties: {
           format: {
             type: "string",
             enum: ["json", "csv"],
-            description: "数据格式：json 或 csv。",
+            description:
+              "数据格式：json 或 csv。用户粘贴支付宝/微信账单导出内容时传 csv，\n" +
+              "系统会自动识别账单格式并走确定性解析。",
           },
           data: {
             type: "string",
             description:
-              "数据内容字符串。json 时为 JSON 数组文本；csv 时为带表头的 CSV 文本。",
+              "数据内容字符串。用户粘贴账单导出原文时请原样完整传入（含「支付宝交易记录明细查询」\n" +
+              "或「微信支付账单明细」等说明头与列名行）；json 时为 JSON 数组文本；csv 时为带表头的 CSV 文本。",
           },
           source: {
             type: "string",

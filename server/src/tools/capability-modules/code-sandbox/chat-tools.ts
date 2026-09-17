@@ -153,6 +153,11 @@ export const CODE_SANDBOX_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "code.read_file",
       description:
         "读取工作目录下的文件内容（utf-8 文本）。文件大小上限 10MB，超出返回错误。\n" +
+        "读法（mode）：\n" +
+        "  - 默认：小文件（≤2000 字符）直接返回全文；大文件返回结构目录（标题/表头/函数清单）+ 头部预览，\n" +
+        "    先看结构再定向读，避免整份大文件挤占上下文；\n" +
+        "  - mode=\"range\"：按 offset/limit 读取指定片段（大文件分段读，配合结构目录的 [offset] 标注使用）；\n" +
+        "  - mode=\"full\"：强制返回全文（明确需要完整内容时使用，会消耗较多上下文）。\n" +
         "适用场景：查看 code.run 生成的 csv / json / txt / log 文件内容。",
       parameters: {
         type: "object",
@@ -165,8 +170,42 @@ export const CODE_SANDBOX_CHAT_TOOLS: ChatCompletionTool[] = [
             type: "string",
             description: "文件名（仅允许 [a-zA-Z0-9_\\-.]，禁止路径分隔符与 `..`）。",
           },
+          mode: {
+            type: "string",
+            enum: ["full", "range"],
+            description: "full=全文；range=按 offset/limit 读片段。默认自动：小文件全文、大文件先返回结构目录。",
+          },
+          offset: {
+            type: "integer",
+            description: "mode=\"range\" 时的起始字符偏移（结构目录中 [N] 标注即偏移量）。",
+          },
+          limit: {
+            type: "integer",
+            description: "mode=\"range\" 时的读取字符数，默认 4000，上限 16000。",
+          },
         },
         required: ["workspaceId", "fileName"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "code.workspace_map",
+      description:
+        "返回工作区结构地图：每个文件的结构概要（类型 / 大小 / 标题树或表头 / 函数清单，含字符偏移标注）。\n" +
+        "适用场景：多文件工作区先看全景再定向读，替代「list_files → 逐个盲读全文」。" +
+        "概要仅供导航，引用细节前先用 code.read_file 读取对应文件/片段。未变更文件走增量缓存，调用廉价。",
+      parameters: {
+        type: "object",
+        properties: {
+          workspaceId: {
+            type: "string",
+            description: "工作目录标识（与 code.run 使用的 workspaceId 一致）。",
+          },
+        },
+        required: ["workspaceId"],
         additionalProperties: false,
       },
     },

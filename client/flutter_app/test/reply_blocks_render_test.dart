@@ -110,4 +110,61 @@ void main() {
     expect(find.textContaining("前导说明"), findsOneWidget);
     expect(find.textContaining("AGENT_RESULT_CARD_START"), findsNothing);
   });
+
+  testWidgets("无 blocks 回退路径：多卡按位置渲染——总览卡置首、正文居中、行程卡收尾", (tester) async {
+    await pumpBody(
+      tester,
+      ChatMessage(
+        messageId: "m3",
+        sessionId: "s1",
+        role: "assistant",
+        text: "[RENDER_AS:structured]\n"
+            "[AGENT_RESULT_CARD_START]\n"
+            '{"title":"印尼7天怎么排","cardType":"fold_list","items":'
+            '[{"type":"num","text":"Day 1 落地巴厘岛"},{"type":"num","text":"Day 2 乌布一天"}],'
+            '"footer":"7 天就这个骨架。"}\n'
+            "[AGENT_RESULT_CARD_END]\n"
+            "## 🏨 住哪儿\n预算充足的话先乌布后海景，节奏刚好。\n"
+            "[AGENT_RESULT_CARD_START]\n"
+            '{"title":"巴厘岛5日游·海景/泳池/休闲","cardType":"travel_itinerary","autoOpen":false,'
+            '"items":[{"type":"num","text":"Day 1 · 2026-09-16：AYANA Resort 等"}],"footer":""}\n'
+            "[AGENT_RESULT_CARD_END]",
+        timestamp: DateTime.now(),
+        replyBlocks: null,
+      ),
+    );
+
+    // 三段都在：总览卡、正文、行程卡
+    expect(find.text("印尼7天怎么排"), findsOneWidget);
+    expect(find.textContaining("住哪儿"), findsOneWidget);
+    expect(find.text("巴厘岛5日游·海景/泳池/休闲"), findsOneWidget);
+    // 模型自带的 RENDER_AS 声明行剥掉，不漏进正文
+    expect(find.textContaining("RENDER_AS"), findsNothing);
+    // 位置：总览卡在正文之上、行程卡在正文之下（置首 + 收尾）
+    final double overviewTop = tester.getTopLeft(find.text("印尼7天怎么排")).dy;
+    final double proseTop = tester.getTopLeft(find.textContaining("住哪儿")).dy;
+    final double travelTop = tester.getTopLeft(find.text("巴厘岛5日游·海景/泳池/休闲")).dy;
+    expect(overviewTop, lessThan(proseTop));
+    expect(proseTop, lessThan(travelTop));
+  });
+
+  testWidgets("无 blocks 回退路径：JSON 损坏的卡片块静默跳过，不漏脏 JSON", (tester) async {
+    await pumpBody(
+      tester,
+      ChatMessage(
+        messageId: "m4",
+        sessionId: "s1",
+        role: "assistant",
+        text: "前导说明。\n[AGENT_RESULT_CARD_START]\n{broken json\n[AGENT_RESULT_CARD_END]\n"
+            "收尾说明。",
+        timestamp: DateTime.now(),
+        replyBlocks: null,
+      ),
+    );
+
+    expect(find.textContaining("前导说明"), findsOneWidget);
+    expect(find.textContaining("收尾说明"), findsOneWidget);
+    expect(find.textContaining("broken json"), findsNothing);
+    expect(find.textContaining("AGENT_RESULT_CARD_START"), findsNothing);
+  });
 }

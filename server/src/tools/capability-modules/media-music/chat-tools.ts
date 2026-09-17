@@ -53,11 +53,13 @@ export const MEDIA_MUSIC_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "media.play",
       description:
-        "播放指定曲目。服务端会通过 WebSocket 推 `agent.media.play` 事件给用户客户端，由客户端实际播放。\n" +
+        "播放指定曲目。服务端按 trackId 解析可播放 URL 后推 `agent.media.play` 事件给用户客户端，客户端直接播放。\n" +
         "适用场景：用户说「放一首xxx」「播放xxx」「来首歌」。\n" +
         "⚠ 前置条件：客户端须在 session.init 声明媒体播放能力（capabilities.mediaPlayback），" +
         "未声明的客户端不会消费播放事件——调用会如实返回失败。若失败且用户电脑在本机，" +
         "改用 desktop.open 打开网易云等音乐应用播放。\n" +
+        "⚠ 诚实要求：若返回 urlError（无版权/仅 VIP/解析超时），说明客户端无法真正出声，" +
+        "必须如实告知用户，绝不能宣称「歌已经在放了」。\n" +
         "推荐先用 media.search 拿到 trackId 再调用本工具；也可直接传 trackId。",
       parameters: {
         type: "object",

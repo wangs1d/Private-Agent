@@ -54,6 +54,81 @@ const UNSUPPORTED_MARKERS = [
 ];
 
 /**
+ * 剥模型输出的 [RENDER_HINT:xxx] 声明（根源收口，2026-09-17）。
+ *
+ * RENDER_HINT 是「模型→服务器」的展示形态信号：服务器在 processAssistantText
+ * 消费它做渲染路由后，它就不该再存在于任何下发文本里——客户端没有它的
+ * 消费者，残留只会被当字面文本漏到用户屏幕（历史教训：任务面/HTTP 重答等
+ * 不走 processAssistantText 的路径曾经漏出）。渲染令牌（RENDER_AS 等）由
+ * 服务器权威注入，此处不动。
+ */
+export function stripRenderHintDeclarations(text: string): string {
+  if (!text.includes("[RENDER_HINT:")) return text ?? "";
+  const kept: string[] = [];
+  for (const line of (text ?? "").split("\n")) {
+    const stripped = line.replace(/\[RENDER_HINT:[A-Za-z_]+\]/g, "");
+    // 声明独占一行 → 整行删除；行内嵌声明 → 就地剥离保留其余文本
+    if (!stripped.trim() && line.trim()) continue;
+    kept.push(stripped);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * 卡片版式归一化：总览卡置首、行程卡置尾、正文居中（2026-09-17 用户需求）。
+ * 同时作为回复文本的出口收口之一：先剥 RENDER_HINT 声明，再重排卡片。
+ *
+ * 回复含卡片时的版式固定为：
+ *   [模型总览卡（Day 概览/要点等，首位）] → [正文散文（原顺序）] → [travel_itinerary 行程卡（尾部）]
+ *
+ * 行为：
+ *   - 剥全部 [RENDER_HINT:xxx] 声明（独占行整行删、行内就地剥）；
+ *   - 非行程卡稳定提到最前（首位总览卡），散文按原顺序居中，
+ *     行程卡稳定放在最后（尾部独立规划卡）；
+ *   - 卡块 JSON 解析失败或标记残缺时不重组（原样返回声明剥离后的文本，
+ *     交由既有降级路径）；
+ *   - 无卡片块时仅返回声明剥离后的文本（零额外开销）。
+ */
+export function normalizeReplyCardLayout(text: string): string {
+  const source = stripRenderHintDeclarations(text ?? "");
+  if (!source.includes(CARD_START)) return source;
+
+  const proseSegments: string[] = [];
+  const genericCards: string[] = [];
+  const travelCards: string[] = [];
+  let cursor = 0;
+  while (true) {
+    const start = source.indexOf(CARD_START, cursor);
+    if (start === -1) break;
+    const end = source.indexOf(CARD_END, start + CARD_START.length);
+    if (end === -1) return source; // 残缺标记：不重组
+
+    const before = source.slice(cursor, start).trim();
+    if (before) proseSegments.push(before);
+    const rawBlock = source.slice(start, end + CARD_END.length);
+    const rawJson = source.slice(start + CARD_START.length, end).trim();
+    let card: unknown;
+    try {
+      card = JSON.parse(rawJson);
+    } catch {
+      return source; // JSON 不可解析：不重组
+    }
+    if (!card || typeof card !== "object" || Array.isArray(card)) return source;
+    if ((card as Record<string, unknown>).cardType === "travel_itinerary") {
+      travelCards.push(rawBlock);
+    } else {
+      genericCards.push(rawBlock);
+    }
+    cursor = end + CARD_END.length;
+  }
+  const tail = source.slice(cursor).trim();
+  if (tail) proseSegments.push(tail);
+  if (genericCards.length + travelCards.length === 0) return source;
+
+  return [...genericCards, ...proseSegments, ...travelCards].join("\n\n").trim();
+}
+
+/**
  * 把带卡片标记的回复文本拆成结构化块序列。
  * 返回 null 表示本轮不下发 blocks（前端回退文本解析），见文件头降级判定。
  */

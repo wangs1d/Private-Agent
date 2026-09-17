@@ -14,6 +14,7 @@ import type { SessionService } from "../services/session-service.js";
 import type { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
+import { normalizeDeviceClass } from "../services/ws-connection-registry.js";
 import { declareClientCapabilities } from "../services/client-capability-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
@@ -45,6 +46,7 @@ import {
 } from "../task-plane/task-events.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
+import type { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
 import type {
   SharedBrowserCoordinator,
   SharedBrowserResult,
@@ -211,6 +213,11 @@ export type WsRouteDeps = {
   eveningDigestScheduler?: EveningDigestScheduler;
   /** 设备自绑定鉴权服务（ACCESS_AUTH_REQUIRED=1 时 session.init 须持有效 token） */
   accessAuthService?: AccessAuthService;
+  /**
+   * 电话代办协调器（可选）：在 chat.user_action 入口消费确认卡点击，
+   * 作为 phone_call.start 确认门的权威证据源（LLM 无法伪造）。
+   */
+  phoneCallCoordinator?: PhoneCallCoordinator;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -244,6 +251,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     morningBriefingScheduler,
     eveningDigestScheduler,
     accessAuthService,
+    phoneCallCoordinator,
   } = deps;
 
   // device-bus 处理器依赖（device.* 事件路由）
@@ -803,7 +811,11 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           initAsDesktopBridge = isDesktopBridgeChannel;
           initAsPhoneBridge = isPhoneBridgeChannel;
           if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
-            wsConnectionRegistry.register(actorId, socket);
+            // 设备类别随连接登记（2026-09-18）：session.init 自报 platform，
+            // critical 升级链据此区分电脑端/移动端触达；旧客户端缺省按桌面端处理
+            wsConnectionRegistry.register(actorId, socket, {
+              deviceClass: normalizeDeviceClass(payload.platform ?? payload.deviceClass),
+            });
             getEmbodimentAutonomy()?.registerSession(actorId);
             // 离线结果重放（2026-09-08 outbox）：用户离线期间完成的任务面结果
             // 暂存于 TaskOutbox，重连时按 FIFO 原样重推，闭合「离线=结果丢失」缺口。
@@ -1280,6 +1292,15 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               ? (actPl.payload as Record<string, unknown>)
               : {};
 
+          // 电话代办确认门（权威证据源）：在点击原点捕获「确认拨打/取消」按钮，
+          // 写入 phone-call 会话——后续 phone_call.start 只认可这里记录的确认，
+          // LLM 侧无法伪造。其余卡片动作不受影响。
+          phoneCallCoordinator?.observeCardAction(boundActorId, {
+            cardId,
+            actionId,
+            payload: actionPayload,
+          });
+
           // 构造等价的 user message payload。
           // text 使用按钮 label(等价于用户打字输入了这段话);
           // messageId 由客户端提供,保证前端 UI 与后端审计可对齐。
@@ -1322,6 +1343,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               auditService,
               voiceCapabilityService,
               voiceMessageService,
+              phoneCallCoordinator,
             },
           );
           return;
@@ -1343,6 +1365,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               auditService,
               voiceCapabilityService,
               voiceMessageService,
+              phoneCallCoordinator,
             },
           );
           return;

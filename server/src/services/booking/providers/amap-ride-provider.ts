@@ -107,6 +107,24 @@ export class AmapRideProvider implements BookingProvider {
     return `${location.longitude.toFixed(6)},${location.latitude.toFixed(6)}`;
   }
 
+  /**
+   * 半自动唤起链接（2026-09-18）：把起终点灌进高德叫车/导航页。
+   * 真实代下单卡企业资质（见 book），资质开通前这是最短的"真实成交"路径——
+   * Agent 查好真实路线与预估价，用户点链接唤起高德（Web/手机浏览器均可打开，
+   * callnative=1 时手机端直接拉起高德 App 续行），不必重新输入起终点。
+   */
+  private buildHandoffUrl(origin: Coord, destination: Coord, pickupLabel: string, dropoffLabel: string): string {
+    const params = new URLSearchParams({
+      from: `${origin},${pickupLabel}`,
+      to: `${destination},${dropoffLabel}`,
+      mode: "car",
+      coordinate: "gaode",
+      callnative: "1",
+      src: "private-agent",
+    });
+    return `https://uri.amap.com/navigation?${params.toString()}`;
+  }
+
   async search(
     query: BookingSearchQuery,
     ctx: BookingProviderContext,
@@ -159,6 +177,7 @@ export class AmapRideProvider implements BookingProvider {
       return { ok: false, error: "高德路径规划未返回距离", retryable: true };
     }
 
+    const handoffUrl = this.buildHandoffUrl(origin, destination, pickupLabel, dropoffText);
     const options: BookingOption[] = FARE_TIERS.map((t) => {
       const amount = Math.round(t.base + t.perKm * distanceKm);
       return {
@@ -177,6 +196,7 @@ export class AmapRideProvider implements BookingProvider {
           destination,
           estimate: true,
           estimateNote: "按本地费率表估算的预估价，非平台实时报价，以实际接单为准",
+          handoffUrl,
         },
       };
     });
@@ -185,7 +205,8 @@ export class AmapRideProvider implements BookingProvider {
       options,
       note: this.enterpriseReady()
         ? "价格为预估值；确认下单后将调用高德打车企业版 API 真实下单"
-        : "价格为预估值；高德打车企业版下单接口未配置（RIDE_AMAP_ENTERPRISE_BASE_URL/TOKEN），确认下单会返回不可用错误",
+        : "价格为预估值；真实代下单需企业版资质（未配置 RIDE_AMAP_ENTERPRISE_BASE_URL/TOKEN）。" +
+          "每个报价已附 handoffUrl 唤起链接，可引导用户一键打开高德 App 续行下单",
     };
   }
 
@@ -194,11 +215,18 @@ export class AmapRideProvider implements BookingProvider {
     ctx: BookingProviderContext,
   ): Promise<BookingProviderResult<BookingProviderBookPayload>> {
     if (!this.enterpriseReady()) {
+      const origin = typeof draft.params.origin === "string" ? draft.params.origin : "";
+      const destination = typeof draft.params.destination === "string" ? draft.params.destination : "";
+      const handoffHint =
+        origin && destination
+          ? "可改用报价时附带的 handoffUrl 唤起链接，让用户一键打开高德 App 完成下单。"
+          : "可让用户重新报价（ride 报价附带 handoffUrl 唤起链接），一键打开高德 App 完成下单。";
       return {
         ok: false,
         error:
           "高德打车企业版下单接口未配置：需企业资质开通（lbs.amap.com 网约车开放平台）并设置 " +
-          "RIDE_AMAP_ENTERPRISE_BASE_URL + RIDE_AMAP_ENTERPRISE_TOKEN。当前仅支持估价查询。",
+          "RIDE_AMAP_ENTERPRISE_BASE_URL + RIDE_AMAP_ENTERPRISE_TOKEN。当前仅支持估价查询。" +
+          handoffHint,
         retryable: false,
       };
     }

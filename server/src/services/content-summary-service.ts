@@ -129,16 +129,46 @@ const CATEGORY_CONFIG: Record<ContentCategory, {
 /** 低于此字数不启用摘要折叠卡（原 800 过高导致实际对话几乎不触发；现降为 400） */
 const SUMMARY_MIN_CHARS = 400;
 
-/** 调研报告：主区展示结论类板块，数据类板块仅进详情卡 */
-const CONCLUSION_SECTION_RE =
-  /结论|核心|要点|建议|总结|发现|概要|摘要|研判|观点|executive|summary|conclusion/i;
-const DATA_SUPPORT_SECTION_RE =
-  /数据|附录|来源|引用|表格|统计|明细|支撑|证据|样本|方法论|链接|原始|附录|chart|table|source/i;
-
 const CONTENT_SUMMARY_MARKER = "[CONTENT_SUMMARY_V2_START]";
 
 function generateId(): string {
   return `sum-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * 模型自声明的展示形态标记行（[RENDER_HINT:xxx] / [RENDER_AS:xxx]）。
+ * 只属于渲染路由信号，不属于正文——若不在文本开头（extractLlmRenderHint
+ * 只剥离首处标记），会随 detailContent 漏进面板/弹窗正文，这里整行剥离。
+ */
+const RENDER_DECLARATION_LINE_RE = /^[ \t]*\[RENDER_(?:HINT|AS):\w+\][ \t]*$/;
+
+function stripRenderDeclarationLines(content: string): string {
+  return content
+    .split("\n")
+    .filter((line) => !RENDER_DECLARATION_LINE_RE.test(line))
+    .join("\n")
+    .trim();
+}
+
+/**
+ * detailContent 首行与卡片标题重复时删掉该行：标题（extractTitle）通常
+ * 取自正文首行导语，面板/弹窗顶栏已展示标题，正文再复读一遍属于冗余。
+ */
+function stripLeadingTitleEcho(content: string, title: string): string {
+  const titleTrim = title.trim();
+  if (!titleTrim) return content;
+  const lines = content.split("\n");
+  const firstIdx = lines.findIndex((line) => line.trim());
+  if (firstIdx === -1) return content;
+  const first = lines[firstIdx].trim();
+  const firstSansHash = first.replace(/^#{1,3}\s+/, "").trim();
+  const echoed =
+    first === titleTrim ||
+    firstSansHash === titleTrim ||
+    (titleTrim.length >= 12 && first.includes(titleTrim));
+  if (!echoed) return content;
+  lines.splice(firstIdx, 1);
+  return lines.join("\n").trim();
 }
 
 function looksLikeCapabilityOrToolDump(content: string): boolean {
@@ -465,41 +495,14 @@ function resolveCardTitle(
   return subjectLabel;
 }
 
-/** 精简区：对全文的概括性介绍（非正文摘录） */
-function buildOverviewIntro(
-  content: string,
-  subjectLabel: string,
-  headline: string,
-  features: {
-    sectionCount: number;
-    listItemCount: number;
-    hasTable: boolean;
-  },
-): string {
-  const structureParts: string[] = [];
-
-  if (features.sectionCount >= 2) {
-    structureParts.push(`${features.sectionCount} 个板块`);
-  } else if (features.listItemCount >= 3) {
-    structureParts.push(`${features.listItemCount} 条要点`);
-  } else if (features.hasTable) {
-    structureParts.push("含表格");
-  }
-
-  const structureHint =
-    structureParts.length > 0 ? `，${structureParts.join("、")}` : "";
-
-  return `【${subjectLabel}】全文约 ${content.length} 字${structureHint}。`;
-}
-
-/** 精简区要点：仅高层主题/结论，不复制详情正文 */
+/** 精简区要点：直接从正文提取真实内容（实际条目/句子）作为简洁介绍——
+ *  用户在气泡里读到的是内容本身的预览，不是「主要涵盖哪些板块」式的目录转述。 */
 function extractOverviewHighlights(
   content: string,
   category: ContentCategory,
   features: {
     hasSections: boolean;
     hasList: boolean;
-    sectionCount: number;
     listItemCount: number;
   },
   maxCount: number,
@@ -509,61 +512,42 @@ function extractOverviewHighlights(
   const points: BriefPoint[] = [];
   let index = 0;
 
-  const push = (text: string, section?: string) => {
+  const push = (text: string) => {
     if (index >= maxCount) return;
     const clean = text.trim();
     if (clean.length < 4) return;
     points.push({
       icon: icons[index % icons.length],
       text: truncateBrief(clean, 100),
-      section,
     });
     index++;
   };
 
   if (features.hasSections) {
+    // 分板块内容：各板块轮询取第 1、2、… 条真实要点，
+    // 保证摘要在板块间均衡覆盖，且每条都是正文里的实际信息
     const sections = parseSections(content);
-    const titles = sections
-      .map((s) => s.title.trim())
-      .filter((t) => t.length > 0 && t.length < 50);
-
-    if (category === "data") {
+    for (let round = 0; round < maxCount && index < maxCount; round++) {
       for (const section of sections) {
         if (index >= maxCount) break;
-        const title = section.title.trim();
-        if (title && DATA_SUPPORT_SECTION_RE.test(title)) continue;
-        if (title && !CONCLUSION_SECTION_RE.test(title) && points.length > 0) continue;
-        if (title) {
-          push(`板块：${title}`, title);
-        } else if (section.items[0]) {
-          push(truncateBrief(section.items[0], 80), title);
-        }
-      }
-    } else if (titles.length > 0) {
-      if (titles.length <= 4) {
-        push(`主要涵盖：${titles.join("、")}`);
-      } else {
-        push(`主要涵盖 ${titles.length} 个部分：${titles.slice(0, 3).join("、")}等`);
+        const item = section.items[round];
+        if (item) push(item);
       }
     }
   } else if (features.hasList && features.listItemCount >= 3) {
-    push(`清单共 ${features.listItemCount} 项`);
-    const lines = content.split("\n").filter((l) => l.trim());
-    let picked = 0;
-    for (const line of lines) {
-      if (picked >= 2 || index >= maxCount) break;
-      const trimmed = line.trim();
-      const clean = trimmed
+    // 清单内容：直接取前若干条真实列表项
+    for (const line of content.split("\n")) {
+      if (index >= maxCount) break;
+      const clean = line
+        .trim()
         .replace(/^[\s]*[-•*→▸‣⁃◦·#*]+\s*/, "")
         .replace(/^[""「『【]/, "")
         .replace(/[""」』】]$/, "")
         .trim();
-      if (clean.length >= 6) {
-        push(`示例：${truncateBrief(clean, 55)}`);
-        picked++;
-      }
+      if (clean.length >= 6) push(clean);
     }
   } else {
+    // 纯段落：取开头几句完整句子
     const sentences = content
       .split(/[。！？.!?]/)
       .map((s) => s.replace(/\s+/g, " ").trim())
@@ -576,36 +560,20 @@ function extractOverviewHighlights(
   return points;
 }
 
+/** 精简区：从正文提取的真实要点（气泡里折叠卡上方的简洁介绍）。
+ *  不再拼接「全文约 N 字 / 主要涵盖…」式的元信息，全部为真实内容预览。 */
 function extractBriefPoints(
   content: string,
   category: ContentCategory,
   maxCount: number = 6,
-  subjectLabel?: string,
 ): BriefPoint[] {
   const contentType = detectContentType(content);
-  const rawTitle = extractTitle(content, category);
-  const subject = subjectLabel ?? inferTaskSubject(content, category, rawTitle);
-  const cardTitle = resolveCardTitle(rawTitle, subject, category);
-  const config = CATEGORY_CONFIG[category];
-  const icons = config.briefIcons;
-
-  const intro: BriefPoint = {
-    icon: icons[0],
-    text: buildOverviewIntro(content, subject, cardTitle, {
-      sectionCount: contentType.features.sectionCount,
-      listItemCount: contentType.features.listItemCount,
-      hasTable: contentType.features.hasTable,
-    }),
-  };
-
-  const highlights = extractOverviewHighlights(
+  return extractOverviewHighlights(
     content,
     category,
     contentType.features,
-    Math.max(1, maxCount - 1),
+    maxCount,
   );
-
-  return [intro, ...highlights].slice(0, maxCount);
 }
 
 export function createContentSummary(
@@ -627,27 +595,29 @@ export function createContentSummary(
     return null;
   }
 
-  const contentType = detectContentType(content);
-  const category = detectCategory(content, source);
+  // 先剥离模型声明的渲染标记行再做结构/标题/正文提取，保证 detailContent 干净
+  const renderCleaned = stripRenderDeclarationLines(content);
+  const contentType = detectContentType(renderCleaned);
+  const category = detectCategory(renderCleaned, source);
 
   const eligible =
     forceSummary ||
-    isEligibleForSummaryCard(category, content, contentType.features);
+    isEligibleForSummaryCard(category, renderCleaned, contentType.features);
 
   if (!eligible) {
     return null;
   }
 
   const config = CATEGORY_CONFIG[category];
-  const rawTitle = extractTitle(content, category);
-  const subjectLabel = inferTaskSubject(content, category, rawTitle);
+  const rawTitle = extractTitle(renderCleaned, category);
+  const subjectLabel = inferTaskSubject(renderCleaned, category, rawTitle);
   const cardTitle = resolveCardTitle(rawTitle, subjectLabel, category);
+  const detailContent = stripLeadingTitleEcho(renderCleaned, cardTitle);
 
   const briefPoints = extractBriefPoints(
-    content,
+    renderCleaned,
     category,
     briefPointCount,
-    subjectLabel,
   );
   if (briefPoints.length === 0) {
     return null;
@@ -655,7 +625,7 @@ export function createContentSummary(
   
   let sections: SectionInfo[] | undefined;
   if (contentType.features.hasSections) {
-    const parsed = parseSections(content);
+    const parsed = parseSections(renderCleaned);
     sections = parsed.map(s => ({
       title: s.title || "未命名",
       pointCount: s.items.length,
@@ -669,14 +639,14 @@ export function createContentSummary(
     category,
     title: cardTitle,
     briefPoints,
-    detailContent: content,
+    detailContent,
     cardIcon: config.cardIcon,
     cardLabel: subjectLabel,
     sections,
     metadata: {
       source,
       subjectLabel,
-      wordCount: content.length,
+      wordCount: detailContent.length,
       itemCount: briefPoints.length,
       sectionCount: sections?.length,
       hasTable: contentType.features.hasTable,
@@ -696,21 +666,22 @@ export function formatContentSummaryForChat(summary: ContentSummary): string {
     cardLabel: summary.cardLabel,
     subjectLabel: summary.cardLabel,
     briefCount: summary.briefPoints.length,
+    // 简洁要点：气泡里在折叠卡上方展示的概要内容（详情在右侧面板/卡片内）
+    briefPoints: summary.briefPoints.map((point) => ({
+      icon: point.icon,
+      text: point.text,
+    })),
     detailContent: summary.detailContent,
     sections: summary.sections,
     metadata: summary.metadata ?? {},
   });
 
-  // 仅保留一行简短标题，详情由 <details_card /> 折叠展示
-  const titleLine = summary.title
-    ? `${summary.cardIcon || "📋"} ${summary.cardLabel || ""}：${summary.title}`
-    : "";
-
+  // 卡片自身已渲染 cardLabel + title，正文不再重复输出同一文案，
+  // 气泡里只保留卡片占位 <details_card />（旧版在此处插一行 titleLine，
+  // 导致「先一段文案、卡片又复用同一文案」的冗余）。
   return `[CONTENT_SUMMARY_V2_START]
 ${summaryData}
 [CONTENT_SUMMARY_V2_END]
-
-${titleLine}
 
 <details_card ref="${summary.id}" />`;
 }

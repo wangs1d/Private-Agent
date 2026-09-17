@@ -21,6 +21,7 @@ import "core/models/wallet_models.dart";
 import "core/models/turn_state.dart";
 import "core/utils/agent_result_parser.dart";
 import "core/utils/assistant_text_sanitizer.dart";
+import "core/utils/content_summary_parser.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
@@ -35,6 +36,7 @@ import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
+import "core/services/content_summary_launcher.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/window_bounds_preference.dart";
 import "core/services/shared_browser_host.dart";
@@ -52,6 +54,8 @@ import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_activity_section.dart" show AgentActivityBus;
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
+import "features/chat/content_summary_detail_modal.dart";
+import "features/chat/content_summary_detail_view.dart";
 import "features/chat/travel_plan_launcher.dart";
 import "features/chat/travel_plan_window.dart";
 import "features/chat/travel_plan_browser_launcher.dart";
@@ -73,6 +77,7 @@ import "core/services/incoming_call_launcher.dart";
 import "core/services/phone_call_session.dart";
 import "core/presentation/phone_call_page.dart";
 import "core/services/local_notification_service.dart";
+import "core/services/media_playback_service.dart";
 import "core/services/mobile_briefing_launcher.dart";
 import "core/services/presence_gate_service.dart";
 import "core/services/mobile_push_service.dart";
@@ -306,6 +311,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 图片预览面板当前要展示的图片快照（来自媒体卡点击）。
   ImagePreviewSnapshot? _imagePreview;
 
+  /// 内容详情面板当前要展示的摘要数据（来自详情卡点击）。
+  ContentSummaryDataV2? _contentSummary;
+
   /// 左聊天区 / 右分栏面板 的宽度比例（0.1~0.9），持久化到本地。
   double _splitRatio = SplitRatioPreference.defaultRatio;
 
@@ -454,6 +462,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 已弹窗处理的「其与 Agent 来电」callId，避免重复弹)
   String? _peerIncomingDialogCallId;
 
+  /// TTS 闹钟（tts_alarm_play）上一次真实起播时刻：服务端渐强循环会在约 10s 内
+  /// 连推约 20 个音量步事件，去抖避免音频重叠轰炸；与重复间隔（默认 15s）对齐
+  DateTime? _ttsAlarmLastPlayedAt;
+  static const int _ttsAlarmMinGapMs = 8000;
+
   /// 通话中是否静音（与 ConnectedCallWindow 同步）
   // ignore: unused_field
   bool _phoneMuted = false;
@@ -517,6 +530,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
     // 右侧双栏「图片预览」面板：媒体卡点击 → 打开右栏大图
     ImagePreviewLauncher.setHandler(_openImagePreview);
+    // 右侧双栏「内容详情」面板：详情卡（长内容折叠卡）点击 → 右栏继续展示
+    ContentSummaryLauncher.setHandler(_openContentSummaryPanel);
     // 「行程规划」独立界面：行程卡点击 / autoOpen → 全屏路由打开
     TravelPlanLauncher.setHandler(_openTravelPlanPanel);
     // 注意：主进程不再预加载共享行程 WebView（TravelWebPanelHost.preload）。
@@ -831,6 +846,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         // 共用浏览器桥：Agent 的 shared_browser.* 动作转发到内嵌浏览器执行，
         // 结果经 browser.bridge.result 回传（jobId 配对；未命中类型内部直接返回）
         unawaited(SharedBrowserHost.instance.handleServerEvent(type, payload));
+        // 媒体音乐播放闭环：agent.media.play/pause/resume/stop 真正出声
+        // （session.init 已声明 mediaPlayback 能力；未命中类型内部直接忽略）
+        unawaited(MediaPlaybackService.instance.handleMediaEvent(type, payload));
         // 服务端按需请求实时位置：Agent 需要位置时（如天气工具）才拉一次 GPS。
         if (type == "agent.location_request") {
           final String jobId = payload["jobId"]?.toString() ?? "";
@@ -1918,6 +1936,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final String attentionId =
               payload["attentionId"]?.toString() ?? "";
 
+          // 手机端且 App 在后台：应用内弹窗看不见，升级链第 1 级就成了"推给空气"。
+          // 走系统通知触达（通知即弹窗，点开回前台），服务端升级链随之收敛。
+          if (_isMobile && _appBackgrounded) {
+            unawaited(LocalNotificationService.show(
+              title: priority == "urgent" ? "[紧急] $title" : title,
+              body: message,
+            ));
+          }
+
           final BuildContext? navCtx = _rootNavigatorKey.currentContext;
           if (navCtx != null && navCtx.mounted) {
             // 分级触达 ack 归一：用户点掉弹窗 = 已知晓，服务端升级链即停
@@ -1933,6 +1960,62 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 // ack 失败不影响本地弹窗（升级链会随截止时间自然收敛）
               }
             }());
+          }
+        }
+
+        // ====== TTS 闹钟升级链事件（tts_alarm_start / tts_alarm_play）======
+        // 此前服务端推了音频但客户端无 handler——升级链第 2 级"有声无息"。
+        // start：桌面端原生通知（urgent/high）+ 应用内卡片；手机后台走系统通知。
+        // play：播 base64 mp3，带时间去抖——服务端渐强会在 10s 内连推约 20 个
+        // 音量步，全部起播会重叠轰炸；两次真实起播至少间隔 [._ttsAlarmMinGap]。
+        if (type == "tts_alarm_start") {
+          final String title = payload["title"]?.toString() ?? "语音提醒";
+          final String text = payload["message"]?.toString() ?? "";
+          final String priority = payload["priority"]?.toString() ?? "medium";
+          final bool important = priority == "urgent" || priority == "high";
+          if (_isMobile && _appBackgrounded) {
+            unawaited(LocalNotificationService.show(
+              title: important ? "[紧急语音] $title" : "[语音提醒] $title",
+              body: text,
+            ));
+          } else if (mounted) {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(
+                content: Text(
+                    important ? "【$priority】$title\n$text" : "$title\n$text"),
+                duration: const Duration(seconds: 10),
+              ),
+            );
+            if (important && !kIsWeb && !_isMobile) {
+              unawaited(DesktopNotificationLauncher.show(
+                title: "【$priority】$title",
+                message: text,
+                priority: priority,
+                showConfirmButton: true,
+                confirmText: "我知道了",
+                autoCloseMs: 30000,
+              ));
+            }
+          }
+        }
+        if (type == "tts_alarm_play") {
+          final Object? ttsRaw = payload["tts"];
+          String? ttsBase64;
+          if (ttsRaw is Map) {
+            final Object? fmt = ttsRaw["format"];
+            final Object? b64 = ttsRaw["base64"];
+            if (fmt?.toString() == "mp3" && b64 is String && b64.isNotEmpty) {
+              ttsBase64 = b64;
+            }
+          }
+          if (ttsBase64 != null) {
+            final DateTime now = DateTime.now();
+            final DateTime? last = _ttsAlarmLastPlayedAt;
+            if (last == null ||
+                now.difference(last).inMilliseconds >= _ttsAlarmMinGapMs) {
+              _ttsAlarmLastPlayedAt = now;
+              unawaited(TtsPlayer.instance.playFromBase64(ttsBase64));
+            }
           }
         }
 
@@ -2781,6 +2864,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       "userAlias": "owner",
       // 共用浏览器桥：本连接即浏览器执行器（Agent 与用户共用 WebView2）
       "browserBridge": true,
+      // 设备类别自报：服务端升级链据此区分电脑端/移动端触达（弹窗→TTS→推送/电话）
+      "platform": _devicePlatform,
+      // 媒体播放能力声明：服务端凭此放行 media.play（未声明时 media.play 如实失败）。
+      // 分发区已接线 MediaPlaybackService，声明即真实可消费，不再是"信令没人消费"的假成功。
+      "capabilities": <String, dynamic>{"mediaPlayback": kMediaPlaybackCapability},
       // 访问鉴权（ACCESS_AUTH_REQUIRED）开启时服务端校验此 token；
       // 未绑定/未开启时为 null，服务端行为不变。
       if (AccessCredentialStore.instance.token != null)
@@ -2791,6 +2879,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       sessionInit["userId"] = uid;
     }
     _ws.sendEvent("session.init", sessionInit);
+  }
+
+  /// 当前设备类别标识：手机系 → "mobile"，桌面/网页 → "desktop"。
+  /// 服务端 normalizeDeviceClass 归一后随 WS 连接登记，供 critical 升级链
+  /// 做"电脑端弹窗 / 移动端系统通知+来电"的分级触达与全离线判断。
+  String get _devicePlatform {
+    if (kIsWeb) return "desktop";
+    if (Platform.isAndroid || Platform.isIOS) return "mobile";
+    return "desktop";
   }
 
   /// 设置页绑定/解绑设备后重连会话，让新凭据随 session.init 生效。
@@ -3106,6 +3203,24 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 内容详情入口：详情卡（科技新闻等长内容折叠卡）点击 →
+  /// 复用右侧双面板继续展示完整内容（书签导航 + markdown 正文）。
+  /// 窗口过窄无法分栏时回退为居中弹窗，保证功能可达。
+  void _openContentSummaryPanel(ContentSummaryDataV2 summary) {
+    if (MediaQuery.sizeOf(context).width < kWideLayoutBreakpoint) {
+      unawaited(ContentSummaryDetailModal.show(context, summary));
+      return;
+    }
+    setState(() {
+      _tabIndex = 0;
+      _contentSummary = summary;
+      _rightPanel = RightPanelKind.contentSummary;
+      _previousSplitRatio = _splitRatio;
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.contentSummary.defaultSplitRatio;
+    });
+  }
+
   /// 行程规划入口：行程卡(travel_itinerary)点击 / autoOpen → 在独立系统
   /// 窗口中打开行程规划（spawn 子进程，与主窗口并排，互不遮挡）。
   void _openTravelPlanPanel(AgentResultData data) {
@@ -3236,6 +3351,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 .whereType<Map<String, dynamic>>()
                 .toList()
             : null;
+    // 回复信封块：任务面 done 与前台轮次同构，服务端已把卡片标记确定性拆成
+    // text/card 序列（行程卡收尾独立成块）——优先按 blocks 渲染，
+    // 消除文本解析漂移导致的漏卡。
+    final List<Map<String, dynamic>>? replyBlocksFromPayload =
+        payload["blocks"] is List
+            ? (payload["blocks"] as List)
+                .whereType<Map<String, dynamic>>()
+                .toList()
+            : null;
     if (finalText.trim().isEmpty && (mediaCardsFromPayload == null || mediaCardsFromPayload.isEmpty)) {
       return;
     }
@@ -3249,6 +3373,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           ? _messages[idx].timestamp
           : DateTime.now(),
       mediaCards: mediaCardsFromPayload,
+      replyBlocks: replyBlocksFromPayload,
     );
     void apply() {
       if (idx != null && idx < _messages.length) {
@@ -5348,7 +5473,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 Icon(Icons.drag_indicator, size: 16, color: fgMuted),
                 const SizedBox(width: 8),
                 Text(
-                  _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
+                  _rightPanel == null ? "" : _rightPanelTitleText(),
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
@@ -5368,6 +5493,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         );
       },
     );
+  }
+
+  /// 面板顶栏标题文案。内容详情面板不展示 LLM 导语式的卡片标题
+  /// （如「王哥，我扒了一圈……」），只展示任务主体标签（如「科技新闻」）。
+  String _rightPanelTitleText() {
+    final RightPanelKind kind = _rightPanel!;
+    if (kind == RightPanelKind.contentSummary) {
+      final ContentSummaryDataV2? summary = _contentSummary;
+      return summary != null
+          ? ContentSummaryParser.taskSubject(summary)
+          : "内容详情";
+    }
+    return rightPanelTitle(kind);
   }
 
   /// 右侧面板要渲染的具体内容
@@ -5414,6 +5552,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         return CatalogPage(apiClient: _catalogApi);
       case RightPanelKind.approvals:
         return const ApprovalsPanel();
+      case RightPanelKind.contentSummary:
+        // 内容详情面板：标题栏显示主体标签（见 _rightPanelTitleText），
+        // 正文区与弹窗共用视图；按摘要 id 建 Key，切换详情时重置滚动/书签状态
+        final ContentSummaryDataV2? summary = _contentSummary;
+        if (summary == null) return const SizedBox.shrink();
+        return ContentSummaryDetailView(
+          key: ValueKey<String>(summary.id),
+          summary: summary,
+        );
       case null:
         return const SizedBox.shrink();
     }
