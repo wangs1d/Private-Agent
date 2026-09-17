@@ -422,7 +422,8 @@ test("抢救：模型回显行程 JSON → travel_itinerary 双面板卡", () =>
   const out = processor.processAssistantText(itinerary, { toolName: "travel.plan-itinerary" });
   const card = parseCard(out);
   assert.equal(card.cardType, "travel_itinerary");
-  assert.equal(card.autoOpen, true);
+  // 2026-09-17：行程卡不自动展开双面板，卡面直接逐日展示安排
+  assert.equal(card.autoOpen, false);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

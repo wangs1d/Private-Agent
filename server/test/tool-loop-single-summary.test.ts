@@ -257,7 +257,9 @@ function readAudit(sessionId: string) {
     .split("\n")
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l) as Record<string, unknown>)
-    .filter((r) => r.sessionId === sessionId);
+    // tool_result_compaction 是工具压缩遥测（非 LLM 调用，2026-09-17 WP0 引入），
+    // 不计入 LLM 调用次数
+    .filter((r) => r.sessionId === sessionId && r.stage !== "tool_result_compaction");
 }
 
 function sumTokens(recs: Array<Record<string, unknown>>) {

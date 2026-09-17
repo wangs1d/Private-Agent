@@ -136,6 +136,26 @@ export const CODE_SANDBOX_INTENT_RULES: ToolIntentRule[] = [
       ],
     },
   },
+  {
+    exact: "code.workspace_map",
+    metadata: {
+      aliases: [
+        "workspace map", "workspace overview", "file overview", "project structure",
+        "工作区地图", "工作区概览", "文件结构", "目录结构", "看看工作区里有什么",
+        "分析一下生成的文件", "数据文件长什么样",
+      ],
+      examples: [
+        "看看工作区里的文件都是什么结构",
+        "这个 csv 有哪些列、多少行",
+        "先概览一下目录再决定读哪个文件",
+        "show me the workspace structure",
+      ],
+      negativeExamples: [
+        "运行这段代码",
+        "写入这个文件",
+      ],
+    },
+  },
 ];
 
 export const CODE_SANDBOX_CATEGORY_MAPPING: { name: string; keywords: string[] } = {

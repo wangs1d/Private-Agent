@@ -102,7 +102,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
   }
 
-  testWidgets("海报卡：徽章/天数/日期区间/简介/记得带/按钮渲染，Day 摘要不再展示", (WidgetTester tester) async {
+  testWidgets("海报卡：徽章/天数/日期区间/简介/记得带/按钮渲染，卡面直读每日安排", (WidgetTester tester) async {
     await pumpCard(tester, _structuredPlanData());
 
     expect(find.text("马尔代夫"), findsOneWidget);
@@ -114,9 +114,11 @@ void main() {
     expect(find.text("打开行程规划"), findsOneWidget);
     expect(find.text("共 5 天 · 1 项安排"), findsOneWidget);
 
-    // 用户反馈核心：卡面不再罗列 Day 摘要（明细只在规划界面）
-    expect(find.textContaining("Day 1"), findsNothing);
-    expect(find.textContaining("Day 2"), findsNothing);
+    // 2026-09-17 用户需求反转（此前的「明细只在规划界面」作废）：
+    // 行程卡即独立的规划卡——卡面直接逐日展示安排（Day 摘要），不点开也能看规划
+    expect(find.textContaining("Day 1"), findsOneWidget);
+    expect(find.textContaining("Day 2"), findsOneWidget);
+    expect(find.textContaining("Day 3"), findsOneWidget);
   });
 
   testWidgets("海报背景优先目的地代表性封面（目的地形象照），而非首个有图景点", (WidgetTester tester) async {

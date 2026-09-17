@@ -2497,8 +2497,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                     (!widget.isUser && _typewriter.isPartial)
                         ? _typewriter.revealed
                         : null,
-                typewriterCursor:
-                    _typewriter.isRevealing && _typewriter.cursorOn,
+                typewriterCursor: _typewriter.isRevealing,
               ),
               // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
               // 插在正在打字的正文下方实时展示；`chat.assistant_done` 到达后

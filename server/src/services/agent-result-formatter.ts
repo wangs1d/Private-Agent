@@ -643,8 +643,9 @@ export function formatAgentResultForChat(
     if (snap && snap.days.length > 0) {
       payload.travelPlan = snap;
     }
-    // 本轮规划实时完成 → 前端直接展开双面板（卡片仍保留供回看）
-    payload.autoOpen = true;
+    // 2026-09-17 用户需求：行程以「回复末尾的独立规划卡」呈现，不自动弹出
+    // 双面板（与 tool-result-processor 的 attachTravelItineraryCard 同口径）
+    payload.autoOpen = false;
   }
 
   const json = JSON.stringify(payload);

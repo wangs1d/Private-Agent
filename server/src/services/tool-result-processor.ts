@@ -31,6 +31,28 @@ function wrapRenderAs(name: string, text: string): string {
   return `[RENDER_AS:${name}]\n${text}`;
 }
 
+/** 模型复述在正文里的展示形态声明（RENDER_AS / RENDER_HINT，任意位置） */
+const RENDER_DECLARATION_TOKEN_RE = /\[RENDER_(?:HINT|AS):[A-Za-z_]+\]/g;
+
+/**
+ * 剥掉正文任何位置残留的 [RENDER_AS:xxx] / [RENDER_HINT:xxx] 声明。
+ * extractLlmRenderHint 只认文本开头一处 RENDER_HINT；模型照抄历史消息格式
+ * 把声明复述在中段/结尾时（真实案例：行程攻略结尾带 [RENDER_AS:structured]），
+ * 客户端只剥开头一处权威标记，残留声明会被当字面文本渲染在卡片下方。
+ * 声明只属于路由信号，权威标记由 wrapRenderAs 统一前置注入。
+ */
+export function stripResidualRenderDeclarations(text: string): string {
+  if (!text.includes("[RENDER_")) return text;
+  const kept: string[] = [];
+  for (const line of text.split("\n")) {
+    const stripped = line.replace(RENDER_DECLARATION_TOKEN_RE, "");
+    // 声明独占一行 → 整行删除；行内嵌声明 → 就地剥离，保留其余文本
+    if (!stripped.trim() && line.trim()) continue;
+    kept.push(stripped);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 const CARD_MARKER_START = "[AGENT_RESULT_CARD_START]";
 const CARD_MARKER_END = "[AGENT_RESULT_CARD_END]";
 
@@ -604,8 +626,10 @@ function buildTravelItineraryCardFromPlan(
     items,
     footer,
     cardType: "travel_itinerary",
-    // 本轮规划实时完成 → 前端在 assistant_done 直接收卡即自动展开双面板
-    autoOpen: true,
+    // 2026-09-17 用户需求：行程以「回复末尾的独立规划卡」呈现——卡面直接
+    // 逐日展示安排，不再自动弹出双面板（autoOpen=false）；完整明细由用户
+    // 点卡片上的「打开行程规划」按钮按需进入。
+    autoOpen: false,
     cardId: `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     travelPlan,
   };
@@ -727,7 +751,8 @@ export function containsTravelItineraryCard(text: string): boolean {
  *     时仍要附加：通用卡没有 autoOpen/结构化数据，客户端解析器会优先取行程卡，
  *     缺卡会导致右侧双面板既不自动展开也没有数据；
  *   - 否则以原始工具结果（全量字段：坐标/图片/评论/视频）构建 travel_itinerary
- *     卡（autoOpen=true），拼在正文之后。正文（LLM 的自然口语回复）保留为卡前导。
+ *     卡（autoOpen=false，卡面直接逐日展示安排、不自动弹出双面板），拼在正文
+ *     之后。正文（LLM 的自然口语回复）保留为卡前导。
  */
 export function attachTravelItineraryCard(
   text: string,
@@ -813,7 +838,9 @@ export class ToolResultProcessor {
     const { rawHint: llmHint, cleanText: textAfterLlmHint } = extractLlmRenderHint(text);
     // L2：模型自声明的卡片块先经校验/归一化（合法补默认值、非法整块丢弃），
     // 后续所有分支与"已带标记直接放行"看到的都是干净的标准块。
-    let workingText = sanitizeModelCardBlocks(textAfterLlmHint);
+    let workingText = stripResidualRenderDeclarations(
+      sanitizeModelCardBlocks(textAfterLlmHint),
+    );
     if (llmHint) {
       console.log(`[ToolResultProcessor] LLM declared render_hint: ${llmHint}`);
       switch (llmHint) {

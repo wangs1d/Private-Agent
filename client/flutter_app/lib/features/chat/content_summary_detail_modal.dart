@@ -1,10 +1,12 @@
 ﻿import "package:flutter/material.dart";
 
 import "../../core/utils/content_summary_parser.dart";
-import "content_summary_detail_formatter.dart";
-import "content_summary_section_nav.dart";
+import "content_summary_detail_view.dart";
 
 /// 豆包风格：点击详情卡后以独立弹窗展示完整内容。
+/// 宽屏下详情卡默认在右侧双面板展开（main.dart contentSummary 分支，
+/// 顶栏由面板 chrome 展示主体标签），弹窗保留给窄窗口/无面板宿主的场景，
+/// 内容区与面板共用 [ContentSummaryDetailView]。
 class ContentSummaryDetailModal {
   ContentSummaryDetailModal._();
 
@@ -63,120 +65,9 @@ class _ContentSummaryDetailModalBody extends StatefulWidget {
 
 class _ContentSummaryDetailModalBodyState
     extends State<_ContentSummaryDetailModalBody> {
-  final ScrollController _scrollController = ScrollController();
-  final Map<int, GlobalKey> _sectionKeys = <int, GlobalKey>{};
-  int _activeSectionIndex = 0;
   Offset _dragOffset = Offset.zero;
 
-  @override
-  void initState() {
-    super.initState();
-    final List<ContentSummarySectionInfo>? sections = widget.summary.sections;
-    if (sections != null) {
-      for (int i = 0; i < sections.length; i++) {
-        _sectionKeys[i] = GlobalKey();
-      }
-    }
-    _scrollController.addListener(_syncActiveSectionFromScroll);
-  }
-
-  @override
-  void dispose() {
-    _scrollController.removeListener(_syncActiveSectionFromScroll);
-    _scrollController.dispose();
-    super.dispose();
-  }
-
   void _close() => Navigator.of(context).pop();
-
-  void _syncActiveSectionFromScroll() {
-    final List<ContentSummarySectionInfo>? sections = widget.summary.sections;
-    if (sections == null || sections.isEmpty) return;
-
-    int? nearestIndex;
-    double nearestDistance = double.infinity;
-
-    for (int i = 0; i < sections.length; i++) {
-      final GlobalKey? key = _sectionKeys[i];
-      final BuildContext? ctx = key?.currentContext;
-      if (ctx == null) continue;
-      final RenderObject? renderObject = ctx.findRenderObject();
-      if (renderObject is! RenderBox || !renderObject.hasSize) continue;
-
-      final Offset position = renderObject.localToGlobal(Offset.zero);
-      final double distance = (position.dy - 160).abs();
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearestIndex = i;
-      }
-    }
-
-    if (nearestIndex != null && nearestIndex != _activeSectionIndex) {
-      setState(() => _activeSectionIndex = nearestIndex!);
-    }
-  }
-
-  void _scrollToSection(int index) {
-    setState(() => _activeSectionIndex = index);
-    final GlobalKey? key = _sectionKeys[index];
-    final BuildContext? ctx = key?.currentContext;
-    if (ctx != null) {
-      Scrollable.ensureVisible(
-        ctx,
-        duration: const Duration(milliseconds: 280),
-        curve: Curves.easeOutCubic,
-        alignment: 0.08,
-      );
-      return;
-    }
-
-    _scrollToSectionFallback(index);
-  }
-
-  void _scrollToSectionFallback(int index) {
-    final List<ContentSummarySectionInfo>? sections = widget.summary.sections;
-    if (sections == null || sections.isEmpty) return;
-
-    final String targetTitle = sections[index].title.trim();
-    final String content = widget.summary.detailContent?.trim() ?? "";
-    if (content.isEmpty) return;
-
-    final RegExp sectionHeader = RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]");
-    final RegExp markdownHeader = RegExp(r"^#{1,6}\s+");
-    final List<String> lines = content.split("\n");
-
-    double offset = 0;
-    const double lineHeight = 28;
-    bool found = false;
-
-    for (final String line in lines) {
-      final String trimmed = line.trim();
-      if (trimmed.isEmpty) {
-        offset += 6;
-        continue;
-      }
-
-      final bool isHeader =
-          sectionHeader.hasMatch(trimmed) || markdownHeader.hasMatch(trimmed);
-      if (isHeader) {
-        final String title = markdownHeader.hasMatch(trimmed)
-            ? trimmed.replaceFirst(markdownHeader, "").trim()
-            : trimmed;
-        if (title.contains(targetTitle) || targetTitle.contains(title)) {
-          found = true;
-          break;
-        }
-      }
-      offset += lineHeight;
-    }
-
-    if (!found || !_scrollController.hasClients) return;
-    _scrollController.animateTo(
-      offset.clamp(0.0, _scrollController.position.maxScrollExtent),
-      duration: const Duration(milliseconds: 280),
-      curve: Curves.easeOutCubic,
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -187,16 +78,10 @@ class _ContentSummaryDetailModalBodyState
     final List<ContentSummarySectionInfo>? sections = summary.sections;
     final bool showBookmarks = sections != null && sections.length > 1;
 
-    final String displayLabel = ContentSummaryParser.categoryLabel(
-      summary.category,
-      summary.cardLabel,
-    );
-    final String subtitle = showBookmarks
-        ? "$displayLabel · ${sections.length}个板块"
-        : displayLabel;
-    final String content = summary.detailContent?.trim().isNotEmpty == true
-        ? summary.detailContent!.trim()
-        : "暂无详细内容";
+    // 标题只展示任务主体标签（如「科技新闻」），不展示 LLM 导语式的卡片标题
+    // （如「王哥，我扒了一圈……」，与右侧双面板顶栏一致）；副标题仅板块数。
+    final String title = ContentSummaryParser.taskSubject(summary);
+    final String subtitle = showBookmarks ? "${sections.length} 个板块" : "";
 
     final double panelWidth = wide
         ? (size.width * (showBookmarks ? 0.62 : 0.52)).clamp(520.0, 860.0)
@@ -217,56 +102,8 @@ class _ContentSummaryDetailModalBodyState
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            _buildHeader(context, cs, summary, subtitle),
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  if (showBookmarks)
-                    ContentSummaryBookmarkRail(
-                      sections: sections,
-                      activeIndex: _activeSectionIndex,
-                      onSectionTap: _scrollToSection,
-                    ),
-                  Expanded(
-                    child: Scrollbar(
-                      controller: _scrollController,
-                      thumbVisibility: true,
-                      child: SingleChildScrollView(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            ...formatContentSummaryDetailLines(
-                              content,
-                              cs,
-                              Theme.of(context).textTheme,
-                              sectionKeys: _sectionKeys,
-                              sectionTitles: sections
-                                  ?.map((ContentSummarySectionInfo s) => s.title)
-                                  .toList(),
-                            ),
-                            if (contentSummaryMetadataTags(summary.metadata)
-                                .isNotEmpty)
-                              ...<Widget>[
-                                const SizedBox(height: 16),
-                                Wrap(
-                                  spacing: 10,
-                                  runSpacing: 8,
-                                  children: contentSummaryMetadataTags(
-                                    summary.metadata,
-                                  ),
-                                ),
-                              ],
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            _buildHeader(context, cs, summary.cardIcon, title, subtitle),
+            Expanded(child: ContentSummaryDetailView(summary: summary)),
           ],
         ),
       ),
@@ -309,7 +146,8 @@ class _ContentSummaryDetailModalBodyState
   Widget _buildHeader(
     BuildContext context,
     ColorScheme cs,
-    ContentSummaryDataV2 summary,
+    String cardIcon,
+    String title,
     String subtitle,
   ) {
     return GestureDetector(
@@ -348,7 +186,7 @@ class _ContentSummaryDetailModalBodyState
                 color: cs.primaryContainer.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Text(summary.cardIcon, style: const TextStyle(fontSize: 20)),
+              child: Text(cardIcon, style: const TextStyle(fontSize: 20)),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -356,20 +194,22 @@ class _ContentSummaryDetailModalBodyState
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   Text(
-                    summary.title,
+                    title,
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
                           fontWeight: FontWeight.w700,
                           color: cs.onSurface,
                           height: 1.35,
                         ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                          color: cs.onSurfaceVariant,
-                        ),
-                  ),
+                  if (subtitle.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                            color: cs.onSurfaceVariant,
+                          ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -390,18 +230,9 @@ List<Widget> contentSummaryMetadataTags(Map<String, dynamic>? metadata) {
     return const <Widget>[];
   }
 
+  // 仅保留「来源」：字数/板块数属于统计噪音（板块数已在标题栏副标题展示），
+  // 经用户反馈从详情底部移除。
   final List<Widget> tags = <Widget>[];
-  final Object? wordCount = metadata["wordCount"];
-  if (wordCount != null) {
-    tags.add(_ContentSummaryMetaTag(label: "字数", value: wordCount.toString()));
-  }
-
-  final Object? sectionCount = metadata["sectionCount"];
-  if (sectionCount != null &&
-      int.tryParse(sectionCount.toString()) != null &&
-      int.parse(sectionCount.toString()) > 1) {
-    tags.add(_ContentSummaryMetaTag(label: "板块", value: "$sectionCount个"));
-  }
 
   final Object? source = metadata["source"];
   if (source != null && source.toString().trim().isNotEmpty) {

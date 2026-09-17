@@ -44,16 +44,10 @@
 ## 全链路（读取侧）
 
 ```
-主应用右侧面板「代办足迹」卡
+客户端右侧面板「代办足迹」卡（唯一展示面）
   ├─ 挂载拉取  GET /agent/activities?actorId=&limit=20
   ├─ 实时刷新  WS agent.activity_new → AgentActivityBus → 立即重拉（轮询 1min 仅兜底）
   └─ 已读      POST /agent/activities/read（点开详情/打开全量列表时）
-
-「今日足迹」独立原生悬浮窗（footprint-floating/，纯 Win32，与桌宠无关）
-  ├─ 数据面    轮询 GET /agent/activities?actorId=（默认 20s，标准库实现零依赖）
-  ├─ 冒泡态    右下角常驻：最新一条代办 + 呼吸点；点击展开
-  ├─ 展开态    今日足迹列表（类别字标 + 状态 pill，配色与主应用足迹卡同源）
-  └─ 入口      右键菜单（展开/收起/退出）+ 拖动；已读语义归主应用，悬浮窗不置已读
 ```
 
 ## actorId 归一规则（P1 修复 2026-09-16）

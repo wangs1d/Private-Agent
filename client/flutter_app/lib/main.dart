@@ -21,6 +21,7 @@ import "core/models/wallet_models.dart";
 import "core/models/turn_state.dart";
 import "core/utils/agent_result_parser.dart";
 import "core/utils/assistant_text_sanitizer.dart";
+import "core/utils/content_summary_parser.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
@@ -35,6 +36,7 @@ import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
+import "core/services/content_summary_launcher.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/window_bounds_preference.dart";
 import "core/services/shared_browser_host.dart";
@@ -52,6 +54,8 @@ import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_activity_section.dart" show AgentActivityBus;
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
+import "features/chat/content_summary_detail_modal.dart";
+import "features/chat/content_summary_detail_view.dart";
 import "features/chat/travel_plan_launcher.dart";
 import "features/chat/travel_plan_window.dart";
 import "features/chat/travel_plan_browser_launcher.dart";
@@ -306,6 +310,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 图片预览面板当前要展示的图片快照（来自媒体卡点击）。
   ImagePreviewSnapshot? _imagePreview;
 
+  /// 内容详情面板当前要展示的摘要数据（来自详情卡点击）。
+  ContentSummaryDataV2? _contentSummary;
+
   /// 左聊天区 / 右分栏面板 的宽度比例（0.1~0.9），持久化到本地。
   double _splitRatio = SplitRatioPreference.defaultRatio;
 
@@ -517,6 +524,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
     // 右侧双栏「图片预览」面板：媒体卡点击 → 打开右栏大图
     ImagePreviewLauncher.setHandler(_openImagePreview);
+    // 右侧双栏「内容详情」面板：详情卡（长内容折叠卡）点击 → 右栏继续展示
+    ContentSummaryLauncher.setHandler(_openContentSummaryPanel);
     // 「行程规划」独立界面：行程卡点击 / autoOpen → 全屏路由打开
     TravelPlanLauncher.setHandler(_openTravelPlanPanel);
     // 注意：主进程不再预加载共享行程 WebView（TravelWebPanelHost.preload）。
@@ -3106,6 +3115,24 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 内容详情入口：详情卡（科技新闻等长内容折叠卡）点击 →
+  /// 复用右侧双面板继续展示完整内容（书签导航 + markdown 正文）。
+  /// 窗口过窄无法分栏时回退为居中弹窗，保证功能可达。
+  void _openContentSummaryPanel(ContentSummaryDataV2 summary) {
+    if (MediaQuery.sizeOf(context).width < kWideLayoutBreakpoint) {
+      unawaited(ContentSummaryDetailModal.show(context, summary));
+      return;
+    }
+    setState(() {
+      _tabIndex = 0;
+      _contentSummary = summary;
+      _rightPanel = RightPanelKind.contentSummary;
+      _previousSplitRatio = _splitRatio;
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.contentSummary.defaultSplitRatio;
+    });
+  }
+
   /// 行程规划入口：行程卡(travel_itinerary)点击 / autoOpen → 在独立系统
   /// 窗口中打开行程规划（spawn 子进程，与主窗口并排，互不遮挡）。
   void _openTravelPlanPanel(AgentResultData data) {
@@ -3236,6 +3263,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 .whereType<Map<String, dynamic>>()
                 .toList()
             : null;
+    // 回复信封块：任务面 done 与前台轮次同构，服务端已把卡片标记确定性拆成
+    // text/card 序列（行程卡收尾独立成块）——优先按 blocks 渲染，
+    // 消除文本解析漂移导致的漏卡。
+    final List<Map<String, dynamic>>? replyBlocksFromPayload =
+        payload["blocks"] is List
+            ? (payload["blocks"] as List)
+                .whereType<Map<String, dynamic>>()
+                .toList()
+            : null;
     if (finalText.trim().isEmpty && (mediaCardsFromPayload == null || mediaCardsFromPayload.isEmpty)) {
       return;
     }
@@ -3249,6 +3285,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           ? _messages[idx].timestamp
           : DateTime.now(),
       mediaCards: mediaCardsFromPayload,
+      replyBlocks: replyBlocksFromPayload,
     );
     void apply() {
       if (idx != null && idx < _messages.length) {
@@ -5348,7 +5385,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 Icon(Icons.drag_indicator, size: 16, color: fgMuted),
                 const SizedBox(width: 8),
                 Text(
-                  _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
+                  _rightPanel == null ? "" : _rightPanelTitleText(),
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
@@ -5368,6 +5405,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         );
       },
     );
+  }
+
+  /// 面板顶栏标题文案。内容详情面板不展示 LLM 导语式的卡片标题
+  /// （如「王哥，我扒了一圈……」），只展示任务主体标签（如「科技新闻」）。
+  String _rightPanelTitleText() {
+    final RightPanelKind kind = _rightPanel!;
+    if (kind == RightPanelKind.contentSummary) {
+      final ContentSummaryDataV2? summary = _contentSummary;
+      return summary != null
+          ? ContentSummaryParser.taskSubject(summary)
+          : "内容详情";
+    }
+    return rightPanelTitle(kind);
   }
 
   /// 右侧面板要渲染的具体内容
@@ -5414,6 +5464,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         return CatalogPage(apiClient: _catalogApi);
       case RightPanelKind.approvals:
         return const ApprovalsPanel();
+      case RightPanelKind.contentSummary:
+        // 内容详情面板：标题栏显示主体标签（见 _rightPanelTitleText），
+        // 正文区与弹窗共用视图；按摘要 id 建 Key，切换详情时重置滚动/书签状态
+        final ContentSummaryDataV2? summary = _contentSummary;
+        if (summary == null) return const SizedBox.shrink();
+        return ContentSummaryDetailView(
+          key: ValueKey<String>(summary.id),
+          summary: summary,
+        );
       case null:
         return const SizedBox.shrink();
     }

@@ -1,10 +1,14 @@
 import "dart:async";
+import "dart:math" as math;
+
 import "package:flutter/gestures.dart";
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:url_launcher/url_launcher.dart";
 
+import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
+import "accent_panel.dart";
 import "code_highlight.dart";
 import "media_thumbnail.dart";
 
@@ -79,6 +83,16 @@ MarkdownTableCellData parseMarkdownTableCell(String raw) {
   );
 }
 
+/// 内容区分隔线（HR / 导语后分隔）的唯一来源。
+/// 此前 HR、导语后、dividerTheme 三处三种透明度/粗细，同屏不一致。
+Widget buildContentDivider(ColorScheme cs) {
+  return Divider(
+    height: 1,
+    thickness: 1,
+    color: cs.outline.withValues(alpha: 0.2),
+  );
+}
+
 List<Widget> formatContentSummaryDetailLines(
   String content,
   ColorScheme cs,
@@ -88,18 +102,62 @@ List<Widget> formatContentSummaryDetailLines(
 }) {
   final RegExp sectionHeader = RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]");
   final RegExp markdownHeader = RegExp(r"^(#{1,6})\s+");
-  final RegExp listItem = RegExp(r"^[\s]*[-•*→▸‣⁃◦·]\s+");
-  final RegExp orderedListItem = RegExp(r"^[\s]*\d+[.)]\s+");
+  // 列表捕获缩进（group 1），用于嵌套层级缩进展示
+  final RegExp listItem = RegExp(r"^([ \t]*)[-•*→▸‣⁃◦·]\s+(.*)$");
+  final RegExp orderedListItem = RegExp(r"^([ \t]*)(\d+[.)])\s+(.*)$");
+  // markdown 分隔线（--- / *** / ___）：标杆排版用它划分大板块
+  final RegExp horizontalRule = RegExp(r"^(-{3,}|\*{3,}|_{3,})$");
+
+  final TextStyle bodyStyle = AppTypography.assistantBody(textTheme, cs);
+
+  // 普通段落行：非空且不属于任何结构块（标题/列表/表格/代码/引用/图片/分隔线）
+  bool isPlainLine(String rawLine) {
+    final String trimmed = rawLine.trim();
+    if (trimmed.isEmpty) return false;
+    if (horizontalRule.hasMatch(trimmed)) return false;
+    if (trimmed.startsWith("```") || trimmed.startsWith(">")) return false;
+    if (sectionHeader.hasMatch(trimmed) || markdownHeader.hasMatch(trimmed)) {
+      return false;
+    }
+    if (_isCompactSectionHeader(trimmed, listItem, orderedListItem)) {
+      return false;
+    }
+    if (listItem.hasMatch(rawLine) || orderedListItem.hasMatch(rawLine)) {
+      return false;
+    }
+    if (isMarkdownTableRow(trimmed)) return false;
+    if (_standaloneImageLine(trimmed) != null) return false;
+    return true;
+  }
 
   final List<String> lines = content.split("\n");
   final List<Widget> widgets = <Widget>[];
   int index = 0;
+  // 上一块是否为列表：列表 → 段落过渡时补一个组间距，衔接前后节奏
+  bool lastWasList = false;
 
   while (index < lines.length) {
     final String trimmed = lines[index].trim();
+    final String rawLine = lines[index];
 
+    // 空行不再单独补高度：段间距统一由段落自身的 bottom 提供，
+    // 消灭「单换行分段挤、空行分段松」的疏密不一致。
     if (trimmed.isEmpty) {
-      widgets.add(const SizedBox(height: 6));
+      index++;
+      continue;
+    }
+
+    if (horizontalRule.hasMatch(trimmed)) {
+      widgets.add(
+        Padding(
+          padding: const EdgeInsets.only(
+            top: AppTypography.space2,
+            bottom: AppTypography.space3,
+          ),
+          child: buildContentDivider(cs),
+        ),
+      );
+      lastWasList = false;
       index++;
       continue;
     }
@@ -122,7 +180,10 @@ List<Widget> formatContentSummaryDetailLines(
       final String code = lines.sublist(start + 1, index - 1).join("\n");
       widgets.add(
         Padding(
-          padding: const EdgeInsets.only(bottom: 10, top: 4),
+          padding: const EdgeInsets.only(
+            bottom: AppTypography.space3,
+            top: AppTypography.space1,
+          ),
           child: _CodeBlockWidget(
             code: code,
             language: language,
@@ -131,6 +192,7 @@ List<Widget> formatContentSummaryDetailLines(
           ),
         ),
       );
+      lastWasList = false;
       continue;
     }
 
@@ -145,10 +207,14 @@ List<Widget> formatContentSummaryDetailLines(
           .join("\n");
       widgets.add(
         Padding(
-          padding: const EdgeInsets.only(bottom: 10, top: 4),
+          padding: const EdgeInsets.only(
+            bottom: AppTypography.space3,
+            top: AppTypography.space1,
+          ),
           child: _BlockquoteWidget(text: quote, cs: cs, textTheme: textTheme),
         ),
       );
+      lastWasList = false;
       continue;
     }
 
@@ -161,12 +227,18 @@ List<Widget> formatContentSummaryDetailLines(
       final int level = _headingLevel(trimmed, markdownHeader, sectionHeader);
       final GlobalKey? key =
           _matchSectionKey(title, sectionTitles, sectionKeys);
+      // 首块是标题时折叠 top 间距：文档开头顶格，不留无来源的空行
+      final bool isFirstBlock = widgets.isEmpty;
       widgets.add(
         Padding(
           key: key,
           padding: EdgeInsets.only(
-            top: level == 1 ? 14 : 10,
-            bottom: level == 1 ? 7 : 5,
+            top: isFirstBlock
+                ? 0
+                : level == 1
+                    ? AppTypography.space4
+                    : AppTypography.space2,
+            bottom: level == 1 ? AppTypography.space2 : AppTypography.space1,
           ),
           child: level == 1
               ? _Level1Heading(
@@ -182,65 +254,74 @@ List<Widget> formatContentSummaryDetailLines(
                 ),
         ),
       );
+      lastWasList = false;
       index++;
       continue;
     }
 
-    if (listItem.hasMatch(trimmed)) {
+    // 独占一行的图片（markdown 图 / 裸图片 URL）→ 块级渲染：
+    // 不再作为 220×150 固定缩略图塞进行内撑乱行高。
+    final String? standaloneImage = _standaloneImageLine(trimmed);
+    if (standaloneImage != null) {
       widgets.add(
         Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 5),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text("• ", style: TextStyle(color: cs.onSurfaceVariant)),
-              Expanded(
-                child: buildInlineMarkdownText(
-                  trimmed.replaceFirst(listItem, ""),
-                  textTheme.bodyMedium!.copyWith(
-                    color: cs.onSurface,
-                    height: AppTypography.bodyLineHeight,
-                  ),
-                  cs: cs,
-                ),
-              ),
-            ],
+          padding: const EdgeInsets.only(
+            top: AppTypography.space1,
+            bottom: AppTypography.space3,
           ),
+          child: _BlockImage(url: standaloneImage, cs: cs),
         ),
       );
+      lastWasList = false;
       index++;
       continue;
     }
 
-    if (orderedListItem.hasMatch(trimmed)) {
-      final String itemText = trimmed.replaceFirst(orderedListItem, "");
-      final String marker =
-          trimmed.substring(0, trimmed.indexOf(itemText)).trim();
+    // 列表（含嵌套）：按原始行的前导空白计算层级缩进（2 空格一级，最多 3 级）
+    final RegExpMatch? bulletMatch = listItem.firstMatch(rawLine);
+    final RegExpMatch? orderedMatch =
+        bulletMatch == null ? orderedListItem.firstMatch(rawLine) : null;
+    if (bulletMatch != null || orderedMatch != null) {
+      final RegExpMatch m = bulletMatch ?? orderedMatch!;
+      final String indentStr = m.group(1)!;
+      final String itemText = (bulletMatch != null
+              ? bulletMatch.group(2)!
+              : orderedMatch!.group(3)!)
+          .trim();
+      final String marker = bulletMatch != null
+          ? "•"
+          : orderedMatch!.group(2)!;
+      final int depth = (indentStr.replaceAll("\t", "  ").length / 2)
+          .round()
+          .clamp(0, 3);
+      // 有序列表编号右对齐：1. 与 10. 的正文起点保持对齐，不随位数错位
+      final TextAlign markerAlign =
+          bulletMatch != null ? TextAlign.left : TextAlign.right;
       widgets.add(
         Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 5),
+          padding: EdgeInsets.only(
+            left: 4.0 + depth * 18,
+            bottom: AppTypography.space1,
+          ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               SizedBox(
                 width: 22,
-                child:
-                    Text(marker, style: TextStyle(color: cs.onSurfaceVariant)),
+                child: Text(
+                  marker,
+                  textAlign: markerAlign,
+                  style: TextStyle(color: cs.onSurfaceVariant),
+                ),
               ),
               Expanded(
-                child: buildInlineMarkdownText(
-                  itemText,
-                  textTheme.bodyMedium!.copyWith(
-                    color: cs.onSurface,
-                    height: AppTypography.bodyLineHeight,
-                  ),
-                  cs: cs,
-                ),
+                child: buildInlineMarkdownText(itemText, bodyStyle, cs: cs),
               ),
             ],
           ),
         ),
       );
+      lastWasList = true;
       index++;
       continue;
     }
@@ -252,7 +333,10 @@ List<Widget> formatContentSummaryDetailLines(
       }
       widgets.add(
         Padding(
-          padding: const EdgeInsets.only(bottom: 12, top: 4),
+          padding: const EdgeInsets.only(
+            bottom: AppTypography.space3,
+            top: AppTypography.space1,
+          ),
           child: MarkdownTableWidget(
             lines: lines.sublist(start, index),
             cs: cs,
@@ -260,24 +344,26 @@ List<Widget> formatContentSummaryDetailLines(
           ),
         ),
       );
+      lastWasList = false;
       continue;
     }
 
+    // 普通段落：连续普通行合并为一段（Text 保留软换行），段间距统一 8。
+    final int start = index;
+    while (index < lines.length && isPlainLine(lines[index])) {
+      index++;
+    }
+    final String paragraph = lines.sublist(start, index).join("\n").trim();
     widgets.add(
       Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: buildInlineMarkdownText(
-          trimmed,
-          textTheme.bodyMedium!.copyWith(
-            color: cs.onSurface,
-            // 正文行高全局统一 1.6(不再按段落长度切换,避免同屏行距不一致)
-            height: AppTypography.bodyLineHeight,
-          ),
-          cs: cs,
+        padding: EdgeInsets.only(
+          top: lastWasList ? AppTypography.space1 : 0,
+          bottom: AppTypography.space2,
         ),
+        child: buildInlineMarkdownText(paragraph, bodyStyle, cs: cs),
       ),
     );
-    index++;
+    lastWasList = false;
   }
 
   return widgets;
@@ -330,19 +416,12 @@ class _Level1Heading extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
+    return AccentPanel(
+      cs: cs,
+      radius: 6,
+      accentAlpha: 0.55,
+      fillAlpha: 0.10,
       padding: const EdgeInsets.only(left: 9, top: 3, bottom: 3),
-      decoration: BoxDecoration(
-        border: Border(
-          left: BorderSide(
-            color: cs.primary.withValues(alpha: 0.55),
-            width: 3,
-          ),
-        ),
-        color: cs.primaryContainer.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(6),
-      ),
       child: buildInlineMarkdownText(
         title,
         textTheme.titleMedium!.copyWith(
@@ -400,32 +479,126 @@ GlobalKey? _matchSectionKey(
   return null;
 }
 
+/// 行内 markdown 文本入口。识别器生命周期由 [InlineMarkdownText] 托管。
+/// [trailingInline] 可选：拼在末尾的行内组件（打字机光标等），随文本换行流式排布。
 Widget buildInlineMarkdownText(
   String text,
   TextStyle baseStyle, {
   required ColorScheme cs,
+  Widget? trailingInline,
 }) {
-  final List<InlineSpan> spans = parseInlineMarkdownSpans(text, baseStyle, cs);
-  if (spans.length == 1 && spans.first is TextSpan) {
-    final TextSpan only = spans.first as TextSpan;
-    if (only.style == baseStyle && only.recognizer == null) {
-      return Text(only.text ?? "", style: baseStyle);
+  return InlineMarkdownText(
+    text: text,
+    baseStyle: baseStyle,
+    cs: cs,
+    trailing: trailingInline,
+  );
+}
+
+/// 行内 markdown 渲染（加粗/链接/行内 code/删除线/图片）。
+///
+/// 链接的 [TapGestureRecognizer] 必须有人 dispose：此前内联创建、无人持有，
+/// 每次重建都泄漏一个识别器；这里集中登记，销毁时机分两代——
+/// 当前帧正在渲染的不能立刻销毁（旧渲染树尚存活），延迟到下一帧后统一释放。
+class InlineMarkdownText extends StatefulWidget {
+  const InlineMarkdownText({
+    super.key,
+    required this.text,
+    required this.baseStyle,
+    required this.cs,
+    this.trailing,
+  });
+
+  final String text;
+  final TextStyle baseStyle;
+  final ColorScheme cs;
+
+  /// 拼在末尾的行内组件（WidgetSpan），如打字机光标。
+  final Widget? trailing;
+
+  @override
+  State<InlineMarkdownText> createState() => _InlineMarkdownTextState();
+}
+
+class _InlineMarkdownTextState extends State<InlineMarkdownText> {
+  List<TapGestureRecognizer> _active = <TapGestureRecognizer>[];
+  List<TapGestureRecognizer> _stale = <TapGestureRecognizer>[];
+
+  void _disposeAll(List<TapGestureRecognizer> list) {
+    for (final TapGestureRecognizer recognizer in list) {
+      recognizer.dispose();
     }
   }
-  return Text.rich(TextSpan(style: baseStyle, children: spans));
+
+  @override
+  void dispose() {
+    _disposeAll(_active);
+    _disposeAll(_stale);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_stale.isNotEmpty) {
+      final List<TapGestureRecognizer> doomed = _stale;
+      _stale = <TapGestureRecognizer>[];
+      WidgetsBinding.instance.addPostFrameCallback((_) => _disposeAll(doomed));
+    }
+
+    final List<TapGestureRecognizer> recognizers = <TapGestureRecognizer>[];
+    final List<InlineSpan> spans = parseInlineMarkdownSpans(
+      widget.text,
+      widget.baseStyle,
+      widget.cs,
+      recognizers: recognizers,
+    );
+    _stale = _active;
+    _active = recognizers;
+
+    if (spans.length == 1 && spans.first is TextSpan) {
+      final TextSpan only = spans.first as TextSpan;
+      if (only.style == widget.baseStyle && only.recognizer == null) {
+        if (widget.trailing == null) {
+          return Text(only.text ?? "", style: widget.baseStyle);
+        }
+        return Text.rich(
+          TextSpan(
+            style: widget.baseStyle,
+            children: <InlineSpan>[
+              TextSpan(text: only.text ?? ""),
+              WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: widget.trailing!,
+              ),
+            ],
+          ),
+        );
+      }
+    }
+    if (widget.trailing != null) {
+      spans.add(
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: widget.trailing!,
+        ),
+      );
+    }
+    return Text.rich(TextSpan(style: widget.baseStyle, children: spans));
+  }
 }
 
 List<InlineSpan> parseInlineMarkdownSpans(
   String text,
   TextStyle baseStyle,
-  ColorScheme cs,
-) {
+  ColorScheme cs, {
+  List<TapGestureRecognizer>? recognizers,
+}) {
   final RegExp tokenPattern = RegExp(
     r"(!\[[^\]]*\]\([^)]+\)|\*\*.+?\*\*|~~.+?~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|_(.+?)_)",
   );
 
   if (!tokenPattern.hasMatch(text)) {
-    return _parsePlainLinks(text, baseStyle, cs);
+    return _parsePlainLinks(text, baseStyle, cs, recognizers);
   }
 
   final List<InlineSpan> spans = <InlineSpan>[];
@@ -434,7 +607,12 @@ List<InlineSpan> parseInlineMarkdownSpans(
   for (final RegExpMatch match in tokenPattern.allMatches(text)) {
     if (match.start > cursor) {
       spans.addAll(
-        _parsePlainLinks(text.substring(cursor, match.start), baseStyle, cs),
+        _parsePlainLinks(
+          text.substring(cursor, match.start),
+          baseStyle,
+          cs,
+          recognizers,
+        ),
       );
     }
 
@@ -457,18 +635,26 @@ List<InlineSpan> parseInlineMarkdownSpans(
         ),
       );
     } else if (token.startsWith("`") && token.endsWith("`")) {
+      // 行内 code：圆角浅底胶囊。backgroundColor 无法圆角且色块顶满行盒，
+      // 改用 WidgetSpan 容器绘制底色；字号 -1 的基线策略见 AppTypography。
       spans.add(
-        TextSpan(
-          text: token.substring(1, token.length - 1),
-          // 行内 code:等宽字体 + 略缩一号 + 浅底色(基线对齐策略见 AppTypography.inlineCode)
-          style: AppTypography.inlineCode(
-            baseStyle,
-            cs.surfaceContainerHighest.withValues(alpha: 0.65),
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest.withValues(alpha: 0.65),
+              borderRadius: BorderRadius.circular(AppTypography.inlineCodeRadius),
+            ),
+            child: Text(
+              token.substring(1, token.length - 1),
+              style: AppTypography.inlineCodeForeground(baseStyle),
+            ),
           ),
         ),
       );
     } else if (token.startsWith("![")) {
-      // markdown 图片: ![alt](url) → 渲染为内嵌网络图片缩略图，点击打开原图
+      // markdown 图片: ![alt](url) → 渲染为内嵌网络图片缩略图，点击应用内预览
       final RegExp imgPattern = RegExp(r"^!\[(.+?)\]\((.+?)\)$");
       final RegExpMatch? imgMatch = imgPattern.firstMatch(token);
       if (imgMatch != null) {
@@ -489,6 +675,9 @@ List<InlineSpan> parseInlineMarkdownSpans(
       if (linkMatch != null) {
         final String label = linkMatch.group(1)!;
         final String url = linkMatch.group(2)!;
+        final TapGestureRecognizer recognizer = TapGestureRecognizer()
+          ..onTap = () => launchUrlFromText(url);
+        recognizers?.add(recognizer);
         spans.add(
           TextSpan(
             text: label,
@@ -496,8 +685,7 @@ List<InlineSpan> parseInlineMarkdownSpans(
               color: cs.primary,
               fontWeight: FontWeight.w700,
             ),
-            recognizer: TapGestureRecognizer()
-              ..onTap = () => launchUrlFromText(url),
+            recognizer: recognizer,
           ),
         );
       } else {
@@ -530,6 +718,7 @@ List<InlineSpan> _parsePlainLinks(
   String text,
   TextStyle baseStyle,
   ColorScheme cs,
+  List<TapGestureRecognizer>? recognizers,
 ) {
   final RegExp urlRe = RegExp(r'https?://[^\s]+');
   if (!urlRe.hasMatch(text)) {
@@ -554,6 +743,9 @@ List<InlineSpan> _parsePlainLinks(
         ),
       );
     } else {
+      final TapGestureRecognizer recognizer = TapGestureRecognizer()
+        ..onTap = () => launchUrlFromText(url);
+      recognizers?.add(recognizer);
       spans.add(
         TextSpan(
           text: _linkLabel(url),
@@ -561,8 +753,7 @@ List<InlineSpan> _parsePlainLinks(
             color: cs.primary,
             fontWeight: FontWeight.w700,
           ),
-          recognizer: TapGestureRecognizer()
-            ..onTap = () => launchUrlFromText(url),
+          recognizer: recognizer,
         ),
       );
     }
@@ -572,6 +763,21 @@ List<InlineSpan> _parsePlainLinks(
     spans.add(TextSpan(text: text.substring(cursor)));
   }
   return spans;
+}
+
+/// 独占一行的图片识别：markdown 图 / 裸图片 URL，返回图片地址。
+final RegExp _standaloneImgMarkdown = RegExp(r"^!\[[^\]]*\]\(([^)\s]+)\)$");
+final RegExp _standaloneImgBareUrl = RegExp(
+  r"^(https?://[^\s]+\.(?:jpe?g|png|gif|webp|avif|bmp|svg)(?:\?[^\s]*)?)$",
+  caseSensitive: false,
+);
+
+String? _standaloneImageLine(String trimmed) {
+  final RegExpMatch? md = _standaloneImgMarkdown.firstMatch(trimmed);
+  if (md != null) return md.group(1);
+  final RegExpMatch? bare = _standaloneImgBareUrl.firstMatch(trimmed);
+  if (bare != null) return bare.group(1);
+  return null;
 }
 
 /// 从 URL 生成简短文字标签：取域名并去掉 www，作为文字链接的显示文本。
@@ -638,6 +844,13 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
     });
   }
 
+  /// 复制成功反馈色按亮度取值：greenAccent 在浅色头部上对比度不足，
+  /// 浅色主题改用深绿；不再硬编码主题外颜色。
+  Color _copiedColor(Brightness brightness) =>
+      brightness == Brightness.dark
+          ? const Color(0xFF7CE8B1)
+          : const Color(0xFF177A4C);
+
   /// 按当前亮度选择深色 / 浅色高亮主题;代码区用固定底色,
   /// 保证高亮配色在桌面深色 / 暖色 / 移动端主题下都可读。
   CodeHighlightTheme _highlightTheme(Brightness brightness) =>
@@ -669,6 +882,7 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
         (widget.language ?? "").isNotEmpty;
     final Brightness brightness = Theme.of(context).brightness;
     final CodeHighlightTheme theme = _highlightTheme(brightness);
+    final Color copiedColor = _copiedColor(brightness);
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -730,21 +944,17 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
                     icon: Icon(
                       _copied ? Icons.check_rounded : Icons.copy_rounded,
                       size: 13,
-                      color: _copied ? Colors.greenAccent : cs.primary,
+                      color: _copied ? copiedColor : cs.primary,
                     ),
                     label: Text(
                       _copied ? "已复制" : "复制",
                       style: textTheme.labelSmall?.copyWith(
-                            color: _copied
-                                ? Colors.greenAccent
-                                : cs.primary,
+                            color: _copied ? copiedColor : cs.primary,
                             fontWeight: FontWeight.w600,
                           ) ??
                           TextStyle(
                             fontSize: AppTypography.micro,
-                            color: _copied
-                                ? Colors.greenAccent
-                                : cs.primary,
+                            color: _copied ? copiedColor : cs.primary,
                             fontWeight: FontWeight.w600,
                           ),
                     ),
@@ -790,24 +1000,17 @@ class _BlockquoteWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        border: Border(
-          left: BorderSide(color: cs.primary.withValues(alpha: 0.45), width: 3),
+    return AccentPanel(
+      cs: cs,
+      accentAlpha: 0.45,
+      fillAlpha: 0.12,
+      child: buildInlineMarkdownText(
+        text,
+        textTheme.bodyMedium!.copyWith(
+          color: cs.onSurfaceVariant,
+          height: AppTypography.bodyLineHeight,
         ),
-        color: cs.primaryContainer.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        child: buildInlineMarkdownText(
-          text,
-          textTheme.bodyMedium!.copyWith(
-            color: cs.onSurfaceVariant,
-            height: AppTypography.bodyLineHeight,
-          ),
-          cs: cs,
-        ),
+        cs: cs,
       ),
     );
   }
@@ -873,6 +1076,9 @@ class MarkdownTableWidget extends StatelessWidget {
     for (int rowIndex = 0; rowIndex < allRows.length; rowIndex++) {
       final List<MarkdownTableCellData> row = allRows[rowIndex];
       final bool isHeader = headerCells != null && rowIndex == 0;
+      // 扁平表格：单元格不再画四周全框（相邻单元格双线叠印发闷），
+      // 只留横向分隔线；纵向靠列距与表头底色分区，外框由容器提供。
+      final bool isLastRow = rowIndex == allRows.length - 1;
       final List<Widget> cells = <Widget>[];
       int colIndex = 0;
 
@@ -907,7 +1113,16 @@ class MarkdownTableWidget extends StatelessWidget {
                 color: isHeader
                     ? cs.primaryContainer.withValues(alpha: 0.28)
                     : null,
-                border: Border.all(color: cs.outline.withValues(alpha: 0.14)),
+                border: isLastRow
+                    ? null
+                    : Border(
+                        bottom: BorderSide(
+                          color: isHeader
+                              ? cs.primary.withValues(alpha: 0.35)
+                              : cs.outline.withValues(alpha: 0.14),
+                          width: isHeader ? 1.2 : 1,
+                        ),
+                      ),
               ),
               child: buildInlineMarkdownText(
                 cell.text,
@@ -927,23 +1142,62 @@ class MarkdownTableWidget extends StatelessWidget {
               children: cells)));
     }
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerLow.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.16)),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: ConstrainedBox(
-            constraints:
-                BoxConstraints(minWidth: 280, maxWidth: columnCount * 140.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: tableRows,
+    // 宽度撑满可用空间；仅当列数多到超过容器宽度时才出现横向滚动。
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints box) {
+        final double availableWidth =
+            box.maxWidth.isFinite ? box.maxWidth : 280.0;
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerLow.withValues(alpha: 0.35),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: cs.outline.withValues(alpha: 0.16)),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minWidth: math.max(280.0, availableWidth),
+                  maxWidth: math.max(availableWidth, columnCount * 140.0),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: tableRows,
+                ),
+              ),
             ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 块级图片：独占一行、限宽 560、16:9 裁切，点击走应用内预览面板
+/// （此前点行内图片直接跳外部浏览器，与媒体卡的预览体验不一致）。
+class _BlockImage extends StatelessWidget {
+  const _BlockImage({required this.url, required this.cs});
+
+  final String url;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: GestureDetector(
+            onTap: () => ImagePreviewLauncher.open(
+              url: url,
+              title: "图片预览",
+              anchorContext: context,
+            ),
+            child: MediaThumbnail(url: url, cs: cs, borderRadius: 10),
           ),
         ),
       ),
@@ -951,7 +1205,8 @@ class MarkdownTableWidget extends StatelessWidget {
   }
 }
 
-/// markdown 图片内嵌组件：渲染网络图片缩略图，点击打开原图。
+/// markdown 图片内嵌组件：渲染网络图片缩略图（夹在文字行内的小图），
+/// 点击打开应用内预览面板。
 /// 由 [parseInlineMarkdownSpans] 中的 `![alt](url)` 语法触发。
 class _InlineImage extends StatelessWidget {
   const _InlineImage({
@@ -967,7 +1222,11 @@ class _InlineImage extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: GestureDetector(
-        onTap: () => launchUrlFromText(url),
+        onTap: () => ImagePreviewLauncher.open(
+          url: url,
+          title: "图片预览",
+          anchorContext: context,
+        ),
         child: MediaThumbnail(
           url: url,
           cs: cs,

@@ -12,6 +12,11 @@ import type { HttpRouteDeps } from "./types.js";
 import { ServerEventType } from "../../protocol.js";
 import { getChatThreadStore } from "../../external-model/chat-thread-store.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
+import {
+  normalizeReplyCardLayout,
+  stripRenderHintDeclarations,
+} from "../../services/reply-envelope.js";
+import { stripResidualRenderDeclarations } from "../../services/tool-result-processor.js";
 
 function resolveActorKey(q: Record<string, unknown> | undefined): string | undefined {
   const userId = typeof q?.userId === "string" ? q.userId : undefined;
@@ -292,7 +297,13 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
               sessionId: actorKey,
               messageId: assistantMessageId,
               traceId: messageId,
-              finalText: reply0.text,
+              // 出口收口（与 WS 对话路径同构）：剥模型声明的 RENDER_HINT/RENDER_AS
+              // 残留 + 卡片版式归一化，声明标记绝不透出到用户屏幕。
+              finalText: normalizeReplyCardLayout(
+                stripResidualRenderDeclarations(
+                  stripRenderHintDeclarations(reply0.text),
+                ),
+              ),
               toolCalls: reply0.toolName ? [reply0.toolName] : [],
               source: "chat.message_edit",
             },

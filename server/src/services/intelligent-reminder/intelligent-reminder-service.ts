@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { readJson, writeJson } from "../../proactivity/persist-file.js";
 import type {
   ReminderConfig,
   ReminderInstance,
@@ -43,7 +44,15 @@ export interface IntelligentReminderDeps {
     responseTimeMs: number,
     responded: boolean,
   ) => Promise<void>;
+  /**
+   * 提醒实例 + 升级计时器持久化文件路径。缺省 = 纯内存（单测保持轻量）。
+   * 背景：此前 activeReminders/escalationTimers 全在内存，服务重启整条升级链
+   * 静默蒸发——用户以为会升级的电话提醒，重启后无人再管。
+   */
+  persistPath?: string;
 }
+
+const ACTIVE_STATUSES: ReminderStatus[] = ["pending", "active", "escalated", "delivered"];
 
 export class IntelligentReminderService {
   private activeReminders = new Map<string, ReminderInstance>();
@@ -105,6 +114,7 @@ export class IntelligentReminderService {
     };
 
     this.activeReminders.set(config.id, instance);
+    this.persist();
     return instance;
   }
 
@@ -120,6 +130,7 @@ export class IntelligentReminderService {
     await this.executeCurrentLevel(instance);
 
     this.scheduleEscalation(instance);
+    this.persist();
 
     return instance;
   }
@@ -200,6 +211,7 @@ export class IntelligentReminderService {
     instance.status = "active";
     await this.executeCurrentLevel(instance);
     this.scheduleEscalation(instance);
+    this.persist();
 
     return instance;
   }
@@ -222,6 +234,7 @@ export class IntelligentReminderService {
 
     instance.status = "acknowledged";
     instance.acknowledgedAt = new Date();
+    this.persist();
 
     if (this.deps.updateUserResponseHistory) {
       await this.deps.updateUserResponseHistory(
@@ -243,6 +256,7 @@ export class IntelligentReminderService {
 
     instance.status = "delivered";
     instance.deliveredAt = new Date();
+    this.persist();
     return instance;
   }
 
@@ -254,6 +268,7 @@ export class IntelligentReminderService {
 
     this.clearEscalationTimer(reminderId);
     instance.status = "cancelled";
+    this.persist();
     return true;
   }
 
@@ -371,5 +386,108 @@ export class IntelligentReminderService {
     }
     this.escalationTimers.clear();
     this.activeReminders.clear();
+    this.persist();
   }
+
+  /** 把活跃实例（含升级状态）落盘。写失败静默（内存态仍可用，与 persist-file 约定一致）。 */
+  private persist(): void {
+    if (!this.deps.persistPath) return;
+    const instances = [...this.activeReminders.values()].filter((r) =>
+      ACTIVE_STATUSES.includes(r.status),
+    );
+    writeJson(this.deps.persistPath, {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      instances: instances.map(serializeInstance),
+    });
+  }
+
+  /**
+   * 重启恢复：回填活跃实例，并对 active/escalated 的实例重排升级计时。
+   * 原定升级时刻已过的 → 立即补升级（错过语义：宁可迟到，不让 critical 链静默蒸发）。
+   * 返回恢复的实例数。
+   */
+  async load(): Promise<number> {
+    if (!this.deps.persistPath) return 0;
+    const raw = readJson<{ version?: number; instances?: Array<Record<string, unknown>> }>(
+      this.deps.persistPath,
+      {},
+    );
+    const restored: ReminderInstance[] = [];
+    for (const item of raw.instances ?? []) {
+      try {
+        const inst = reviveInstance(item);
+        if (ACTIVE_STATUSES.includes(inst.status) && !this.activeReminders.has(inst.config.id)) {
+          this.activeReminders.set(inst.config.id, inst);
+          restored.push(inst);
+        }
+      } catch {
+        /* 单条损坏跳过，不影响其余恢复 */
+      }
+    }
+
+    for (const inst of restored.filter((r) => r.status === "active" || r.status === "escalated")) {
+      const rule = this.findNextEscalationRule(inst.currentLevel, inst.config.escalationRules);
+      if (!rule) continue;
+      const anchor =
+        inst.escalationHistory[inst.escalationHistory.length - 1]?.triggeredAt ??
+        inst.startedAt ??
+        inst.createdAt;
+      const remaining = anchor.getTime() + rule.timeoutMs - Date.now();
+      if (remaining <= 0) {
+        await this.escalateReminder(inst.config.id, "服务重启后错过升级时刻，立即补升级");
+      } else {
+        const timer = setTimeout(() => {
+          void this.escalateReminder(inst.config.id, "重启恢复的升级计时器到点");
+        }, remaining);
+        this.escalationTimers.set(inst.config.id, timer);
+      }
+    }
+
+    this.persist();
+    return restored.length;
+  }
+}
+
+// ─── 持久化序列化：Date ↔ ISO 字符串（JSON.stringify 天然把 Date 变 ISO，恢复时定点复活）───
+
+function serializeInstance(instance: ReminderInstance): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(instance)) as Record<string, unknown>;
+}
+
+function reviveInstance(raw: Record<string, unknown>): ReminderInstance {
+  const toDate = (v: unknown): Date | undefined => {
+    const d = typeof v === "string" ? new Date(v) : null;
+    return d && !Number.isNaN(d.getTime()) ? d : undefined;
+  };
+  const config = raw.config as Record<string, unknown> | undefined;
+  if (!config || typeof raw.status !== "string" || typeof config.id !== "string") {
+    throw new Error("malformed reminder instance");
+  }
+  const history = Array.isArray(raw.escalationHistory) ? raw.escalationHistory : [];
+  return {
+    config: {
+      ...(config as unknown as ReminderConfig),
+      scheduledAt: toDate(config.scheduledAt) ?? new Date(),
+    },
+    currentLevel: raw.currentLevel as ReminderLevel,
+    status: raw.status as ReminderStatus,
+    createdAt: toDate(raw.createdAt) ?? new Date(),
+    startedAt: toDate(raw.startedAt),
+    deliveredAt: toDate(raw.deliveredAt),
+    acknowledgedAt: toDate(raw.acknowledgedAt),
+    escalationCount: typeof raw.escalationCount === "number" ? raw.escalationCount : 0,
+    escalationHistory: history.map((h) => {
+      const entry = h as { fromLevel: ReminderLevel; toLevel: ReminderLevel; triggeredAt: unknown; reason?: string };
+      return {
+        fromLevel: entry.fromLevel,
+        toLevel: entry.toLevel,
+        triggeredAt: toDate(entry.triggeredAt) ?? new Date(),
+        reason: entry.reason ?? "",
+      };
+    }),
+    popupConfig: raw.popupConfig as PopupReminderConfig | undefined,
+    ttsConfig: raw.ttsConfig as TTSAlarmConfig | undefined,
+    phoneConfig: raw.phoneConfig as PhoneCallConfig | undefined,
+  };
 }

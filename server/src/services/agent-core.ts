@@ -216,11 +216,15 @@ import {
 } from "../agent/task-router.js";
 import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
 import {
+  attachTravelItineraryCard,
   dedupMediaCards,
   extractMediaCards,
+  stripResidualRenderDeclarations,
   trimMediaCardsByTopic,
   type MediaCardItem,
 } from "./tool-result-processor.js";
+import { normalizeReplyCardLayout, buildReplyBlocks } from "./reply-envelope.js";
+import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
 import { claimsWebSearch } from "../agent/realtime-search-query.js";
 import { recordBackgroundOutcome } from "./task-plane-metrics.js";
@@ -2026,7 +2030,14 @@ if (route.plane === "task") {
           opts?.onExternalToolExecuteStart?.(info);
         },
         onAgentStatusLine: opts?.onAgentPhaseStatus,
-        onToolExecuted: ctx.orchestrateToolCtx?.onToolExecuted ?? ctx.backgroundOnToolExecuted,
+        // 两个回调都要执行（2026-09-17 修复，原 `??` 二选一会导致后台捕获恒空）：
+        // 任务面派发必带 orchestrateToolCtx（其 onToolExecuted 承担轨迹捕获/
+        // 自我学习/外部回执），而 backgroundOnToolExecuted 是派发方收集
+        // media/行程回执的数据源——二者职责不同，不能互相短路。
+        onToolExecuted: (info: ToolExecutedInfo) => {
+          ctx.orchestrateToolCtx?.onToolExecuted?.(info);
+          ctx.backgroundOnToolExecuted?.(info);
+        },
       },
     );
 
@@ -2806,6 +2817,10 @@ if (route.plane === "task") {
       try {
         // 投递失败（用户离线：trySend false / registry 缺失）→ TaskOutbox 暂存，
         // 客户端重连（session.init）时重放——离线完成的任务结果不再静默丢失。
+        // 回复信封 blocks：与 WS 对话路径同构，finalText 里的卡片标记在服务端
+        // 确定性拆块下发——任务面结果此前只有文本标记，客户端解析漂移时
+        // 收尾的行程独立卡会丢。
+        const replyBlocks = buildReplyBlocks(finalText);
         const delivered = registry?.trySend(
           sessionId,
           JSON.stringify({
@@ -2817,6 +2832,7 @@ if (route.plane === "task") {
               toolCalls: [],
               source: "task_plane",
               ...(mediaCards.length > 0 ? { mediaCards } : {}),
+              ...(replyBlocks && replyBlocks.length > 0 ? { blocks: replyBlocks } : {}),
             },
           }),
         );
@@ -2860,6 +2876,8 @@ if (route.plane === "task") {
       };
       /** 媒体结果捕获：search_images/search_videos 结果随任务结果消息投递 mediaCards。 */
       const capturedMedia: Array<{ toolName: string; result: Record<string, unknown> }> = [];
+      /** 行程回执捕获：travel.plan-itinerary 执行回执，收尾时确定性附行程卡（与 WS 对话路径同构）。 */
+      const capturedTravel: Array<{ toolName: string; result: Record<string, unknown> }> = [];
       try {
         // 快速通道（默认起步，2026-09-05 先轻后重）：tool router 召回执行
         //（可见集=桥工具，零业务 schema）+ Flash 档；段1 即流式（A4，2026-09-08）：
@@ -2892,6 +2910,9 @@ if (route.plane === "task") {
             backgroundOnToolExecuted: (info) => {
               if (info.ok && info.result) {
                 capturedMedia.push({ toolName: info.toolName, result: info.result });
+                if (info.toolName === "travel.plan-itinerary") {
+                  capturedTravel.push({ toolName: info.toolName, result: info.result });
+                }
               }
             },
             ...(input.fullChannel ? {} : { toolRecallOnly: true }),
@@ -2937,6 +2958,9 @@ if (route.plane === "task") {
               backgroundOnToolExecuted: (info) => {
                 if (info.ok && info.result) {
                   capturedMedia.push({ toolName: info.toolName, result: info.result });
+                  if (info.toolName === "travel.plan-itinerary") {
+                    capturedTravel.push({ toolName: info.toolName, result: info.result });
+                  }
                 }
               },
               ...(carryTrace ? { toolRecallOnly: true } : {}),
@@ -2973,6 +2997,32 @@ if (route.plane === "task") {
         // 任务回执交代来龙去脉，结果气泡只呈现结果本体。归属仍由对话 thread 的
         // 单条「任务记录」承接（LLM 上下文可见，用户不可见）。
         if (finalText) {
+          // 任务面结果不走 WS 管线的 processAssistantText（那里才做声明清洗/
+          // 渲染路由），这里补齐同构的出口处理：剥模型复述的展示形态声明行
+          // （[RENDER_HINT:xxx]/[RENDER_AS:xxx]，否则原样透出到用户屏幕）、
+          // 附行程卡、版式归一化——与 WS 对话路径同构。
+          finalText = stripResidualRenderDeclarations(finalText);
+          // 行程回执裁决与 WS 对话路径同构（resolveTravelReceipt）：捕获漏拍
+          // （缓存重放/升级段边缘）时按冷层近窗回捞兜底。任务面执行可能在
+          // 并发闸排队，窗口放宽到 10 分钟，目标/正文点名目的地优先。
+          const travelReceipt = capturedTravel[capturedTravel.length - 1];
+          const resolvedTravel = resolveTravelReceipt({
+            executedReceipt: travelReceipt?.result,
+            goal: input.goal,
+            finalText,
+            fallbackWindowMs: 10 * 60 * 1000,
+          });
+          console.info(
+            `[AgentCore] 任务面收尾附卡检查: capturedTravel=${capturedTravel.length} capturedMedia=${capturedMedia.length} tool=${travelReceipt?.toolName ?? resolvedTravel.toolName ?? "none"}`,
+          );
+          if (resolvedTravel.toolName && resolvedTravel.result) {
+            finalText = attachTravelItineraryCard(
+              finalText,
+              resolvedTravel.toolName,
+              resolvedTravel.result,
+            );
+          }
+          finalText = normalizeReplyCardLayout(finalText);
           // 对话 thread 以单条「任务记录」并入（ephemeral 执行不自动落 thread）。
           // 2026-09-08 改造：不再伪造 user 轮「[后台任务] <原文>」+ assistant 回复对
           // ——user 轮会让后续对话把任务原文当作用户说过的话接茬（说媒事故根因之一）。

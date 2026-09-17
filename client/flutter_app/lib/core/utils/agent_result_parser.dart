@@ -279,6 +279,19 @@ class AgentResultParseResult {
   final String cleanedText;
 }
 
+/// 按原文位置展开的渲染块：一段正文或一张卡片。
+/// 与新版服务端 reply blocks（text/card 序列）同构，用于无 blocks 的
+/// 历史消息回退渲染——「总览卡置首、正文居中、行程卡收尾」按原位呈现。
+class AgentResultBlock {
+  const AgentResultBlock.text(String this.text) : data = null;
+  const AgentResultBlock.card(AgentResultData this.data) : text = null;
+
+  final String? text;
+  final AgentResultData? data;
+
+  bool get isCard => data != null;
+}
+
 class AgentResultParser {
   AgentResultParser._();
 
@@ -325,6 +338,42 @@ class AgentResultParser {
     data ??= _parseCardJson(chosen.group(1)?.trim() ?? "");
     final String cleaned = _stripAllCardBlocks(text, matches);
     return AgentResultParseResult(data: data, cleanedText: cleaned);
+  }
+
+  /// 把消息文本按位置拆成「正文段 / 卡片」序列（卡片不合并不丢弃）。
+  ///
+  /// 多卡消息（如模型总览卡 + 服务端附加的行程卡）按标记在原文中的位置
+  /// 原样展开，前端按序渲染即可还原「总览卡置首、正文居中、行程卡收尾」。
+  /// JSON 损坏的卡片块被静默跳过（防脏 JSON 混进正文），不产生块。
+  static List<AgentResultBlock> parseBlocks(String text) {
+    if (text.isEmpty) {
+      return <AgentResultBlock>[AgentResultBlock.text(text)];
+    }
+    final List<RegExpMatch> matches =
+        _blockPattern.allMatches(text).toList(growable: false);
+    if (matches.isEmpty) {
+      return <AgentResultBlock>[AgentResultBlock.text(text)];
+    }
+    final List<AgentResultBlock> blocks = <AgentResultBlock>[];
+    int cursor = 0;
+    for (final RegExpMatch match in matches) {
+      final String before = text.substring(cursor, match.start).trim();
+      if (before.isNotEmpty) {
+        blocks.add(AgentResultBlock.text(before));
+      }
+      final AgentResultData? data = _parseCardJson(
+        match.group(1)?.trim() ?? "",
+      );
+      if (data != null) {
+        blocks.add(AgentResultBlock.card(data));
+      }
+      cursor = match.end;
+    }
+    final String tail = text.substring(cursor).trim();
+    if (tail.isNotEmpty) {
+      blocks.add(AgentResultBlock.text(tail));
+    }
+    return blocks;
   }
 
   static AgentResultData? _parseCardJson(String rawJson) {

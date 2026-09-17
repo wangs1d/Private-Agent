@@ -1,4 +1,5 @@
 import { ServerEventType } from "../protocol.js";
+import type { AgentMediaPlayPayload } from "../protocol.js";
 import type { ClientPushPort } from "../ports/client-push-port.js";
 import { clientSupportsMediaPlayback } from "./client-capability-registry.js";
 
@@ -14,9 +15,14 @@ import { clientSupportsMediaPlayback } from "./client-capability-registry.js";
  * 设计要点：
  *   - 播放状态仅存内存（Map<actorId, state>），进程重启后清空。媒体播放本身是短时态，
  *     不需要持久化；客户端断线重连后可调 media.now_playing 重新拉取。
- *   - 实际音频流由客户端拉取（网易云搜索 API 不直接返回可播放 URL，客户端可按 trackId
- *     自行调 v1/song/url 或 song/detail 拉流）。
- *   - 服务端只做"控制信令"下发，不代理音频流，避免版权与带宽问题。
+ *   - 播放 URL 由服务端统一解析（{@link resolveTrackUrl}，调网易云 song/enhance/player/url
+ *     公开接口），随 `agent.media.play` 事件一并下发——历史上服务端只发 trackId、指望
+ *     客户端自己拉流，但客户端从未实现这一步，导致信令发了却永远不出声。
+ *     URL 解析失败（无版权/超时）时事件仍下发（带 urlError），客户端能如实展示
+ *     "无法播放"而不是黑屏假死；media.play 工具返回值同步如实告知模型。
+ *   - 服务端默认不代理音频流（版权与带宽考量）；但提供 /api/media/stream-proxy
+ *     （routes/http/media.ts）作客户端直连失败时的兜底，且仅按 trackId 解析后转发，
+ *     不做任意 URL 开放代理。
  *   - 与 {@link VoiceCapabilityService} 区别：voice.* 是 Agent 自身合成语音播报给用户，
  *     media.* 是控制客户端播放第三方音乐流。
  */
@@ -57,12 +63,147 @@ export interface MediaTrackInfo {
 }
 
 const NETEASE_SEARCH_ENDPOINT = "https://music.163.com/api/search/get";
+const NETEASE_SONG_URL_ENDPOINT = "https://music.163.com/api/song/enhance/player/url";
+
+/** 播放 URL 解析结果（resolveTrackPlayUrl 的返回）。 */
+export type TrackUrlResolution =
+  | { ok: true; url: string }
+  | { ok: false; error: string };
+
+/** URL 缓存条目：url=null 表示"该曲目无版权/不可播"的负缓存（同样防重复打接口）。 */
+interface TrackUrlCacheEntry {
+  url: string | null;
+  cachedAt: number;
+}
+
+/**
+ * 播放 URL 的进程内 LRU 缓存：最多 200 条，TTL 30 分钟。
+ *
+ * 为什么缓存：同一首歌短时间内反复 play/pause/resume 很常见，而网易云接口对
+ * 高频请求不友好；负缓存（url=null）同样缓存，避免对无版权曲目反复打接口。
+ */
+const TRACK_URL_CACHE_MAX = 200;
+const TRACK_URL_CACHE_TTL_MS = 30 * 60_000;
+const trackUrlCache = new Map<string, TrackUrlCacheEntry>();
+
+/** 取缓存并按 LRU 语义刷新热度（Map 迭代序 = 插入序，重插即提到最新）。 */
+function getCachedTrackUrl(trackId: string): TrackUrlCacheEntry | undefined {
+  const entry = trackUrlCache.get(trackId);
+  if (!entry) return undefined;
+  if (Date.now() - entry.cachedAt > TRACK_URL_CACHE_TTL_MS) {
+    trackUrlCache.delete(trackId);
+    return undefined;
+  }
+  trackUrlCache.delete(trackId);
+  trackUrlCache.set(trackId, entry);
+  return entry;
+}
+
+function setCachedTrackUrl(trackId: string, url: string | null): void {
+  trackUrlCache.delete(trackId);
+  trackUrlCache.set(trackId, { url, cachedAt: Date.now() });
+  while (trackUrlCache.size > TRACK_URL_CACHE_MAX) {
+    const oldest = trackUrlCache.keys().next().value;
+    if (oldest === undefined) break;
+    trackUrlCache.delete(oldest);
+  }
+}
+
+/**
+ * 按曲目 ID 解析可播放 URL（独立导出，供 /api/media/stream-proxy 路由复用，
+ * 与 MediaMusicService 共享同一份 LRU 缓存）。
+ *
+ * 调网易云公开接口（无需鉴权）：
+ *   GET https://music.163.com/api/song/enhance/player/url?ids=[<id>]&br=320000
+ *
+ * 返回 `data[0].url`：null 表示无版权 / 仅 VIP / 地区限制——这是上游的如实结论，
+ * 必须透传为失败，绝不能编造一个 URL 假装可以播。
+ *
+ * @param fetchImpl 可注入 fetch（测试 mock 用）；默认全局 fetch。
+ */
+export async function resolveTrackPlayUrl(
+  trackId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<TrackUrlResolution> {
+  const id = String(trackId ?? "").trim();
+  if (!/^\d+$/.test(id)) {
+    return { ok: false, error: `trackId 无效（应为纯数字网易云曲目 ID）：${id}` };
+  }
+
+  const cached = getCachedTrackUrl(id);
+  if (cached) {
+    return cached.url
+      ? { ok: true, url: cached.url }
+      : { ok: false, error: "该曲目无可播放 URL（无版权/仅 VIP/地区限制）" };
+  }
+
+  const url = `${NETEASE_SONG_URL_ENDPOINT}?ids=[${id}]&br=320000`;
+  try {
+    const res = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; PrivateAgent/1.0)",
+        Accept: "application/json",
+        Referer: "https://music.163.com",
+      },
+      // 10s 超时：媒体播放是交互场景，超过 10s 用户早已认为失败
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `网易云播放地址请求失败：HTTP ${res.status} ${res.statusText}` };
+    }
+    const data = (await res.json()) as {
+      code?: number;
+      data?: Array<{ id?: number; url?: string | null; code?: number; type?: string }>;
+    };
+    const item = data.data?.[0];
+    const playUrl = typeof item?.url === "string" ? item.url.trim() : "";
+    if (!playUrl) {
+      // 负缓存：无版权结论短期不会变，缓存住避免反复打接口
+      setCachedTrackUrl(id, null);
+      return { ok: false, error: "该曲目无可播放 URL（无版权/仅 VIP/地区限制）" };
+    }
+    setCachedTrackUrl(id, playUrl);
+    return { ok: true, url: playUrl };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // 超时/网络错误不缓存：可能瞬时抖动，下次重试
+    return { ok: false, error: `网易云播放地址解析失败：${msg}` };
+  }
+}
+
+/** play() 成功分支的返回（url/urlError 如实透出，供工具返回值向模型告知）。 */
+export type MediaPlayOkResult = {
+  ok: true;
+  pushed: boolean;
+  /** 解析成功的可播放 URL（trackInfo 直接给 url 时原样透传）。 */
+  url?: string;
+  /** URL 解析失败原因；存在时客户端大概率无法真正出声。 */
+  urlError?: string;
+};
 
 export class MediaMusicService {
   /** actorId → 当前播放状态。 */
   private readonly states = new Map<string, MediaNowPlayingState>();
 
-  constructor(private readonly wsRegistry: ClientPushPort) {}
+  /** 可注入 fetch（测试 mock）；默认全局 fetch。 */
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(
+    private readonly wsRegistry: ClientPushPort,
+    fetchImpl?: typeof fetch,
+  ) {
+    this.fetchImpl = fetchImpl ?? fetch;
+  }
+
+  /**
+   * 按曲目 ID 解析可播放 URL（带 LRU 缓存）。
+   *
+   * @returns 成功返回 `{ ok: true, url }`；无版权/接口失败返回 `{ ok: false, error }`。
+   */
+  async resolveTrackUrl(trackId: string): Promise<TrackUrlResolution> {
+    return resolveTrackPlayUrl(trackId, this.fetchImpl);
+  }
 
   /**
    * 搜索曲目。
@@ -135,20 +276,24 @@ export class MediaMusicService {
   }
 
   /**
-   * 播放指定曲目：更新内存播放状态 + 推 `agent.media.play` WS 事件给客户端。
+   * 播放指定曲目：解析播放 URL → 更新内存播放状态 → 推 `agent.media.play` WS 事件。
+   *
+   * URL 解析失败（无版权/超时）不阻断事件下发：事件仍带 `urlError` 推出，客户端
+   * 可如实展示"无法播放"；工具返回值同步带 `urlError`，让模型如实告知用户，
+   * 而不是宣称"已经在放了"。
    *
    * @param trackId 曲目 ID（来自 media.search）
    * @param actorId 用户标识
-   * @param trackInfo 可选曲目元数据（用于客户端 UI 显示；未提供时仅推 trackId）
+   * @param trackInfo 可选曲目元数据（含外部直接给的 url 时跳过服务端解析）
    *
-   * @returns 成功返回 `{ ok: true, pushed }`；失败返回 `{ ok: false, error }`。
+   * @returns 成功返回 `{ ok: true, pushed, url?, urlError? }`；失败返回 `{ ok: false, error }`。
    *          pushed=false 表示用户当前离线（未连接 WebSocket），状态已记录但事件未送达。
    */
   async play(
     trackId: string,
     actorId: string,
     trackInfo?: MediaTrackInfo,
-  ): Promise<{ ok: true; pushed: boolean } | { ok: false; error: string }> {
+  ): Promise<MediaPlayOkResult | { ok: false; error: string }> {
     if (!trackId) return { ok: false, error: "trackId 不能为空" };
     if (!actorId) return { ok: false, error: "actorId 不能为空" };
     // 能力门控（2026-09-12 诚实化）：客户端未声明 mediaPlayback 时不会消费
@@ -164,6 +309,21 @@ export class MediaMusicService {
       };
     }
 
+    // 播放 URL 解析：调用方（media.play 工具）通常拿不到可播放 URL（搜索接口不返回），
+    // 服务端按 trackId 解析；调用方显式给 url 时直接采用（省一次上游请求）。
+    let playUrl: string | null = null;
+    let urlError: string | undefined;
+    if (trackInfo?.url) {
+      playUrl = trackInfo.url;
+    } else {
+      const resolved = await this.resolveTrackUrl(trackId);
+      if (resolved.ok) {
+        playUrl = resolved.url;
+      } else {
+        urlError = resolved.error;
+      }
+    }
+
     const now = Date.now();
     const state: MediaNowPlayingState = {
       trackId,
@@ -171,32 +331,38 @@ export class MediaMusicService {
       artist: trackInfo?.artist,
       album: trackInfo?.album,
       durationSec: trackInfo?.durationSec,
-      url: trackInfo?.url,
+      url: playUrl ?? undefined,
       paused: false,
       startedAt: now,
     };
     this.states.set(actorId, state);
 
+    // 事件 payload：扁平结构（trackId/title/artist/url/durationMs），与
+    // packages/agent-protocol events.ts 的 AgentMediaPlayPayload 契约一致。
     const pushed = this.wsRegistry.trySend(
       actorId,
       JSON.stringify({
         type: ServerEventType.AgentMediaPlay,
         payload: {
           actorId,
-          track: {
-            id: trackId,
-            name: trackInfo?.name ?? null,
-            artist: trackInfo?.artist ?? null,
-            album: trackInfo?.album ?? null,
-            durationSec: trackInfo?.durationSec ?? null,
-            url: trackInfo?.url ?? null,
-          },
+          trackId,
+          title: trackInfo?.name ?? null,
+          artist: trackInfo?.artist ?? null,
+          album: trackInfo?.album ?? null,
+          url: playUrl,
+          durationMs:
+            trackInfo?.durationSec != null && trackInfo.durationSec > 0
+              ? Math.round(trackInfo.durationSec * 1000)
+              : null,
+          ...(urlError ? { urlError } : {}),
           timestamp: new Date(now).toISOString(),
-        },
+        } satisfies AgentMediaPlayPayload,
       }),
     );
 
-    return { ok: true, pushed };
+    return playUrl
+      ? { ok: true, pushed, url: playUrl }
+      : { ok: true, pushed, urlError: urlError ?? "播放 URL 解析失败" };
   }
 
   /**

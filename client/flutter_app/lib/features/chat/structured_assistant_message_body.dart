@@ -1,6 +1,9 @@
+import "dart:async";
+
 import "package:flutter/material.dart";
 
 import "../../core/theme/app_typography.dart";
+import "accent_panel.dart";
 import "content_summary_detail_formatter.dart";
 
 class StructuredAssistantMessageBody extends StatelessWidget {
@@ -15,6 +18,9 @@ class StructuredAssistantMessageBody extends StatelessWidget {
   final String text;
   final ColorScheme cs;
   final TextTheme textTheme;
+
+  /// 是否处于打字机打字中：光标常驻显示，闪烁节奏由 [_BlinkingCursor]
+  /// 自带（480ms，与 TypewriterReveal 一致），布局位置稳定不跳动。
   final bool showCursor;
 
   @override
@@ -22,9 +28,8 @@ class StructuredAssistantMessageBody extends StatelessWidget {
     final String normalized = text.replaceAll("\r\n", "\n").trimRight();
     if (normalized.isEmpty) {
       return showCursor
-          ? Text(
-              "▍",
-              style: textTheme.bodyMedium?.copyWith(
+          ? _BlinkingCursor(
+              style: textTheme.bodyMedium!.copyWith(
                 color: cs.primary,
                 height: AppTypography.uiLineHeight,
               ),
@@ -33,68 +38,56 @@ class StructuredAssistantMessageBody extends StatelessWidget {
     }
 
     final _StructuredMessageParts parts = _splitStructuredMessage(normalized);
-    final TextStyle bodyStyle = textTheme.bodyMedium!.copyWith(
-      color: cs.onSurface,
-      height: AppTypography.bodyLineHeight,
-    );
+    final TextStyle bodyStyle = AppTypography.assistantBody(textTheme, cs);
 
     if (!parts.structured) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          buildInlineMarkdownText(normalized, bodyStyle, cs: cs),
-          if (showCursor)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(
-                "▍",
+      // 光标作为行内 WidgetSpan 拼在正文末尾：随最后一行排布，
+      // 不再独占一行导致末行每次闪烁都上下跳动。
+      return buildInlineMarkdownText(
+        normalized,
+        bodyStyle,
+        cs: cs,
+        trailingInline: showCursor
+            ? _BlinkingCursor(
                 style: bodyStyle.copyWith(
                   color: cs.primary,
                   fontWeight: FontWeight.w700,
                 ),
-              ),
-            ),
-        ],
+              )
+            : null,
       );
     }
+
+    // 结构化分支：正文是逐块 widget，光标无法拼进最后一块内部，
+    // 改为预留一整行高的光标行——闪烁期间行盒恒定存在，只有字形透明度变化。
+    final double cursorLineHeight =
+        (textTheme.bodyMedium?.fontSize ?? AppTypography.body) *
+            AppTypography.bodyLineHeight;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
         if (parts.lead.isNotEmpty)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
-            decoration: BoxDecoration(
-              color: cs.primaryContainer.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(8),
-              border: Border(
-                left: BorderSide(
-                  color: cs.outline.withValues(alpha: 0.38),
-                  width: 2.5,
-                ),
-              ),
-            ),
+          AccentPanel(
+            cs: cs,
+            accentColor: cs.outline,
+            accentAlpha: 0.5,
+            fillAlpha: 0.08,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             child: buildInlineMarkdownText(
               parts.lead,
               bodyStyle.copyWith(
                 fontWeight: FontWeight.w500,
                 color: cs.onSurfaceVariant,
-                height: AppTypography.bodyLineHeight,
               ),
               cs: cs,
             ),
           ),
         if (parts.lead.isNotEmpty && parts.body.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Divider(
-              height: 1,
-              thickness: 0.8,
-              color: cs.outline.withValues(alpha: 0.18),
-            ),
+            padding: const EdgeInsets.symmetric(vertical: AppTypography.space2),
+            child: buildContentDivider(cs),
           ),
         if (parts.body.isNotEmpty)
           ...formatContentSummaryDetailLines(
@@ -103,17 +96,57 @@ class StructuredAssistantMessageBody extends StatelessWidget {
             textTheme,
           ),
         if (showCursor)
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Text(
-              "▍",
-              style: bodyStyle.copyWith(
-                color: cs.primary,
-                fontWeight: FontWeight.w700,
+          SizedBox(
+            height: cursorLineHeight,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: _BlinkingCursor(
+                style: bodyStyle.copyWith(
+                  color: cs.primary,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ),
       ],
+    );
+  }
+}
+
+/// 打字机光标：自带 480ms 周期闪烁（与 TypewriterReveal 的 _cursorBlink 同节奏），
+/// 外层只传「是否打字中」；行内场景作为 WidgetSpan 嵌入正文末尾。
+class _BlinkingCursor extends StatefulWidget {
+  const _BlinkingCursor({required this.style});
+
+  final TextStyle style;
+
+  @override
+  State<_BlinkingCursor> createState() => _BlinkingCursorState();
+}
+
+class _BlinkingCursorState extends State<_BlinkingCursor> {
+  Timer? _timer;
+  bool _on = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 480), (_) {
+      if (mounted) setState(() => _on = !_on);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: _on ? 1 : 0,
+      child: Text("▍", style: widget.style),
     );
   }
 }

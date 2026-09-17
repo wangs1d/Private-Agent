@@ -447,6 +447,19 @@ test("structured: 用户意图词（整理/清单）→ [RENDER_AS:structured] �
   assert.ok(out.includes("[RENDER_AS:structured]"), `意图词应触发富文本，实际文本: ${out}`);
 });
 
+test("structured: 模型把 [RENDER_AS:structured] 复述在正文结尾 → 残留声明剥除不泄漏", () => {
+  // 真实回归：模型照抄历史消息格式，在回复结尾复述 [RENDER_AS:structured]。
+  // 旧逻辑只剥开头一处标记，结尾的声明被客户端当字面文本渲染在卡片下方。
+  const out = runLoopTurn(
+    "帮我把这几条整理成一个清单",
+    "好的，按优先级排好如下，搬东西的纸箱要先备齐，然后是易碎品的缓冲材料。\n[RENDER_AS:structured]",
+  );
+  assert.ok(out.startsWith("[RENDER_AS:structured]\n"), `权威标记应唯一前置，实际: ${out.slice(0, 120)}`);
+  const markerCount = (out.match(/\[RENDER_AS:structured\]/g) ?? []).length;
+  assert.equal(markerCount, 1, `结尾复述的声明应被剥掉，实际标记数: ${markerCount}，全文: ${out}`);
+  assert.ok(out.includes("按优先级排好如下"), "正文内容应保留");
+});
+
 test("L2 卡块: 模型主动声明卡片 JSON → 校验后原样透传", () => {
   const out = runLoopTurn(
     "耳机怎么连手机",
