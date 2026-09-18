@@ -1098,7 +1098,10 @@ class MarkdownTableWidget extends StatelessWidget {
           }
         }
 
+        // 表格正文在 bodySmall 基础上上调一档到 secondary（13），
+        // 12 在桌面端密度下偏小，阅读费劲。
         final TextStyle cellStyle = textTheme.bodySmall!.copyWith(
+          fontSize: AppTypography.secondary,
           color: cs.onSurface,
           height: AppTypography.compactLineHeight,
           fontWeight: isHeader ? FontWeight.w700 : FontWeight.w400,
