@@ -559,4 +559,23 @@ export const FINANCE_DEEP_CHAT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  // finance.bills.sync_now — 立即后台拉取支付宝账单（handler 在 create-app-services 注册，
+  // 闭包持有 FinanceBillAutoFetchService）
+  {
+    type: "function",
+    function: {
+      name: "finance.bills.sync_now",
+      description:
+        "立即用用户的支付宝登录态后台拉取最近几天的交易明细并自动入账（确定性幂等去重，\n" +
+        "重复调用不会重复记账）。适用场景：用户问「同步一下我的账单」「把支付宝流水拉下来」\n" +
+        "「这个月花了多少（先更新数据）」。前置条件：用户已在浏览器会话导入支付宝 Cookie\n" +
+        "（siteId=alipay）并授权 agentAllowed；未导入时工具会如实失败并给出指引——此时可让\n" +
+        "用户直接粘贴账单导出内容走 finance.import_transactions。",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
 ];

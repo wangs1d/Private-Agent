@@ -13,11 +13,11 @@ import "../../core/presentation/voice_call_ui_labels.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
 import "../../core/services/speech_service.dart";
-import "../../core/services/agent_profile_overlay_launcher.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
 import "../../core/theme/app_theme.dart";
-import "agent_profile_page.dart";
+import "agent_home_page.dart";
+import "agent_profile_page.dart" show AgentProfileData;
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "typewriter_reveal.dart";
@@ -1110,22 +1110,10 @@ class _ChatPageState extends State<ChatPage>
   }
 
   void _showAgentProfilePopover(GlobalKey avatarKey) {
-    if (widget.agentProfile == null) return;
-
-    final RenderBox? renderBox =
-        avatarKey.currentContext?.findRenderObject() as RenderBox?;
-    if (renderBox == null) return;
-
-    final Offset position = renderBox.localToGlobal(Offset.zero);
-    final Size size = renderBox.size;
-
-    AgentProfileOverlayLauncher.bindHandlers();
-
-    unawaited(AgentProfileOverlayLauncher.show(
-      x: (position.dx + size.width + 10).round(),
-      y: position.dy.round(),
-      profile: widget.agentProfile!,
-    ));
+    // 头像单击 → 进入 Agent 主页（一级路由页）。
+    // 原 Windows 原生 320×160 小弹窗退役：其信息（名字/签名/状态）只是主页
+    // header 的子集，点「人」进「家」动线更自然，也不再维护独立 HWND+GDI 窗口。
+    unawaited(AgentHomePage.show(context));
   }
 
   /// 鼠标悬停消息气泡时自动浮现操作按钮栏
@@ -2411,14 +2399,20 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       );
     } else {
       // Agent 回复：扣子式描边框（浅底 + 清晰描边），不再是「无底色无边框平铺」。
-      // 浅色模式下底色与左侧边栏面板同色（2026-09-03 用户反馈）；深色模式维持原浅底。
+      // 暖色模式走白底卡片：框内表头/行内代码/描边都是冷蓝调，画布也是蓝白，
+      // 若沿用侧栏中性灰(#F0F1F3)会色相相斥、观感突兀（2026-09-18 用户反馈）；
+      // 描边加深到与暖色 CardTheme 一致的 0.55，否则白底在蓝白画布上分不出边界。
+      // 深色模式维持原浅底。
       final AppThemeVariant themeVariant = AppThemeController.instance.value;
+      final bool isWarm = themeVariant == AppThemeVariant.warm;
       decoration = BoxDecoration(
         borderRadius: borderRadius,
-        color: themeVariant == AppThemeVariant.warm
-            ? AppPalette.resolveSidebarPanel(themeVariant)
+        color: isWarm
+            ? AppPalette.cardBackgroundWarm
             : cs.surfaceContainerLow.withValues(alpha: 0.4),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.32)),
+        border: Border.all(
+          color: cs.outline.withValues(alpha: isWarm ? 0.55 : 0.32),
+        ),
       );
     }
 

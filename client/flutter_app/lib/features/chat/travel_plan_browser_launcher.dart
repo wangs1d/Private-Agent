@@ -18,6 +18,8 @@ import "travel_web_panel_controller.dart" show TravelWebPanelPayload;
 ///
 /// 为什么优先于独立子进程窗口：零额外进程、零 WebView2 纹理中间窗
 /// （曾产生透明"幽灵窗"拦截其他应用点击），窗口管理交给系统。
+/// runner 的 WebViewGhostGuard 看门狗已能自动中和滞留幽灵窗，此优先级
+/// 仍保留：规避发生在源头优于事后中和。
 /// server 不可达 / 超时 / 打开失败一律返回 false，调用方降级到
 /// [TravelPlanWindowLauncher]（独立子进程窗口）→ 应用内全屏页。
 class TravelPlanBrowserLauncher {

@@ -53,185 +53,50 @@ Widget buildMessageBody(
     );
   }
 
-  // 回复信封块（reply blocks）：服务端已把 `[AGENT_RESULT_CARD_START]` 标记
-  // 确定性拆成 text/card 序列，这里按块直读渲染，不再对正文做标记正则。
-  // text 仍是事实源：历史消息无此字段（不持久化），走下方既有解析路径，
-  // blocks 与文本解析的产物同构（card 即同一份 AgentResultPayload JSON），
-  // 两端渲染等价；解析漂移与标记泄漏随「服务端单点拆分」一并消除。
+  // 回复信封块（reply blocks）：服务端已把卡片标记确定性拆成结构化块序列，
+  // 这里按块直读渲染。v2 序列含 media 块——照片与卡片/正文同一条版式语义
+  // （服务端 2026-09-18 统一编入，根治「带卡回复照片消失」）。
+  // text 仍是事实源：历史消息无此字段（不持久化），走下方统一路径。
   final List<Map<String, dynamic>>? replyBlocks = message.replyBlocks;
+  final bool hasMediaFields = (message.mediaCards?.isNotEmpty ?? false) ||
+      (message.renderBlocks?.isNotEmpty ?? false) ||
+      (message.pendingMediaCards?.isNotEmpty ?? false);
   if (replyBlocks != null && replyBlocks.isNotEmpty) {
-    final List<Widget> blockWidgets = <Widget>[];
-    final TextStyle bodyStyle = AppTypography.assistantBody(
-      Theme.of(context).textTheme,
-      cs,
-    );
-    for (final Map<String, dynamic> block in replyBlocks) {
-      final String type = block["type"]?.toString() ?? "text";
-      if (type == "card") {
-        final Map<String, dynamic> cardJson =
-            block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
-        final AgentResultData data = AgentResultData.fromJson(cardJson);
-        final int idx = blockWidgets.length;
-        blockWidgets.add(
-          Padding(
-            padding: EdgeInsets.only(top: idx == 0 ? 0 : AppTypography.space3),
-            child: data.actions.isNotEmpty
-                ? AgentActionChoiceCard(
-                    data: data,
-                    onAction: onUserAction == null
-                        ? null
-                        : (AgentResultAction a) => onUserAction(a, cardData: data),
-                  )
-                : AgentResultCard(data: data, onUserAction: onUserAction),
-          ),
-        );
-      } else {
-        final String text = block["text"]?.toString() ?? "";
-        if (text.trim().isEmpty) continue;
-        blockWidgets.add(buildInlineMarkdownText(text, bodyStyle, cs: cs));
-      }
-    }
-    if (blockWidgets.isNotEmpty) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: blockWidgets,
+    final bool blocksHaveMedia = replyBlocks
+        .any((Map<String, dynamic> b) => b["type"]?.toString() == "media");
+    // v1 blocks（纯 text/card）+ 消息带照片 → 不能在此渲染：照片不在 blocks 里，
+    // 渲染即丢（升级前的缺陷形态）。落到下方统一路径合并渲染；
+    // v2 blocks 或确无媒体的消息照常直读。
+    if (blocksHaveMedia || !hasMediaFields) {
+      final Widget? body = _buildReplyBlocksBody(
+        context,
+        cs,
+        replyBlocks,
+        onUserAction: onUserAction,
       );
+      if (body != null) return body;
     }
   }
 
-  // 智能体结果卡片：正文解析回退路径（历史消息无 replyBlocks 时走这里）。
-  // 与新版服务端一致的版式——「总览卡置首、正文居中、行程卡独立收尾」：
-  // 按标记在原文中的位置展开为 text/card 序列渲染，多卡不合并不丢弃
-  // （此前单卡优先会把模型总览卡整个丢掉）。
-  //
-  // actions 非空时,渲染为带按钮的"选择型卡片"——专门给用户做快速决策
-  // (如「周六去 / 忽略」「订阅 / 稍后再说」),点击会触发 onUserAction。
-  // actions 为空时,保持原有"纯汇报"卡片样式不变。
-  final List<AgentResultBlock> resultBlocks = AgentResultParser.parseBlocks(
-    message.text,
-  );
-  // 只要文本含完整卡片标记就进入本分支：损坏的卡片块在 parseBlocks 里被
-  // 静默跳过（防脏 JSON 漏进正文），纯正文段照常渲染。
-  final bool hasCardMarker = message.text.contains(AgentResultParser.startMarker);
-  if (hasCardMarker && resultBlocks.isNotEmpty) {
-    final List<Widget> blockWidgets = <Widget>[];
-    for (final AgentResultBlock block in resultBlocks) {
-      if (block.isCard) {
-        final AgentResultData data = block.data!;
-        final int idx = blockWidgets.length;
-        blockWidgets.add(
-          Padding(
-            padding: EdgeInsets.only(top: idx == 0 ? 0 : AppTypography.space3),
-            child: data.actions.isNotEmpty
-                ? AgentActionChoiceCard(
-                    data: data,
-                    onAction: onUserAction == null
-                        ? null
-                        : (AgentResultAction a) => onUserAction(a, cardData: data),
-                  )
-                : AgentResultCard(
-                    data: data,
-                    onUserAction: onUserAction,
-                  ),
-          ),
-        );
-        continue;
-      }
-      // 剥模型自带的展示形态声明行（[RENDER_AS:xxx]/[RENDER_HINT:xxx]）：
-      // 声明是渲染路由信号，不属于正文——含卡片的消息走不到下方 RENDER_AS
-      // 分支，声明行会原样漏进正文，这里在正文段里整行剥离。
-      final String prose = _stripRenderDeclarationLines(block.text ?? "");
-      if (prose.isEmpty) continue;
-      if (blockWidgets.isNotEmpty) {
-        blockWidgets.add(const SizedBox(height: AppTypography.space2));
-      }
-      // 卡旁正文可能是完整结构化 markdown（模型按 structured 范式写的
-      // 标题/表格/列表），用结构化正文渲染器；纯叙述时其内部自动回退
-      // 内联排版，与旧行为等价。
-      blockWidgets.add(
-        StructuredAssistantMessageBody(
-          text: prose,
-          cs: cs,
-          textTheme: Theme.of(context).textTheme,
-        ),
-      );
-    }
-    if (blockWidgets.isNotEmpty) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: blockWidgets,
-      );
-    }
-  }
-
-  // 交错渲染块（renderBlocks）：服务端已按「分组关键词在正文中的出现位置」
-  // 把最终正文切成有序的「文字段 + 媒体组」，前端按块顺序渲染即可得到
-  // 「一段文字介绍 → 一组照片 → 再一段文字 → 再一组照片」的自然阅读节奏，
-  // 替代旧行为「全部照片一次性铺在最前面」。由代码层确定性完成，不依赖 prompt。
+  // 统一路径（卡片 × 照片）：正文卡片标记、交错媒体块、mediaCards 三个来源
+  // 合并成一条块序列渲染——历史消息（blocks 不落盘）与老服务端 v1 blocks 都
+  // 走这里。此前「正文含卡片标记 → 渲染卡片即 return」会让排在其后的照片
+  // 分支永远执行不到（带卡回复「卡片在、照片没了」的根因）；现在照片与
+  // 卡片在同一序列合流，谁也不再挤掉谁。
   final List<Map<String, dynamic>>? renderBlocks = message.renderBlocks;
-  if (renderBlocks != null && renderBlocks.isNotEmpty) {
-    final List<Widget> blockWidgets = <Widget>[];
-    final TextStyle bodyStyle = AppTypography.assistantBody(
-      Theme.of(context).textTheme,
+  final bool hasCardMarker = message.text.contains(AgentResultParser.startMarker);
+  if (hasCardMarker || (renderBlocks != null && renderBlocks.isNotEmpty)) {
+    final Widget? body = _buildUnifiedMediaCardBody(
+      context,
       cs,
+      message,
+      onUserAction: onUserAction,
     );
-    for (final Map<String, dynamic> block in renderBlocks) {
-      final String type = block["type"]?.toString() ?? "text";
-      if (type == "media") {
-        final List<Map<String, dynamic>> cards =
-            (block["cards"] as List<dynamic>? ?? const <dynamic>[])
-                .whereType<Map<String, dynamic>>()
-                .toList();
-        if (cards.isEmpty) continue;
-        final List<AgentResultItem> items = cards.map(_cardToItem).toList();
-        final String groupTitle = (block["groupTitle"] ?? "").toString().trim();
-        final String sideA = (block["sideA"] ?? "").toString().trim();
-        final String sideB = (block["sideB"] ?? "").toString().trim();
-        // 小簇判断：无维度标题/无 A/B 对比 → 走轻量内联行（紧贴文字，不套大卡框）。
-        // 这是「一段介绍文字后挨着放一两张图」的关键视觉决策。
-        final bool isSmallCluster =
-            groupTitle.isEmpty && sideA.isEmpty && sideB.isEmpty;
-        if (isSmallCluster) {
-          blockWidgets.add(
-            Padding(
-              padding: const EdgeInsets.only(top: AppTypography.space2),
-              child: MediaInlineRow(items: items, cs: cs),
-            ),
-          );
-        } else {
-          blockWidgets.add(
-            Padding(
-              padding: const EdgeInsets.only(top: AppTypography.space3),
-              child: AgentResultCard(
-                data: AgentResultData(
-                  cardType: "media",
-                  title: "",
-                  items: items,
-                  footer: "",
-                  groupTitle: groupTitle.isEmpty ? null : groupTitle,
-                  sideA: sideA.isEmpty ? null : sideA,
-                  sideB: sideB.isEmpty ? null : sideB,
-                ),
-              ),
-            ),
-          );
-        }
-      } else {
-        final String text = block["text"]?.toString() ?? "";
-        if (text.trim().isEmpty) continue;
-        blockWidgets.add(buildInlineMarkdownText(text, bodyStyle, cs: cs));
-      }
-    }
-    if (blockWidgets.isNotEmpty) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: blockWidgets,
-      );
-    }
+    if (body != null) return body;
   }
+
+  // （renderBlocks 已并入上方统一路径：卡片标记与照片在同一序列渲染，
+  // 不再作为独立分支彼此抢占。）
 
   // 结构化媒体卡片（Coze 式架构）：独立于 LLM 文本渲染。
   //
@@ -421,6 +286,234 @@ AgentResultItem _cardToItem(Map<String, dynamic> m) {
     width: (m["width"] as num?)?.toInt(),
     height: (m["height"] as num?)?.toInt(),
   );
+}
+
+/// 卡片点击回调签名（与 buildMessageBody 的 onUserAction 参数同型）。
+typedef _UserActionHandler = void Function(
+  AgentResultAction action, {
+  required AgentResultData cardData,
+});
+
+/// blocks 序列（v2：text/card/media）→ 正文 Widget。
+/// 媒体块与卡片/正文同一条序列渲染；无任何可渲染块返回 null（调用方回退
+/// 统一路径），保持「空 blocks 不拦截后续分支」的旧行为。
+Widget? _buildReplyBlocksBody(
+  BuildContext context,
+  ColorScheme cs,
+  List<Map<String, dynamic>> replyBlocks, {
+  _UserActionHandler? onUserAction,
+}) {
+  final List<Widget> blockWidgets = <Widget>[];
+  final TextStyle bodyStyle = AppTypography.assistantBody(
+    Theme.of(context).textTheme,
+    cs,
+  );
+  for (final Map<String, dynamic> block in replyBlocks) {
+    final String type = block["type"]?.toString() ?? "text";
+    if (type == "card") {
+      final Map<String, dynamic> cardJson =
+          block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
+      final AgentResultData data = AgentResultData.fromJson(cardJson);
+      _appendCardWidget(blockWidgets, data, onUserAction);
+    } else if (type == "media") {
+      final Widget? media = _mediaBlockWidget(context, cs, block);
+      if (media != null) blockWidgets.add(media);
+    } else {
+      final String text = block["text"]?.toString() ?? "";
+      if (text.trim().isEmpty) continue;
+      blockWidgets.add(buildInlineMarkdownText(text, bodyStyle, cs: cs));
+    }
+  }
+  if (blockWidgets.isEmpty) return null;
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: blockWidgets,
+  );
+}
+
+/// 统一路径：卡片标记解析 × 交错媒体块，合成一条块序列渲染。
+///
+/// 基底取 renderBlocks（服务端按锚定切好的「文字段+媒体组」，text 段里嵌着
+/// 卡片标记），缺省时以整段正文为单一文字块。文字段再析出卡片与散文；
+/// mediaCards 仅在无 renderBlocks 时编组补尾（老服务端/任务面离线重放的
+/// 载荷没有 renderBlocks，照片只在 mediaCards 里）。
+Widget? _buildUnifiedMediaCardBody(
+  BuildContext context,
+  ColorScheme cs,
+  ChatMessage message, {
+  _UserActionHandler? onUserAction,
+}) {
+  final List<Map<String, dynamic>>? renderBlocks = message.renderBlocks;
+  final bool hasRenderBlocks = renderBlocks != null && renderBlocks.isNotEmpty;
+  final bool hasCardMarker = message.text.contains(AgentResultParser.startMarker);
+  final List<Map<String, dynamic>> base = hasRenderBlocks
+      ? renderBlocks
+      : <Map<String, dynamic>>[
+          <String, dynamic>{"type": "text", "text": message.text},
+        ];
+
+  final List<Widget> blockWidgets = <Widget>[];
+  final TextStyle bodyStyle = AppTypography.assistantBody(
+    Theme.of(context).textTheme,
+    cs,
+  );
+
+  for (final Map<String, dynamic> block in base) {
+    final String type = block["type"]?.toString() ?? "text";
+    if (type == "media") {
+      final Widget? media = _mediaBlockWidget(context, cs, block);
+      if (media != null) blockWidgets.add(media);
+      continue;
+    }
+    final String text = block["text"]?.toString() ?? "";
+    if (hasCardMarker) {
+      // 文字段析出卡片标记：卡片建卡，散文走结构化渲染器。损坏的卡片块在
+      // parseBlocks 里被静默跳过（防脏 JSON 漏进正文），纯正文段照常渲染。
+      for (final AgentResultBlock seg in AgentResultParser.parseBlocks(text)) {
+        if (seg.isCard) {
+          _appendCardWidget(blockWidgets, seg.data!, onUserAction);
+          continue;
+        }
+        // 剥模型自带的展示形态声明行（[RENDER_AS:xxx]/[RENDER_HINT:xxx]）：
+        // 声明是渲染路由信号，不属于正文。
+        final String prose = _stripRenderDeclarationLines(seg.text ?? "");
+        if (prose.isEmpty) continue;
+        if (blockWidgets.isNotEmpty) {
+          blockWidgets.add(const SizedBox(height: AppTypography.space2));
+        }
+        // 卡旁正文可能是完整结构化 markdown（模型按 structured 范式写的
+        // 标题/表格/列表），用结构化正文渲染器；纯叙述时其内部自动回退
+        // 内联排版，与旧行为等价。
+        blockWidgets.add(
+          StructuredAssistantMessageBody(
+            text: prose,
+            cs: cs,
+            textTheme: Theme.of(context).textTheme,
+          ),
+        );
+      }
+    } else {
+      if (text.trim().isEmpty) continue;
+      blockWidgets.add(buildInlineMarkdownText(text, bodyStyle, cs: cs));
+    }
+  }
+
+  if (!hasRenderBlocks) {
+    final List<Map<String, dynamic>>? mediaCards = message.mediaCards;
+    if (mediaCards != null && mediaCards.isNotEmpty) {
+      blockWidgets.addAll(_groupedMediaWidgets(context, cs, mediaCards));
+    }
+  }
+
+  if (blockWidgets.isEmpty) return null;
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: blockWidgets,
+  );
+}
+
+/// 卡片块 → Widget（actions 非空渲染为带按钮的选择型卡片）；首位卡不加顶距。
+void _appendCardWidget(
+  List<Widget> blockWidgets,
+  AgentResultData data,
+  _UserActionHandler? onUserAction,
+) {
+  final int idx = blockWidgets.length;
+  blockWidgets.add(
+    Padding(
+      padding: EdgeInsets.only(top: idx == 0 ? 0 : AppTypography.space3),
+      child: data.actions.isNotEmpty
+          ? AgentActionChoiceCard(
+              data: data,
+              onAction: onUserAction == null
+                  ? null
+                  : (AgentResultAction a) => onUserAction(a, cardData: data),
+            )
+          : AgentResultCard(data: data, onUserAction: onUserAction),
+    ),
+  );
+}
+
+/// media 块 → Widget：小簇（无维度标题/无 A/B 对比）走轻量内联行（紧贴文字，
+/// 不套大卡框），分组走媒体大卡。与统一路径/blocks 序列共用。
+Widget? _mediaBlockWidget(
+  BuildContext context,
+  ColorScheme cs,
+  Map<String, dynamic> block,
+) {
+  final List<Map<String, dynamic>> cards =
+      (block["cards"] as List<dynamic>? ?? const <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .toList();
+  if (cards.isEmpty) return null;
+  final List<AgentResultItem> items = cards.map(_cardToItem).toList();
+  final String groupTitle = (block["groupTitle"] ?? "").toString().trim();
+  final String sideA = (block["sideA"] ?? "").toString().trim();
+  final String sideB = (block["sideB"] ?? "").toString().trim();
+  final bool isSmallCluster =
+      groupTitle.isEmpty && sideA.isEmpty && sideB.isEmpty;
+  if (isSmallCluster) {
+    return Padding(
+      padding: const EdgeInsets.only(top: AppTypography.space2),
+      child: MediaInlineRow(items: items, cs: cs),
+    );
+  }
+  return Padding(
+    padding: const EdgeInsets.only(top: AppTypography.space3),
+    child: AgentResultCard(
+      data: AgentResultData(
+        cardType: "media",
+        title: "",
+        items: items,
+        footer: "",
+        groupTitle: groupTitle.isEmpty ? null : groupTitle,
+        sideA: sideA.isEmpty ? null : sideA,
+        sideB: sideB.isEmpty ? null : sideB,
+      ),
+    ),
+  );
+}
+
+/// mediaCards 按 groupTitle 编组（保持首次出现顺序）逐组出媒体块，与
+/// 服务端 buildInterleavedRenderBlocks 的编组口径一致；sideA/sideB 取该组内
+/// 首个对应侧的 sideLabel。
+List<Widget> _groupedMediaWidgets(
+  BuildContext context,
+  ColorScheme cs,
+  List<Map<String, dynamic>> cards,
+) {
+  final List<Widget> widgets = <Widget>[];
+  final Map<String, List<Map<String, dynamic>>> groups =
+      <String, List<Map<String, dynamic>>>{};
+  for (final Map<String, dynamic> c in cards) {
+    final String title = (c["groupTitle"] ?? "").toString().trim();
+    groups.putIfAbsent(title, () => <Map<String, dynamic>>[]).add(c);
+  }
+  groups.forEach((String title, List<Map<String, dynamic>> groupCards) {
+    String sideA = "";
+    String sideB = "";
+    for (final Map<String, dynamic> c in groupCards) {
+      final String side = (c["side"] ?? "").toString().trim().toUpperCase();
+      final String label = (c["sideLabel"] ?? "").toString().trim();
+      if (side == "A" && sideA.isEmpty) sideA = label;
+      if (side == "B" && sideB.isEmpty) sideB = label;
+    }
+    final Widget? widget = _mediaBlockWidget(
+      context,
+      cs,
+      <String, dynamic>{
+        "type": "media",
+        if (title.isNotEmpty) "groupTitle": title,
+        if (sideA.isNotEmpty) "sideA": sideA,
+        if (sideB.isNotEmpty) "sideB": sideB,
+        "cards": groupCards,
+      },
+    );
+    if (widget != null) widgets.add(widget);
+  });
+  return widgets;
 }
 
 /// 边说边出图：把流式阶段 `chat.media_ready` 收到的临时照片渲染成媒体卡。

@@ -36,6 +36,9 @@ class MessageCaptureListenerService : NotificationListenerService() {
             "com.ss.android.lark" to "feishu",
             "com.ss.android.lark.hd" to "feishu",
             "com.alibaba.android.rimet" to "feishu", // 钉钉按飞书域归类（办公 IM）
+            // 支付宝（2026-09-18）：支付/收款推送 → 财务实时入账（钱迹模式，零 Cookie）。
+            // 营销/积分类推送由服务端 alipay-payment-notice 的噪音规则排除，不误记账。
+            "com.eg.android.AlipayGphone" to "alipay",
         )
         /** 已知短信 app 包名片段：命中按 sms 归类 */
         private val SMS_PACKAGE_HINTS = listOf("mms", "messaging")

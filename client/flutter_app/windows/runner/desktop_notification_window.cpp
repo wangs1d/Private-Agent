@@ -15,8 +15,8 @@ namespace {
 using namespace Gdiplus;
 
 // ═══════════════════════════ 配色（实色近似，压在深色毛玻璃上） ═══════════════════════════
-// 说明：Acrylic 层提供 rgba(30,30,30,0.72) 底色 + 桌面模糊；
-// 这里的控件色 = 设计稿半透明色 与 毛玻璃底 混合后的“等效实色”，
+// 说明：Acrylic 层提供 rgba(18,18,24,0.13) 极薄底色 + 桌面模糊（全透明玻璃）；
+// 这里的控件色 = 设计稿半透明色 与 玻璃底 混合后的“等效实色”，
 // 保证绘制到窗口表面时视觉与设计稿一致。
 constexpr COLORREF kTextWhite   = RGB(0xFF, 0xFF, 0xFF);
 constexpr COLORREF kTextHeader  = RGB(0xF2, 0xF2, 0xF5);  // 顶部「系统通知」
@@ -35,8 +35,8 @@ constexpr COLORREF kCloseBgHover= RGB(0x3D, 0x3D, 0x46);  // 关闭 hover 底
 // ── 玻璃按钮（两颗同色：常态全透明、只留描边 + 文字，hover 才上淡底） ──
 constexpr COLORREF kGlassWhite  = RGB(0xFF, 0xFF, 0xFF);
 constexpr BYTE     kBtnFillHoverA  = 30;   // hover 淡底 ≈ 白 12%（常态无底色）
-constexpr BYTE     kBtnBorderA     = 80;   // 常态描边 ≈ 白 31%
-constexpr BYTE     kBtnBorderHoverA = 125; // hover 描边 ≈ 白 49%
+constexpr BYTE     kBtnBorderA     = 96;   // 常态描边 ≈ 白 38%（透明底上加浓保轮廓）
+constexpr BYTE     kBtnBorderHoverA = 135; // hover 描边 ≈ 白 53%
 constexpr COLORREF kBtnText        = RGB(0xF2, 0xF2, 0xF5);
 
 constexpr COLORREF kAccentNormal = RGB(0x7A, 0xA2, 0xFF);  // normal → 柔蓝
@@ -60,21 +60,27 @@ using SetWindowCompositionAttributeFn =
 
 constexpr int kWcaAccentPolicy              = 19;
 constexpr int kAccentEnableAcrylicBlurBehind = 4;
-// rgba(18,18,24,0.25) → A=0x40, B=0x18, G=0x12, R=0x12
-// 着色压到 25%：DWM 模糊后的桌面大面积透出，玻璃感来自这里；
-// 可读性由 Paint 里的自绘渐变压暗层负责（不依赖系统“透明效果”开关）
-constexpr DWORD kAcrylicTint = 0x40181212u;
+// rgba(18,18,24,0.13) → A=0x22, B=0x18, G=0x12, R=0x12
+// 注意：未公开的 AccentPolicy Acrylic 在部分 Win11 版本上已失效（本机实测
+// 无模糊），真正的玻璃底由 CaptureBackdrop 自绘；系统 Acrylic 仅作老系统
+// 兼容叠加（被不透明的自绘底覆盖后无感，保留无害）。
+constexpr DWORD kAcrylicTint = 0x22181212u;
 
 constexpr int kDwmwaWindowCornerPreference = 33;
 constexpr int kDwmwcpRound                 = 2;
 
 // ── 自绘玻璃压暗层（GDI+ 半透明渐变，直接控制通透度与文字对比度） ──
+// 全透明玻璃：只留一层极薄的顶部→底部渐变托住文字对比度，
+// 桌面/壁纸经 CaptureBackdrop 模糊后直接成为弹窗背景
 constexpr COLORREF kScrimTop    = RGB(0x1A, 0x1C, 0x24);  // 顶部稍深
-constexpr BYTE     kScrimTopA   = 88;
+constexpr BYTE     kScrimTopA   = 32;
 constexpr COLORREF kScrimBottom = RGB(0x0C, 0x0D, 0x12);  // 底部稍浅
-constexpr BYTE     kScrimBottomA = 60;
+constexpr BYTE     kScrimBottomA = 12;
 constexpr COLORREF kRimColor    = RGB(0xFF, 0xFF, 0xFF);
-constexpr BYTE     kRimAlpha    = 55;                     // 玻璃高光描边
+constexpr BYTE     kRimAlpha    = 66;                     // 玻璃高光描边
+
+// 自适应压暗目标：模糊底平均亮度高于此值时按比例压暗（白字可读底线）
+constexpr float kGlassTargetLuma = 90.0f;
 
 // ── 布局常量 ──
 constexpr int kSidePad    = 18;   // 左右留白
@@ -126,9 +132,6 @@ std::wstring TrimLeadingPunct(std::wstring s) {
   }
   return i > 0 ? s.substr(i) : s;
 }
-
-// 顶部空白以下的按钮标题「稍后」
-constexpr wchar_t kDismissLabel[] = L"\u7A0D\u540E" /*稍后*/;
 
 HFONT MakeFont(int px, int weight) {
   return CreateFontW(-px, 0, 0, 0, weight, FALSE, FALSE, FALSE,
@@ -229,6 +232,31 @@ bool PtIn(const POINT& pt, const RECT& rc) {
          pt.y >= rc.top && pt.y < rc.bottom;
 }
 
+// 抓拍背景的平均亮度（0-255），用于自适应压暗白字背景
+float MeanLuma(Gdiplus::Bitmap* img) {
+  using namespace Gdiplus;
+  BitmapData data;
+  Rect full(0, 0, static_cast<INT>(img->GetWidth()),
+            static_cast<INT>(img->GetHeight()));
+  if (img->LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB,
+                    &data) != Ok) {
+    return 80.0f;
+  }
+  float sum = 0.0f;
+  int n = 0;
+  for (UINT y = 0; y < data.Height; ++y) {
+    const BYTE* row =
+        static_cast<const BYTE*>(data.Scan0) + y * data.Stride;
+    for (UINT x = 0; x < data.Width; ++x) {
+      const BYTE* px = row + x * 4;  // BGRA
+      sum += 0.299f * px[2] + 0.587f * px[1] + 0.114f * px[0];
+      ++n;
+    }
+  }
+  img->UnlockBits(&data);
+  return n > 0 ? sum / n : 80.0f;
+}
+
 }  // namespace
 
 DesktopNotificationWindow::DesktopNotificationWindow() {
@@ -310,8 +338,8 @@ bool DesktopNotificationWindow::CreateWindowIfNeeded() {
   window_handle_ = hwnd;
 
   ApplyRoundedCorners(hwnd);
-  // 玻璃背景：低透明度 Acrylic 模糊（不依赖系统“透明效果”开关），
-  // 压暗与高光由 Paint 里的自绘渐变层负责，通透度完全可控
+  // 玻璃背景：真正的毛玻璃由 Show() 里的 CaptureBackdrop 自绘提供；
+  // 系统 Acrylic 仅作老系统兼容叠加
   ApplyAcrylicBlur(hwnd);
   return true;
 }
@@ -354,46 +382,101 @@ void DesktopNotificationWindow::ComputeLayout() {
   SetRect(&rc_close_, kWindowWidth - 10 - 28, 10,
           kWindowWidth - 10, 38);
 
-  // 底部右侧：主按钮 + 可选次按钮
+  // 底部右侧：主按钮（「稍后」次按钮已移除，确认即唯一动作）
   const int btn_y = window_height_ - kBtnBottomPad - kBtnHeight;
   HDC hdc = GetDC(nullptr);
   const int confirm_w = MeasureButtonWidth(hdc, confirm_text_);
-  const int dismiss_w = show_confirm_button_
-                            ? MeasureButtonWidth(hdc, kDismissLabel)
-                            : 0;
   ReleaseDC(nullptr, hdc);
-  const int gap       = 10;
   const int confirm_x = kWindowWidth - kSidePad - confirm_w;
-  const int dismiss_x = confirm_x - gap - dismiss_w;
 
   SetRect(&rc_confirm_, confirm_x, btn_y,
           confirm_x + confirm_w, btn_y + kBtnHeight);
-  if (show_confirm_button_) {
-    SetRect(&rc_dismiss_, dismiss_x, btn_y,
-            dismiss_x + dismiss_w, btn_y + kBtnHeight);
-  } else {
-    SetRectEmpty(&rc_dismiss_);
-  }
 }
 
-void DesktopNotificationWindow::PositionAtBottomRight() {
-  if (!window_handle_) return;
+POINT DesktopNotificationWindow::BottomRightOrigin() const {
   MONITORINFO mi = {sizeof(mi)};
   GetMonitorInfoW(MonitorFromWindow(window_handle_, MONITOR_DEFAULTTONEAREST),
                   &mi);
-  const int x = mi.rcWork.right  - kWindowWidth - kMargin;
-  const int y = mi.rcWork.bottom - window_height_ - kMargin;
-  // 先显式置可见（NOACTIVATE，不抢焦点），再原子定位——避免仅靠
-  // SWP_SHOWWINDOW 在个别环境下初始不可见的竞态
-  ShowWindow(window_handle_, SW_SHOWNOACTIVATE);
-  SetWindowPos(window_handle_, HWND_TOPMOST, x, y, kWindowWidth,
-               window_height_, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  POINT pt = {mi.rcWork.right - kWindowWidth - kMargin,
+              mi.rcWork.bottom - window_height_ - kMargin};
+  return pt;
 }
+
+// ── 自绘毛玻璃底 ──
+// 抓取弹窗将覆盖的桌面像素（此时窗口还隐藏，画面干净），1/8 降采样丢弃
+// 细节后再双三次放大回原尺寸 = 大半径柔焦。不依赖系统 Acrylic 接口
+// （AccentPolicy 在部分 Win11 版本上已失效，本机实测无模糊效果）。
+void DesktopNotificationWindow::CaptureBackdrop(int origin_x, int origin_y) {
+  backdrop_.reset();
+  const int w = kWindowWidth;
+  const int h = window_height_;
+
+  HDC screen = GetDC(nullptr);
+  BITMAPINFO bmi = {};
+  bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth       = w;
+  bmi.bmiHeader.biHeight      = -h;  // top-down，与 GDI+ 扫描行方向一致
+  bmi.bmiHeader.biPlanes      = 1;
+  bmi.bmiHeader.biBitCount    = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP dib =
+      CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (!dib) {
+    ReleaseDC(nullptr, screen);
+    return;
+  }
+  HDC mem = CreateCompatibleDC(screen);
+  HBITMAP old = static_cast<HBITMAP>(SelectObject(mem, dib));
+  BitBlt(mem, 0, 0, w, h, screen, origin_x, origin_y, SRCCOPY);
+  SelectObject(mem, old);
+  DeleteDC(mem);
+  ReleaseDC(nullptr, screen);
+
+  // raw 只是包裹 DIB 缓冲的视图；降采样完成前不能释放 dib
+  Bitmap raw(w, h, w * 4, PixelFormat32bppARGB, static_cast<BYTE*>(bits));
+
+  const int sw = std::max(1, w / 8);
+  const int sh = std::max(1, h / 8);
+  Bitmap downscaled(sw, sh, PixelFormat32bppARGB);
+  {
+    Graphics gs(&downscaled);
+    gs.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    gs.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    ImageAttributes ia;
+    ia.SetWrapMode(WrapModeTileFlipXY);  // 边缘镜像采样，避免暗边
+    gs.DrawImage(&raw, RectF(0.0f, 0.0f, static_cast<REAL>(sw),
+                             static_cast<REAL>(sh)),
+                 0.0f, 0.0f, static_cast<REAL>(w), static_cast<REAL>(h),
+                 UnitPixel, &ia);
+  }
+  DeleteObject(dib);  // 像素已复制进 downscaled，DIB 可释放
+
+  // 自适应压暗：白字的可读底线约在亮度 90；暗桌面不压（全通透），
+  // 亮桌面把玻璃整体压到深色贴膜效果（模糊纹理仍清晰可见）
+  backdrop_dim_ = std::clamp(kGlassTargetLuma / std::max(MeanLuma(&downscaled),
+                                                         1.0f),
+                             0.34f, 1.0f);
+
+  auto* blurred = new Bitmap(w, h, PixelFormat32bppARGB);
+  {
+    Graphics gb(blurred);
+    gb.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    gb.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    ImageAttributes ia;
+    ia.SetWrapMode(WrapModeTileFlipXY);
+    gb.DrawImage(&downscaled, RectF(0.0f, 0.0f, static_cast<REAL>(w),
+                                    static_cast<REAL>(h)),
+                 0.0f, 0.0f, static_cast<REAL>(sw), static_cast<REAL>(sh),
+                 UnitPixel, &ia);
+  }
+  backdrop_.reset(blurred);
+}
+
 
 void DesktopNotificationWindow::Show(const std::string& title,
                                      const std::string& message,
                                      const std::string& priority,
-                                     bool show_confirm_button,
                                      const std::string& confirm_text,
                                      int auto_close_ms) {
   title_              = StripUnrenderable(Utf8ToWide(title));
@@ -402,7 +485,6 @@ void DesktopNotificationWindow::Show(const std::string& title,
   confirm_text_       = StripUnrenderable(
       Utf8ToWide(confirm_text.empty() ? "\u6211\u77E5\u9053\u4E86"
                                       /*我知道了*/ : confirm_text));
-  show_confirm_button_ = show_confirm_button;
   auto_close_ms_       = auto_close_ms;
 
   // 优先级 → 强调色（自动关闭进度条着色）
@@ -425,20 +507,29 @@ void DesktopNotificationWindow::Show(const std::string& title,
   window_height_ = std::clamp(btn_y + kBtnHeight + kBtnBottomPad,
                               kMinHeight, kMaxHeight);
 
-  // 每次都重建窗口：毛玻璃窗口从不擦除背景，复用旧窗口会残留上一次的
+  // 每次都重建窗口：玻璃窗口从不擦除背景，复用旧窗口会残留上一次的
   // 像素（文字/高度变化时出现鬼影）；新建表面全零，视觉始终纯净。
   DestroyNativeWindow();
   if (!CreateWindowIfNeeded()) return;
   ComputeLayout();
   hover_id_ = 0;
   show_tick_ = GetTickCount64();  // 预绘制进度条需要正确的起点
-  // 显示前先绘制完整第一帧，避免弹出瞬间出现无内容的纯毛玻璃帧
+
+  // 窗口尚不可见时，先抓拍右下角目标位置背后的桌面做毛玻璃底，
+  // 弹出即是"透明玻璃盖在桌面上"
+  const POINT origin = BottomRightOrigin();
+  CaptureBackdrop(origin.x, origin.y);
+
+  // 显示前先绘制完整第一帧（含玻璃底），避免弹出瞬间出现空帧
   {
     HDC wdc = GetWindowDC(window_handle_);
     Paint(window_handle_, wdc);
     ReleaseDC(window_handle_, wdc);
   }
-  PositionAtBottomRight();
+  // 原子定位+显示——NOACTIVATE 不抢焦点，避免仅靠 SWP_SHOWWINDOW
+  // 在个别环境下初始不可见的竞态
+  SetWindowPos(window_handle_, HWND_TOPMOST, origin.x, origin.y, kWindowWidth,
+               window_height_, SWP_NOACTIVATE | SWP_SHOWWINDOW);
   StartTimer();
   Repaint();
 }
@@ -477,7 +568,6 @@ void DesktopNotificationWindow::Repaint() {
 
 int DesktopNotificationWindow::HitTest(const POINT& pt) const {
   if (PtIn(pt, rc_close_))   return 1;
-  if (PtIn(pt, rc_dismiss_)) return 2;
   if (PtIn(pt, rc_confirm_)) return 3;
   return 0;
 }
@@ -545,8 +635,32 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
   g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
   g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
 
-  // ── 玻璃压暗层：半透明渐变盖在 Acrylic 模糊上，透出背景的同时保证
-  //    文字对比度；透明度在此统一可调 ──
+  // ── 毛玻璃底：弹出前抓拍并模糊的桌面（全透明玻璃的本体）；
+  //    背后太亮时整体压暗（深色贴膜），保证白字可读 ──
+  if (backdrop_) {
+    if (backdrop_dim_ < 0.999f) {
+      ColorMatrix dim = {{
+        {backdrop_dim_, 0.0f,          0.0f,          0.0f, 0.0f},
+        {0.0f,          backdrop_dim_, 0.0f,          0.0f, 0.0f},
+        {0.0f,          0.0f,          backdrop_dim_, 0.0f, 0.0f},
+        {0.0f,          0.0f,          0.0f,          1.0f, 0.0f},
+        {0.0f,          0.0f,          0.0f,          0.0f, 1.0f},
+      }};
+      ImageAttributes ia;
+      ia.SetColorMatrix(&dim);
+      g.DrawImage(backdrop_.get(),
+                  RectF(0.0f, 0.0f, static_cast<float>(kWindowWidth),
+                        static_cast<float>(window_height_)),
+                  0.0f, 0.0f, static_cast<float>(kWindowWidth),
+                  static_cast<float>(window_height_), UnitPixel, &ia);
+    } else {
+      g.DrawImage(backdrop_.get(), 0.0f, 0.0f,
+                  static_cast<float>(kWindowWidth),
+                  static_cast<float>(window_height_));
+    }
+  }
+
+  // ── 玻璃压暗层：毛玻璃底上极薄的顶部→底部渐变，只负责托住文字对比度 ──
   {
     const RectF full(0, 0, static_cast<float>(kWindowWidth),
                      static_cast<float>(window_height_));
@@ -600,7 +714,7 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
     g.DrawLine(&pen, cx + s, cy - s, cx - s, cy + s);
   }
 
-  // ── 按钮底（两颗同色：常态全透明只有描边，hover 才上一层淡底反馈） ──
+  // ── 按钮底（常态全透明只有描边，hover 才上一层淡底反馈） ──
   auto draw_button_base = [&](const RECT& rc, bool hovered) {
     const RectF brc(static_cast<float>(rc.left),
                     static_cast<float>(rc.top),
@@ -610,9 +724,6 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
                   hovered ? kBtnFillHoverA : 0, kGlassWhite,
                   hovered ? kBtnBorderHoverA : kBtnBorderA, true);
   };
-  if (show_confirm_button_) {
-    draw_button_base(rc_dismiss_, hover_id_ == 2);
-  }
   draw_button_base(rc_confirm_, hover_id_ == 3);
 
   // ── 自动关闭进度条：半透明轨道 + 剩余时间强调色填充 ──
@@ -620,7 +731,7 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
     const float track_y = static_cast<float>(window_height_ - 6);
     const float track_w = static_cast<float>(kWindowWidth - kSidePad * 2);
     FillRoundRect(g, RectF(kSidePad, track_y, track_w, 3), 1.5f,
-                  kGlassWhite, 30);
+                  kGlassWhite, 45);
     const double elapsed =
         static_cast<double>(GetTickCount64() - show_tick_);
     double remain = 1.0;
@@ -688,13 +799,8 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
                  static_cast<float>(rc.right - rc.left),
                  static_cast<float>(rc.bottom - rc.top));
   };
-  if (show_confirm_button_) {
-    DrawTextGp(g, f_btn.get(), kDismissLabel, rect_of(rc_dismiss_), kBtnText,
-               StringAlignmentCenter, StringAlignmentCenter);
-  }
   DrawTextGp(g, f_btn.get(), confirm_text_, rect_of(rc_confirm_), kBtnText,
              StringAlignmentCenter, StringAlignmentCenter);
-
   g.Flush(FlushIntentionSync);
 }
 
@@ -793,7 +899,7 @@ LRESULT DesktopNotificationWindow::HandleMessage(HWND hwnd, UINT message,
         Hide();
         return 0;
       }
-      if (id == 1 || id == 2) {
+      if (id == 1) {
         if (on_dismiss_) on_dismiss_();
         Hide();
         return 0;

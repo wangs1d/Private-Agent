@@ -52,6 +52,10 @@ function(APPLY_STANDARD_SETTINGS TARGET)
   # type specifier" errors caused by mis-decoded bytes).
   target_compile_options(${TARGET} PRIVATE /W4 /WX /wd"4100" /utf-8)
   target_compile_options(${TARGET} PRIVATE /EHsc)
+  # /FS: let mspdbsrv serialize PDB writes across parallel cl.exe instances.
+  # Without it the geolocator_windows plugin hits MSVC C1041 ("cannot open
+  # program database ... vc145.pdb") when its sources compile concurrently.
+  target_compile_options(${TARGET} PRIVATE /FS)
   target_compile_definitions(${TARGET} PRIVATE "_HAS_EXCEPTIONS=0")
   target_compile_definitions(${TARGET} PRIVATE "$<$<CONFIG:Debug>:_DEBUG>")
 endfunction()

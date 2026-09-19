@@ -53,6 +53,8 @@ export const CAPABILITY_DOMAINS = [
   "home_services",
   "restaurant_booking",
   "travel_booking",
+  "period_care",
+  "safety_guard",
 ] as const;
 export type CapabilityDomain = (typeof CAPABILITY_DOMAINS)[number] | "all";
 
@@ -93,6 +95,8 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   home_services: "家政/本地生活预订（保洁/维修/搬家/美容/宠物，搜索/下单/改期/取消）",
   restaurant_booking: "餐厅预订（附近搜索/订座/状态/取消）",
   travel_booking: "机票/火车票/酒店预订（多源报价比价/下单/支付/出票/取消）",
+  period_care: "生理周期关怀（经期记录/预测/临近提醒/状态打卡，数据本地加密）",
+  safety_guard: "安全守护（紧急联系人/一键SOS/借口来电，定位仅按需获取一次）",
   all: "全部领域",
 };
 

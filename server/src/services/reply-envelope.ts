@@ -7,6 +7,7 @@
  *   blocks: [
  *     { type: "text", text: "好的，耳机已下单，预计周六送达。" },
  *     { type: "card", card: { title, items, footer, cardType, actions, ... } },
+ *     { type: "media", groupTitle, sideA, sideB, cards: [ 媒体卡同构 ] },
  *     { type: "text", text: "需要调整吗？" }
  *   ]
  *
@@ -14,8 +15,15 @@
  *   - **text 仍是唯一事实源**：blocks 是标记文本的确定性派生视图（同一份内容
  *     两种编码），不做双写、不会分叉。旧客户端忽略 blocks、照旧解析文本标记；
  *     新客户端优先 blocks，文本标记成为惰性备份——解析漂移与标记泄漏双消除。
+ *   - **媒体块统一编入（v2，2026-09-18）**：blocks 原先只承载 text/card，照片走
+ *     独立的 renderBlocks/mediaCards 字段——同一回复两套互不知情的版式视图，
+ *     客户端按优先级取其一，必然丢另一份的内容（「带卡回复照片消失」的根源）。
+ *     现在 media 块按既有交错锚定编入 blocks，一条序列承载全部版式语义。
+ *     兼容性：v1 客户端对未知块类型静默跳过，其表现与升级前一致（带卡回复本就
+ *     丢照片），无回归；renderBlocks/mediaCards 字段照常下发，供旧客户端与
+ *     历史消息（blocks 不落盘）回退。
  *   - **降级判定**（返回 null → 不下发 blocks，前端走既有文本解析）：
- *     · 纯文本（无卡片标记）——无增益，省字节；
+ *     · 纯文本（无卡片标记且无媒体）——无增益，省字节；
  *     · 含 v1 未支持的标记（RENDER_AS / DATA_BRIEF / VIDEO / CHAT_MEDIA /
  *       CONTENT_SUMMARY_V2）——这些形态前端文本解析已正确工作，宁可不下发
  *       也不半拆；
@@ -25,6 +33,8 @@
  *
  * 前端消费：message.replyBlocks（见 message_body_renderer.dart 的 blocks 分支）。
  */
+
+import type { MediaCardItem, RenderBlock } from "./tool-result-processor.js";
 
 /** 文本块：一段普通正文（内联 markdown，前端按既有正文样式渲染） */
 export interface ReplyTextBlock {
@@ -38,7 +48,20 @@ export interface ReplyCardBlock {
   card: Record<string, unknown>;
 }
 
-export type ReplyBlock = ReplyTextBlock | ReplyCardBlock;
+/**
+ * 媒体块（v2）：与 renderBlocks 的 media 块同构——一组照片/视频及其分组元数据。
+ * groupTitle/sideA/sideB 缺省表示无维度的小簇照片（前端走轻量内联行渲染）。
+ */
+export interface ReplyMediaBlock {
+  type: "media";
+  groupTitle?: string;
+  sideA?: string;
+  sideB?: string;
+  cards: MediaCardItem[];
+}
+
+
+export type ReplyBlock = ReplyTextBlock | ReplyCardBlock | ReplyMediaBlock;
 
 const CARD_START = "[AGENT_RESULT_CARD_START]";
 const CARD_END = "[AGENT_RESULT_CARD_END]";
@@ -129,12 +152,56 @@ export function normalizeReplyCardLayout(text: string): string {
 }
 
 /**
- * 把带卡片标记的回复文本拆成结构化块序列。
+ * 把带卡片标记的回复文本拆成结构化块序列（v2 统一序列）。
  * 返回 null 表示本轮不下发 blocks（前端回退文本解析），见文件头降级判定。
+ *
+ * @param finalText 归一化后的回复正文（卡片标记嵌在文本里）
+ * @param mediaSegments 可选；同一 finalText 构建出的「文字+媒体」交错序列
+ *   （即 renderBlocks，其 text 段里仍嵌着卡片标记）。传入时以它为基底：
+ *   media 段原样编入，text 段再析出卡片——一条序列同时承载 文字/卡片/照片
+ *   的版式语义，客户端不再需要跨字段拼接（「带卡回复照片消失」的根治）。
+ *   缺省时退化为 v1 纯 text/card 拆分（无媒体回复，行为不变）。
  */
-export function buildReplyBlocks(finalText: string): ReplyBlock[] | null {
+export function buildReplyBlocks(
+  finalText: string,
+  mediaSegments?: RenderBlock[],
+): ReplyBlock[] | null {
   const text = finalText ?? "";
+
+  // v2：媒体在场 → 以交错序列为基底层析卡片标记
+  if (mediaSegments && mediaSegments.length > 0) {
+    const blocks: ReplyBlock[] = [];
+    for (const seg of mediaSegments) {
+      if (seg.type === "media") {
+        blocks.push({
+          type: "media",
+          ...(seg.groupTitle ? { groupTitle: seg.groupTitle } : {}),
+          ...(seg.sideA ? { sideA: seg.sideA } : {}),
+          ...(seg.sideB ? { sideB: seg.sideB } : {}),
+          cards: seg.cards,
+        });
+        continue;
+      }
+      // text 段：扫卡片标记；残缺标记/坏 JSON → 整体降级（与 v1 同口径）
+      const scanned = scanCardSegments(seg.text);
+      if (scanned === null) return null;
+      blocks.push(...scanned);
+    }
+    return blocks.length > 0 ? blocks : null;
+  }
+
+  // v1：无媒体的纯 text/card 拆分
   if (!text.includes(CARD_START)) return null;
+  const blocks = scanCardSegments(text);
+  return blocks && blocks.length > 0 ? blocks : null;
+}
+
+/**
+ * 把一段文本按卡片标记切成 text/card 块序列。
+ * 含 v1 未支持的标记（RENDER_AS/DATA_BRIEF/…）或卡片 JSON 不可解析时返回
+ * null——调用方整体降级，绝不 partially 下发。
+ */
+function scanCardSegments(text: string): ReplyBlock[] | null {
   if (UNSUPPORTED_MARKERS.some((m) => text.includes(m))) return null;
 
   const blocks: ReplyBlock[] = [];
@@ -164,7 +231,7 @@ export function buildReplyBlocks(finalText: string): ReplyBlock[] | null {
   const tail = text.slice(cursor).trim();
   if (tail) blocks.push({ type: "text", text: tail });
 
-  return blocks.length > 0 ? blocks : null;
+  return blocks;
 }
 
 /**

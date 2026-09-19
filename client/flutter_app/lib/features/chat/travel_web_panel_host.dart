@@ -24,6 +24,8 @@ import "travel_web_panel_controller.dart";
 /// 主应用禁止在启动/首页 initState 里预加载：WebView2 一旦创建就会产生
 /// 内部顶层窗口，若滞留屏幕会变成透明"幽灵窗"拦截其他应用的点击
 /// （曾实测盖住左半屏）；主进程路径由 TravelPlanPanel 挂载时懒加载兜底。
+/// 兜底之兜底：runner 常驻 WebViewGhostGuard 看门狗会自动中和滞留窗口，
+/// 即使幽灵窗再出现也不会拦截其他应用的点击。
 class TravelWebPanelHost {
   TravelWebPanelHost._();
 

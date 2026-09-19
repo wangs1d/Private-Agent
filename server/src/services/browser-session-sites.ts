@@ -60,6 +60,19 @@ export const BROWSER_SESSION_SITES = {
     hosts: ["maoyan.com", "www.maoyan.com"],
     homeUrl: "https://www.maoyan.com",
   },
+  // ── 2026-09-18 新增两类非购物用途的站点 ──
+  alipay: {
+    // 财务后台自动拉账：用用户登录态查交易明细（Cookie 双门禁同购物站点）
+    label: "支付宝",
+    hosts: ["alipay.com", "www.alipay.com", "consumeprod.alipay.com", "mbillexprod.alipay.com"],
+    homeUrl: "https://www.alipay.com",
+  },
+  netease: {
+    // 媒体音乐登录音源：带 MUSIC_U Cookie 解析 VIP/版权曲目的可播放 URL
+    label: "网易云音乐",
+    hosts: ["music.163.com"],
+    homeUrl: "https://music.163.com",
+  },
 } as const;
 
 export type BrowserSessionSiteId = keyof typeof BROWSER_SESSION_SITES;

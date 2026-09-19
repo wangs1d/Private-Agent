@@ -2,6 +2,7 @@ import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
 import "package:private_ai_agent/core/models/chat_models.dart";
+import "package:private_ai_agent/features/chat/agent_result_card.dart" show MediaInlineRow;
 import "package:private_ai_agent/features/chat/message_body_renderer.dart";
 
 /// 回复信封块（reply blocks）渲染测试：
@@ -166,5 +167,122 @@ void main() {
     expect(find.textContaining("收尾说明"), findsOneWidget);
     expect(find.textContaining("broken json"), findsNothing);
     expect(find.textContaining("AGENT_RESULT_CARD_START"), findsNothing);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // v2 统一渲染：卡片与照片同屏（blocks 含 media 块 / 历史回放 / v1 blocks 回退）
+  // ───────────────────────────────────────────────────────────────────────────
+
+  const String cardMarkerBlock = "[AGENT_RESULT_CARD_START]\n"
+      '{"title":"泳池别墅怎么选","items":[{"type":"check","text":"乌布雨林"}],'
+      '"footer":""}\n'
+      "[AGENT_RESULT_CARD_END]";
+
+  final List<Map<String, dynamic>> mediaCards = <Map<String, dynamic>>[
+    {"type": "image", "title": "乌布泳池别墅", "thumbnailUrl": "https://example.com/1.jpg"},
+  ];
+
+  testWidgets("v2 blocks：text+card+media 序列——卡片与照片同屏渲染", (tester) async {
+    await pumpBody(
+      tester,
+      ChatMessage(
+        messageId: "m-v2",
+        sessionId: "s1",
+        role: "assistant",
+        text: "（正文文本，v2 blocks 下不参与渲染）",
+        timestamp: DateTime.now(),
+        replyBlocks: <Map<String, dynamic>>[
+          {"type": "text", "text": "先看这家。"},
+          {"type": "card", "card": <String, dynamic>{
+            "title": "泳池别墅怎么选",
+            "items": <dynamic>[
+              {"type": "check", "text": "乌布雨林"},
+            ],
+            "footer": "",
+            "cardType": "",
+          }},
+          {"type": "media", "cards": mediaCards},
+          {"type": "text", "text": "预算充足就住乌布。"},
+        ],
+      ),
+    );
+
+    expect(find.text("先看这家。"), findsOneWidget);
+    expect(find.text("泳池别墅怎么选"), findsOneWidget);
+    expect(find.text("预算充足就住乌布。"), findsOneWidget);
+    expect(find.byType(MediaInlineRow), findsOneWidget);
+  });
+
+  testWidgets("历史回放：正文卡片标记 + renderBlocks 媒体 → 卡片与照片都渲染（不互相挤掉）", (tester) async {
+    await pumpBody(
+      tester,
+      ChatMessage(
+        messageId: "m-history",
+        sessionId: "s1",
+        role: "assistant",
+        text: "前导说明。\n$cardMarkerBlock\n\n预算充足就住乌布。",
+        timestamp: DateTime.now(),
+        replyBlocks: null,
+        renderBlocks: <Map<String, dynamic>>[
+          {"type": "text", "text": "前导说明。\n$cardMarkerBlock"},
+          {"type": "media", "cards": mediaCards},
+          {"type": "text", "text": "预算充足就住乌布。"},
+        ],
+      ),
+    );
+
+    expect(find.text("泳池别墅怎么选"), findsOneWidget);
+    expect(find.textContaining("前导说明"), findsOneWidget);
+    expect(find.text("预算充足就住乌布。"), findsOneWidget);
+    expect(find.byType(MediaInlineRow), findsOneWidget);
+  });
+
+  testWidgets("v1 blocks（无媒体块）+ 消息带照片 → 回退统一路径，照片不丢", (tester) async {
+    await pumpBody(
+      tester,
+      ChatMessage(
+        messageId: "m-v1",
+        sessionId: "s1",
+        role: "assistant",
+        text: "前导说明。\n$cardMarkerBlock",
+        timestamp: DateTime.now(),
+        replyBlocks: <Map<String, dynamic>>[
+          {"type": "text", "text": "前导说明。"},
+          {"type": "card", "card": <String, dynamic>{
+            "title": "泳池别墅怎么选",
+            "items": <dynamic>[
+              {"type": "check", "text": "乌布雨林"},
+            ],
+            "footer": "",
+            "cardType": "",
+          }},
+        ],
+        renderBlocks: <Map<String, dynamic>>[
+          {"type": "text", "text": "前导说明。\n$cardMarkerBlock"},
+          {"type": "media", "cards": mediaCards},
+        ],
+      ),
+    );
+
+    expect(find.text("泳池别墅怎么选"), findsOneWidget);
+    expect(find.byType(MediaInlineRow), findsOneWidget);
+  });
+
+  testWidgets("mediaCards-only（无 renderBlocks）→ 编组补尾渲染（老服务端/离线重放兼容）", (tester) async {
+    await pumpBody(
+      tester,
+      ChatMessage(
+        messageId: "m-legacy",
+        sessionId: "s1",
+        role: "assistant",
+        text: "前导说明。\n$cardMarkerBlock",
+        timestamp: DateTime.now(),
+        replyBlocks: null,
+        mediaCards: mediaCards,
+      ),
+    );
+
+    expect(find.text("泳池别墅怎么选"), findsOneWidget);
+    expect(find.byType(MediaInlineRow), findsOneWidget);
   });
 }

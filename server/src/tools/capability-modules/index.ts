@@ -33,6 +33,8 @@ import type { SharedBrowserCoordinator } from "../../services/shared-browser-coo
 import type { SharedBrowserCdpGateway } from "../../services/shared-browser/cdp-gateway.js";
 import type { PhoneCallCoordinator } from "../../services/phone-call-coordinator.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
+import type { PeriodCareService } from "../../services/period-care-service.js";
+import type { SafetyGuardService } from "../../services/safety-guard-service.js";
 import type { ClientPushPort } from "../../ports/client-push-port.js";
 
 import {
@@ -60,6 +62,16 @@ import {
   HEALTH_FITNESS_INTENT_RULES,
   registerHealthFitnessTools,
 } from "./health-fitness/index.js";
+import {
+  PERIOD_CARE_CHAT_TOOLS,
+  PERIOD_CARE_INTENT_RULES,
+  registerPeriodCareTools,
+} from "./period-care/index.js";
+import {
+  SAFETY_GUARD_CHAT_TOOLS,
+  SAFETY_GUARD_INTENT_RULES,
+  registerSafetyGuardTools,
+} from "./safety-guard/index.js";
 import {
   FINANCE_DEEP_CHAT_TOOLS,
   FINANCE_DEEP_INTENT_RULES,
@@ -191,6 +203,10 @@ export interface CapabilityModuleDeps {
   bookingService: BookingService;
   /** 电话代办协调器（phone_call.*：真实外呼确认门/频控/状态机/结果回填） */
   phoneCallCoordinator: PhoneCallCoordinator;
+  /** 生理周期关怀（period.*：经期记录/预测/临近提醒，数据本地加密） */
+  periodCareService: PeriodCareService;
+  /** 安全守护（safety.*：紧急联系人/一键SOS/借口来电） */
+  safetyGuardService: SafetyGuardService;
   /** 图片能力套件(图库/美颜批图),存储根 data/pictures */
   pictureKit: PictureKit;
 }
@@ -395,6 +411,35 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       intentRules: TRAVEL_BOOKING_INTENT_RULES,
       register: (registry) => registerTravelBookingTools(registry, { bookingService: deps.bookingService }),
       category: TRAVEL_BOOKING_CATEGORY_MAPPING,
+    },
+    {
+      domain: "period_care",
+      label: "生理周期关怀（经期记录/预测/临近提醒）",
+      chatTools: PERIOD_CARE_CHAT_TOOLS,
+      intentRules: PERIOD_CARE_INTENT_RULES,
+      register: (registry) => registerPeriodCareTools(registry, { periodCareService: deps.periodCareService }),
+      category: {
+        name: "period_care",
+        keywords: [
+          "period", "menstrual", "menstruation", "cycle", "pms", "cramps",
+          "月经", "例假", "大姨妈", "姨妈", "生理期", "经期", "痛经",
+        ],
+      },
+    },
+    {
+      domain: "safety_guard",
+      label: "安全守护（紧急联系人/一键SOS/借口来电）",
+      chatTools: SAFETY_GUARD_CHAT_TOOLS,
+      intentRules: SAFETY_GUARD_INTENT_RULES,
+      register: (registry) => registerSafetyGuardTools(registry, { safetyGuardService: deps.safetyGuardService }),
+      category: {
+        name: "safety_guard",
+        keywords: [
+          "sos", "emergency", "panic", "safety", "fake call", "call me", "excuse",
+          "救命", "求救", "紧急", "紧急联系人", "害怕", "危险",
+          "守护", "借口", "脱身", "给我打电话", "打个电话", "来个电话",
+        ],
+      },
     },
     // 电话代办：模块自带 PHONE_CALL_ENABLED 开关门控（关闭时 schema/执行器/intent 全空，
     // 对 LLM 不可见且无漂移），故直接复用 buildPhoneCallModule。

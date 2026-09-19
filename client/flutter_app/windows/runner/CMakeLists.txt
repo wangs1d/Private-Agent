@@ -22,6 +22,7 @@ add_executable(${BINARY_NAME} WIN32
   "schedule_floating_window.cpp"
   "sphere_overlay_window.cpp"
   "utils.cpp"
+  "webview_ghost_window_guardian.cpp"
   "win32_window.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
   "Runner.rc"

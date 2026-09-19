@@ -9,11 +9,12 @@ import "../../core/services/shared_browser_host.dart";
 /// 浏览器页（用户与 Agent 共用）。
 ///
 /// 颜色全部取自 [Theme.of] —— 深色/暖色两套主题自动跟随：
-///   - 主页态：居中单层搜索框 + 「试试让 Agent」任务建议 chips
-///     （点击直接把任务发进对话）
-///   - 浏览态：顶部一条细工具栏（后退/前进/刷新 + omnibox + 主页）；
-///     主页态下 omnibox 透明无框、居中提示，与主页搜索框风格一致
-///   - Agent 正在操作时工具栏下方浮出细状态条（共用浏览器的信任提示）
+///   - 主页态：工具栏整条收起，只留居中标识 + 单层搜索框 + 「试试让 Agent」
+///     任务建议 chips（点击直接把任务发进对话）
+///   - 浏览态：顶部一条细工具栏（后退/前进/刷新 + omnibox + 主页），
+///     工具栏底边贴 2px 加载进度线；omnibox 获得焦点即全选，输入直接替换
+///   - Agent 正在操作时工具栏下浮出细状态条（操作可见、可接管）；
+///     状态条/确认条均带滑出过渡，确认条用 errorContainer 语义色区分
 ///
 /// 嵌入模式（embedded=true）：渲染在右侧 Dock 面板里，不自带关闭按钮
 /// （面板顶栏已有）；false 时为整页（预留全屏打开形态）。
@@ -50,6 +51,7 @@ class _BrowserPageState extends State<BrowserPage> {
     super.initState();
     _bootstrap();
     host.currentUrl.addListener(_syncOmnibox);
+    _omniboxFocus.addListener(_onOmniboxFocusChanged);
     _syncOmnibox();
   }
 
@@ -63,6 +65,7 @@ class _BrowserPageState extends State<BrowserPage> {
   @override
   void dispose() {
     host.currentUrl.removeListener(_syncOmnibox);
+    _omniboxFocus.removeListener(_onOmniboxFocusChanged);
     _omnibox.dispose();
     _omniboxFocus.dispose();
     super.dispose();
@@ -85,6 +88,39 @@ class _BrowserPageState extends State<BrowserPage> {
     host.submitQuery(raw);
   }
 
+  // ── omnibox 聚焦全选（浏览器标准行为：点入即选中整个地址，输入即替换）──
+  //
+  // 鼠标点击聚焦分两步：tap-down 请求焦点（此处先全选一次，覆盖键盘聚焦等
+  // 无落点竞争的场景），tap-up 才把光标落到点击点——会覆盖上一步，因此标记
+  // _omniboxSelectPending，由 onTap 再补一次全选。已聚焦后的再次点击不标记，
+  // 光标正常落点，方便局部编辑。
+
+  /// 本次聚焦是否由 tap-down 触发且尚未被 onTap 消费。
+  bool _omniboxSelectPending = false;
+
+  void _onOmniboxFocusChanged() {
+    if (_omniboxFocus.hasFocus) {
+      _selectAllOmnibox();
+      _omniboxSelectPending = true;
+    } else {
+      _omniboxSelectPending = false;
+    }
+  }
+
+  void _handleOmniboxTap() {
+    if (!_omniboxSelectPending) return;
+    _omniboxSelectPending = false;
+    _selectAllOmnibox();
+  }
+
+  void _selectAllOmnibox() {
+    if (_omnibox.text.isEmpty) return;
+    _omnibox.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _omnibox.text.length,
+    );
+  }
+
   void _sendAgentTask(String task) {
     _omniboxFocus.unfocus();
     widget.onAgentTask?.call(task);
@@ -96,31 +132,47 @@ class _BrowserPageState extends State<BrowserPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        // URL 变化驱动工具栏重建（后退/主页按钮的可用态、omnibox 图标跟随）
+        // URL 变化驱动工具栏重建（按钮可用态、omnibox 图标跟随）。
+        // 主页态整条收起（主页有自己的大搜索框，避免双搜索框叠加），
+        // 进入浏览态时滑出。
         ValueListenableBuilder<String>(
           valueListenable: host.currentUrl,
           builder: (BuildContext context, String _, Widget? __) =>
-              _buildToolbar(cs),
+              AnimatedSize(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                alignment: Alignment.topCenter,
+                child: host.atHome
+                    ? const SizedBox(width: double.infinity)
+                    : _buildToolbar(cs),
+              ),
         ),
         // Agent 操作状态条（共用浏览器：操作可见、可接管）
         ValueListenableBuilder<int>(
           valueListenable: host.pendingAgentActions,
-          builder: (BuildContext context, int pending, _) {
-            if (pending <= 0) return const SizedBox.shrink();
-            return _AgentStatusBar(cs: cs, action: host.lastAgentAction.value);
-          },
+          builder: (BuildContext context, int pending, _) => _AnimatedBar(
+            visible: pending > 0,
+            child: _AgentStatusBar(cs: cs, action: host.lastAgentAction.value),
+          ),
         ),
-        // 高风险动作确认条（提交/支付类操作需用户点头才执行）
+        // 高风险动作确认条（提交/支付类操作需用户点头才执行）。
+        // 注意：null 态不能急切求值 cast（child 参数总会先构建），
+        // 否则确认条关闭时 `null as SbConfirmRequest` 直接抛类型错误。
         ValueListenableBuilder<Object?>(
           valueListenable: host.confirmRequest,
           builder: (BuildContext context, Object? request, _) {
-            if (request == null) return const SizedBox.shrink();
-            final SbConfirmRequest req = request as SbConfirmRequest;
-            return _ConfirmBar(
-              cs: cs,
-              request: req,
-              onAllow: () => host.resolveConfirmation(true),
-              onDeny: () => host.resolveConfirmation(false),
+            final SbConfirmRequest? req =
+                request is SbConfirmRequest ? request : null;
+            return _AnimatedBar(
+              visible: req != null,
+              child: req == null
+                  ? const SizedBox(width: double.infinity)
+                  : _ConfirmBar(
+                      cs: cs,
+                      request: req,
+                      onAllow: () => host.resolveConfirmation(true),
+                      onDeny: () => host.resolveConfirmation(false),
+                    ),
             );
           },
         ),
@@ -137,96 +189,113 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 工具栏（Chrome 式：图标按钮 + 胶囊 omnibox；主页态 omnibox 透明无框）
+  // 工具栏（Chrome 式：图标按钮 + 胶囊 omnibox；底边贴 2px 加载进度线）
   // ═══════════════════════════════════════════════════════════
 
   Widget _buildToolbar(ColorScheme cs) {
-    return Container(
-      height: 44,
-      decoration: BoxDecoration(
-        color: cs.surface,
-        border: Border(
-          bottom: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
-        ),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Row(
-        children: <Widget>[
-          _NavButton(
-            icon: Icons.arrow_back_ios_new,
-            tooltip: "后退",
-            cs: cs,
-            onTap: host.atHome ? null : host.goBack,
-          ),
-          _NavButton(
-            icon: Icons.arrow_forward_ios,
-            tooltip: "前进",
-            cs: cs,
-            onTap: host.atHome ? null : host.goForward,
-          ),
-          ValueListenableBuilder<bool>(
-            valueListenable: host.isLoading,
-            builder: (BuildContext context, bool loading, _) => _NavButton(
-              icon: loading ? Icons.close : Icons.refresh,
-              tooltip: loading ? "停止" : "刷新",
-              cs: cs,
-              onTap: loading ? host.stop : (host.atHome ? null : host.reload),
+    return Stack(
+      alignment: Alignment.bottomCenter,
+      children: <Widget>[
+        Container(
+          height: 44,
+          decoration: BoxDecoration(
+            color: cs.surface,
+            border: Border(
+              bottom: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
             ),
           ),
-          const SizedBox(width: 4),
-          Expanded(child: _buildOmnibox(cs)),
-          const SizedBox(width: 4),
-          _NavButton(
-            icon: Icons.home_outlined,
-            tooltip: "主页",
-            cs: cs,
-            onTap: host.atHome ? null : host.goHome,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
+            children: <Widget>[
+              _NavButton(
+                icon: Icons.arrow_back_ios_new,
+                tooltip: "后退",
+                cs: cs,
+                onTap: host.atHome ? null : host.goBack,
+              ),
+              _NavButton(
+                icon: Icons.arrow_forward_ios,
+                tooltip: "前进",
+                cs: cs,
+                onTap: host.atHome ? null : host.goForward,
+              ),
+              ValueListenableBuilder<bool>(
+                valueListenable: host.isLoading,
+                builder: (BuildContext context, bool loading, _) => _NavButton(
+                  icon: loading ? Icons.close : Icons.refresh,
+                  tooltip: loading ? "停止" : "刷新",
+                  cs: cs,
+                  onTap: loading ? host.stop : (host.atHome ? null : host.reload),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Expanded(child: _buildOmnibox(cs)),
+              const SizedBox(width: 4),
+              _NavButton(
+                icon: Icons.home_outlined,
+                tooltip: "主页",
+                cs: cs,
+                onTap: host.atHome ? null : host.goHome,
+              ),
+            ],
           ),
-        ],
-      ),
+        ),
+        // 加载进度线：不确定进度模式，贴底边压在分隔线上，淡入淡出
+        ValueListenableBuilder<bool>(
+          valueListenable: host.isLoading,
+          builder: (BuildContext context, bool loading, _) => AnimatedSwitcher(
+            duration: const Duration(milliseconds: 150),
+            child: loading
+                ? SizedBox(
+                    key: const ValueKey<String>("loading"),
+                    width: double.infinity,
+                    child: LinearProgressIndicator(
+                      minHeight: 2,
+                      backgroundColor: Colors.transparent,
+                      color: cs.primary,
+                    ),
+                  )
+                : const SizedBox(
+                    key: ValueKey<String>("idle"),
+                    width: double.infinity,
+                    height: 2,
+                  ),
+          ),
+        ),
+      ],
     );
   }
 
   Widget _buildOmnibox(ColorScheme cs) {
-    final bool home = host.atHome;
-    // 主页态：透明无框、提示居中（与主页单层搜索框同一风格，不再套一层框）；
-    // 浏览态：淡色胶囊填充，聚焦时浅描边。
+    // 淡色胶囊填充，聚焦时浅描边（主页态工具栏整体收起，无主页分支）。
     return TextField(
       controller: _omnibox,
       focusNode: _omniboxFocus,
+      onTap: _handleOmniboxTap,
       style: TextStyle(fontSize: 13, color: cs.onSurface),
-      textAlign: home ? TextAlign.center : TextAlign.start,
       textAlignVertical: TextAlignVertical.center,
       textInputAction: TextInputAction.go,
       onSubmitted: _submit,
       decoration: InputDecoration(
         isDense: true,
         filled: true,
-        fillColor: home
-            ? Colors.transparent
-            : cs.surfaceContainerHigh.withValues(alpha: 0.6),
+        fillColor: cs.surfaceContainerHigh.withValues(alpha: 0.6),
         contentPadding:
             const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        prefixIcon: home
-            ? null
-            : Icon(_omniboxIcon, size: 15, color: cs.onSurfaceVariant),
+        prefixIcon: Icon(_omniboxIcon, size: 15, color: cs.onSurfaceVariant),
         prefixIconConstraints: const BoxConstraints(minWidth: 34),
         hintText: "搜索或输入网址",
         hintStyle: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant),
         border: InputBorder.none,
-        enabledBorder: home
-            ? InputBorder.none
-            : OutlineInputBorder(
-                borderRadius: BorderRadius.circular(20),
-                borderSide: BorderSide.none,
-              ),
-        focusedBorder: home
-            ? InputBorder.none
-            : OutlineInputBorder(
-                borderRadius: BorderRadius.circular(20),
-                borderSide:
-                    BorderSide(color: cs.onSurface.withValues(alpha: 0.45)),
-              ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(20),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(20),
+          borderSide:
+              BorderSide(color: cs.onSurface.withValues(alpha: 0.45)),
+        ),
       ),
     );
   }
@@ -250,7 +319,6 @@ class _BrowserPageState extends State<BrowserPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            const SizedBox(height: 8),
             // 单层搜索框：仅一层淡色填充圆角，无外框、无描边
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -259,7 +327,7 @@ class _BrowserPageState extends State<BrowserPage> {
                 child: _HomeSearchBox(cs: cs, onSubmitted: _submit),
               ),
             ),
-            const SizedBox(height: 40),
+            const SizedBox(height: 36),
             Text(
               "试试让 Agent",
               style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
@@ -296,18 +364,50 @@ class _BrowserPageState extends State<BrowserPage> {
       );
     }
     if (controller == null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(
-            host.error ?? "浏览器组件暂不可用",
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-          ),
-        ),
-      );
+      return _buildErrorState(cs);
     }
     return Webview(controller);
+  }
+
+  /// 初始化失败空态：图标 + 一句话 + 重试（ensureStarted 失败会清空 _starting，
+  /// 重调即真正重试）。
+  Widget _buildErrorState(ColorScheme cs) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(
+              Icons.error_outline_rounded,
+              size: 36,
+              color: cs.onSurfaceVariant.withValues(alpha: 0.6),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              host.error ?? "浏览器组件暂不可用",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                color: cs.onSurfaceVariant,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              onPressed: _bootstrap,
+              style: OutlinedButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                foregroundColor: cs.onSurface,
+                side: BorderSide(color: cs.outline.withValues(alpha: 0.5)),
+              ),
+              icon: const Icon(Icons.refresh, size: 15),
+              label: const Text("重试", style: TextStyle(fontSize: 12.5)),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -551,6 +651,30 @@ class _NavButton extends StatelessWidget {
   }
 }
 
+/// 状态条出现/消失的过渡容器：AnimatedSize 负责高度收展（内容从工具栏
+/// 下方推/收），AnimatedSwitcher 负责淡入淡出，避免硬切跳动。
+class _AnimatedBar extends StatelessWidget {
+  const _AnimatedBar({required this.visible, required this.child});
+
+  final bool visible;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 150),
+        child: visible
+            ? child
+            : const SizedBox(width: double.infinity),
+      ),
+    );
+  }
+}
+
 /// 「Agent 正在操作」状态条：细、低饱和，不抢注意力。
 class _AgentStatusBar extends StatelessWidget {
   const _AgentStatusBar({required this.cs, required this.action});
@@ -586,6 +710,8 @@ class _AgentStatusBar extends StatelessWidget {
 
 /// 高风险动作确认条：服务端风险分级判定为提交/支付类操作时浮出，
 /// 用户点「允许」才真正下发到页面；120 秒未决自动视为拒绝。
+/// 用 errorContainer 语义底色与灰底的 Agent 状态条区分——
+/// 这一条是需要用户决策的。
 class _ConfirmBar extends StatelessWidget {
   const _ConfirmBar({
     required this.cs,
@@ -602,19 +728,20 @@ class _ConfirmBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: cs.surfaceContainerHighest.withValues(alpha: 0.96),
+      color: cs.errorContainer,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           children: <Widget>[
-            Icon(Icons.verified_user_outlined, size: 16, color: cs.primary),
+            Icon(Icons.verified_user_outlined, size: 16, color: cs.error),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
                 "Agent 请求执行「${request.targetSummary}」· ${request.reason}",
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: cs.onSurface),
+                style:
+                    TextStyle(fontSize: 12, color: cs.onErrorContainer),
               ),
             ),
             const SizedBox(width: 8),
@@ -622,7 +749,8 @@ class _ConfirmBar extends StatelessWidget {
               onPressed: onDeny,
               style: TextButton.styleFrom(
                 visualDensity: VisualDensity.compact,
-                foregroundColor: cs.onSurfaceVariant,
+                foregroundColor:
+                    cs.onErrorContainer.withValues(alpha: 0.75),
               ),
               child: const Text("拒绝", style: TextStyle(fontSize: 12.5)),
             ),

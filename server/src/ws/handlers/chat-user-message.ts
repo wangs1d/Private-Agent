@@ -1391,21 +1391,6 @@ async function processBatchedMessage(
       }
     }
 
-    // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，
-    // 前端按块顺序渲染 → 「一段文字介绍后放一组照片，再一段文字，再一组照片」，
-    // 替代旧行为「全部照片一次性铺在最前面」。由代码层位置锚定完成，不依赖 prompt。
-    // 仅当有结构化媒体卡片时构建；无媒体时前端走原「文本+标记」路径。
-    //
-    // 2026-09-03：图片卡全部带真实描述（caption）时改走 buildCaptionedRenderBlocks——
-    // 正文保持完整一段，照片逐张附各自的 caption（描述由视觉模型看图生成），
-    // 不再用位置启发式把正文切段钉到照片旁（那是「文字与照片对不上」的根源）。
-    const renderBlocks =
-      mediaCards.length > 0
-        ? allImageCardsHaveCaption(mediaCards)
-          ? buildCaptionedRenderBlocks(finalText, mediaCards)
-          : buildInterleavedRenderBlocks(finalText, mediaCards)
-        : [];
-
     // [调试] 图片搜索链路诊断：记录工具名 / items / 卡片是否注入，用于排查前端照片不显示
     try {
       const debugItems = Array.isArray((toolResult?.result as any)?.items)
@@ -1448,15 +1433,36 @@ async function processBatchedMessage(
 
     // 卡片版式归一化：旅游规划回复固定三段式——模型总览卡置首、正文居中、
     // 行程卡独立收尾在最后（无行程卡的回复不重排，卡保持在模型落笔位置）。
-    // done 载荷、落库文本与 blocks 派生共用这份归一化后的 finalText，
+    // done 载荷、落库文本、renderBlocks 与 blocks 派生共用这份归一化后的
+    // finalText（此前 renderBlocks 在归一化前构建，媒体锚点与卡片版式会分叉），
     // 见 normalizeReplyCardLayout。
     finalText = normalizeReplyCardLayout(finalText);
+
+    // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，
+    // 前端按块顺序渲染 → 「一段文字介绍后放一组照片，再一段文字，再一组照片」，
+    // 替代旧行为「全部照片一次性铺在最前面」。由代码层位置锚定完成，不依赖 prompt。
+    // 仅当有结构化媒体卡片时构建；无媒体时前端走原「文本+标记」路径。
+    //
+    // 2026-09-03：图片卡全部带真实描述（caption）时改走 buildCaptionedRenderBlocks——
+    // 正文保持完整一段，照片逐张附各自的 caption（描述由视觉模型看图生成），
+    // 不再用位置启发式把正文切段钉到照片旁（那是「文字与照片对不上」的根源）。
+    const renderBlocks =
+      mediaCards.length > 0
+        ? allImageCardsHaveCaption(mediaCards)
+          ? buildCaptionedRenderBlocks(finalText, mediaCards)
+          : buildInterleavedRenderBlocks(finalText, mediaCards)
+        : [];
 
     // 回复信封（A 阶段）：finalText 里的卡片标记在服务端确定性拆成 blocks，
     // 随 done 可选下发。text 仍是唯一事实源，blocks 是派生视图——旧客户端
     // 忽略 blocks 照旧解析标记，新客户端优先 blocks（消除解析漂移/标记泄漏）。
     // 含 v1 未支持标记（RENDER_AS/data_brief/video/summary）时返回 null，不下发。
-    const replyBlocks = buildReplyBlocks(finalText);
+    //
+    // v2（2026-09-18）：媒体段一并编入 blocks——原先 blocks 只装 text/card，
+    // 照片在独立的 renderBlocks/mediaCards 里，客户端按优先级取 blocks 即丢照片
+    // （带卡回复「卡片在、照片没了」的根源）。media 块兼容性见 reply-envelope.ts
+    // 文件头：v1 客户端静默跳过未知块，表现与升级前一致，无回归。
+    const replyBlocks = buildReplyBlocks(finalText, renderBlocks);
 
     ctx.socket.send(
       JSON.stringify({

@@ -241,3 +241,112 @@ test("hint-strip: 只剥 RENDER_HINT，不碰权威 RENDER_AS（客户端路由�
   const text = "[RENDER_AS:brief]\n今日简报正文。";
   assert.equal(normalizeReplyCardLayout(text), text);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v2 统一序列：媒体块编入 blocks（卡片与照片同一条版式语义）
+// ─────────────────────────────────────────────────────────────────────────────
+
+import type { RenderBlock } from "../src/services/tool-result-processor.js";
+
+function mediaBlock(overrides: Partial<Extract<RenderBlock, { type: "media" }>> = {}): RenderBlock {
+  return {
+    type: "media",
+    cards: [
+      { type: "image", title: "乌布泳池别墅", thumbnailUrl: "/agent/images/a/1.png" },
+    ],
+    ...overrides,
+  };
+}
+
+test("envelope v2: 卡片标记 + 媒体段 → text/card/media 统一序列", () => {
+  const text = [
+    "先看这两家。",
+    "[AGENT_RESULT_CARD_START]",
+    weekendCard,
+    "[AGENT_RESULT_CARD_END]",
+    "",
+    "预算充足就住乌布。",
+  ].join("\n");
+  const renderBlocks: RenderBlock[] = [
+    { type: "text", text: `先看这两家。\n[AGENT_RESULT_CARD_START]\n${weekendCard}\n[AGENT_RESULT_CARD_END]` },
+    mediaBlock(),
+    { type: "text", text: "预算充足就住乌布。" },
+  ];
+  const blocks = buildReplyBlocks(text, renderBlocks);
+  assert.ok(blocks);
+  assert.deepEqual(
+    blocks.map((b) => b.type),
+    ["text", "card", "media", "text"],
+  );
+  // 媒体块元数据原样透传
+  const media = blocks[2];
+  assert.equal(media.type, "media");
+  if (media.type === "media") {
+    assert.equal(media.cards.length, 1);
+    assert.equal(media.cards[0].thumbnailUrl, "/agent/images/a/1.png");
+  }
+});
+
+test("envelope v2: 纯媒体回复（无卡片标记）也下发 blocks——照片不再依赖独立字段", () => {
+  const renderBlocks: RenderBlock[] = [
+    { type: "text", text: "马尔代夫的水屋长这样。" },
+    mediaBlock({ groupTitle: "水屋", sideA: "马尔代夫", sideB: "印尼", cards: [
+      { type: "image", title: "水屋", thumbnailUrl: "/agent/images/a/2.png", groupTitle: "水屋", side: "A", sideLabel: "马尔代夫" },
+    ] }),
+  ];
+  const blocks = buildReplyBlocks("马尔代夫的水屋长这样。", renderBlocks);
+  assert.ok(blocks);
+  assert.deepEqual(
+    blocks.map((b) => b.type),
+    ["text", "media"],
+  );
+  if (blocks[1].type === "media") {
+    assert.equal(blocks[1].groupTitle, "水屋");
+    assert.equal(blocks[1].sideA, "马尔代夫");
+    assert.equal(blocks[1].sideB, "印尼");
+  }
+});
+
+test("envelope v2: 卡片 JSON 损坏 → 整体降级不下发（不 partially）", () => {
+  const renderBlocks: RenderBlock[] = [
+    { type: "text", text: "前导。[AGENT_RESULT_CARD_START]\n{broken json\n[AGENT_RESULT_CARD_END]" },
+    mediaBlock(),
+  ];
+  assert.equal(buildReplyBlocks("前导。[AGENT_RESULT_CARD_START]\n{broken json\n[AGENT_RESULT_CARD_END]", renderBlocks), null);
+});
+
+test("envelope v2: 含 v1 未支持标记（RENDER_AS）→ 整体降级不下发", () => {
+  const renderBlocks: RenderBlock[] = [
+    { type: "text", text: "[RENDER_AS:structured]\n正文" },
+    mediaBlock(),
+  ];
+  assert.equal(buildReplyBlocks("[RENDER_AS:structured]\n正文", renderBlocks), null);
+});
+
+test("envelope v2: 残缺卡片标记 → 整体降级不下发", () => {
+  const renderBlocks: RenderBlock[] = [
+    { type: "text", text: "正文 [AGENT_RESULT_CARD_START] 缺结束标记" },
+    mediaBlock(),
+  ];
+  assert.equal(buildReplyBlocks("正文 [AGENT_RESULT_CARD_START] 缺结束标记", renderBlocks), null);
+});
+
+test("envelope v2: 多文字段各自析卡，媒体段保持锚定位置", () => {
+  const cardA = JSON.stringify({ title: "卡A", items: [], footer: "" });
+  const cardB = JSON.stringify({ title: "卡B", items: [], footer: "" });
+  const renderBlocks: RenderBlock[] = [
+    { type: "text", text: `A 段。[AGENT_RESULT_CARD_START]\n${cardA}\n[AGENT_RESULT_CARD_END]` },
+    mediaBlock(),
+    { type: "text", text: `B 段。[AGENT_RESULT_CARD_START]\n${cardB}\n[AGENT_RESULT_CARD_END]` },
+    mediaBlock({ cards: [{ type: "image", title: "第二组", thumbnailUrl: "/agent/images/a/3.png" }] }),
+  ];
+  const blocks = buildReplyBlocks(
+    `A 段。[AGENT_RESULT_CARD_START]\n${cardA}\n[AGENT_RESULT_CARD_END]\nB 段。[AGENT_RESULT_CARD_START]\n${cardB}\n[AGENT_RESULT_CARD_END]`,
+    renderBlocks,
+  );
+  assert.ok(blocks);
+  assert.deepEqual(
+    blocks.map((b) => b.type),
+    ["text", "card", "media", "text", "card", "media"],
+  );
+});

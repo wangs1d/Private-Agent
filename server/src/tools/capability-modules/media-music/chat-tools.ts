@@ -150,4 +150,19 @@ export const MEDIA_MUSIC_CHAT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  // media.login_status — 查询音源登录状态（登录音源可解析 VIP 曲目）
+  {
+    type: "function",
+    function: {
+      name: "media.login_status",
+      description:
+        "查询当前音源状态：网易云登录音源（用户已导入 Cookie，可解析 VIP/版权曲目）或匿名音源（仅非 VIP 曲目）。\n" +
+        "适用场景：播放失败提示无版权/VIP 时自查原因、用户问「为什么放不了这首歌」「怎么接我的网易云会员」。",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
 ];

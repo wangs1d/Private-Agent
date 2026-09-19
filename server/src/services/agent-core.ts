@@ -107,21 +107,37 @@ const FOREGROUND_INLINE_TOOL_NAMES = new Set([
   "reminder.plan",
   "calendar.create_from_text",
 ]);
-function getForegroundChatToolWhitelist(): ChatCompletionTool[] {
-  if (_foregroundToolWhitelist) return _foregroundToolWhitelist;
-  const searchWeb = getBuiltinAgentChatTools().find(
-    (tool) => tool.type === "function" && tool.function?.name === "search_web",
+function getForegroundChatToolWhitelist(userText?: string): ChatCompletionTool[] {
+  const base = (() => {
+    if (_foregroundToolWhitelist) return _foregroundToolWhitelist;
+    const searchWeb = getBuiltinAgentChatTools().find(
+      (tool) => tool.type === "function" && tool.function?.name === "search_web",
+    );
+    const inlineWriteTools = getBuiltinAgentChatTools().filter(
+      (tool) =>
+        tool.type === "function" && tool.function && FOREGROUND_INLINE_TOOL_NAMES.has(tool.function.name),
+    );
+    _foregroundToolWhitelist = [
+      ...inlineWriteTools,
+      TASK_DISPATCH_TOOL_DEFINITION,
+      ...(searchWeb ? [searchWeb] : []),
+    ];
+    return _foregroundToolWhitelist;
+  })();
+  // 能力域关键词确定性注入（2026-09-19）：轻量模型不会主动 tool_discover，
+  // 用户提到「经期/SOS/紧急联系人」等话题时把对应能力域 schema 并入本轮白名单，
+  // 否则女性关怀等新域在话面上不可达（见 selectForegroundCapabilityToolAdditions 注释）。
+  const additions = selectForegroundCapabilityToolAdditions(userText);
+  if (additions.length === 0) return base;
+  const known = new Set(
+    base.map((tool) => (tool.type === "function" ? tool.function.name : undefined)),
   );
-  const inlineWriteTools = getBuiltinAgentChatTools().filter(
-    (tool) =>
-      tool.type === "function" && tool.function && FOREGROUND_INLINE_TOOL_NAMES.has(tool.function.name),
-  );
-  _foregroundToolWhitelist = [
-    ...inlineWriteTools,
-    TASK_DISPATCH_TOOL_DEFINITION,
-    ...(searchWeb ? [searchWeb] : []),
+  return [
+    ...base,
+    ...additions.filter(
+      (tool) => tool.type === "function" && !known.has(tool.function.name),
+    ),
   ];
-  return _foregroundToolWhitelist;
 }
 
 /** 解析规划器输出的 {"tools":["a","b"]}（容错：剥前缀/截取 JSON 对象）。 */
@@ -188,7 +204,10 @@ import type {
   VisionFrame,
 } from "../external-model/types.js";
 import { isApologyStyleFallback, FALLBACK_TEXT_BACKGROUND_FAILED } from "../external-model/fallback-texts.js";
-import { getBuiltinAgentChatTools } from "../external-model/openai-compatible-tool-loop.js";
+import {
+  getBuiltinAgentChatTools,
+  selectForegroundCapabilityToolAdditions,
+} from "../external-model/openai-compatible-tool-loop.js";
 import { describeMemoryAge, semanticFingerprint } from "./memory-record-utils.js";
 
 /** 记忆 domain → 注入 prompt 时的中文类型标签（分类显性化，P4）。 */
@@ -216,7 +235,10 @@ import {
 } from "../agent/task-router.js";
 import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
 import {
+  allImageCardsHaveCaption,
   attachTravelItineraryCard,
+  buildCaptionedRenderBlocks,
+  buildInterleavedRenderBlocks,
   dedupMediaCards,
   extractMediaCards,
   stripResidualRenderDeclarations,
@@ -2082,7 +2104,7 @@ if (route.plane === "task") {
             ? { toolExposureProfile: "none" as const }
             : {
                 toolExposureProfile: "explicit" as const,
-                chatToolsBuiltin: getForegroundChatToolWhitelist(),
+                chatToolsBuiltin: getForegroundChatToolWhitelist(text),
                 disableToolSearch: true,
                 toolLoop: { maxRounds: 2 },
               }),
@@ -2817,10 +2839,17 @@ if (route.plane === "task") {
       try {
         // 投递失败（用户离线：trySend false / registry 缺失）→ TaskOutbox 暂存，
         // 客户端重连（session.init）时重放——离线完成的任务结果不再静默丢失。
-        // 回复信封 blocks：与 WS 对话路径同构，finalText 里的卡片标记在服务端
-        // 确定性拆块下发——任务面结果此前只有文本标记，客户端解析漂移时
-        // 收尾的行程独立卡会丢。
-        const replyBlocks = buildReplyBlocks(finalText);
+        // 回复信封 blocks（v2 统一序列）：与 WS 对话路径同构——媒体段按交错锚定
+        // 编入 blocks，卡片与照片同一条序列下发。原先 blocks 只装 text/card，
+        // 客户端优先 blocks 即丢任务结果照片；renderBlocks 一并下发，旧客户端
+        // 与历史回放（blocks 不落盘）走原字段回退。
+        const renderBlocks =
+          mediaCards.length > 0
+            ? allImageCardsHaveCaption(mediaCards)
+              ? buildCaptionedRenderBlocks(finalText, mediaCards)
+              : buildInterleavedRenderBlocks(finalText, mediaCards)
+            : [];
+        const replyBlocks = buildReplyBlocks(finalText, renderBlocks);
         const delivered = registry?.trySend(
           sessionId,
           JSON.stringify({
@@ -2832,6 +2861,7 @@ if (route.plane === "task") {
               toolCalls: [],
               source: "task_plane",
               ...(mediaCards.length > 0 ? { mediaCards } : {}),
+              ...(renderBlocks.length > 0 ? { renderBlocks } : {}),
               ...(replyBlocks && replyBlocks.length > 0 ? { blocks: replyBlocks } : {}),
             },
           }),

@@ -26,6 +26,7 @@ import {
   createMediaResumeHandler,
   createMediaStopHandler,
   createMediaNowPlayingHandler,
+  createMediaLoginStatusHandler,
 } from "./handlers.js";
 
 export { MEDIA_MUSIC_CHAT_TOOLS } from "./chat-tools.js";
@@ -51,4 +52,5 @@ export function registerMediaMusicTools(
   registry.register("media.resume", createMediaResumeHandler(deps.mediaMusicService));
   registry.register("media.stop", createMediaStopHandler(deps.mediaMusicService));
   registry.register("media.now_playing", createMediaNowPlayingHandler(deps.mediaMusicService));
+  registry.register("media.login_status", createMediaLoginStatusHandler(deps.mediaMusicService));
 }

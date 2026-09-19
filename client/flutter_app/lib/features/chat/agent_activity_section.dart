@@ -5,6 +5,7 @@ import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
+import "agent_home_page.dart";
 
 const Color _kAccentBlue = Color(0xFF18D6F3);
 const Color _kAccentGreen = Color(0xFF1ED7A6);
@@ -21,16 +22,16 @@ class AgentActivityBus {
   static void notify() => version.value++;
 }
 
-/// 代办足迹卡：右侧面板顶部区块，展示 Agent 的可回溯代办账本。
+/// 「此刻」卡：右侧面板顶部区块（原名「代办足迹」，已去名——内容即界面）。
 ///
 /// 定位（与后端 server/src/proactivity/activity-store.ts 对齐）：「可回溯的
 /// 代办账本」而非通知流——通知实时性由聊天流承担，本卡回答两类问题：
-///   1. 执行类条目：「助手替我办的事办得怎么样了」（订牛奶/缴费/改日程…，
-///      statusLabel 如 配送中/已完成）；
-///   2. 告知类条目：「助手替我盯到了什么」（如日程变动，statusLabel=已告知）。
+///   1. 盯着（进行时）：承诺板 active 承诺，带下次复核时间（GET /api/agent-now）；
+///   2. 最近（完成时）：「助手替我办的事办得怎么样了」（订牛奶/缴费/改日程…，
+///      statusLabel 如 配送中/已完成）+「助手替我盯到了什么」（已告知）。
 ///
 /// 与对话流的分工：主动消息摘要仍实时推入聊天（必看），本卡只做「可回溯
-/// 的代办账本」——未读条目用品牌色竖条 + 染色底 + 状态 pill 醒目提示。
+/// 的代办账本」。全量视图在 Agent 主页（头像单击进入），原底部抽屉已退役。
 /// 刷新：挂载时拉取 + 每分钟轮询兜底 + 收到服务端 `agent.activity_new`
 /// 推送（AgentActivityBus）时立即重拉，消除轮询滞后。
 class AgentActivitySection extends StatefulWidget {
@@ -46,6 +47,8 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
   static const Duration _refreshInterval = Duration(minutes: 1);
 
   List<AgentActivity> _activities = const <AgentActivity>[];
+  /// 「盯着」小节：承诺板 active 承诺（进行时），来自 GET /api/agent-now
+  List<Map<String, dynamic>> _watching = const <Map<String, dynamic>>[];
   bool _loading = true;
   bool _loadFailed = false;
   Timer? _refreshTimer;
@@ -89,6 +92,10 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
       _loading = false;
       _loadFailed = failed;
     });
+    // 盯着（承诺板进行时）与足迹同节奏刷新；失败静默（该小节直接不出现）
+    final List<Map<String, dynamic>> watching = await AgentNowApi.fetchWatching();
+    if (!mounted) return;
+    setState(() => _watching = watching);
   }
 
   /// 批量置已读并刷新本地态（打开「查看全部足迹」时调用）。
@@ -120,78 +127,15 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 2),
-          child: Row(
-            children: <Widget>[
-              if (unreadCount > 0) ...<Widget>[
-                FadeTransition(
-                  opacity: Tween<double>(begin: 0.35, end: 1.0).animate(
-                    CurvedAnimation(
-                      parent: _breatheController,
-                      curve: Curves.easeInOut,
-                    ),
-                  ),
-                  child: _BreathingDot(color: _kAccentBlue),
-                ),
-                const SizedBox(width: 6),
-              ],
-              Text(
-                "代办足迹",
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: cs.onSurface,
-                  letterSpacing: 0.2,
-                ),
-              ),
-              const Spacer(),
-              if (_loading && _activities.isEmpty)
-                const SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(strokeWidth: 1.6),
-                )
-              else if (unreadCount > 0)
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: _kAccentBlue,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    "$unreadCount 条新",
-                    style: const TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF06252C),
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                )
-              else if (_activities.isNotEmpty)
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    "共 ${_activities.length} 条",
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                      color: cs.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 4),
-        if (_loadFailed && _activities.isEmpty)
+        // 本区块不叫任何名字（原「代办足迹」标题已去）：盯着（进行时）在上，
+        // 最近足迹（完成时）在下，「查看全部」进主页。内容即界面。
+        // 无盯着项但有未读时，头部行退化为呼吸点 + 「N 条新」徽标的紧凑状态行。
+        if (_watching.isNotEmpty || unreadCount > 0)
+          _buildWatchingHeader(cs, showLabel: _watching.isNotEmpty),
+        for (final Map<String, dynamic> item in _watching)
+          _WatchingTile(item: item),
+        if (_watching.isNotEmpty) const SizedBox(height: 8),
+        if (_loadFailed && _activities.isEmpty && _watching.isEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
             child: Text(
@@ -202,18 +146,70 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
               ),
             ),
           )
-        else if (!_loading && _activities.isEmpty)
+        else if (!_loading && _activities.isEmpty && _watching.isEmpty)
           _buildEmptyState(cs)
-        else
+        else if (_activities.isNotEmpty)
           ...<Widget>[
             for (final AgentActivity activity in _activities.take(_visibleLimit))
               _ActivityTile(
                 activity: activity,
                 onTap: () => _showDetail(activity),
               ),
-            if (_activities.length > _visibleLimit)
-              _buildSeeAllRow(cs),
           ],
+        if (_activities.isNotEmpty || _watching.isNotEmpty)
+          _buildSeeAllRow(cs, unreadCount),
+      ],
+    );
+  }
+
+  /// 「盯着」小节标签：未读呼吸点挂在这里（有新动静时出现，读完消失）
+  Widget _buildWatchingHeader(ColorScheme cs, {required bool showLabel}) {
+    final int unreadCount = _activities.where((a) => !a.isRead).length;
+    return Row(
+      children: <Widget>[
+        if (unreadCount > 0) ...<Widget>[
+          FadeTransition(
+            opacity: Tween<double>(begin: 0.35, end: 1.0).animate(
+              CurvedAnimation(
+                parent: _breatheController,
+                curve: Curves.easeInOut,
+              ),
+            ),
+            child: _BreathingDot(color: _kAccentBlue),
+          ),
+          const SizedBox(width: 6),
+        ],
+        if (showLabel) ...<Widget>[
+          Icon(Icons.visibility_outlined, size: 12, color: _kAccentBlue),
+          const SizedBox(width: 4),
+          Text(
+            "盯着",
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: _kAccentBlue,
+              letterSpacing: 0.4,
+            ),
+          ),
+        ],
+        const Spacer(),
+        if (unreadCount > 0)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: _kAccentBlue,
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              "$unreadCount 条新",
+              style: const TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF06252C),
+                letterSpacing: 0.3,
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -264,21 +260,25 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
     );
   }
 
-  Widget _buildSeeAllRow(ColorScheme cs) {
+  Widget _buildSeeAllRow(ColorScheme cs, int unreadCount) {
     return Padding(
       padding: const EdgeInsets.only(top: 2),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
-          onTap: () => _showAllSheet(cs),
+          onTap: () {
+            // 打开主页即视为「已全部查看」——批量置已读、熄灭未读高亮
+            unawaited(_markAllRead());
+            unawaited(AgentHomePage.show(context));
+          },
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 7),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: <Widget>[
                 Text(
-                  "查看全部足迹",
+                  "查看全部 → 主页",
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
@@ -295,59 +295,6 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
           ),
         ),
       ),
-    );
-  }
-
-  /// 全量足迹：底部抽屉列表（台账只增，面板视图最多展示 3 条）。
-  /// 打开即视为「已全部查看」——批量置已读、熄灭未读高亮。
-  Future<void> _showAllSheet(ColorScheme cs) async {
-    unawaited(_markAllRead());
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: cs.surfaceContainerLow,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (BuildContext sheetContext) {
-        return SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-            children: <Widget>[
-              Text(
-                "代办足迹",
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: cs.onSurface,
-                ),
-              ),
-              const SizedBox(height: 6),
-              if (_activities.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 24),
-                  child: Text(
-                    "还没有足迹",
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: cs.onSurfaceVariant,
-                    ),
-                  ),
-                )
-              else
-                for (final AgentActivity activity in _activities)
-                  _ActivityTile(
-                    activity: activity,
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      _showDetail(activity);
-                    },
-                  ),
-            ],
-          ),
-        );
-      },
     );
   }
 
@@ -827,5 +774,100 @@ class _BreathingDot extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 盯着瓦片：承诺板 active 承诺（进行时），点开进主页「此刻」块
+// ═══════════════════════════════════════════════════════════
+
+class _WatchingTile extends StatelessWidget {
+  const _WatchingTile({required this.item});
+
+  final Map<String, dynamic> item;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => unawaited(AgentHomePage.show(context)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: _BreathingDot(color: _kAccentBlue),
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    _line,
+                    style: TextStyle(fontSize: 12, height: 1.45, color: cs.onSurface),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String get _line {
+    final String text = item["text"]?.toString() ?? "";
+    final DateTime? deadline =
+        DateTime.tryParse(item["deadline"]?.toString() ?? "");
+    if (deadline == null) return text;
+    final Duration diff = deadline.difference(DateTime.now());
+    final String label;
+    if (diff.isNegative) {
+      label = "已过期";
+    } else if (diff.inDays >= 1) {
+      label = "${diff.inDays} 天后";
+    } else if (diff.inHours >= 1) {
+      label = "还剩 ${diff.inHours} 小时";
+    } else {
+      label = "还剩 ${diff.inMinutes} 分钟";
+    }
+    return "$text · $label";
+  }
+}
+
+/// GET /api/agent-now：「盯着」小节数据源（承诺板 active 承诺，进行时）。
+class AgentNowApi {
+  AgentNowApi._();
+
+  /// 测试注入口：注入 MockClient 后走桩，不触网
+  static http.Client? clientOverride;
+
+  static http.Client get _client => clientOverride ?? http.Client();
+
+  static Future<List<Map<String, dynamic>>> fetchWatching() async {
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/agent-now")
+          .replace(queryParameters: <String, String>{
+        "sessionId": ApiConfig.effectiveActorId,
+        "watchingLimit": "3",
+      });
+      final http.Response res = await _client
+          .get(uri, headers: const <String, String>{"Accept": "application/json"})
+          .timeout(const Duration(seconds: 8));
+      if (res.statusCode != 200) return const <Map<String, dynamic>>[];
+      final Map<String, dynamic> body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body["ok"] != true) return const <Map<String, dynamic>>[];
+      final List<dynamic> watching = body["watching"] as List<dynamic>? ?? const [];
+      return <Map<String, dynamic>>[
+        for (final dynamic item in watching) (item as Map).cast<String, dynamic>(),
+      ];
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
   }
 }

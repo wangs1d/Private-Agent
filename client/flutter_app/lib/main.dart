@@ -12,7 +12,7 @@ import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
 import "core/presentation/voice_call_ui_labels.dart";
-import "core/presentation/entrance_animation.dart";
+import "core/presentation/boot_animation.dart";
 import "core/db/isar_local_history_store.dart";
 import "core/models/agent_relay_models.dart";
 import "core/models/chat_models.dart";
@@ -385,7 +385,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   bool _isInitialized = false;
 
   /// 是否正在播放进场动画
-  bool _showEntranceAnimation = true;
+  final bool _showBootAnimation = true;
+  bool _bootAnimDone = false;   // 开场动画是否已播完
 
   /// Agent是否正在处理中（用于显示响应状态指示器)
   bool _isAgentProcessing = false;
@@ -539,6 +540,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 成为透明"幽灵窗"，拦截其他应用的点击；现改为真实使用时懒加载——
     // 行程卡默认走独立子进程窗口（自带预加载），应用内回退页由
     // TravelPlanPanel.initState 的 ensureStarted() 兜底初始化。
+    // 兜底防护：runner 已常驻 WebViewGhostGuard 看门狗
+    // （windows/runner/webview_ghost_window_guardian.cpp），任何滞留的
+    // WebView2 内部顶层窗口都会被自动打上点击穿透样式，不再拦截其他应用。
     // 今日安排面板数据刷新：设置（创建/删除）提醒日程后，通过信号刷新右侧面板
     _scheduleReloadSignal.addListener(_onScheduleReloadSignal);
     _bootstrap();
@@ -4668,6 +4672,31 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   @override
   Widget build(BuildContext context) {
+    final Widget app = _buildApp();
+    final bool hideBoot = _bootAnimDone && _isInitialized;
+    // 根部 Stack（boot 动画覆盖层）位于 MaterialApp 之上，须自带 Directionality，
+    // 否则启动即抛 "No Directionality widget found"（alignment 依赖文本方向）。
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Stack(
+        children: <Widget>[
+          Positioned.fill(child: app),
+          if (!hideBoot)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: BootAnimation(
+                  onAnimationComplete: () {
+                    if (mounted) setState(() => _bootAnimDone = true);
+                  },
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildApp() {
     // 如果还未初始化，显示加载界面
     if (!_isInitialized) {
       return ValueListenableBuilder<AppThemeVariant>(
@@ -4721,7 +4750,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       builder: (BuildContext _, AppThemeVariant variant, __) {
         // 同步 Windows 标题栏颜色跟随主题
         unawaited(WindowsTitleBarTheme.setDarkMode(
-          _showEntranceAnimation || variant == AppThemeVariant.dark,
+          _showBootAnimation || variant == AppThemeVariant.dark,
         ));
         return MaterialApp(
           navigatorKey: _rootNavigatorKey,
@@ -4859,17 +4888,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                     // side 模式 288px，split 模式动态宽度。
                     // 仅在 chat tab + 宽屏时显示。
                     _buildRightPanelOverlay(),
-                    // 进场动画层（覆盖在主界面上方，播完后自动消失层
-                    if (_showEntranceAnimation)
-                      IgnorePointer(
-                        child: EntranceAnimation(
-                          onAnimationComplete: () {
-                            if (mounted) {
-                              setState(() => _showEntranceAnimation = false);
-                            }
-                          },
-                        ),
-                      ),
                         ],
                       ),
                     ),

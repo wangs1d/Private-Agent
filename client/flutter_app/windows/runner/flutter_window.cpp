@@ -672,16 +672,14 @@ void FlutterWindow::HandleDesktopNotificationMethodCall(
     std::string title;
     std::string message;
     std::string priority = "normal";
-    bool show_confirm_button = false;
     std::string confirm_text = "我知道了";
     int auto_close_ms = 0;
 
+    // 注：Dart 端可能仍下发 showConfirmButton（稍后按钮已移除），直接忽略
     if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
       title = GetEncodableString(args, "title");
       message = GetEncodableString(args, "message");
       priority = GetEncodableString(args, "priority", priority);
-      show_confirm_button =
-          GetEncodableBool(args, "showConfirmButton", show_confirm_button);
       confirm_text = GetEncodableString(args, "confirmText", confirm_text);
       auto_close_ms = GetEncodableInt(args, "autoCloseMs", auto_close_ms);
     }
@@ -694,8 +692,7 @@ void FlutterWindow::HandleDesktopNotificationMethodCall(
           [this]() { ReportDesktopNotificationEvent("timeout"); });
     }
 
-    desktop_notification_window_->Show(title, message, priority,
-                                       show_confirm_button, confirm_text,
+    desktop_notification_window_->Show(title, message, priority, confirm_text,
                                        auto_close_ms);
     result->Success(flutter::EncodableValue(true));
     return;

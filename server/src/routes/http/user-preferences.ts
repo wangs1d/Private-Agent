@@ -1,6 +1,13 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
+import { writeJsonAtomic } from "../../storage/atomic-json.js";
 import { isWithinBriefingWindow } from "../../services/morning-briefing-service.js";
+import {
+  AGENT_NAME_SUGGESTIONS,
+  DEFAULT_AGENT_NAME,
+} from "../../services/agent-identity.js";
 
 type BriefingMode = "voice" | "window" | "card";
 type BriefingSections = {
@@ -35,8 +42,18 @@ type AgentProfile = {
   statusText: string;
   avatarPreset: AgentAvatarPreset;
   lastProfileEvent: string;
+  /** 名字来源：self=Agent 自己取的 / user=用户取的 / default=出厂默认（prompt 注入措辞用） */
+  nameOrigin: AgentProfileNameOrigin;
+  /** 自我介绍（SOUL 人设摘要，仅 Agent 经 agent.update_homepage 写） */
+  intro: string;
+  /** 「此刻」一行字（Agent 手写的当下状态；承诺板/足迹列表之外的自由叙述） */
+  nowLine: string;
+  /** 主页置顶的站内动态 post id */
+  pinnedPostId: string | null;
   updatedAt: string | null;
 };
+
+type AgentProfileNameOrigin = "self" | "user" | "default";
 
 type UserPreferences = {
   morningBriefing: {
@@ -72,6 +89,39 @@ const VALID_AVATAR_PRESETS = new Set<AgentAvatarPreset>([
 
 const prefsStore = new Map<string, UserPreferences>();
 
+// ─── 落盘持久化 ───
+// prefsStore 原本是纯内存 Map，服务重启即丢（名字/主页状态全回到默认）。
+// 现在懒加载单文件 JSON（data/user-preferences.json），写入经持久化链排队原子落盘。
+const prefsFilePath =
+  process.env.USER_PREFERENCES_FILE?.trim() || join(process.cwd(), "data", "user-preferences.json");
+let prefsLoadPromise: Promise<void> | null = null;
+let prefsPersistChain: Promise<void> = Promise.resolve();
+
+type PersistedPrefsShape = { sessions: Record<string, UserPreferences> };
+const persistedPrefs: Record<string, UserPreferences> = {};
+
+function ensurePrefsLoaded(): Promise<void> {
+  prefsLoadPromise ??= (async () => {
+    try {
+      const raw = await readFile(prefsFilePath, "utf8");
+      const parsed = JSON.parse(raw) as PersistedPrefsShape;
+      if (parsed?.sessions && typeof parsed.sessions === "object") {
+        Object.assign(persistedPrefs, parsed.sessions);
+      }
+    } catch (e: unknown) {
+      const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
+      if (code !== "ENOENT") throw e;
+    }
+  })();
+  return prefsLoadPromise;
+}
+
+function schedulePrefsPersist(): void {
+  prefsPersistChain = prefsPersistChain.then(() =>
+    writeJsonAtomic(prefsFilePath, { sessions: persistedPrefs } satisfies PersistedPrefsShape),
+  );
+}
+
 const DEFAULT_PREFS: UserPreferences = {
   morningBriefing: {
     enabled: true,
@@ -89,24 +139,30 @@ const DEFAULT_PREFS: UserPreferences = {
     deliveredChannel: null,
   },
   agentProfile: {
-    displayName: "小夜灯",
-    handle: "soft_reply_box",
-    signature: "主页亮着，你什么时候来找我都可以。",
+    displayName: DEFAULT_AGENT_NAME.displayName,
+    handle: DEFAULT_AGENT_NAME.handle,
+    signature: "昼与夜的边界，替你值守。",
     avatarUrl: null,
     moodStyle: "gentle",
     statusText: "有点忙，但不是不在。",
     avatarPreset: "dawn",
     lastProfileEvent: "这是 Agent 当前默认的主页状态。",
+    nameOrigin: "default",
+    intro: "",
+    nowLine: "",
+    pinnedPostId: null,
     updatedAt: null,
   },
 };
 
 function getOrCreatePrefs(sessionId: string): UserPreferences {
-  let prefs = prefsStore.get(sessionId);
-  if (!prefs) {
-    prefs = JSON.parse(JSON.stringify(DEFAULT_PREFS)) as UserPreferences;
-    prefsStore.set(sessionId, prefs);
-  }
+  const cached = prefsStore.get(sessionId);
+  if (cached) return cached;
+  const persisted = persistedPrefs[sessionId];
+  const prefs: UserPreferences = persisted
+    ? JSON.parse(JSON.stringify(persisted)) as UserPreferences
+    : JSON.parse(JSON.stringify(DEFAULT_PREFS)) as UserPreferences;
+  prefsStore.set(sessionId, prefs);
   return prefs;
 }
 
@@ -145,6 +201,20 @@ function applyAgentProfilePatch(
   if (typeof patch.lastProfileEvent === "string") {
     target.lastProfileEvent = patch.lastProfileEvent.trim().slice(0, 160);
   }
+  if (patch.nameOrigin === "self" || patch.nameOrigin === "user" || patch.nameOrigin === "default") {
+    target.nameOrigin = patch.nameOrigin;
+  }
+  if (typeof patch.intro === "string") {
+    target.intro = patch.intro.trim().slice(0, 800);
+  }
+  if (typeof patch.nowLine === "string") {
+    target.nowLine = patch.nowLine.trim().slice(0, 120);
+  }
+  if (patch.pinnedPostId === null || typeof patch.pinnedPostId === "string") {
+    const pinned =
+      typeof patch.pinnedPostId === "string" ? patch.pinnedPostId.trim() : null;
+    target.pinnedPostId = pinned ? pinned.slice(0, 80) : null;
+  }
   if (patch.updatedAt === null || typeof patch.updatedAt === "string") {
     target.updatedAt =
       typeof patch.updatedAt === "string" && patch.updatedAt.trim()
@@ -153,6 +223,15 @@ function applyAgentProfilePatch(
   }
   return target;
 }
+
+/** 落盘镜像：把内存态回写进持久化缓存并排队原子写盘（写入方统一走这里） */
+function mirrorPersist(sessionId: string, prefs: UserPreferences): void {
+  persistedPrefs[sessionId] = JSON.parse(JSON.stringify(prefs)) as UserPreferences;
+  schedulePrefsPersist();
+}
+
+// 模块加载即开始懒加载磁盘快照，尽早让重启后的读取命中持久值
+void ensurePrefsLoaded();
 
 export function getUserPreferences(sessionId: string): UserPreferences {
   return getOrCreatePrefs(sessionId);
@@ -163,7 +242,9 @@ export function patchAgentProfile(
   patch: Partial<AgentProfile>,
 ): AgentProfile {
   const prefs = getOrCreatePrefs(sessionId);
-  return applyAgentProfilePatch(prefs.agentProfile, patch);
+  const next = applyAgentProfilePatch(prefs.agentProfile, patch);
+  mirrorPersist(sessionId, prefs);
+  return next;
 }
 
 export function markMorningBriefingDelivered(
@@ -174,6 +255,7 @@ export function markMorningBriefingDelivered(
   const prefs = getOrCreatePrefs(sessionId);
   prefs.morningBriefing.deliveredAt = deliveredAt.toISOString();
   prefs.morningBriefing.deliveredChannel = channel;
+  mirrorPersist(sessionId, prefs);
   return prefs;
 }
 
@@ -194,7 +276,13 @@ export function resetMorningBriefingDeliveryIfNeeded(
 export function registerUserPreferencesRoutes(app: FastifyInstance): void {
   app.get("/api/user-preferences", async (request) => {
     const sessionId = (request.query as { sessionId?: string }).sessionId;
+    await ensurePrefsLoaded();
     return { ok: true, preferences: getOrCreatePrefs(sessionId ?? "anonymous") };
+  });
+
+  // 建议名池：命名仪式 / 主页改名入口的候选来源（docs/onboarding-opening-animation-design.md §5）
+  app.get("/api/agent-name-suggestions", async () => {
+    return { ok: true, suggestions: AGENT_NAME_SUGGESTIONS };
   });
 
   app.put("/api/user-preferences", async (request, reply) => {
@@ -205,6 +293,7 @@ export function registerUserPreferencesRoutes(app: FastifyInstance): void {
     if (!body.sessionId) {
       return reply.code(400).send({ ok: false, error: "sessionId required" });
     }
+    await ensurePrefsLoaded();
     const prefs = getOrCreatePrefs(body.sessionId);
     if (body.preferences?.morningBriefing) {
       const mb = body.preferences.morningBriefing;
@@ -244,6 +333,7 @@ export function registerUserPreferencesRoutes(app: FastifyInstance): void {
         body.preferences.agentProfile as Partial<AgentProfile>,
       );
     }
+    mirrorPersist(body.sessionId, prefs);
     return { ok: true, preferences: prefs };
   });
 }
@@ -252,6 +342,7 @@ export type {
   AgentAvatarPreset,
   AgentProfile,
   AgentProfileMoodStyle,
+  AgentProfileNameOrigin,
   BriefingMode,
   UserPreferences,
 };

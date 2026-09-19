@@ -1169,7 +1169,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const reportPayload = (event.payload ?? {}) as Record<string, unknown>;
           const batchId = String(reportPayload.batchId ?? "").trim();
           const items = Array.isArray(reportPayload.messages) ? reportPayload.messages : [];
-          const reportablePlatforms = new Set<string>(["wechat", "qq", "feishu", "sms", "generic"]);
+          // alipay：支付宝 App 支付/收款推送（通知监听白名单专属映射；财务实时入账通道）
+          const reportablePlatforms = new Set<string>(["wechat", "qq", "feishu", "sms", "alipay", "generic"]);
           let accepted = 0;
           let duplicates = 0;
           let invalid = 0;

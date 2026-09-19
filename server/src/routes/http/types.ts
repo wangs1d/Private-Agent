@@ -122,6 +122,8 @@ export type HttpRouteDeps = {
   proactivityFabric?: import("../../routes/http/proactivity.js").ProactivityFabricDeps | null;
   /** 助手动态台账（右侧面板「助手动态」卡数据源） */
   agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
+  /** 承诺板（主页「盯着」小节数据源；未启用时该小节为空） */
+  commitmentBoard?: import("../../agentic-memory/commitment-board.js").CommitmentBoard | null;
   marketSignalService?: MarketSignalService;
   proactiveLifeRuntimeService?: ProactiveLifeRuntimeService;
   userPersonalizationService?: UserPersonalizationService;

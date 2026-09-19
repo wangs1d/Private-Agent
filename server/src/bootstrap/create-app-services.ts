@@ -142,7 +142,14 @@ import { FileProcessingService } from "../services/file-processing-service.js";
 import { EmailSmsService } from "../services/email-sms-service.js";
 import { MediaMusicService } from "../services/media-music-service.js";
 import { MailWatchService } from "../services/mail-watch-service.js";
+import {
+  FinanceBillAutoFetchService,
+  createPlaywrightAlipayBillFetcher,
+} from "../services/finance-bill-auto-fetch-service.js";
+import { isBillRelatedMail } from "../services/finance-ingest-service.js";
 import { HealthFitnessService } from "../services/health-fitness-service.js";
+import { PeriodCareService } from "../services/period-care-service.js";
+import { SafetyGuardService } from "../services/safety-guard-service.js";
 import { FinanceDeepService } from "../services/finance-deep-service.js";
 import { SubscriptionAuditService } from "../services/subscription-audit-service.js";
 import { BillManagementService } from "../services/bill-management-service.js";
@@ -186,6 +193,7 @@ import { MerchantOrderService } from "../services/merchant-order-service.js";
 import { SkillValidator } from "../skills/skill-validator.js";
 import type { SkillMetadata } from "../skills/types.js";
 import { registerAgentAccountTools } from "../tools/agent-account-tools.js";
+import { registerAgentIdentityTools } from "../tools/agent-identity-tools.js";
 import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerPaymentTools } from "../tools/payment-tools.js";
 import { registerMeituanTools } from "../tools/meituan-tools.js";
@@ -236,6 +244,8 @@ import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
 import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
 import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
+import type { ToolContext } from "../tools/tool-registry.js";
+import { resolveActorId } from "../agent/actor-id.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import { SharedBrowserCoordinator } from "../services/shared-browser-coordinator.js";
 import { SharedBrowserCdpGateway } from "../services/shared-browser/cdp-gateway.js";
@@ -682,7 +692,9 @@ export async function createAppServices(): Promise<AppServices> {
   // 初始化邮件/短信主动发送服务（SMTP + 阿里云短信，凭证从环境变量读取）。
   const emailSmsService = new EmailSmsService();
   // 初始化媒体音乐服务（搜索 + WS 推送播放控制事件）。
-  const mediaMusicService = new MediaMusicService(wsConnectionRegistry);
+  // 登录音源（2026-09-18）：注入浏览器会话库——用户导入 music.163.com Cookie 并授权后，
+  // 播放 URL 解析带用户身份（VIP 曲目用其会员权益）；无会话自动回退匿名。
+  const mediaMusicService = new MediaMusicService(wsConnectionRegistry, undefined, browserSessionService);
   // 初始化健康/运动数据服务（data/health/{actorId}.json，1s 防抖落盘）。
   const healthFitnessService = new HealthFitnessService(join(process.cwd(), "data", "health"));
   // 初始化财务深度服务（data/finance/{actorId}/{transactions,budgets}.json + reports/）。
@@ -978,6 +990,42 @@ export async function createAppServices(): Promise<AppServices> {
     rootDir: join(process.cwd(), "data", "pictures"),
     batchOutputDir: join(process.cwd(), "data", "pictures", "batch"),
   });
+  // ─── 女性关怀（M1）：生理周期关怀 + 安全守护（docs/women-care-proposal.md）───
+  // 主动通知走 proactivity 管道、SOS 按需定位走位置协调器，两者都在本文件下方
+  // 才创建——持懒引用，工具调用/提醒 tick 时必然已就绪（同 briefing 天气兜底模式）。
+  const wellnessPipelineRef: { current: ProactivePipeline | null } = { current: null };
+  const wellnessLocationRef: { current: LocationCoordinator | null } = { current: null };
+  // 生理周期关怀：加密存储 data/period-care/，每分钟 tick 临近提醒
+  const periodCareService = new PeriodCareService({
+    dataDir: join(process.cwd(), "data", "period-care"),
+    getPipeline: () => wellnessPipelineRef.current,
+  });
+  await periodCareService.load();
+  periodCareService.start();
+  // 安全守护：紧急联系人/SOS/借口来电；SOS 位置按需取一次，不持续上传不落库
+  const safetyGuardService = new SafetyGuardService({
+    dataDir: join(process.cwd(), "data", "safety-guard"),
+    sendSms: (params) => emailSmsService.sendSms(params),
+    prepareCall: (actorId, input) =>
+      phoneCallCoordinator.prepare(actorId, {
+        number: input.number,
+        contactName: input.contactName,
+        goal: input.goal,
+        script: input.script,
+        facts: input.facts,
+      }) as Promise<Record<string, unknown>>,
+    isCallEnabled: () => phoneCallCoordinator.isEnabled(),
+    requestLocation: async (actorId, reason) => {
+      const coordinator = wellnessLocationRef.current;
+      if (!coordinator) return null;
+      const live = await coordinator.requestLocation(actorId, reason);
+      if (live) return live;
+      return coordinator.getCachedWithTime(actorId)?.payload ?? null;
+    },
+    getPipeline: () => wellnessPipelineRef.current,
+  });
+  await safetyGuardService.load();
+
   const capabilityModuleDeps: CapabilityModuleDeps = {
     imageGenerationService,
     fileProcessingService,
@@ -998,6 +1046,8 @@ export async function createAppServices(): Promise<AppServices> {
     sharedBrowserCdpGateway,
     bookingService,
     phoneCallCoordinator,
+    periodCareService,
+    safetyGuardService,
   };
   setCapabilityModuleDeps(capabilityModuleDeps);
   // 意图规则 = 能力模块静态规则 + Feature Catalog 生活域检索词（12 域 aliases）
@@ -2627,6 +2677,8 @@ export async function createAppServices(): Promise<AppServices> {
   agentCore.setLocationCoordinator(locationCoordinator);
   // 简报天气定位兜底经延迟引用取到此处创建的协调器
   locationCoordinatorRef.current = locationCoordinator;
+  // 安全守护 SOS 的按需定位同样取此处创建的协调器
+  wellnessLocationRef.current = locationCoordinator;
 
   // ─── 位置能力（方案 A-D）：默认全部关闭（隐私优先），LOCATION_TRACKING_MODE=continuous 显式开启 ───
   // 方案 C 地理围栏：用户显式创建围栏才存在位置触发，独立于持续模式常驻装配。
@@ -4375,11 +4427,31 @@ export async function createAppServices(): Promise<AppServices> {
   // IMAP 轮询 → 重要性分级（VIP 白名单/确定性关键词规则）：
   //   critical/high → ProactivityHub 主动提醒（life_reminder kind 走频控，speak 闭环）；
   //   全部邮件     → message-hub 落库（platform=email，进消息中心统计）。
+  // 财务实时通道（2026-09-18）：账单/支付类新邮件 → isBillRelatedMail 粗筛 →
+  //   ingestText（LLM 抽取 + 指纹去重 + 入账，入账后经 setOnIngested 轻提醒）。
+  //   这是"后台自动获取财务数据"里延迟最低的通道（邮件到达即入账，秒~分钟级）；
+  //   浏览器拉取通道（FinanceBillAutoFetchService）负责兜底对账，两者靠幂等键互补。
   // MAIL_WATCH_ENABLED=0 或配置不齐时 start() 如实 no-op，状态查 mailWatchService.status()。
   const mailWatchService = new MailWatchService({
     env: process.env,
     messageHub: messageHubService,
     onNewMessage: (mail, classification) => {
+      // 财务实时入账：账单/支付类邮件直接喂给财务抽取链路（fire-and-forget，
+      // 失败只记日志不打断盯梢；是否真有交易由 ingestText 的 LLM 抽取如实判断）
+      if (isBillRelatedMail({ from: mail.from, subject: mail.subject, text: mail.textSnippet ?? "" })) {
+        const billText =
+          `发件人: ${mail.from}\n主题: ${mail.subject}\n时间: ${mail.date ?? ""}\n正文:\n${mail.textSnippet ?? ""}`;
+        void financeIngestService
+          .ingestText(mail.actorId, billText)
+          .then((r) => {
+            if (r.ok) {
+              app.log.info(`[mail-watch] 账单邮件已自动入账（${mail.from}）: ${r.message}`);
+            }
+          })
+          .catch((e) => {
+            app.log.warn(`[mail-watch] 账单邮件自动入账失败（忽略）: ${e instanceof Error ? e.message : String(e)}`);
+          });
+      }
       if (classification.importance === "normal") return;
       proactivityHub.submitIntent({
         actorId: mail.actorId,
@@ -4399,6 +4471,72 @@ export async function createAppServices(): Promise<AppServices> {
   mailWatchService.start();
   console.log(
     `[Bootstrap] 邮箱盯梢 ${mailWatchService.status().running ? "已启动" : "未启用（MAIL_WATCH_ENABLED/MAIL_WATCH_HOST/USER/PASS）"}`,
+  );
+
+  // ─── 财务账单后台自动拉取（2026-09-18，"系统后台自动获取财务数据"）───
+  // 双模式调度：准实时（FINANCE_BILL_AUTO_FETCH_INTERVAL_MIN>0，每 N 分钟拉增量，
+  // 下限 10 分钟防支付宝风控）或 每日定点（默认 21 点）。用用户支付宝登录态
+  // （Cookie 双门禁同购物域）拉交易明细 → 确定性 id 幂等去重 → 仅新增入账 →
+  // 有新增时轻提醒。秒~分钟级的"实时"主力是上面的账单邮件通道（邮件到达即入账），
+  // 本服务负责登录态全量兜底对账。FINANCE_BILL_AUTO_FETCH_ENABLED=0 时调度 no-op；
+  // finance.bills.sync_now 可手动触发。
+  const financeBillAutoFetch = new FinanceBillAutoFetchService({
+    browserSessions: browserSessionService,
+    financeDeepService,
+    fetcher: createPlaywrightAlipayBillFetcher(browserSessionService),
+    logger: (level, message) => app.log[level](message),
+    onSynced: (actorId, summary) => {
+      if (summary.added <= 0) return;
+      proactivityHub.submitIntent({
+        actorId,
+        kind: "life_reminder",
+        importance: "low",
+        title: "账单已自动同步",
+        summary:
+          `支付宝账单自动同步完成：新增 ${summary.added} 笔入账` +
+          `${summary.duplicates > 0 ? `（另有 ${summary.duplicates} 笔已存在，未重复记账）` : ""}。` +
+          `消费统计与预算进度已更新。像管家顺手记完账一样轻描淡写提一句即可，不必展开。`,
+        mode: "speak",
+        source: "finance",
+      });
+    },
+  });
+  financeBillAutoFetch.start();
+  toolRegistry.register(
+    "finance.bills.sync_now",
+    async (input: Record<string, unknown>, context: ToolContext) => {
+      void input;
+      const actorId = resolveActorId(context);
+      const result = await financeBillAutoFetch.runNow(actorId);
+      if (!result.ok) {
+        return {
+          ok: false,
+          error: result.error,
+          hint:
+            "后台自动拉取需要：用户在网页登录支付宝后导入 Cookie（siteId=alipay）并授权 agentAllowed。" +
+            "在此之前可让用户直接粘贴账单导出文本（finance.import_transactions 支持自动识别）。",
+        };
+      }
+      return {
+        ok: true,
+        added: result.added,
+        duplicates: result.duplicates,
+        summary:
+          `支付宝账单同步完成：新增 ${result.added} 笔` +
+          `${result.duplicates > 0 ? `，${result.duplicates} 笔已存在未重复入账` : ""}` +
+          `${result.note ? `（${result.note}）` : ""}`,
+      };
+    },
+  );
+  const financeAutoFetchStatus = financeBillAutoFetch.status();
+  console.log(
+    `[Bootstrap] 财务账单自动拉取 ${
+      financeAutoFetchStatus.enabled
+        ? financeAutoFetchStatus.mode === "interval"
+          ? `已启动（准实时：每 ${financeAutoFetchStatus.intervalMin} 分钟）`
+          : `已启动（每日 ${financeAutoFetchStatus.hour} 点）`
+        : "未启用（FINANCE_BILL_AUTO_FETCH_ENABLED=1 开启；需导入支付宝 Cookie；实时场景建议叠加账单邮件通道）"
+    }`,
   );
 
   // ─── Task 16 消费管家闭环装配（场景B）───
@@ -4589,6 +4727,12 @@ export async function createAppServices(): Promise<AppServices> {
   };
   // 代办足迹执行类上报工具：Agent 办完代办（订牛奶/缴费/改日程…）后自主调用落账
   registerAgentActivityTools(toolRegistry, agentActivityStore);
+  // 身份与主页打理工具：agent.update_identity（取名/改名唯一写入口）+ agent.update_homepage
+  registerAgentIdentityTools(toolRegistry, {
+    accounts: agentAccountService,
+    memorySync: agentMemorySyncService,
+    wsRegistry: wsConnectionRegistry,
+  });
   // 站内信：平台/运营侧 → 用户收件箱（data/inbox/{actorId}.json 持久化 + 在线 WS 直推）
   const inboxService = new InboxService({
     rootDir: join(process.cwd(), "data", "inbox"),
@@ -4778,6 +4922,8 @@ export async function createAppServices(): Promise<AppServices> {
       },
     });
   });
+  // 管道已就绪：女性关怀（周期提醒/SOS 告警）的懒引用自此可用
+  wellnessPipelineRef.current = proactivePipeline;
   // 评估器事件 → 观察流（喂 LLM 通用路径）+ 仲裁裁决 → 管道投递
   evaluatorChain.onEvent((event) => {
     const actorId = event.actorId ?? "local_user";
@@ -5058,6 +5204,7 @@ export async function createAppServices(): Promise<AppServices> {
     skillMetadataValidator,
     realFundsWallet,
     paymentService,
+    commitmentBoard,
     scheduleTaskService,
     scheduleIntentService,
     proactivitySuppressionStore,
@@ -5230,6 +5377,10 @@ export async function createAppServices(): Promise<AppServices> {
     subscriptionAuditService.stop();
     billManagementService.stop();
     eveningDigestScheduler.stop();
+    // 女性关怀：停经期提醒调度 + 加密数据落盘
+    periodCareService.stop();
+    void periodCareService.flush();
+    void safetyGuardService.flush();
     // 新增子系统：习惯闭环 / 到站监控 / 全双工语音
     habitLoopService.stop();
     arrivalMonitorService.stop();

@@ -39,6 +39,10 @@ import {
 } from "../tools/proactivity-feedback-tools.js";
 import { CARE_REMINDER_CHAT_TOOLS } from "../tools/care-reminder-tools.js";
 import { AGENT_ACTIVITY_CHAT_TOOLS } from "../tools/agent-activity-tools.js";
+import {
+  AGENT_UPDATE_HOMEPAGE_CHAT_TOOL,
+  AGENT_UPDATE_IDENTITY_CHAT_TOOL,
+} from "../tools/agent-identity-tools.js";
 import { COMMITMENT_CHAT_TOOLS } from "../tools/commitment-tools.js";
 import { GEOFENCE_CHAT_TOOLS } from "../tools/geofence-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
@@ -819,6 +823,8 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...RHYTHM_REMINDER_CHAT_TOOLS,
     ...PROACTIVITY_FEEDBACK_CHAT_TOOLS,
     ...AGENT_ACTIVITY_CHAT_TOOLS,
+    ...AGENT_UPDATE_IDENTITY_CHAT_TOOL,
+    ...AGENT_UPDATE_HOMEPAGE_CHAT_TOOL,
     ...PROACTIVITY_CONFIRM_CHAT_TOOLS,
     ...CARE_REMINDER_CHAT_TOOLS,
     ...COMMITMENT_CHAT_TOOLS,
@@ -1153,6 +1159,67 @@ function detectRelevantCategoriesFrom(
   return relevantCategories;
 }
 
+/**
+ * 前台对话面的能力域工具确定性注入（2026-09-19 女性关怀 E2E 发现）。
+ *
+ * 前台 explicit 白名单只含 task.dispatch / search_web 等基础设施（见
+ * agent-core.ts getForegroundChatToolWhitelist），其余工具全部依赖模型自觉
+ * 调 tool_discover 召回——轻量模型（deepseek-flash 实测）不会主动调，导致
+ * 「记录经期 / SOS / 借口来电」等关键词命中的能力域在话面上完全不可达。
+ *
+ * 本函数在用户文本命中能力域分类关键词时，返回该域的工具 schema 供前台
+ * 白名单合并注入（与 selectRelevantTools 的 category 机制同源，只取能力域，
+ * 不含基础/MCP 工具）。注入≠调用：模型仍自行决定是否调用。
+ */
+export function selectForegroundCapabilityToolAdditions(
+  userText: string | undefined,
+): ChatCompletionTool[] {
+  if (!userText?.trim() || !_capabilityModuleDeps) return [];
+  const capabilityModuleMappings = getCapabilityModuleCategoryMappings(_capabilityModuleDeps).map(
+    (m) => ({
+      category: m.category as ToolCategory,
+      keywords: m.keywords,
+      toolNames: m.toolNames,
+    }),
+  );
+  if (capabilityModuleMappings.length === 0) return [];
+  const relevantCategories = detectRelevantCategoriesFrom(userText, capabilityModuleMappings);
+  if (relevantCategories.size === 0) return [];
+
+  const wanted = new Set<string>();
+  for (const mapping of capabilityModuleMappings) {
+    if (!relevantCategories.has(mapping.category)) continue;
+    mapping.toolNames.forEach((name) => wanted.add(name));
+  }
+  if (wanted.size === 0) return [];
+  // 单轮注入上限：防关键词宽泛的域（如 health）把 schema 预算打爆。
+  // 排序上安全/生理域置顶（E2E 实测：宽泛词如「通知/打车」会把 email_sms、
+  // shopping 等域的前景工具塞满上限，把 safety 挤出窗口——紧急域不可被挤掉）。
+  const MAX_INJECTED = 14;
+  const priority = (name: string): number => (name.startsWith("safety.") ? 0 : name.startsWith("period.") ? 1 : 2);
+  const injected = getCapabilityModuleChatTools(_capabilityModuleDeps)
+    .filter(
+      (t) =>
+        t.type === "function" &&
+        t.function?.name &&
+        wanted.has(t.function.name),
+    )
+    .sort((a, b) => {
+      const an = a.type === "function" ? a.function.name : "";
+      const bn = b.type === "function" ? b.function.name : "";
+      return priority(an) - priority(bn);
+    })
+    .slice(0, MAX_INJECTED);
+  if (injected.length > 0) {
+    console.log(
+      `[foreground-tools] 关键词命中，注入能力域工具: ${injected
+        .map((t) => (t.type === "function" ? t.function.name : ""))
+        .join(", ")}`,
+    );
+  }
+  return injected;
+}
+
 export function selectRelevantTools(
   userText: string,
   allTools: ChatCompletionTool[],
@@ -1162,8 +1229,7 @@ export function selectRelevantTools(
     includeAlwaysIncluded?: boolean;
     tokenBudget?: number;
   }
-): ChatCompletionTool[] {
-  const minTools = options?.minTools ?? 5;
+): ChatCompletionTool[] {  const minTools = options?.minTools ?? 5;
   const maxTools = options?.maxTools ?? 20;
   const includeAlwaysIncluded = options?.includeAlwaysIncluded ?? true;
 

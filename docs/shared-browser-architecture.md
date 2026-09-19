@@ -113,3 +113,37 @@ installDocumentBootstrap/captureScreenshot + 三个状态流 + 能力声明
   storageState 建议走服务端 agent_browser 池 + shopping-order 既有 Cookie 导入链路
 - 下单类任务维持既有分工：shared_browser 只到"把结算页摆好 + 用户确认"，
   真正下单走 shopping-order-service 两阶段确认链路
+
+## 七、WebView2 幽灵窗防护（WebViewGhostGuard）
+
+### 问题
+webview_windows（WebView2 Composition 模式）运行中，msedgewebview2.exe
+浏览器进程会自行创建内部 Win32 顶层窗口（`Chrome_WidgetWin_*` /
+`Chrome_RenderWidgetHostHWND`）。个别滞留场景下该窗口会以**透明幽灵窗**
+形态盖在屏幕上拦截其他应用的点击（曾实测盖住左半屏）。这是 WebView2
+运行时行为，Dart/插件层不可见也不可控；插件宿主窗口本身是 message-only
+窗口（`FlutterWebviewMessage`），不可命中，问题只出在浏览器进程的顶层内部窗。
+
+### 防护（runner 常驻看门狗）
+`windows/runner/webview_ghost_window_guardian.cpp`，在 `wWinMain` 入口
+启动（主窗口/简报/行程等子进程模式共用入口，全覆盖），每 2s 清扫一轮：
+
+命中条件（全部满足才动手）：
+- 顶层窗口、可见、非最小化、非前台窗口
+- 类名为 `Chrome_WidgetWin*` / `Chrome_RenderWidgetHostHWND`
+- 归属进程 = 本进程，或父链可追溯的 `msedgewebview2.exe` 进程树
+  （用户自己开的 Chrome/Edge/豆包等 Chromium 应用窗口绝不误伤）
+- 覆盖所在显示器工作区 ≥25%（页内下拉/日期选择等合法小弹层被尺寸门排除）
+
+动作：打上 `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` —— 鼠标命中穿透、
+不可激活、不改变渲染与生命周期。Composition 模式的网页交互全走
+`SendMouseInput` 合成事件，不依赖这些窗口的原生命中，内嵌 WebView 正常
+使用零影响。命中记录走 OutputDebugString + stderr（`pai_app_stderr.log`）。
+
+### 手动测试
+`webview_ghost_window_guardian_test.cpp`（不参与 CMake 构建）在本进程内
+构造"大幽灵窗 + 小合法弹层"双样本验证中和与豁免；VS 命令行编译运行：
+`cl /utf-8 /EHsc /W4 webview_ghost_window_guardian_test.cpp webview_ghost_window_guardian.cpp user32.lib /Fe:test.exe`
+
+### 若幽灵窗来自已退出的旧实例（孤儿 msedgewebview2）
+父链已断，看门狗无法归属，只能任务管理器结束对应 `msedgewebview2.exe`。

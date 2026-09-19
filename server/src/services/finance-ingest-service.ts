@@ -24,6 +24,7 @@ import type { AgentAccountService } from "./agent-account-service.js";
 import { parseRecipientToEmail } from "./email-registration-service.js";
 import { getAgentMailInboundSecret } from "../config/mail.js";
 import { isWechatPaymentContact, parseWechatPaymentNotice } from "./wechat-payment-notice.js";
+import { parseAlipayPaymentNotice } from "./alipay-payment-notice.js";
 
 /** 账单/支付类邮件判定关键词（命中任一即进入 LLM 抽取）。 */
 const BILL_KEYWORDS = [
@@ -345,7 +346,11 @@ export class FinanceIngestService {
   // ─── 微信支付服务通知通道（实时、零 LLM、静默入账） ──────────
 
   /**
-   * MessageHub 入站消息统一回调：命中「微信支付」联系人 → 确定性解析 → 静默入账。
+   * MessageHub 入站消息统一回调：支付类通知 → 确定性解析 → 静默入账。
+   *
+   * 两个入口：
+   *   - platform=alipay：手机通知监听捕捉的支付宝支付/收款推送（钱迹模式，实时主通道）
+   *   - platform=wechat 且来自「微信支付」联系人：微信桥服务通知 / 手机通知捕捉
    *
    * 异常全部吞掉（不阻断消息落库主链路，与 MessageWatchTrigger 同契约）；
    * 只落库不做主动推送——查询走 agent 的 finance.* 工具。
@@ -363,12 +368,65 @@ export class FinanceIngestService {
   }): Promise<void> {
     try {
       if (!input.actorId || !input.text) return;
+      // 支付宝 App 推送（platform 信号即来源门禁：只有通知监听白名单里的支付宝
+      // 包名会打上 alipay 平台，普通聊天文本不会进这条通道）
+      if (input.platform === "alipay") {
+        // title 常带「支付成功/收款到账」等关键信号，与正文拼接后一起解析
+        await this.ingestAlipayNotice(input.actorId, `${input.title ?? ""}。${input.text}`);
+        return;
+      }
       // 「微信支付」联系人信号是唯一入口：普通聊天里提到"微信支付了xx"不会误记账
       if (!isWechatPaymentContact(input)) return;
       await this.ingestWechatNotice(input.actorId, input.text);
     } catch {
       /* 入账失败静默，不影响消息主链路 */
     }
+  }
+
+  /**
+   * 解析单条支付宝通知并入账（零 LLM，钱迹模式）。
+   * 指纹与微信/邮件/文本通道共用同一份 seen 集：同一笔交易不会因多通道重复入账。
+   */
+  async ingestAlipayNotice(
+    actorId: string,
+    text: string,
+  ): Promise<{ ok: boolean; ingested: number; message: string }> {
+    const parsed = parseAlipayPaymentNotice(text, this.now());
+    if (!parsed) {
+      return { ok: false, ingested: 0, message: "非可识别的支付通知" };
+    }
+
+    const seen = await this.loadSeen(actorId);
+    // 指纹统一为 时间(到分)|金额|方向：商户/备注在不同通道文本里时有时无，
+    // 参与指纹会把同一笔交易分裂成多条；同分钟同额同向的另一笔真实交易极罕见，
+    // 按「宁可漏记不可错记」取更激进的去重
+    const fp = `${parsed.date.slice(0, 16)}|${parsed.amount}|${parsed.type}`;
+    if (seen.includes(fp)) {
+      return { ok: false, ingested: 0, message: "该笔交易已入账（去重跳过）" };
+    }
+    seen.push(fp);
+    if (seen.length > this.SEEN_LIMIT) seen.splice(0, seen.length - this.SEEN_LIMIT);
+    await this.saveSeen(actorId, seen);
+
+    const imported = await this.deps.financeDeepService.importTransactions(actorId, [
+      {
+        id: `ingest-aly-${Date.now()}-${randomUUID().slice(0, 8)}`,
+        date: parsed.date,
+        amount: parsed.amount,
+        type: parsed.type,
+        category: "其他" as const, // 落账时由 finance-deep 按 merchant/description 自动分类
+        ...(parsed.merchant ? { merchant: parsed.merchant } : {}),
+        ...(parsed.description ? { description: parsed.description } : {}),
+        source: "alipay_notice",
+      },
+    ]);
+    if (imported > 0) {
+      console.log(
+        `[FinanceIngest] 支付宝通知入账 actor=${actorId} ` +
+          `¥${parsed.amount.toFixed(2)} ${parsed.type === "income" ? "收入" : "支出"} ${parsed.merchant ?? ""}`,
+      );
+    }
+    return { ok: true, ingested: imported, message: "已自动入账" };
   }
 
   /**
@@ -385,7 +443,10 @@ export class FinanceIngestService {
     }
 
     const seen = await this.loadSeen(actorId);
-    const fp = `${parsed.date}|${parsed.amount}|${parsed.type}|${parsed.merchant ?? parsed.description ?? ""}`;
+    // 指纹统一为 时间(到分)|金额|方向：商户/备注在不同通道文本里时有时无，
+    // 参与指纹会把同一笔交易分裂成多条；同分钟同额同向的另一笔真实交易极罕见，
+    // 按「宁可漏记不可错记」取更激进的去重
+    const fp = `${parsed.date.slice(0, 16)}|${parsed.amount}|${parsed.type}`;
     if (seen.includes(fp)) {
       return { ok: false, ingested: 0, message: "该笔交易已入账（去重跳过）" };
     }

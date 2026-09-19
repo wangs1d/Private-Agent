@@ -67,6 +67,7 @@ import { registerMediaStreamProxyRoutes } from "./media.js";
 import { registerUserFileRoutes } from "./user-files.js";
 import { registerTravelMediaRoutes } from "./travel-media.js";
 import { registerAgentActivityRoutes } from "./agent-activities.js";
+import { registerAgentHomepageRoutes } from "./agent-homepage.js";
 import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
@@ -236,6 +237,13 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerBriefingTtsRoutes(app, { ttsService: deps.ttsService });
   registerPresenceDetectRoutes(app);
   registerUserPreferencesRoutes(app);
+  registerAgentHomepageRoutes(app, {
+    agentActivityStore: deps.agentActivityStore,
+    agentMemorySyncService: deps.agentMemorySyncService,
+    socialFeedService: deps.socialFeedService,
+    agentAccountService: deps.agentAccountService,
+    commitmentBoard: deps.commitmentBoard ?? null,
+  });
   registerFeedbackRoutes(app);
   registerAdminConsoleRoutes(app, deps);
   if (deps.devicePairingService && deps.deviceRegistry) {

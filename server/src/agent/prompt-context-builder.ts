@@ -16,6 +16,11 @@ import { SKILL_MANAGE_CHAT_TOOLS } from "../tools/skill-manage-tools.js";
 import type { SkillManager } from "../skills/index.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import {
+  AGENT_NAME_KV_KEY,
+  buildIdentityNameLine,
+  parseAgentIdentityKv,
+} from "../services/agent-identity.js";
+import {
   buildSchedulePromptSnapshot,
   shouldInjectScheduleSnapshot,
 } from "../services/schedule-prompt-snapshot.js";
@@ -554,6 +559,20 @@ export class PromptContextBuilder {
       const kvCurrentMission = compactPromptBlock(formatKvValueForPrompt(entries["memory_current_mission"]), 240);
       if (kvCurrentMission) {
         fromKv.taskContext = [`current-mission-from-memory: ${kvCurrentMission}`].join("\n");
+      }
+    }
+
+    // 名字自我认知：agent.update_identity 写入的 agent.name KV 不在 memoryKeys 配置内，
+    // 这里定点拉取并拼进 persona 稳定前缀首行——让 Agent 每轮都知道自己叫什么、
+    // 名字是谁取的。名字极低频变化，放稳定层不会打爆 prefix cache。
+    if (this.deps.agentMemorySyncService) {
+      const identityRaw = this.deps.agentMemorySyncService
+        .getSnapshot(input.actorId, [AGENT_NAME_KV_KEY])
+        .entries[AGENT_NAME_KV_KEY];
+      const identity = parseAgentIdentityKv(identityRaw);
+      if (identity) {
+        const nameLine = buildIdentityNameLine(identity);
+        fromKv.persona = fromKv.persona ? `${nameLine}\n${fromKv.persona}` : nameLine;
       }
     }
 

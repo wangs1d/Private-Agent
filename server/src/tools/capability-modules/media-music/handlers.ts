@@ -184,3 +184,17 @@ export function createMediaNowPlayingHandler(mediaMusicService: MediaMusicServic
     };
   };
 }
+
+/** media.login_status：查询音源登录状态（网易云登录音源 vs 匿名音源）。 */
+export function createMediaLoginStatusHandler(mediaMusicService: MediaMusicService): ToolHandler {
+  return async (_input, context: ToolContext) => {
+    const actorId = resolveActorId(context);
+    const status = await mediaMusicService.getLoginSourceStatus(actorId);
+    return {
+      ok: true,
+      loggedIn: status.loggedIn,
+      source: status.source,
+      summary: status.detail,
+    };
+  };
+}

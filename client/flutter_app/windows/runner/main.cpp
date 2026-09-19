@@ -7,6 +7,7 @@
 
 #include "flutter_window.h"
 #include "utils.h"
+#include "webview_ghost_window_guardian.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
@@ -43,6 +44,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+  // WebView2 幽灵窗防护：msedgewebview2.exe 滞留的内部顶层窗口曾以透明
+  // "幽灵窗"形态拦截其他应用点击（见 webview_ghost_window_guardian.h）。
+  // 在入口处启动常驻清扫，主窗口/简报/行程等所有子进程模式共用本入口，
+  // 全部覆盖。
+  webview_ghost_guardian::Start();
 
   flutter::DartProject project(L"data");
 

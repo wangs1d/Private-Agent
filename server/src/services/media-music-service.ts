@@ -87,21 +87,21 @@ const TRACK_URL_CACHE_TTL_MS = 30 * 60_000;
 const trackUrlCache = new Map<string, TrackUrlCacheEntry>();
 
 /** 取缓存并按 LRU 语义刷新热度（Map 迭代序 = 插入序，重插即提到最新）。 */
-function getCachedTrackUrl(trackId: string): TrackUrlCacheEntry | undefined {
-  const entry = trackUrlCache.get(trackId);
+function getCachedTrackUrl(cacheKey: string): TrackUrlCacheEntry | undefined {
+  const entry = trackUrlCache.get(cacheKey);
   if (!entry) return undefined;
   if (Date.now() - entry.cachedAt > TRACK_URL_CACHE_TTL_MS) {
-    trackUrlCache.delete(trackId);
+    trackUrlCache.delete(cacheKey);
     return undefined;
   }
-  trackUrlCache.delete(trackId);
-  trackUrlCache.set(trackId, entry);
+  trackUrlCache.delete(cacheKey);
+  trackUrlCache.set(cacheKey, entry);
   return entry;
 }
 
-function setCachedTrackUrl(trackId: string, url: string | null): void {
-  trackUrlCache.delete(trackId);
-  trackUrlCache.set(trackId, { url, cachedAt: Date.now() });
+function setCachedTrackUrl(cacheKey: string, url: string | null): void {
+  trackUrlCache.delete(cacheKey);
+  trackUrlCache.set(cacheKey, { url, cachedAt: Date.now() });
   while (trackUrlCache.size > TRACK_URL_CACHE_MAX) {
     const oldest = trackUrlCache.keys().next().value;
     if (oldest === undefined) break;
@@ -113,8 +113,12 @@ function setCachedTrackUrl(trackId: string, url: string | null): void {
  * 按曲目 ID 解析可播放 URL（独立导出，供 /api/media/stream-proxy 路由复用，
  * 与 MediaMusicService 共享同一份 LRU 缓存）。
  *
- * 调网易云公开接口（无需鉴权）：
+ * 调网易云接口：
  *   GET https://music.163.com/api/song/enhance/player/url?ids=[<id>]&br=320000
+ *
+ * 匿名调用能拿到大部分曲目的 URL；仅 VIP / 部分版权曲目返回 null。传入
+ * opts.cookieHeader（用户在 music.163.com 登录后导出的 Cookie，含 MUSIC_U）
+ * 可用用户本人的会员权益解析这些曲目——缓存键按 登录/匿名 分开，两者互不污染。
  *
  * 返回 `data[0].url`：null 表示无版权 / 仅 VIP / 地区限制——这是上游的如实结论，
  * 必须透传为失败，绝不能编造一个 URL 假装可以播。
@@ -124,13 +128,16 @@ function setCachedTrackUrl(trackId: string, url: string | null): void {
 export async function resolveTrackPlayUrl(
   trackId: string,
   fetchImpl: typeof fetch = fetch,
+  opts?: { cookieHeader?: string },
 ): Promise<TrackUrlResolution> {
   const id = String(trackId ?? "").trim();
   if (!/^\d+$/.test(id)) {
     return { ok: false, error: `trackId 无效（应为纯数字网易云曲目 ID）：${id}` };
   }
 
-  const cached = getCachedTrackUrl(id);
+  const cookieHeader = opts?.cookieHeader?.trim() || "";
+  const cacheKey = cookieHeader ? `${id}|auth` : `${id}|anon`;
+  const cached = getCachedTrackUrl(cacheKey);
   if (cached) {
     return cached.url
       ? { ok: true, url: cached.url }
@@ -145,6 +152,7 @@ export async function resolveTrackPlayUrl(
         "User-Agent": "Mozilla/5.0 (compatible; PrivateAgent/1.0)",
         Accept: "application/json",
         Referer: "https://music.163.com",
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
       // 10s 超时：媒体播放是交互场景，超过 10s 用户早已认为失败
       signal: AbortSignal.timeout(10_000),
@@ -160,10 +168,10 @@ export async function resolveTrackPlayUrl(
     const playUrl = typeof item?.url === "string" ? item.url.trim() : "";
     if (!playUrl) {
       // 负缓存：无版权结论短期不会变，缓存住避免反复打接口
-      setCachedTrackUrl(id, null);
+      setCachedTrackUrl(cacheKey, null);
       return { ok: false, error: "该曲目无可播放 URL（无版权/仅 VIP/地区限制）" };
     }
-    setCachedTrackUrl(id, playUrl);
+    setCachedTrackUrl(cacheKey, playUrl);
     return { ok: true, url: playUrl };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -189,11 +197,78 @@ export class MediaMusicService {
   /** 可注入 fetch（测试 mock）；默认全局 fetch。 */
   private readonly fetchImpl: typeof fetch;
 
+  /** 可选：浏览器会话库（网易云登录音源；用户导入 music.163.com Cookie 并授权后启用）。 */
+  private readonly browserSessions?: {
+    getCookiesForAgent(actorId: string, siteId: "netease"): Promise<
+      Array<{ name: string; value: string }>
+    >;
+  };
+
   constructor(
     private readonly wsRegistry: ClientPushPort,
     fetchImpl?: typeof fetch,
+    browserSessions?: {
+      getCookiesForAgent(actorId: string, siteId: "netease"): Promise<
+        Array<{ name: string; value: string }>
+      >;
+    },
   ) {
     this.fetchImpl = fetchImpl ?? fetch;
+    this.browserSessions = browserSessions;
+  }
+
+  /**
+   * 网易云登录音源 Cookie：存在则拼成请求头（MUSIC_U 等键决定会员权益解析）。
+   * 无会话 / 未授权 / 解密失败一律回退匿名——音源登录是增强而非前置条件。
+   */
+  private async getNeteaseCookieHeader(actorId: string): Promise<string | null> {
+    if (!this.browserSessions) return null;
+    try {
+      const cookies = await this.browserSessions.getCookiesForAgent(actorId, "netease");
+      const header = cookies
+        .filter((c) => c.name && c.value)
+        .map((c) => `${c.name}=${c.value}`)
+        .join("; ");
+      return header || null;
+    } catch {
+      // 未导入 Cookie / 未授权 agentAllowed：正常回退匿名解析，不视为错误
+      return null;
+    }
+  }
+
+  /** 音源登录状态（media.login_status 工具用；如实报告，供模型解释为何放不了 VIP 曲）。 */
+  async getLoginSourceStatus(actorId: string): Promise<{
+    loggedIn: boolean;
+    source: "netease_login" | "anonymous";
+    detail: string;
+  }> {
+    const header = await this.getNeteaseCookieHeader(actorId);
+    if (header) {
+      return {
+        loggedIn: true,
+        source: "netease_login",
+        detail: "已接入网易云音乐登录音源（用户 Cookie 已导入且授权），可用会员权益解析 VIP/版权曲目",
+      };
+    }
+    return {
+      loggedIn: false,
+      source: "anonymous",
+      detail:
+        "当前为匿名音源：仅能解析非 VIP 曲目。用户在 music.163.com 登录后导入 Cookie 并授权（siteId=netease）即可接入其会员权益",
+    };
+  }
+
+  /**
+   * 按用户解析可播放 URL：有网易云登录会话 → 带用户 Cookie（VIP 曲目可用会员
+   * 权益解析）；否则匿名。两条路径结果独立缓存（auth/anon 双键，互不污染）。
+   */
+  async resolveTrackUrlForActor(
+    actorId: string,
+    trackId: string,
+  ): Promise<TrackUrlResolution & { source: "netease_login" | "anonymous" }> {
+    const cookieHeader = await this.getNeteaseCookieHeader(actorId);
+    const resolution = await resolveTrackPlayUrl(trackId, this.fetchImpl, { cookieHeader: cookieHeader ?? undefined });
+    return { ...resolution, source: cookieHeader ? "netease_login" : "anonymous" };
   }
 
   /**
@@ -311,16 +386,21 @@ export class MediaMusicService {
 
     // 播放 URL 解析：调用方（media.play 工具）通常拿不到可播放 URL（搜索接口不返回），
     // 服务端按 trackId 解析；调用方显式给 url 时直接采用（省一次上游请求）。
+    // 登录音源（2026-09-18）：用户导入了网易云 Cookie 时带用户身份解析，
+    // VIP/版权曲目用其会员权益；匿名路径仅能解析非 VIP 曲。
     let playUrl: string | null = null;
     let urlError: string | undefined;
     if (trackInfo?.url) {
       playUrl = trackInfo.url;
     } else {
-      const resolved = await this.resolveTrackUrl(trackId);
+      const resolved = await this.resolveTrackUrlForActor(actorId, trackId);
       if (resolved.ok) {
         playUrl = resolved.url;
       } else {
-        urlError = resolved.error;
+        urlError =
+          resolved.source === "anonymous"
+            ? `${resolved.error}（当前为匿名音源；接入网易云登录音源后或可播放 VIP 曲目）`
+            : resolved.error;
       }
     }
 
