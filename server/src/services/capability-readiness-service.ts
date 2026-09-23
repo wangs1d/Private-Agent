@@ -92,7 +92,8 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
     label: "旅行订票",
     description: "机票/火车/酒店比价、预订、退改签、到站管家",
     groups: [
-      // 主链路（本地库 + 浏览器比价）无需 key 即可用；各供应商 key 为增强项
+      // 主链路（本地库 + 飞猪 FlyAI + 浏览器比价）无需 key 即可用；各供应商 key 为增强项
+      // （飞猪 FlyAI 无需 API key：安装 flyai CLI 即自动挂载，npm i -g @fly-ai/flyai-cli）
       {
         allOf: ["JUHE_TRAIN_KEY"],
         hint: "配置 JUHE_TRAIN_KEY 解锁火车票实时查询（聚合数据）",
@@ -100,10 +101,6 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
       {
         allOf: ["VARIFLIGHT_APP_ID", "VARIFLIGHT_APP_SECRET"],
         hint: "配置 VARIFLIGHT_APP_ID / VARIFLIGHT_APP_SECRET 解锁航班动态（航旅纵横）",
-      },
-      {
-        allOf: ["ROLLINGGO_API_KEY"],
-        hint: "配置 ROLLINGGO_API_KEY 解锁酒店实时搜索（RollingGo MCP）",
       },
       {
         anyOf: ["AMAP_WEB_KEY", "RIDE_AMAP_WEB_KEY"],

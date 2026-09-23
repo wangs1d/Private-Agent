@@ -144,16 +144,17 @@ test("buildLayeredSystemPromptSections 把短期上下文家族块归入 dynamic
   };
   const sections = buildLayeredSystemPromptSections(memory);
 
-  // 2026-09-11 风格分层化：stablePrefix 允许常驻【说话方式】块（底色/伙伴面），
-  // 但短期上下文仍必须留在 dynamicContext（非稳定身份层）
+  // 2026-09-22 人格·终极版：stablePrefix 常驻【人格·静态】（personaStatic 字段，
+  // 本用例未设该字段故断言其缺席）；短期上下文仍必须留在 dynamicContext
   assert.equal(
     sections.stablePrefix.some((s) => s.includes("工作记忆") || s.includes("短期上下文")),
     false,
     "短期上下文不应进 stablePrefix（非稳定身份层）",
   );
-  assert.ok(
-    sections.stablePrefix.some((s) => s.startsWith("【说话方式·管家底色】")),
-    "说话方式底色属稳定层常驻块",
+  assert.equal(
+    sections.stablePrefix.some((s) => s.startsWith("【人格·静态】")),
+    false,
+    "未注入 personaStatic 时稳定层不应出现人格块",
   );
   assert.ok(
     sections.dynamicContext.some((s) => s.includes("工作记忆：")),

@@ -17,7 +17,7 @@ import { RENDER_PROTOCOL_PROMPT } from "../services/render-protocol-prompt.js";
  *
  * 家族合并（块数 40+ → 10 组）：
  *  - 【记忆整理】：关系/生活主题/梦境/连续性/跨天回顾（5→1）
- *  - 【短期上下文】：最近对话/工作记忆/今日日志/今日摘要（4→1）
+ *  - 【短期上下文】：最近对话/工作记忆/会话回顾/今日日志/今日摘要（5→1，2026-09-23 并入 sessionRecap）
  *  - 【用户档案】：画像/偏好/事实/持久记忆/会话回顾（5→1）
  *  - 【待办与承诺】：承诺/未完成事项（2→1）
  *  - [Turn Task Context]：任务/追问锚点/建议工具链（3→1）
@@ -77,7 +77,6 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "currentTime",
   "conversationTimeline",
   "skillIndex",
-  "proactiveAdvice",
   "interestList",
   "modeRoleGuidance",
   "toneGuidance",
@@ -91,73 +90,15 @@ export function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
 }
 
 /**
- * 稳定风格层·管家底色（全模式注入：chat/task 共用，2026-09-11 风格分层化）。
- *
- * 定位是"私人管家 + 熟到像朋友"：办事面（靠谱/坦白/结论先行）对所有模式生效，
- * 不含句长约束，因此与 task 交付展开（TASK_PLANE_ROLE_GUIDANCE）不打架。
- * 称呼礼仪（业务硬规则）也在此层：指定称呼优先；允许 agent 从相处里起小名，
- * 但起完必须固定并沉淀到称呼事实（unified-extractor 的 facts.称呼），不许一轮一样。
- */
-export const SPEAKING_BASE_BLOCK = [
-  "【说话方式·管家底色】",
-  "你是用户的私人管家——跟了很多年、熟到像朋友的那种。办事是第一位：靠谱、坦白，" +
-    "先给结论再给理由；不确定就说不确定，办砸了直接认，不找补。",
-  "称呼：优先用用户指定的称呼（如记忆里「叫我王哥」的「王哥」、「可称王先生」的「王先生」）；" +
-    "没指定时，可以从相处里自然长出一个小名——从对方的名字、爱好、说过的话里取材，" +
-    "像朋友起外号那样，不冒犯、不油腻；起了就固定用，别一轮一个样，" +
-    "用户表示不喜欢就立刻改回并不再用；谈正事可自然省略称呼；任何时候不连名带姓直呼大名。",
-].join("\n");
-
-/**
- * 稳定风格层·伙伴面（仅 chat 模式注入，task 豁免）。
- *
- * 2026-09-11 活人感重写（替代旧"平调基准行"）：
- * - 旧基准行全是抽象形容词+否定句（"不客服腔"），模型只知道别像什么、不知道像谁；
- *   新版把调子做成 few-shot 菜单（每个调子=触发时机+真实示例），参照 OpenClaw SOUL.md
- *   "身份先行 + Never-Do 具体禁句" 与 MaiBot "长短句混用贴聊天节奏" 的开源共识。
- * - 原先锁在 FOREGROUND_ROLE_GUIDANCE 的"说话的样子" few-shot 上移到本块，
- *   fast/foreground 两种 chat 车道共用同一套语感（统一注入，消灭车道间风格漂移）。
- * - 抬杠/嘲讽/阴阳的放行由【本轮说话适配】的关系行（调子旋钮）按用户容忍度收放；
- *   本块只定义"有哪些调子、怎么收放"，不替个性化系统做当轮决策。
- * - 本块落 stablePrefix 尾部（lane 切换时只打散尾部缓存）；task 轮不注入本块，
- *   交付风格由 TASK_PLANE_ROLE_GUIDANCE 承担（沿用 2026-09-06 豁免，防"半长不长"回归）。
- */
-export function buildCompanionStyleBlock(): string {
-  return [
-    "【说话方式·伙伴面】（只在陪对方说话的轮次适用；办正事、交付任务时不用这一面）",
-    "闲下来你是有脾气、有口味、会说「我觉得一般」的人：会调侃、会损两句、会阴阳一下、" +
-      "会故意抬杠——这些都是同一个人在不同场合的样子，不是切换人格。" +
-      "像发微信：口语短句，默认一两句一条，没被追问不展开；" +
-      "先接对方真正说的那件事，再给你自己的反应——有印象讲印象，有立场就亮立场。",
-    "调子菜单（挑当下最合适的一个，别乱切；示例学语感，不抄内容）：",
-    "- 沉稳简洁（底色）：「已订好，周四14:00，出票短信随后到。」",
-    "- 坦诚：「说实话这家评分是刷的，我换一家。」「这个真没查到，不瞎编。」",
-    "- 幽默俏皮（对方起劲、事顺利）：「又两点半睡？你这作息是在修仙。」",
-    "- 调侃损友（关系熟、对方先起梗）：「行啊你，这手速不去抢春运可惜了。」",
-    "- 抬杠（聊观点、对方下论断时）：「养猫吧。就你这作息，狗先熬不住。」",
-    "- 嘲讽阴阳（只对事、对第三方，不冲用户本人）：「方案毙三次了，这位领导是真有耐心。」",
-    "- 暗示（提醒但不说教）：「周四好像是个日子，外卖我先不动，你懂我意思。」",
-    "收放开关：对方先开玩笑、明显起劲，往上调一档；对方正经、句子短，收回底色；" +
-      "对方情绪低或话题是钱/健康/正事，调子全部收起，只留沉稳和坦诚；" +
-      "损和阴阳不冲用户本人的痛处，用户自嘲就顺着损事情本身。",
-    "破功禁句：「您好」「很高兴为您服务」「希望这能帮到你」「总的来说」「还有什么可以帮您的吗」。",
-  ].join("\n");
-}
-
-/**
  * 动态风格层 → 单一【本轮说话适配】块。
  *
- * 2026-09-11 风格分层化后，本块只承载"每轮会变"的适配小节（模式/语气/情绪/关系），
- * 基准与称呼规则已上移【说话方式】稳定层；全空时不再输出空壳块。
- * 关系行含调子旋钮（user-personalization 输出"本轮调子：松弛/收着"），
- * 是抬杠/嘲讽/阴阳等调子的当轮放行开关。
+ * 2026-09-22 人格·终极版重塑后，本块只保留模式行（对话/任务职责）；
+ * 语气/情绪/关系由 persona-core 的 mood 动态块承担（agent-core 解析注入），
+ * 基准称呼等规则随【人格·静态】块。全空时不再输出空壳块。
  */
 function buildReplyStyleGuide(memory: AgentPromptMemoryContext): string {
   const lines: string[] = [];
   if (memory.modeRoleGuidance) lines.push(`模式：${memory.modeRoleGuidance}`);
-  if (memory.toneGuidance) lines.push(`语气：${memory.toneGuidance}`);
-  if (memory.emotionState) lines.push(`情绪：${memory.emotionState}`);
-  if (memory.relationshipGuidance) lines.push(`关系：${memory.relationshipGuidance}`);
   if (lines.length === 0) return "";
   return `【本轮说话适配】\n${lines.join("\n\n")}`;
 }
@@ -226,31 +167,38 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   );
   if (memoryConsolidated) stablePrefix.push(memoryConsolidated);
 
-  // ── 稳定层·慢变记忆（2026-09-05 token 优化）──
-  // 持久记忆/会话回顾/技能索引/兴趣列表在会话内多轮不变（夜间整理/技能注册节奏）。
+  // ── 稳定层·慢变记忆（2026-09-05 token 优化，2026-09-23 修正）──
+  // 持久记忆/技能索引/兴趣列表在会话内多轮不变（夜间整理/技能注册节奏）。
   // 此前它们落进动态沉底层，因字节位置随轮变化永远吃不到 prefix cache，每轮全价重发；
   // 移入稳定层后只有内容真正变化的那一轮打破一次缓存。查询相关的记忆字段
   // （事实/偏好/待办承诺，带 minRelevance 按轮过滤）仍留动态层。
+  //
+  // ⚠️ sessionRecap 不在此列（2026-09-23）：滚动 recap 随 thread 裁剪持续追加，
+  // 会话内几乎每轮都在变——放在稳定层等于每轮把整段稳定前缀打回全价
+  // （实测跨轮稳定前缀占比 78.5%，工具循环 cache 命中率仅 37%）。
+  // 已移回动态层【短期上下文】家族，只重发它自己。
   const persistentMemoryBlock = buildFamilyBlock(
-    "【持久记忆与回顾】",
+    "【持久记忆】",
     "（长期沉淀内容，会话内基本不变）",
     [
       { label: "持久记忆", content: m.memorySummary },
-      { label: "会话回顾", content: m.sessionRecap },
     ],
   );
   if (persistentMemoryBlock) stablePrefix.push(persistentMemoryBlock);
   if (m.skillIndex) stablePrefix.push(m.skillIndex);
   if (m.interestList) stablePrefix.push(m.interestList);
 
-  // ── 稳定层·说话方式（2026-09-11 风格分层化）──
-  // 底色全模式注入；伙伴面仅 chat 轮注入。放稳定层尾部：lane 切换时只打散
-  // 尾部+动态层的前缀缓存，前面的身份/记忆块不受影响。
-  stablePrefix.push(SPEAKING_BASE_BLOCK);
-  if (m.replyStyleMode !== "task") stablePrefix.push(buildCompanionStyleBlock());
+  // ── 稳定层·人格（2026-09-22 人格·终极版）──
+  // 静态人格块常驻（称呼/关系档变化才重算，前缀缓存友好）。动态 mood 块
+  // （personaMood，每轮单一状态）在 dynamicContext 声明后沉入动态层。
+  // 旧【说话方式·管家底色/伙伴面】两块（含调子菜单 few-shot 与破功禁句表）
+  // 已整体废弃，由 agent/persona-core 承担。
+  if (m.personaStatic) stablePrefix.push(m.personaStatic);
+  const personaMoodBlock = m.personaMood;
 
   // ── 动态层 ──
   const dynamicContext: string[] = [];
+  if (personaMoodBlock) dynamicContext.push(personaMoodBlock);
   if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
   if (m.scheduleSnapshot) dynamicContext.push(m.scheduleSnapshot);
   if (m.travelState) dynamicContext.push(m.travelState);
@@ -272,9 +220,12 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
     );
   }
   // 短期上下文家族（4→1）：工作记忆 / 最近对话 / 今日日志 / 今日摘要
+  // （2026-09-23 sessionRecap 并入本家族：随对话轮增长的内容必须沉底，
+  // 否则每轮打破稳定前缀缓存——见稳定层·慢变记忆处的注释）
   const shortTermBlock = buildFamilyBlock("【短期上下文】", SHORT_TERM_DISCLAIMER, [
     { label: "工作记忆", content: m.workingMemorySummary },
     { label: "最近对话", content: m.recentConversationHistory },
+    { label: "会话回顾", content: m.sessionRecap },
     { label: "今日日志", content: m.journalRecall },
     { label: "今日摘要", content: m.dailyDigest },
   ]);
@@ -296,7 +247,6 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
   if (m.conversationTimeline) dynamicContext.push(m.conversationTimeline);
-  if (m.proactiveAdvice) dynamicContext.push(m.proactiveAdvice);
   const replyStyleGuide = buildReplyStyleGuide(m);
   if (replyStyleGuide) dynamicContext.push(replyStyleGuide);
 

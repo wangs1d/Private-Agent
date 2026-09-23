@@ -8,7 +8,7 @@ import { taskHasOccurrenceInRange } from "./schedule-recurrence-expand.js";
 
 export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly" | "cron";
 export type ScheduleTaskKind = "reminder" | "action" | "weather_brief" | "agent_task";
-export type ScheduleTaskStatus = "active" | "paused" | "completed" | "cancelled";
+export type ScheduleTaskStatus = "active" | "paused" | "completed" | "cancelled" | "failed";
 export type ScheduleRunStatus = "success" | "failed";
 
 /**
@@ -65,6 +65,10 @@ export type ScheduleTaskRecord = {
   reminderMessage?: string;
   action?: ScheduleActionConfig;
   agentTask?: ScheduleAgentTaskConfig;
+  /** 连续失败计数（成功清零）：重试退避与死信停摆的判定依据 */
+  consecutiveFailures?: number;
+  /** 最近一次失败摘要（退避展示与死信通知用） */
+  lastError?: string;
   /** 事件时长（分钟）；0/缺省 = 时间点提醒（无区间）。用于冲突检测与「今日安排」区间展示。 */
   durationMinutes?: number;
   /** 提前量提醒（分钟数组，如 [15,5]）：到点前按各偏移各推一次，主触发前不打断。 */
@@ -178,6 +182,14 @@ export function taskEndMs(startMs: number, durationMinutes?: number): number {
  * 用户原话，锚点差异只会来自毫秒级解析抖动，超过该值即视为两次独立创建。
  */
 const DUPLICATE_RUN_AT_TOLERANCE_MS = 60_000;
+/** 失败重试退避：60s 起步指数退避，封顶 30min（agent_task 每次重试都是完整 LLM 回合） */
+const RETRY_BACKOFF_BASE_MS = 60_000;
+const RETRY_BACKOFF_MAX_MS = 30 * 60_000;
+/** 连续失败达到该次数 → 死信停摆（status=failed 停止调度 + 一次性通知），env 可调 */
+const DEAD_LETTER_AFTER_FAILURES = Math.max(
+  1,
+  Number.parseInt(process.env.SCHEDULE_TASK_MAX_CONSECUTIVE_FAILURES ?? "", 10) || 5,
+);
 
 /** 内容归一化：去全部空白 + 小写，跨创建路径（程序层/工具/HTTP）对同一句话稳定可比。 */
 function normalizeScheduleContent(value: string | undefined): string {
@@ -193,6 +205,12 @@ export class ScheduleTaskService {
   private reminderHandler?: ScheduleReminderHandler;
   private agentTaskHandler?: AgentTaskHandler;
   private taskChangeHandler?: ScheduleTaskChangeHandler;
+  /** 死信通知（进入 status=failed 时调用一次；bootstrap 接 proactivityHub 主动告知用户） */
+  private taskDeadLetterHandler?: (task: ScheduleTaskRecord) => void;
+
+  setTaskDeadLetterHandler(handler: (task: ScheduleTaskRecord) => void): void {
+    this.taskDeadLetterHandler = handler;
+  }
 
   private get persistPath(): string {
     return process.env.SCHEDULE_TASKS_FILE ?? join(process.cwd(), "data", "schedule-tasks.json");
@@ -582,13 +600,21 @@ export class ScheduleTaskService {
       run.error = e instanceof Error ? e.message : String(e);
     } finally {
       run.endedAt = new Date().toISOString();
-      const nextTaskState = this.computeNextTaskState(task, run.status === "success");
+      const nextTaskState = this.computeNextTaskState(task, run.status === "success", run.error);
       this.byTaskId.set(task.taskId, nextTaskState);
       const list = this.runsByTaskId.get(task.taskId) ?? [];
       list.push(run);
       this.runsByTaskId.set(task.taskId, list);
       await this.persist();
       await this.emitTaskChange("updated", nextTaskState);
+      if (run.status === "failed" && nextTaskState.status === "failed" && task.status !== "failed") {
+        // 刚进入死信（本次之前还在重试队列里）→ 通知一次，之后不再重复打扰
+        try {
+          this.taskDeadLetterHandler?.(nextTaskState);
+        } catch {
+          /* 通知失败不影响任务记账 */
+        }
+      }
       if (task.kind === "reminder" && run.status === "success" && this.reminderHandler) {
         const message = task.reminderMessage || task.description;
         await this.reminderHandler(nextTaskState, message);
@@ -599,6 +625,7 @@ export class ScheduleTaskService {
   private computeNextTaskState(
     task: ScheduleTaskRecord,
     wasSuccessful: boolean,
+    errorMessage?: string,
   ): ScheduleTaskRecord {
     const updated: ScheduleTaskRecord = {
       ...task,
@@ -608,9 +635,24 @@ export class ScheduleTaskService {
       firedPreReminderOffsets: undefined,
     };
     if (!wasSuccessful) {
-      updated.nextRunAt = new Date(Date.now() + 60_000).toISOString();
+      // 失败重试治理：指数退避（60s 起步，封顶 30min），连续失败达阈值进入死信
+      // （status=failed，停止调度）——此前是 60s 固定间隔无限重试，
+      // agent_task 每次重试都是完整 LLM 回合，持续失败等于无人值守空烧 token。
+      const fails = (task.consecutiveFailures ?? 0) + 1;
+      updated.consecutiveFailures = fails;
+      if (errorMessage) updated.lastError = errorMessage.slice(0, 300);
+      if (fails >= DEAD_LETTER_AFTER_FAILURES) {
+        updated.status = "failed";
+        updated.nextRunAt = null;
+        return updated;
+      }
+      const backoffMs = Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (fails - 1), RETRY_BACKOFF_MAX_MS);
+      updated.nextRunAt = new Date(Date.now() + backoffMs).toISOString();
       return updated;
     }
+    // 成功清零失败计数
+    if (task.consecutiveFailures !== undefined) updated.consecutiveFailures = 0;
+    if (task.lastError !== undefined) updated.lastError = undefined;
     if (updated.cronExpression) {
       updated.recurrence = "cron";
       updated.nextRunAt = this.computeNextCronRun(

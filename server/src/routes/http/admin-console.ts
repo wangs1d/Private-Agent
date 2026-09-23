@@ -1,5 +1,5 @@
-import { stat, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readFile, stat, readdir, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import net from "node:net";
 import os from "node:os";
 
@@ -9,6 +9,7 @@ import { z } from "zod";
 import { renderAdminConsolePage } from "./admin-console-page.js";
 import { adminAudit, readAdminAudit, requireAdmin } from "./admin-auth.js";
 import { feedbackStatusCounts } from "./feedback.js";
+import { renderInboxTemplate } from "../../services/inbox-templates.js";
 import { resolvePrimaryExternalModelBinding } from "../../external-model/resolve-provider.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -22,7 +23,7 @@ function localDay(ms: number): string {
 /**
  * 管理控制台：页面 + 管理数据 API。
  *
- * - GET  /admin                            控制台页面（概览/用户/支付/站内信/反馈/下载分发/系统）
+ * - GET  /admin                            控制台页面（概览/用户/站内信(发送+统计)/支付/反馈/下载分发/系统）
  * - GET  /admin/feedback                   兼容旧链接，重定向到控制台反馈标签
  * - GET  /api/admin/overview               业务聚合概览（注册 / 支付 / 站内信 / 反馈）
  * - GET  /api/admin/users                  用户注册数据（列表 + 新增趋势）
@@ -163,6 +164,59 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
     return reply.redirect("/admin#feedback");
   });
 
+  // ── 客户端版本清单（manifest）管理：后台"下载分发"页直接改 latest/url 发版 ──
+  // 与 routes/http/client-manifest.ts 的读取路径保持一致（cwd/config/client-manifest.json，
+  // 每次请求实时读取，写完即生效，无需重启）。
+  const manifestFilePath = (): string => join(process.cwd(), "config", "client-manifest.json");
+  const MANIFEST_FIELDS = ["latest", "minVersion", "url", "notes", "channel"] as const;
+
+  app.get("/api/admin/client-manifest", { preHandler: requireAdmin }, async () => {
+    try {
+      const manifest = JSON.parse(await readFile(manifestFilePath(), "utf8")) as Record<
+        string,
+        unknown
+      >;
+      return { ok: true, manifest };
+    } catch {
+      // 文件缺失/损坏：返回 null，前端按服务端内置默认展示
+      return { ok: true, manifest: null };
+    }
+  });
+
+  app.post("/api/admin/client-manifest", { preHandler: requireAdmin }, async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    let next: Record<string, unknown> = {};
+    try {
+      next = JSON.parse(await readFile(manifestFilePath(), "utf8")) as Record<string, unknown>;
+    } catch {
+      // 从空对象起步（首次保存会创建文件）
+    }
+    for (const field of MANIFEST_FIELDS) {
+      const value = body[field];
+      if (typeof value === "string") next[field] = value.trim();
+    }
+    for (const field of ["latest", "minVersion"] as const) {
+      const value = next[field];
+      if (typeof value !== "string" || !/^\d+(\.\d+){1,3}$/.test(value)) {
+        return reply
+          .code(400)
+          .send({ ok: false, message: `${field} 版本号格式须为 x.y.z（如 0.2.1）` });
+      }
+    }
+    const url = next.url;
+    if (typeof url !== "string" || (url !== "" && !/^https?:\/\//.test(url))) {
+      return reply.code(400).send({ ok: false, message: "url 须以 http(s):// 开头（留空表示暂不推送）" });
+    }
+    await mkdir(dirname(manifestFilePath()), { recursive: true });
+    await writeFile(manifestFilePath(), `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    await adminAudit(
+      "client_manifest.update",
+      { latest: next.latest, minVersion: next.minVersion, url: next.url, channel: next.channel },
+      request,
+    );
+    return { ok: true, manifest: next };
+  });
+
   app.get("/api/admin/overview", { preHandler: requireAdmin }, async () => {
     const mem = process.memoryUsage();
     const feedback = await feedbackStatusCounts();
@@ -269,6 +323,18 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
         { userId, displayName: record.displayName },
         request,
       );
+      // 状态变更事件自动通知：模板渲染站内信落盘（必达），失败不影响管理操作本身
+      if (deps.inboxService) {
+        const notice = renderInboxTemplate(
+          parsed.data.disabled ? "account.disabled" : "account.restored",
+          { displayName: record.displayName },
+        );
+        try {
+          await deps.inboxService.send({ actorId: userId, ...notice });
+        } catch (err) {
+          console.warn("[admin-console] account state inbox notify failed:", err);
+        }
+      }
       return { ok: true, account: record };
     },
   );

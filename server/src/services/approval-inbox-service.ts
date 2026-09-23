@@ -7,16 +7,18 @@
  *    AgentActivityStore 的主动动作台账（含已执行的代办性质动作）
  *  - 习惯自动化是 Agent 自己的习惯，**不进收件箱**（habit-loop 自身按
  *    authorization 梯度运行，仅失败降权后才回到确认路径）
- *  - task 来源的 awaiting_approval 依旧**不接入**——approveTask 仅翻状态、
- *    不恢复已退出的编排主循环，接入会造成「批了不跑」的假确认
+ *  - **task 来源的 awaiting_approval 已接入**（2026-09-19 P1-1）：此前不接的
+ *    理由是 approveTask 只翻状态不续跑（「批了不跑」的假确认）；编排器已
+ *    改为审批后用暂存 options 真续跑，接入安全。
  *
  * 只聚合既有挂起态，不新建状态、不重实现动作：resolve 委托
- * hub.resolveConfirmation（内部走既有执行路径），无死锁风险。
+ * hub.resolveConfirmation / orchestrator.approveTask（内部走既有执行路径）。
  */
 import type { PendingActionConfirmation, ProactivityHub } from "../proactivity/proactivity-hub.js";
 import type { AgentActivity } from "../proactivity/activity-store.js";
+import type { AgentTask, AgentTaskStatus } from "./agent-task-types.js";
 
-export type ApprovalSource = "proactivity";
+export type ApprovalSource = "proactivity" | "task";
 
 /** 收件箱条目（payload 只含可安全展示的小子集：不含工具参数等敏感内容） */
 export interface ApprovalInboxItem {
@@ -62,6 +64,15 @@ export type ApprovalActivityStoreLike = {
 export type ApprovalCatalogLike = {
   classify: (name: string) => { cls: { risk: string } } | null;
 };
+/** 与 AgentTaskStore 的查询面同形（awaiting_approval 任务拉取） */
+export type ApprovalTaskStoreLike = {
+  list: (filter?: { actorId?: string; status?: AgentTaskStatus }) => AgentTask[];
+};
+/** 与编排器的审批面同形（审批后真续跑） */
+export type ApprovalTaskOrchestratorLike = {
+  approveTask: (taskId: string, approvedBy: string) => boolean;
+  rejectTask: (taskId: string, rejectedBy: string) => boolean;
+};
 
 /** 兜底花钱判定：目录不可用时按工具名关键词 */
 const SPEND_TOOL_RE = /(^|\.)(book|pay|order|purchase)$|booking\.travel-pay|alipay|wechat_pay|ride_hailing|meituan|restaurant\.book|home_service\.book|shopping/i;
@@ -74,6 +85,9 @@ export class ApprovalInboxService {
       proactivityHub?: ApprovalHubLike | null;
       activityStore?: ApprovalActivityStoreLike | null;
       featureCatalog?: ApprovalCatalogLike | null;
+      /** 任务审批接入（2026-09-19 P1-1）：awaiting_approval 任务 + 审批动作 */
+      taskStore?: ApprovalTaskStoreLike | null;
+      taskOrchestrator?: ApprovalTaskOrchestratorLike | null;
       /** 主动动态拉取条数上限 */
       activityLimit?: number;
       /** 分级触达路由（resolve 时同步闭合关联注意力记录） */
@@ -94,6 +108,13 @@ export class ApprovalInboxService {
         );
       }
     }
+    // 任务面挂起审批（2026-09-19 P1-1）：goal 命中花钱文案即 spend
+    const task = this.deps.taskStore;
+    if (task) {
+      for (const t of task.list({ actorId, status: "awaiting_approval" })) {
+        items.push(toItemFromAgentTask(t));
+      }
+    }
     items.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     const activity = this.deps.activityStore?.list(actorId, this.deps.activityLimit ?? 20) ?? [];
     return { items, activity };
@@ -101,8 +122,8 @@ export class ApprovalInboxService {
 
   /**
    * 解析一条待确认（仅 spend 条目需要调用）：委托既有执行路径。
-   * @param source 目前只有 proactivity（habit/task 不接入，见文件头注释）
-   * @param id proactivity 的 confirmId
+   * @param source proactivity（主动性确认）| task（编排任务审批，2026-09-19 接入）
+   * @param id proactivity 的 confirmId 或任务 id
    * @param decision approve 执行 / decline 作废
    */
   async resolve(
@@ -111,6 +132,21 @@ export class ApprovalInboxService {
     id: string,
     decision: "approve" | "decline",
   ): Promise<ApprovalResolveResult> {
+    if (source === "task") {
+      const orchestrator = this.deps.taskOrchestrator;
+      if (!orchestrator) return { ok: false, detail: "任务审批通道未装配" };
+      const task = this.deps.taskStore?.list({ actorId, status: "awaiting_approval" })
+        .find((t) => t.id === id);
+      if (!task) return { ok: false, detail: "任务不存在或不在等待审批状态" };
+      const ok = decision === "approve"
+        ? orchestrator.approveTask(id, actorId)
+        : orchestrator.rejectTask(id, actorId);
+      if (!ok) return { ok: false, detail: "审批失败（任务状态已变化或续跑上下文丢失）" };
+      return {
+        ok: true,
+        detail: decision === "approve" ? "已批准，任务继续执行" : "已拒绝，任务已终止",
+      };
+    }
     if (source !== "proactivity") {
       return { ok: false, detail: `未知来源：${source}` };
     }
@@ -150,6 +186,24 @@ export function isSpendConfirmation(
     entry.steps.some((s) => isSpendTool(s.tool, catalog)) ||
     SPEND_TEXT_RE.test(entry.rationale)
   );
+}
+
+function toItemFromAgentTask(t: AgentTask): ApprovalInboxItem {
+  const spend = SPEND_TEXT_RE.test(t.goal);
+  return {
+    id: t.id,
+    source: "task",
+    kind: "task_approval",
+    title: spend
+      ? `需要确认：${t.goal.slice(0, 60)}`
+      : `任务等待审批：${t.goal.slice(0, 60)}`,
+    summary: t.goal,
+    actorId: t.actorId,
+    createdAt: t.createdAt,
+    expiresAt: null,
+    spend,
+    payload: { taskId: t.id, status: t.status },
+  };
 }
 
 function toItemFromProactivity(

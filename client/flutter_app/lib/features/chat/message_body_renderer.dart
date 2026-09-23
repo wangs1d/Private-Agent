@@ -27,6 +27,7 @@ import "structured_assistant_message_body.dart";
 /// - `[RENDER_AS:xxx]` 显式展示形式路由（brief / structured / image_result /
 ///   data_brief / video）
 /// - 内容摘要卡与 markdown 内联文本
+/// - `followUpPrompts`「接下来你可以」接续建议胶囊（仅回调接线方展示）
 Widget buildMessageBody(
   BuildContext context,
   ColorScheme cs,
@@ -42,6 +43,127 @@ Widget buildMessageBody(
 
   /// 是否处于打字机打字中：光标常驻，闪烁节奏由渲染层的
   /// [_BlinkingCursor] 自带（480ms），布局不随闪烁跳动。
+  bool typewriterCursor = false,
+
+  /// 「接下来你可以」接续建议点击回调（传入即作为新消息发送）。
+  /// null 时不渲染建议行（未接线方/纯展示场景）。
+  void Function(String prompt)? onFollowupTap,
+}) {
+  final Widget body = _buildAssistantBodyInner(
+    context,
+    cs,
+    message,
+    isUser: isUser,
+    contentSummary: contentSummary,
+    onUserAction: onUserAction,
+    typewriterRawText: typewriterRawText,
+    typewriterCursor: typewriterCursor,
+  );
+  if (isUser || onFollowupTap == null) return body;
+  final List<String> followUps = message.followUpPrompts ?? const <String>[];
+  if (followUps.isEmpty) return body;
+  // 时机门：打字机逐字 reveal 未完成时先不出建议行。done 载荷（携带
+  // followups）先于 reveal 结束到达，若立即渲染会「正文还在打字、建议已
+  // 挂出来」；reveal 结束后本组件随 TypewriterReveal 通知重建，此处放行。
+  if (typewriterRawText != null) return body;
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: <Widget>[
+      body,
+      const SizedBox(height: AppTypography.space3),
+      _buildFollowUpRow(context, cs, followUps, onFollowupTap),
+    ],
+  );
+}
+
+/// 「接下来你可以」接续建议行：灰色小标题 + 换行平铺胶囊，黑白极简。
+/// 时机性内容（不持久化），仅当轮回复下发的 followups 非空时出现。
+Widget _buildFollowUpRow(
+  BuildContext context,
+  ColorScheme cs,
+  List<String> prompts,
+  void Function(String prompt) onFollowupTap,
+) {
+  final TextStyle labelStyle =
+      (Theme.of(context).textTheme.labelMedium ?? const TextStyle()).copyWith(
+    fontSize: AppTypography.secondary,
+    height: AppTypography.uiLineHeight,
+    color: cs.onSurfaceVariant,
+  );
+  final TextStyle promptStyle =
+      (Theme.of(context).textTheme.bodyMedium ?? const TextStyle()).copyWith(
+    fontSize: AppTypography.body,
+    height: AppTypography.uiLineHeight,
+    color: cs.onSurface.withValues(alpha: 0.85),
+  );
+
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: <Widget>[
+      Text("接下来你可以", style: labelStyle),
+      const SizedBox(height: AppTypography.space2),
+      Wrap(
+        spacing: AppTypography.space2,
+        runSpacing: AppTypography.space2,
+        children: <Widget>[
+          for (final String prompt in prompts)
+            _FollowUpPill(
+              prompt: prompt,
+              style: promptStyle,
+              borderColor: cs.outlineVariant,
+              onTap: () => onFollowupTap(prompt),
+            ),
+        ],
+      ),
+    ],
+  );
+}
+
+class _FollowUpPill extends StatelessWidget {
+  const _FollowUpPill({
+    required this.prompt,
+    required this.style,
+    required this.borderColor,
+    required this.onTap,
+  });
+
+  final String prompt;
+  final TextStyle style;
+  final Color borderColor;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: borderColor),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppTypography.space4, vertical: AppTypography.space2),
+          child: Text(prompt, style: style),
+        ),
+      ),
+    );
+  }
+}
+
+Widget _buildAssistantBodyInner(
+  BuildContext context,
+  ColorScheme cs,
+  ChatMessage message, {
+  required bool isUser,
+  ContentSummaryParseResult? contentSummary,
+  void Function(AgentResultAction action, {required AgentResultData cardData})?
+      onUserAction,
+  String? typewriterRawText,
   bool typewriterCursor = false,
 }) {
   if (isUser) {

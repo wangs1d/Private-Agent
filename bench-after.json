@@ -1,0 +1,42 @@
+{
+ "S1_systemPrompt": {
+  "stableChars": 5354,
+  "stableTokens": 5171,
+  "dynamicChars": 1178,
+  "dynamicTokens": 1325,
+  "fullChars": 6534,
+  "fullTokens": 6496,
+  "crossTurnStableRatio": 0.931,
+  "stableLayerCrossTurnEqual": true
+ },
+ "S3_chat_lane_visible": {
+  "visibleCount": 22,
+  "visibleChars": 8582,
+  "visibleTokens": 2450,
+  "deferredCount": 91
+ },
+ "S2_task_lane_light_visible(router_first)": {
+  "visibleCount": 2,
+  "visibleChars": 920,
+  "visibleTokens": 197,
+  "deferredCount": 111
+ },
+ "S2_task_lane_pro_visible(router_first)": {
+  "visibleCount": 2,
+  "visibleChars": 920,
+  "visibleTokens": 197,
+  "deferredCount": 111
+ },
+ "S4_proactive": {
+  "evalPromptChars": 3029,
+  "evalPromptTokens": 3095,
+  "evalPromptSlimMediumChars": 978,
+  "evalPromptSlimMediumTokens": 707,
+  "evalPromptSlimHighChars": 2087,
+  "evalPromptSlimHighTokens": 2002,
+  "simulatedWindows": 100,
+  "llmCallsBefore": 100,
+  "llmCallsAfter": 26,
+  "triageAvailable": true
+ }
+}

@@ -16,6 +16,7 @@ add_executable(${BINARY_NAME} WIN32
   "desktop_notification_window.cpp"
   "desktop_screen_capture.cpp"
   "flutter_window.cpp"
+  "glass_notify_window.cpp"
   "incoming_call_window.cpp"
   "main.cpp"
   "outgoing_call_window.cpp"

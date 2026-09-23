@@ -13,6 +13,8 @@
  *     对话面误判转任务（agent-core），路由不需要一次判对。
  */
 
+import { TASK_PLANE_FALLBACK_BUDGET } from "./intent-router.js";
+
 /** 执行车道：chat=对话面（直答/前台工具直办）；task=任务面（后台执行）。 */
 export type LlmExecutionMode = "chat" | "task";
 
@@ -61,7 +63,12 @@ export function planFieldsForLane(lane: LlmExecutionMode): {
   tier: TurnTier;
 } {
   return lane === "task"
-    ? { plane: "task", capabilities: ["full"], budget: 2, tier: "flash" }
+    ? {
+        plane: "task",
+        capabilities: ["full"],
+        budget: TASK_PLANE_FALLBACK_BUDGET,
+        tier: "flash",
+      }
     : { plane: "chat", capabilities: [], budget: 0, tier: "flash" };
 }
 

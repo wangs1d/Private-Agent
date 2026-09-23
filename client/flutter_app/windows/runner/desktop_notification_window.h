@@ -55,6 +55,9 @@ class DesktopNotificationWindow {
 
   // ── 绘制 ──
   void Paint(HWND hwnd, HDC hdc);
+  // 双缓冲绘制：Paint 先画进内存位图再一次性 BitBlt 到目标 DC，
+  // 避免 GDI+ 分层直画被 DWM 采样到中间态（进度条 tick 时底部闪烁）
+  void PaintBuffered(HWND hwnd, HDC hdc);
   void DrawBellGlyph(HDC hdc, const RECT& rc, COLORREF color);
   int  MeasureButtonWidth(HDC hdc, const std::wstring& label) const;
   int  MeasureMessageHeight(HDC hdc) const;

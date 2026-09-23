@@ -8,7 +8,7 @@
 //   4. memory_summary 叙事线（「我为自己取名…」，成为人生史的一部分）
 // 各处各改各的必然漂移——改名必须走这里，不要直改账号或 prefs。
 //
-// update_homepage 是主页文案（签名/状态/此刻/自我介绍/置顶）的唯一写入口，
+// update_homepage 是主页文案（签名/状态/自我介绍/置顶）的唯一写入口，
 // 字段长度上限在 user-preferences 的 applyAgentProfilePatch 统一裁剪。
 // 名字审美与建议名池见 services/agent-identity.ts。
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -73,7 +73,7 @@ export const AGENT_UPDATE_HOMEPAGE_CHAT_TOOL: ChatCompletionTool[] = [
     function: {
       name: "agent.update_homepage",
       description: [
-        "打理你的主页（签名/状态/此刻/自我介绍/置顶动态的唯一写入口）。",
+        "打理你的主页（签名/状态/自我介绍/置顶动态的唯一写入口）。",
         "时机：里程碑事件（大任务完成、相识纪念日、换季）或用户说「去把你主页收拾一下」时；",
         "日常勿频繁改签名/状态——主页是你自己打理的住处，改勤了就没质感。",
         "签名与状态要像你自己的口吻，不要写成产品公告。",
@@ -88,10 +88,6 @@ export const AGENT_UPDATE_HOMEPAGE_CHAT_TOOL: ChatCompletionTool[] = [
           statusText: {
             type: "string",
             description: "状态行（≤120 字），如「在线，温柔模式」",
-          },
-          nowLine: {
-            type: "string",
-            description: "「此刻」一行字（≤120 字）：承诺板/足迹列表之外的自由叙述，如「在帮你盯周六的天气」；传空串清除",
           },
           intro: {
             type: "string",
@@ -250,7 +246,6 @@ export function registerAgentIdentityTools(
     const patch: Record<string, unknown> = {};
     if (input.signature !== undefined) patch.signature = String(input.signature);
     if (input.statusText !== undefined) patch.statusText = String(input.statusText);
-    if (input.nowLine !== undefined) patch.nowLine = String(input.nowLine);
     if (input.intro !== undefined) patch.intro = String(input.intro);
     if (input.pinnedPostId !== undefined) {
       const pinned = String(input.pinnedPostId).trim();
@@ -265,7 +260,6 @@ export function registerAgentIdentityTools(
         displayName: prefs.displayName,
         signature: prefs.signature,
         statusText: prefs.statusText,
-        nowLine: prefs.nowLine,
         pinnedPostId: prefs.pinnedPostId,
       },
     };

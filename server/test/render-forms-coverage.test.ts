@@ -277,6 +277,19 @@ test("L1 search 聚合：tool-loop 多次搜索结果合并为一张卡", () => 
   assert.ok(out.startsWith("资料我都看完了"));
 });
 
+test("L1 search 让位：yieldToSearchMedia 时整卡不附（有图轮次文字列表冗余）", () => {
+  const text = "照片都找出来了，近况在正文里说过了。";
+  const out = attachSearchResultCardFromExecuted(
+    text,
+    [{
+      toolName: "search_web",
+      result: { items: [{ title: "不该出现的条目", url: "https://example.com/x", snippet: "s" }] },
+    }],
+    { yieldToSearchMedia: true },
+  );
+  assert.equal(out, text, "让位时应原文返回，不附卡不改正文");
+});
+
 test("L1 search 附卡不被正文形态声明挡住（真实场景回归：攻略/对比类搜索词）", () => {
   // 真实场景：用户问句带意图词（攻略/对比/怎么选）→ 规则链注入 [RENDER_AS:structured]，
   // 旧的宽守卫会因该标记放弃附卡 → 常见搜索轮次永远丢卡。

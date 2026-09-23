@@ -15,8 +15,8 @@
 //   对某类取所有范例的最大覆盖率；≥2 个重叠特征且覆盖率达标才算命中。
 //   特征 = 中文相邻 2-gram + 英文/数字 token（与项目词法检索同型）。
 
-/** 触发范例类别（与 ConversationProactiveHookKind 对齐） */
-export type TriggerExemplarKind = "care" | "followup";
+/** 触发范例类别（与 ConversationProactiveHookKind 对齐；care 类已随关怀下线删除） */
+export type TriggerExemplarKind = "followup";
 
 /** 覆盖率命中阈值：查询特征被范例覆盖的比例 */
 const MATCH_COVERAGE_THRESHOLD = 0.35;
@@ -32,23 +32,6 @@ const MIN_LEARN_TEXT_LEN = 4;
  * 后续增长完全来自 LLM 决策蒸馏（learn），不再人工扩充。
  */
 const SEED_EXEMPLARS: Record<TriggerExemplarKind, string[]> = {
-  care: [
-    "最近加班有点撑不住了",
-    "感觉最近压力好大",
-    "快被工作榨干了",
-    "身心俱疲",
-    "好想休息一下",
-    "这几天都没睡好",
-    "整个人都不好了",
-    "心情有点低落",
-    "什么都不想干",
-    "感觉快崩溃了",
-    "头疼得厉害",
-    "状态特别差",
-    "好压抑",
-    "最近很丧",
-    "心态有点崩",
-  ],
   followup: [
     "帮我留意一下那个通知",
     "等他回复我",
@@ -96,7 +79,6 @@ type MatcherState = {
 
 const state: MatcherState = {
   exemplars: {
-    care: [...SEED_EXEMPLARS.care],
     followup: [...SEED_EXEMPLARS.followup],
   },
   learnedFingerprints: new Set(),
@@ -119,7 +101,7 @@ export function detectSemanticHook(text: string | undefined | null): SemanticHoo
   const querySet = new Set(queryFeats);
 
   let best: SemanticHookMatch | null = null;
-  for (const kind of ["care", "followup"] as const) {
+  for (const kind of ["followup"] as const) {
     for (const ex of state.exemplars[kind]) {
       let overlap = 0;
       for (const f of extractTextFeatures(ex)) {
@@ -154,10 +136,6 @@ export function learnExemplar(kind: TriggerExemplarKind, text: string): boolean 
 /** 范例统计（诊断/测试） */
 export function exemplarStats(): Record<TriggerExemplarKind, { total: number; learned: number }> {
   return {
-    care: {
-      total: state.exemplars.care.length,
-      learned: state.exemplars.care.length - SEED_EXEMPLARS.care.length,
-    },
     followup: {
       total: state.exemplars.followup.length,
       learned: state.exemplars.followup.length - SEED_EXEMPLARS.followup.length,
@@ -167,7 +145,6 @@ export function exemplarStats(): Record<TriggerExemplarKind, { total: number; le
 
 /** 重置为种子范例（测试隔离用） */
 export function resetExemplars(): void {
-  state.exemplars.care = [...SEED_EXEMPLARS.care];
   state.exemplars.followup = [...SEED_EXEMPLARS.followup];
   state.learnedFingerprints.clear();
 }

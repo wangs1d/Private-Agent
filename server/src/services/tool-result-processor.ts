@@ -1234,7 +1234,7 @@ export type MediaCardItem = {
  * 由 `chat.assistant_done` 作为独立 `mediaCards` 字段下发，前端直接渲染。
  * LLM 只负责"要不要搜图"，不负责"图片怎么展示"。
  *
- * 支持的工具：search_images, search_images_batch, search_videos
+ * 支持的工具：search_images, search_images_batch, search_videos, image.generate
  * 返回空数组 = 无媒体卡片（不阻塞前端渲染）。
  *
  * 对比分组：search_images_batch 返回的 items 带 compareSide/compareLabel/
@@ -1245,6 +1245,22 @@ export function extractMediaCards(
   toolName: string | undefined,
   toolResult: Record<string, unknown> | undefined,
 ): MediaCardItem[] {
+  // 图像生成（image.generate）：生成图与搜索图走同一条结构化媒体卡链路。
+  // 此前生成图 URL 只存在于工具结果文本里，LLM 转述时不落正文（或落了也被
+  // echo 剥离）→ 用户只看到「画好了」却见不到图。这里确定性建卡：
+  // done 聚合 / renderBlocks / chat.media_ready 早推全部复用这一条路径。
+  if (toolName === "image.generate") {
+    const imageUrl = String(toolResult?.imageUrl ?? "").trim();
+    if (!imageUrl) return [];
+    return [
+      {
+        type: "image",
+        title: "生成的图片",
+        thumbnailUrl: imageUrl,
+        mediaUrl: imageUrl,
+      },
+    ];
+  }
   if (
     toolName !== "search_images" &&
     toolName !== "search_images_batch" &&

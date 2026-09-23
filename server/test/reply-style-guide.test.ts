@@ -6,6 +6,10 @@ import {
   GLOBAL_MEMORY_RULE,
 } from "../src/agent/prompt-assembler.js";
 import {
+  buildPersonaMoodBlock,
+  buildPersonaStaticBlock,
+} from "../src/agent/persona-core.js";
+import {
   buildToneGuidance,
   defaultEmotionState,
 } from "../src/services/user-personalization/emotion-tone.js";
@@ -25,58 +29,37 @@ function sectionsOf(memory: AgentPromptMemoryContext) {
   return assembleLayeredSections(memory);
 }
 
-test("chat 模式注入【说话方式·管家底色】+【说话方式·伙伴面】（调子菜单 few-shot + 禁句）", () => {
-  const { stablePrefix, dynamicContext } = sectionsOf(chatMemory());
-  const base = stablePrefix.find((b) => b.startsWith("【说话方式·管家底色】"));
-  const companion = stablePrefix.find((b) => b.startsWith("【说话方式·伙伴面】"));
-  assert.ok(base, "管家底色块必须注入");
-  assert.ok(companion, "伙伴面块必须注入");
-  // 底色：私人管家定位 + 称呼礼仪（指定称呼优先 + 允许起小名 + 不连名带姓）
-  assert.equal(base.includes("私人管家"), true);
-  assert.equal(base.includes("先给结论再给理由"), true);
-  assert.equal(base.includes("自然长出一个小名"), true);
-  assert.equal(base.includes("不连名带姓直呼大名"), true);
-  // 伙伴面：调子菜单 few-shot、收放开关、破功禁句
-  assert.equal(companion.includes("调子菜单"), true);
-  assert.equal(companion.includes("沉稳简洁"), true);
-  assert.equal(companion.includes("坦诚"), true);
-  assert.equal(companion.includes("幽默俏皮"), true);
-  assert.equal(companion.includes("调侃损友"), true);
-  assert.equal(companion.includes("抬杠"), true);
-  assert.equal(companion.includes("嘲讽阴阳"), true);
-  assert.equal(companion.includes("暗示"), true);
-  assert.equal(companion.includes("收放开关"), true);
-  assert.equal(companion.includes("破功禁句"), true);
-  // 动态层只承载每轮适配小节
-  const guide = dynamicContext.find((b) => b.startsWith("【本轮说话适配】"));
-  assert.ok(guide, "【本轮说话适配】 block must be present");
-  assert.equal(guide.includes("模式："), true);
-  assert.equal(guide.includes("语气："), true);
+test("chat 模式注入【人格·静态】稳定层（2026-09-22 人格·终极版重塑）", () => {
+  const { stablePrefix } = sectionsOf(
+    chatMemory({ personaStatic: buildPersonaStaticBlock({ tier: 1 }) }),
+  );
+  const persona = stablePrefix.find((b) => b.startsWith("【人格·静态】"));
+  assert.ok(persona, "人格静态块必须注入稳定层");
+  assert.equal(persona.includes("私人管家兼搭档"), true);
+  assert.equal(persona.includes("办成事 > 说话有人味儿 > 一切"), true);
+  assert.equal(persona.includes("R1（熟悉）"), true);
+  // 旧【说话方式】两块（管家底色/伙伴面）整体废弃
+  assert.equal(stablePrefix.some((b) => b.startsWith("【说话方式")) , false);
 });
 
-test("task 模式不注入伙伴面（交付不受闲聊调子约束），管家底色保留", () => {
-  const { stablePrefix, dynamicContext } = sectionsOf(chatMemory({ replyStyleMode: "task" }));
-  assert.equal(
-    stablePrefix.some((b) => b.startsWith("【说话方式·伙伴面】")),
-    false,
-    "task 轮不得注入伙伴面",
+test("task 模式 mood 由 personaMood 承担（serious），适配块只剩模式行", () => {
+  const { stablePrefix, dynamicContext } = sectionsOf(
+    chatMemory({
+      personaMood: buildPersonaMoodBlock("serious"),
+      toneGuidance: "本轮长度控制：以短回复为主。",
+    }),
   );
-  const base = stablePrefix.find((b) => b.startsWith("【说话方式·管家底色】"));
-  assert.ok(base, "管家底色全模式注入");
-  // 模式人格与语气行保留（任务交付仍感知用户情绪与关系边界）
+  assert.equal(
+    stablePrefix.some((b) => b.startsWith("【说话方式")), false,
+  );
+  const mood = dynamicContext.find((b) => b.startsWith("【人格·状态"));
+  assert.ok(mood, "serious mood 应沉动态层");
+  assert.ok(mood.includes("零调侃"));
+  // 语气/情绪/关系行不再进【本轮说话适配】（mood 块已承担）
   const guide = dynamicContext.find((b) => b.startsWith("【本轮说话适配】"));
   assert.ok(guide);
   assert.equal(guide.includes("模式："), true);
-  assert.equal(guide.includes("语气："), true);
-});
-
-test("replyStyleMode 缺省按 chat 处理（向后兼容，注入伙伴面）", () => {
-  const { replyStyleMode: _omit, ...legacy } = chatMemory();
-  const { stablePrefix } = sectionsOf(legacy as AgentPromptMemoryContext);
-  assert.equal(
-    stablePrefix.some((b) => b.startsWith("【说话方式·伙伴面】")),
-    true,
-  );
+  assert.equal(guide.includes("语气："), false);
 });
 
 test("适配小节全空时不再输出空壳【本轮说话适配】块", () => {

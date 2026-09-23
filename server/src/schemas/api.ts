@@ -404,6 +404,38 @@ export const inboxReadBodySchema = z.object({
   ids: z.array(z.string().min(1)).max(500).optional(),
 });
 
+// ── 管理后台「消息发送」（收件人解析在服务端，见 routes/http/admin-inbox.ts）──
+
+export const adminInboxSendBodySchema = z
+  .object({
+    title: z.string().min(1).max(120),
+    body: z.string().min(1).max(4000),
+    kind: z.string().min(1).max(80).optional(),
+    importance: z.enum(["low", "normal", "high", "critical"]).optional(),
+    /** all = 全体用户；users = 指定用户列表；group = 内置分组 */
+    targetType: z.enum(["all", "users", "group"]),
+    /** targetType=users 时必填 */
+    userIds: z.array(z.string().min(1)).max(500).optional(),
+    /** targetType=group 时必填（active/disabled/new7d） */
+    group: z.enum(["active", "disabled", "new7d"]).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.targetType === "users" && (!data.userIds || data.userIds.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["userIds"],
+        message: "指定用户发送时 userIds 不能为空",
+      });
+    }
+    if (data.targetType === "group" && !data.group) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["group"],
+        message: "分组发送时须选择分组",
+      });
+    }
+  });
+
 export const chatScheduleDraftBodySchema = z.object({
   sessionId: z.string().min(1),
   text: z.string().min(1).max(4000),

@@ -49,6 +49,51 @@ export const FALLBACK_TEXT_BUSY = () => pickVariant(FALLBACK_BUSY_VARIANTS);
 /** 后台任务失败（直接给用户，通过 WS 推送） */
 export const FALLBACK_TEXT_BACKGROUND_FAILED = () => pickVariant(FALLBACK_BACKGROUND_FAILED_VARIANTS);
 
+// ── 任务面结构化失败回执（2026-09-19 P0-2）──
+// 旧版失败只回一句通用变体，用户不知道「为什么败/下一步能干嘛」；本构造器把
+// 原因归类到类别级（网络/权限/需确认），带目标回显与下一步指引。原始错误
+// （stack/路径/key）仍绝不透出（设计原则 2），命中与否只取决于类别正则。
+
+const TASK_FAILURE_REASON_RULES: ReadonlyArray<{
+  reason: string;
+  next: string;
+  patterns: RegExp[];
+}> = [
+  {
+    reason: "网络或服务暂时不可用",
+    next: "过一会儿跟我说一声「继续」，我就接着办。",
+    patterns: [
+      /timed?\s?out/i, /econn/i, /enotfound/i, /fetch\s?failed/i, /socket hang up/i,
+      /rate\s?limit/i, /\b429\b/, /\b502\b/, /\b503\b/, /超时/, /限流/, /网络/, /繁忙/,
+    ],
+  },
+  {
+    reason: "需要的权限还没开通",
+    next: "可能需要你在设置里开通对应权限，或明确授权我代你操作。",
+    patterns: [/permission/i, /unauthorized/i, /forbidden/i, /denied/i, /\b401\b/, /\b403\b/, /权限/, /未授权/],
+  },
+  {
+    reason: "这一步需要你确认才能继续",
+    next: "稍后确认一下，我就能接着往下办。",
+    patterns: [/awaiting.?approval/i, /approval/i, /需要确认/, /等待确认/, /请确认/],
+  },
+];
+
+/** 任务面失败的结构化用户文案：目标回显 + 类别原因 + 下一步指引。 */
+export function buildTaskFailureNotice(goal: string, err?: unknown): string {
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  const trimmedGoal = goal.trim().slice(0, 40);
+  if (message) {
+    const hit = TASK_FAILURE_REASON_RULES.find((rule) =>
+      rule.patterns.some((p) => p.test(message)),
+    );
+    if (hit) {
+      return `「${trimmedGoal}」这件事没办成（${hit.reason}）。${hit.next}`;
+    }
+  }
+  return `「${trimmedGoal}」这件事没办成。我换个方式、或者你补充点要求，我再试一次。`;
+}
+
 /** 子 Agent 委派失败（注入到 LLM 上下文） */
 export const FALLBACK_TEXT_SUBAGENT_FAILED =
   "子任务执行没成功，可能是工具暂时不可用或信息不足。请向用户说明，并给出你能确定的部分或建议换个方式。";

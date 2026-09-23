@@ -20,6 +20,7 @@
  */
 
 import type { ProactiveImportance } from "./pipeline-types.js";
+import { classifyToolRisk } from "../services/tool-risk.js";
 
 // ============================================================
 // 输入类型
@@ -241,8 +242,11 @@ export function deriveRiskFromSteps(
 
   for (const step of steps) {
     const tool = step.tool ?? "";
-    if (IRREVERSIBLE_TOOL_RE.test(tool)) reversible = false;
-    if (FINANCIAL_TOOL_RE.test(tool)) financialImpact = "high";
+    // 权威分级优先（tool-risk.ts 单一口径）：money→金融高档、irreversible→不可逆；
+    // 正则族保留作兜底（覆盖未入表的新工具名模式）
+    const riskClass = classifyToolRisk(tool);
+    if (riskClass === "irreversible" || IRREVERSIBLE_TOOL_RE.test(tool)) reversible = false;
+    if (riskClass === "money" || FINANCIAL_TOOL_RE.test(tool)) financialImpact = "high";
     if (SENSITIVE_DATA_TOOL_RE.test(tool) && dataSensitivity === "none") dataSensitivity = "personal";
     if (THIRD_PARTY_TOOL_RE.test(tool)) thirdPartyImpact = true;
     if (financialImpact !== "high") {

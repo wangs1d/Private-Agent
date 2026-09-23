@@ -40,6 +40,32 @@ class ApiConfig {
     defaultValue: "session-mvp-001",
   );
 
+  static const String _updateManifestUrlFromEnv =
+      String.fromEnvironment("UPDATE_MANIFEST_URL");
+
+  /// 版本清单（更新检查）地址。byok 捆绑形态下 [httpBase] 指向本地 runtime
+  /// （127.0.0.1），而版本控制面在云端 ECS——发版构建必须烤入：
+  /// `--dart-define=UPDATE_MANIFEST_URL=http://<ECS>:3000`。
+  /// 未配置时回落 [httpBase]（单机部署/开发联调形态，两者同源）。
+  static String get updateManifestUrl {
+    if (_updateManifestUrlFromEnv.isNotEmpty) return _updateManifestUrlFromEnv;
+    return httpBase;
+  }
+
+  static const String _controlPlaneFromEnv = String.fromEnvironment(
+    "CONTROL_PLANE_URL",
+  );
+
+  /// 控制面（管理后台所在服务器）：反馈、站内信等运营数据走这里。
+  /// 捆绑形态下若仍指向本地 runtime，用户反馈只会落进本机数据库，
+  /// 管理后台永远看不到——发版构建必须烤入：
+  /// `--dart-define=CONTROL_PLANE_URL=http://<ECS>:3000`。
+  /// 未配置时回落 [httpBase]（单机部署/开发联调形态，两者同源，行为不变）。
+  static String get controlPlaneBase {
+    final String c = _controlPlaneFromEnv.trim();
+    return c.isNotEmpty ? c : httpBase;
+  }
+
   /// 稳定用户 id（登录账号等）；非空时后端 `boundActorId`、世界/记忆/配额均优先用此值。
   static const String userId = String.fromEnvironment(
     "USER_ID",

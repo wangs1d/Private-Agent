@@ -8,6 +8,7 @@ import "package:url_launcher/url_launcher.dart";
 
 import "../../core/models/chat_models.dart";
 import "../../core/models/turn_state.dart";
+import "../../core/db/local_history_store.dart";
 import "../../core/presentation/agent_avatar_catalog.dart";
 import "../../core/presentation/voice_call_ui_labels.dart";
 import "../../core/utils/agent_result_parser.dart";
@@ -21,8 +22,8 @@ import "agent_profile_page.dart" show AgentProfileData;
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "typewriter_reveal.dart";
-import "emotion_ball_view.dart";
 import "mood_driven_emotion_ball.dart";
+import "chat_suggestions.dart";
 import "../../core/presentation/emotion_ball_ids.dart";
 
 /// 输入框内图标按钮的视觉强度
@@ -47,8 +48,6 @@ class ChatPage extends StatefulWidget {
     this.onRemoveGalleryImage,
     this.resolveUserGalleryImages,
     this.failedUserMessageIds = const <String>{},
-    this.onEnterVoiceMode,
-    this.onOpenVoiceDuplex,
     this.isAgentProcessing = false,
     this.agentStatusLine,
     this.agentStatusPercent,
@@ -79,6 +78,10 @@ class ChatPage extends StatefulWidget {
     /// 「选择型卡片」按钮点击回调(可选;null 时仅在 UI 上锁定按钮)
     this.onUserAction,
 
+    /// 光球头像单击 → 打开 Agent 主页（桌面宽屏走右侧双栏面板；
+    /// null 时退化为全屏路由页，供移动端/未接线调用方兜底）
+    this.onOpenAgentHome,
+
     /// 后台进行中的任务数（任务面回执聚合，状态带展示「N 个任务后台进行中」）
     this.backgroundTaskCount = 0,
 
@@ -89,12 +92,28 @@ class ChatPage extends StatefulWidget {
     /// 命中的用户气泡在时间行显示「排队中」徽标，服务端开始处理该条
     /// （chat.turn_started 晋级）后由父组件移出集合，徽标随之消失。
     this.queuedMessageIds = const <String>{},
+
+    /// 父级聚合的 Agent 空闲态：非处理中、无工具调用、无后台任务。
+    /// 「为你推荐」横滑条仅在空闲时出现，忙碌时隐藏（位置让给状态条）。
+    this.agentIdle = true,
+
+    /// 本地历史存储：「为你推荐」出现时机治理（频控/已知能力集合）的
+    /// 持久化通道；null 时横滑条退化为纯内存治理。
+    this.localStore,
   });
 
   final List<ChatMessage> messages;
   final TextEditingController controller;
   final FocusNode? inputFocusNode;
   final VoidCallback onSend;
+
+  /// 父级聚合的 Agent 空闲态：非处理中、无工具调用、无后台任务。
+  /// 「为你推荐」横滑条仅在空闲时出现，忙碌时隐藏（位置让给状态条）。
+  final bool agentIdle;
+
+  /// 本地历史存储：「为你推荐」出现时机治理（频控/已知能力集合）的
+  /// 持久化通道；null 时横滑条退化为纯内存治理。
+  final LocalHistoryStore? localStore;
 
   /// 用户在「选择型卡片」底部按钮上点击某个 action 的回调。
   /// 父级负责把 action 转成 user message 并发送到后端。
@@ -112,6 +131,10 @@ class ChatPage extends StatefulWidget {
   final AgentProfileData? agentProfile;
   final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
 
+  /// 光球头像单击 → 打开 Agent 主页（桌面宽屏走右侧双栏面板；
+  /// null 时退化为全屏路由页，供移动端/未接线调用方兜底）。
+  final VoidCallback? onOpenAgentHome;
+
   /// 已选相册图（待发）的字节：输入框上方渲染缩略图，让用户确认到底选了哪些图。
   final List<Uint8List> galleryPendingImages;
   final VoidCallback? onPickGalleryImage;
@@ -125,12 +148,6 @@ class ChatPage extends StatefulWidget {
 
   /// 发送失败（WS 未就绪被拒）的用户消息 id 集合，气泡头部显示「未发出」徽标。
   final Set<String> failedUserMessageIds;
-
-  /// 进入语音模式的回调
-  final VoidCallback? onEnterVoiceMode;
-
-  /// 打开 App 内实时语音（全双工 duplex）会话页的回调
-  final VoidCallback? onOpenVoiceDuplex;
 
   /// Agent是否正在处理中（流式输出）
   final bool isAgentProcessing;
@@ -1110,9 +1127,16 @@ class _ChatPageState extends State<ChatPage>
   }
 
   void _showAgentProfilePopover(GlobalKey avatarKey) {
-    // 头像单击 → 进入 Agent 主页（一级路由页）。
+    // 头像单击 → 进入 Agent 主页。
+    // 桌面宽屏由父级路由到右侧 Dock 双栏面板（聊天在左、主页在右），
+    // 回调未接线（移动端等）时退化为原来的全屏路由页。
     // 原 Windows 原生 320×160 小弹窗退役：其信息（名字/签名/状态）只是主页
     // header 的子集，点「人」进「家」动线更自然，也不再维护独立 HWND+GDI 窗口。
+    final VoidCallback? open = widget.onOpenAgentHome;
+    if (open != null) {
+      open();
+      return;
+    }
     unawaited(AgentHomePage.show(context));
   }
 
@@ -1159,6 +1183,7 @@ class _ChatPageState extends State<ChatPage>
       onDeleteConfirm: _confirmDeleteSelection,
       onDeleteCancel: _cancelDeleteMode,
       onUserAction: widget.onUserAction,
+      onFollowupTap: _sendSuggestion,
       onCancelBackgroundTask: widget.onCancelBackgroundTask,
     );
   }
@@ -1193,6 +1218,38 @@ class _ChatPageState extends State<ChatPage>
     return ids;
   }
 
+  /// 「为你推荐」主路径：点击胶囊只把示例文案追加进输入框（不发送），
+  /// 光标移到末尾并聚焦，由用户自己编辑后手动发送。输入框已有草稿时
+  /// 追加在草稿后面（以空格衔接），不覆盖用户正在写的内容。
+  void _insertSuggestion(String prompt) {
+    final String draft = widget.controller.text;
+    if (draft.trim().isEmpty) {
+      widget.controller.text = prompt;
+    } else {
+      final bool endsWithGap =
+          draft.endsWith(" ") || draft.endsWith("\n");
+      widget.controller.text =
+          endsWithGap ? "$draft$prompt" : "$draft $prompt";
+    }
+    widget.controller.selection = TextSelection.collapsed(
+      offset: widget.controller.text.length,
+    );
+    widget.inputFocusNode?.requestFocus();
+  }
+
+  /// 「为你推荐」一键直达路径（胶囊悬停浮现的「直接发送」小按钮）：
+  /// 把示例文案灌入输入框后走与手打一致的发送链路（onSend 无参调用，
+  /// 同步段内读取并清空输入框）。若输入框里有未发送的草稿，发送后恢复，
+  /// 避免推荐文案覆盖用户正在写的内容。
+  void _sendSuggestion(String prompt) {
+    final String draft = widget.controller.text;
+    widget.controller.text = prompt;
+    widget.onSend();
+    if (draft.trim().isNotEmpty) {
+      widget.controller.text = draft;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
@@ -1209,12 +1266,17 @@ class _ChatPageState extends State<ChatPage>
             child: Stack(
               children: <Widget>[
                 if (widget.messages.isEmpty)
-                  // 空会话背景:emotion-ball 小球待机(放空)动画作为背景展示。
+                  // 空会话:「为你推荐」能力引导列表（拉取失败时不挡聊天）。
                   Center(
-                    child: EmotionBallView(
-                      emotion: EmotionBallIds.idle,
-                      size: 200,
-                      bodyColor: cs.primary,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        EmptyStateSuggestions(
+                          onSuggestionTap: _insertSuggestion,
+                          onSuggestionSend: _sendSuggestion,
+                          localStore: widget.localStore,
+                        ),
+                      ],
                     ),
                   )
                 else
@@ -1365,6 +1427,16 @@ class _ChatPageState extends State<ChatPage>
                         );
                       },
                     ),
+                    // 「为你推荐」横滑条：Agent 空闲时偶现的能力引导
+                    // （忙碌时整体隐藏，位置让给状态条；出现时机由组件内治理）
+                    if (widget.messages.isNotEmpty)
+                      ChatSuggestionBar(
+                        agentIdle: widget.agentIdle,
+                        messageCount: widget.messages.length,
+                        onSuggestionTap: _insertSuggestion,
+                        onSuggestionSend: _sendSuggestion,
+                        localStore: widget.localStore,
+                      ),
                     // Agent 状态条：处理状态统一收拢在这一条（工具名 / 口语化进度 /
                     // 百分比 + 进度条），固定在输入框上方，淡入淡出避免闪现/抖动
                     Align(
@@ -1606,7 +1678,7 @@ class _ChatPageState extends State<ChatPage>
                                     );
                                   },
                                 ),
-                                // 第二行：辅助功能按钮（左下：上传图片；右下：语音/通话）
+                                // 第二行：辅助功能按钮（左下：上传图片；右下：通话）
                                 Padding(
                                   padding: const EdgeInsets.only(top: 2),
                                   child: Row(
@@ -1621,28 +1693,6 @@ class _ChatPageState extends State<ChatPage>
                                           size: 18,
                                         ),
                                       const Spacer(),
-                                      // 右下：实时语音（App 内全双工 duplex 会话）
-                                      if (widget.onOpenVoiceDuplex != null)
-                                        _buildInputIconButton(
-                                          icon: Icons.graphic_eq_rounded,
-                                          tooltip: "实时语音",
-                                          onTap: widget.onOpenVoiceDuplex,
-                                          cs: cs,
-                                          size: 20,
-                                          tone: InputIconTone.primary,
-                                        ),
-                                      const SizedBox(width: 4),
-                                      // 右下：语音对话模式 —— 召唤屏幕右下角悬浮球
-                                      if (widget.onEnterVoiceMode != null)
-                                        _buildInputIconButton(
-                                          icon: Icons.mic_rounded,
-                                          tooltip: "语音对话模式",
-                                          onTap: widget.onEnterVoiceMode,
-                                          cs: cs,
-                                          size: 20,
-                                          tone: InputIconTone.primary,
-                                        ),
-                                      const SizedBox(width: 4),
                                       // 右下：电话按钮
                                       if (widget.onOpenPhoneDialer != null)
                                         _buildInputIconButton(
@@ -1774,6 +1824,9 @@ class _HoverableMessageWidget extends StatelessWidget {
     /// 「选择型卡片」按钮点击回调(可选,透传至内容渲染)
     this.onUserAction,
 
+    /// 「接下来你可以」接续建议点击回调（透传至内容渲染；null 不渲染建议行）
+    this.onFollowupTap,
+
     /// 取消后台任务回调（任务回执 hover 取消按钮）
     this.onCancelBackgroundTask,
   });
@@ -1835,6 +1888,9 @@ class _HoverableMessageWidget extends StatelessWidget {
   final void Function(AgentResultAction action,
       {required AgentResultData cardData})? onUserAction;
 
+  /// 「接下来你可以」接续建议点击回调(透传至消息正文渲染)
+  final void Function(String prompt)? onFollowupTap;
+
   @override
   Widget build(BuildContext context) {
     return _HoverableMessageContent(
@@ -1863,6 +1919,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       onDeleteConfirm: onDeleteConfirm,
       onDeleteCancel: onDeleteCancel,
       onUserAction: onUserAction,
+      onFollowupTap: onFollowupTap,
       onCancelBackgroundTask: onCancelBackgroundTask,
     );
   }
@@ -1896,6 +1953,7 @@ class _HoverableMessageContent extends StatefulWidget {
     required this.onDeleteConfirm,
     required this.onDeleteCancel,
     this.onUserAction,
+    this.onFollowupTap,
     this.onCancelBackgroundTask,
   });
 
@@ -1933,6 +1991,9 @@ class _HoverableMessageContent extends StatefulWidget {
   /// 「选择型卡片」按钮点击回调(透传至消息正文渲染)
   final void Function(AgentResultAction action,
       {required AgentResultData cardData})? onUserAction;
+
+  /// 「接下来你可以」接续建议点击回调(透传至消息正文渲染)
+  final void Function(String prompt)? onFollowupTap;
 
   /// 取消后台任务回调（任务回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
@@ -2485,6 +2546,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 isUser: widget.isUser,
                 contentSummary: widget.contentSummary,
                 onUserAction: widget.onUserAction,
+                onFollowupTap: widget.onFollowupTap,
                 // 打字机：assistant 流式消息用「已 reveal」前缀渲染，
                 // 光标随打字闪烁；非打字场景传 null 走原文。
                 typewriterRawText:
@@ -2544,6 +2606,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             {required AgentResultData cardData})?
         onUserAction,
 
+    /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）
+    void Function(String prompt)? onFollowupTap,
+
     /// 打字机「已 reveal」的原文前缀；null 时显示完整原文。
     /// 仅作用于下方纯文本分支（卡片/摘要仍用完整原文解析）。
     String? typewriterRawText,
@@ -2558,6 +2623,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       isUser: isUser,
       contentSummary: contentSummary,
       onUserAction: onUserAction,
+      onFollowupTap: onFollowupTap,
       typewriterRawText: typewriterRawText,
       typewriterCursor: typewriterCursor,
     );

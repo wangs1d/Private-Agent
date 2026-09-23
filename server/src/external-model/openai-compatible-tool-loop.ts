@@ -66,6 +66,7 @@ import {
   executeBridge,
   isToolSearchBridgeName,
   prepareTools,
+  searchResources,
 } from "../gateway/index.js";
 import {
   getCapabilityModuleCategoryMappings,
@@ -109,8 +110,22 @@ import {
 } from "@private-ai-agent/agent-protocol";
 import { evaluateAndSelectStrategy } from "../agent/synthesis-strategy.js";
 import { isDirectFactQuery } from "../agent/direct-fact-query.js";
+import { isStaticToolArchEnabled } from "./lane-tool-sets.js";
+import { recordTurnTrace, type ToolCallTraceEntry } from "./turn-trace.js";
+import {
+  fenceUntrustedToolContent,
+  shouldFenceToolContent,
+} from "./untrusted-content.js";
+import { isHighRiskToolName } from "../services/agent-task-safety.js";
 
 const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
+
+/**
+ * 请求卡（tool_request）召回分数下限。低于预召回的 0.5：请求卡每轮仅一次、
+ * 有出口检查与"如实说明"指令兜底，稍宽松换覆盖率；真实分布见
+ * [openai-tool-loop] 请求卡日志，按线上数据再校准。
+ */
+const REQUEST_CARD_MIN_SCORE = 0.4;
 
 /**
  * ObservationPack 总开关（SoL-Pi 借鉴）：大体积工具结果归档为 obs_N 句柄、
@@ -626,10 +641,17 @@ function compactSchemaDescriptions(node: unknown): unknown {
 function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
   apiTools: ChatCompletionTool[];
   resolveRegistryToolName: (apiName: string) => string;
+  /**
+   * 请求卡转正通道：把延迟目录工具转为 API 命名形态并登记映射。
+   * 必须用它而不是局部 prepareToolsForChatApi——API→注册表名映射表在循环
+   * 启动时由本闭包持有，旁路转换的工具调用回写时解析不回注册表名
+   * （E2E 台架 B2 场景实锤：卡加载的 smart_home.control_device 调用报未知工具）。
+   */
+  registerApiTool: (tool: ChatCompletionTool) => ChatCompletionTool | undefined;
 } {
   const apiToRegistry = new Map<string, string>();
-  const apiTools = tools.map((tool) => {
-    if (tool.type !== "function" || !tool.function?.name) return tool;
+  const toApiTool = (tool: ChatCompletionTool): ChatCompletionTool | undefined => {
+    if (tool.type !== "function" || !tool.function?.name) return undefined;
     const registryName = tool.function.name;
     const apiName = registryNameToApiToolName(registryName);
     apiToRegistry.set(apiName, registryName);
@@ -644,10 +666,16 @@ function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
           : tool.function.parameters,
       },
     };
-  });
+  };
+  const apiTools: ChatCompletionTool[] = [];
+  for (const tool of tools) {
+    const converted = toApiTool(tool);
+    if (converted) apiTools.push(converted);
+  }
   return {
     apiTools,
     resolveRegistryToolName: (apiName) => apiToRegistry.get(apiName) ?? apiName,
+    registerApiTool: toApiTool,
   };
 }
 
@@ -1590,6 +1618,15 @@ function buildToolSufficiencyHint(toolName: string, content: string | undefined)
   );
 }
 
+/**
+ * 剥除正文中的请求卡标记（<tool_request>…</tool_request>）。
+ * 静态架构下请求卡已在收尾分支被拦截续波，不会走到这里；legacy 回退模式下
+ * 卡片无处理通道，标记会滞留在正文——统一剥除，防止协议标记透出到用户。
+ */
+function stripRequestCardTags(text: string): string {
+  return text.replace(/<tool_request>[\s\S]*?<\/tool_request>/gi, "").trim();
+}
+
 export async function streamCompletionWithTools(
   client: OpenAI,
   model: string,
@@ -1604,6 +1641,20 @@ export async function streamCompletionWithTools(
     onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
     /** Moonshot Kimi：如 `{ thinking: { type: "disabled" } }` */
     extraBody?: Record<string, unknown>;
+    /**
+     * 路由意图标签（来自 streamOpts.turnIntent，如 action_write）：出口检查
+     * 据此确定性拦截"路由判定要动手但模型零工具尝试"的轮次。
+     * 2026-09-23 扩面：realtime_lookup / media_retrieval 同样纳入（详见出口检查处）。
+     */
+    turnIntent?: string;
+    /**
+     * 本轮是否已注入前置检索证据块（【实时检索结果】）。realtime_lookup 轮
+     * 证据已注入时模型零工具直答是**正确行为**（答的就是刚检索的事实），
+     * 出口检查据此豁免；未注入时零工具直答才拦截（2026-09-23）。
+     */
+    turnEvidenceInjected?: boolean;
+    /** 路由置信度（观测用，进 turn-trace 便于量化路由误判率） */
+    turnRouteConfidence?: number;
     promptCache?: PrefixCacheRequest;
     requestSystemMessages?: ChatCompletionMessageParam[];
     /** volatile 动态上下文（记忆/时间等），沉底注入到最新 user 消息尾部，保护前缀缓存 */
@@ -1656,10 +1707,19 @@ export async function streamCompletionWithTools(
     );
   }
 
-  const { apiTools, resolveRegistryToolName } = prepareToolsForChatApi(registryTools);
+  const { apiTools, resolveRegistryToolName, registerApiTool } = prepareToolsForChatApi(registryTools);
   // P2：会话级工具 schema 稳定——首轮确定性排序 + 会话基准快照，后续轮保持顺序，
   // 避免多分类检索的顺序抖动破坏 DeepSeek/Kimi 等 provider 的前缀上下文缓存。
-  const stableApiTools = stabilizeToolOrderForSession(apiTools, options?.audit?.sessionId);
+  // let：请求卡（tool_request）命中后按会话基准追加转正工具。
+  let stableApiTools = stabilizeToolOrderForSession(apiTools, options?.audit?.sessionId);
+  const staticToolArch = isStaticToolArchEnabled();
+  // ── 轮级 trace 收集（[turn-trace] 一行 JSON，见 turn-trace.ts）──
+  const traceStartTs = Date.now();
+  const traceToolCalls: ToolCallTraceEntry[] = [];
+  const traceCallStartByCallId = new Map<string, number>();
+  let traceRequestCard: { fired: boolean; loaded: string[]; blockedRisk?: string[] } | undefined;
+  let traceExitGate: { fired: boolean; reason?: string } | undefined;
+  let traceWavesUsed = 0;
   let lastAssistantText = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
   // 累积所有工具调用结果，供 summary 调用时做数据质量评估 + 策略注入
@@ -1709,6 +1769,12 @@ export async function streamCompletionWithTools(
   // 统一出口自检（2026-09-05 TurnOutcomeGate）：轨迹内「换路续波」只授予一次，
   // 不再区分 fast/complex 车道（2026-09-05 双面架构后只有任务面进工具循环）。
   let outcomeGateEnforced = false;
+  // 请求卡（2026-09-19，MCP-Zero 式意图检索）：模型正文输出 <tool_request> 后
+  // 由检索层从延迟目录转正工具，每轮最多一次。
+  let requestCardUsed = false;
+  const requestCardLoadedNames = new Set<string>();
+  // 单一出口检查（2026-09-19 静态架构）：一轮最多续波一次。
+  let exitGateEnforced = false;
   // 档3 委派引导状态：汇总探测报不足且命中探索型信号 → 向下一次 replan 波次
   // 前缀缓存命中统计（本调用内聚合，结束时打印一行，验证优化前后命中率变化）
   const prefixCacheStats = { hit: 0, miss: 0 };
@@ -1729,17 +1795,28 @@ export async function streamCompletionWithTools(
   // 规划引导：Plan-and-Execute 要求模型在单次回复里一次性规划全部工具调用，
   // 减少串行波次（每多一波 = 多一次带 schema 的全量历史重发）。
   // 只在有工具可调时注入，纯对话场景不注入。
+  // router-first 车道（可见集只有桥工具）追加两步走引导：先 discover 后 call。
+  const routerFirstLane =
+    toolSearchPrepared.toolSearchActive &&
+    toolSearchPrepared.coreToolCount <= 2 &&
+    toolSearchPrepared.deferredToolCount > 0;
   if (stableApiTools.length > 0) {
     messages.push({
       role: "system",
       content:
         "工具调用原则（Plan-and-Execute）：\n" +
+        (routerFirstLane
+          ? "0. 本轮业务工具都在延迟目录中（可见的只有 tool_discover/tool_call）：先用 tool_discover 检索出要用的工具（可并行多个 query；include_schema=true 可一次拿多个 schema），再用 tool_call 执行；常用能力直接按注册名 discover（如 search_web）。发现和执行加起来也在总波次预算内，别一次 discover 完就收尾。\n"
+          : "") +
         "1. 一次性规划：把本轮需要的所有工具调用放在同一次回复里并行发出（独立的信息需求拆成多个并行调用），不要拆成多轮串行。\n" +
         "2. 不要用完全相同的 query 重复搜索；但对比/多主题/盘点类需求，或首轮结果覆盖不全时，应换角度拆多个 query 补搜，或用 fetch_web / deep_search 深读，把信息收齐再回答，不要急着收尾。\n" +
         "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
         "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
         "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。搜到的每张照片会由视觉模型自动生成真实画面描述并展示在照片下方，正文**不要**逐张介绍照片、不要用「第一张图/第二张图」这类指代（你看不见图片内容，写了必然对不上），也不要把图片链接复述进正文；正文只写整体性的结论、建议或补充信息。\n" +
-        "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。",
+        "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。" +
+        (toolSearchPrepared.toolSearchActive
+          ? "\n7. 当可见工具不足以完成任务时，在回复中输出 <tool_request>一句话描述你需要的能力</tool_request>（如 <tool_request>把客厅空调调到26度</tool_request>），系统会从延迟工具目录检索并加载对应工具供你下一轮直接调用（每轮最多一次）。拿到加载的工具后继续完成任务，不要只输出请求标记就停。"
+          : ""),
     });
   }
 
@@ -1751,6 +1828,7 @@ export async function streamCompletionWithTools(
     fastProfile ? Math.min(maxWaves + (allToolExecResults.some((r) => !r.ok) ? 1 : 0), 4) : maxWaves;
 
   for (let wave = 0; wave < effectiveMaxWaves(); wave++) {
+    traceWavesUsed = wave + 1;
     let retriedToolCallIdError = false;
     let retriedToolChoice = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
@@ -1982,7 +2060,196 @@ export async function streamCompletionWithTools(
       //     search_images 常驻可见，服务端把工具结果确定性渲染成图廊（chat-user-message.ts）。
       //   - 普通问答时模型不该调图片工具就不调，从而彻底避免误返回照片。
 
-      // ── 收尾兜底链（2026-09-05 根源化：全部话题无关）──
+      // ── 请求卡（2026-09-19，MCP-Zero 式意图检索 → 轮内转正）──
+      // 模型在正文输出 <tool_request>能力描述</tool_request> 表示可见工具不足以
+      // 完成任务：检索层对延迟目录做语义召回，命中工具追加进本轮 tools 数组
+      // （会话排序基准自动吸收新工具），下一波模型原生 tool_calls 直调。
+      // 取代"要求弱模型自觉写好检索词调 tool_discover"的两步协议——模型只说
+      // 意图，检索层负责终审。每轮最多一次；未命中不续波（下方出口检查兜底）。
+      if (
+        staticToolArch &&
+        !requestCardUsed &&
+        toolSearchPrepared.toolSearchActive &&
+        toolSearchPrepared.deferredCatalog.entries.length > 0 &&
+        wave + 1 < effectiveMaxWaves()
+      ) {
+        const cardMatch = /<tool_request>([\s\S]{1,300}?)<\/tool_request>/i.exec(fullText);
+        if (cardMatch?.[1]?.trim()) {
+          requestCardUsed = true;
+          const intent = cardMatch[1].trim();
+          let matches: Awaited<ReturnType<typeof searchResources>> = [];
+          try {
+            matches = await searchResources(
+              toolSearchPrepared.deferredCatalog,
+              intent,
+              3,
+              { includeSchema: true },
+            );
+          } catch {
+            matches = [];
+          }
+          const known = new Set(stableApiTools.map(apiToolNameOf));
+          const loaded: string[] = [];
+          const alreadyVisible: string[] = [];
+          // top-1 语义：请求卡表达的是模型当下的意图，加载=top-1（最小 schema 增量）；
+          // top-1 已可见（预召回先注入）→ 指回直调；top-1 分数不足 → 不加载（出口检查兜底）。
+          const best = matches.find((m) => m.score >= REQUEST_CARD_MIN_SCORE);
+          if (best) {
+            // 高危拦截（2026-09-19 P1-1）：资金/外发类工具不因请求卡自动转正进
+            // chat 车道——引导模型走 task.dispatch 派发后台（人工审批兜底），
+            // 防弱模型一句 <tool_request> 就把支付工具拉进可见集直接调用。
+            const stage = options?.audit?.stage ?? "";
+            if (stage.startsWith("main_chat") && isHighRiskToolName(best.name)) {
+              requestCardUsed = true;
+              traceRequestCard = { fired: true, loaded: [], blockedRisk: [best.name] };
+              messages.push({ role: "assistant", content: fullText || "" });
+              messages.push({
+                role: "system",
+                content:
+                  `你请求的能力（${best.name}）涉及资金或对外发送，属于高危操作，系统不会自动加载。` +
+                  `如用户明确要求办理，请改用 task.dispatch 把它派发为后台任务（会经人工审批），` +
+                  `并先向用户复述将执行的操作内容；不要再次输出请求标记直接索要该工具。`,
+              });
+              lastAssistantText = "";
+              console.info(
+                `[openai-tool-loop] 请求卡高危拦截：${best.name}（stage=${stage}）`,
+              );
+              continue;
+            }
+            const entry =
+              toolSearchPrepared.deferredCatalog.byName.get(best.name) ??
+              toolSearchPrepared.deferredCatalog.byApiName.get(best.name.replace(/\./g, "_"));
+            const tool = entry?.tool;
+            if (tool) {
+              const apiTool = registerApiTool(tool);
+              if (!apiTool || known.has(apiToolNameOf(apiTool))) {
+                if (entry.registryName) alreadyVisible.push(entry.registryName);
+              } else {
+                loaded.push(entry.registryName);
+                requestCardLoadedNames.add(entry.registryName);
+                stableApiTools = stabilizeToolOrderForSession(
+                  [...stableApiTools, apiTool],
+                  options?.audit?.sessionId,
+                );
+              }
+            }
+          }
+          traceRequestCard = {
+            fired: true,
+            loaded,
+            ...(alreadyVisible.length > 0 ? { alreadyVisible } : {}),
+          };
+          console.info(
+            `[openai-tool-loop] 请求卡：intent="${intent.slice(0, 60)}" ` +
+              `candidates=[${matches
+                .map((m) => `${m.name}:${m.score.toFixed(2)}`)
+                .join(", ")}] → loaded=[${loaded.join(", ")}]`,
+          );
+          if (loaded.length > 0) {
+            messages.push({ role: "assistant", content: fullText || "" });
+            messages.push({
+              role: "system",
+              content:
+                `已根据你的能力请求从延迟工具目录检索并加载：${loaded.join("、")}（完整 schema 已进入本轮工具列表）。` +
+                `请立即调用合适的工具完成用户任务；若这些工具仍不匹配，请直接如实向用户说明，不要再次输出请求标记。`,
+            });
+            lastAssistantText = "";
+            continue;
+          }
+          if (alreadyVisible.length > 0) {
+            messages.push({ role: "assistant", content: fullText || "" });
+            messages.push({
+              role: "system",
+              content:
+                `你请求的能力对应的工具（${alreadyVisible.join("、")}）已经在你的可见工具列表中（系统预注入）。` +
+                `请直接调用它完成任务，不要再输出请求标记。`,
+            });
+            lastAssistantText = "";
+            continue;
+          }
+        }
+      }
+
+      // ── 单一出口检查（2026-09-19 静态架构，取代宣告闸/出口自检/空正文闸三闸）──
+      // 一轮最多续波一次，判定只看服务端事实（工具执行结果 + 宣告模式），不再做
+      // 道歉文本风格判定（"零尝试+道歉"直接如实收尾，不再赌文本措辞）。
+      // 优先级：宣告未兑现 > 尝试全败 > 调了工具没正文。预算耗尽 → 如实收尾。
+      if (staticToolArch && !exitGateEnforced && stableApiTools.length > 0) {
+        let gateReason: string | null = null;
+        let gateInstruction = "";
+        // 实质尝试：排除元工具/管线支撑工具（obs_recall、tool_discover、query_capabilities）——
+        // "只查了能力清单"不是失败，对话面回答"你会什么"这类轮次不该被续波。
+        const hasSubstantiveAttempt = allToolExecResults.some(
+          (r) => !META_TOOL_NAMES.has(r.toolName) && !SUPPORT_PLUMBING_TOOLS.has(r.toolName),
+        );
+        if (
+          finalText.trim() &&
+          allToolExecResults.length === 0 &&
+          (options?.turnIntent === "action_write" || options?.turnIntent === "multi_step_task")
+        ) {
+          gateReason = "write_intent_never_attempted";
+          gateInstruction =
+            "用户这条消息是要你实际完成一个动作（设置/创建/操作/发送等），路由系统已把它判定为写操作意图，" +
+            "但你还没有调用任何工具就直接回复了。请立即调用对应工具真正完成这个动作，拿到工具返回的成功结果后再回复用户；" +
+            "严禁在未调用工具的情况下声称「已设置/已办妥/已发送」。只有在确实缺少必要信息（缺什么就先问一句）或工具确实办不到时才直接回复。";
+        } else if (
+          finalText.trim() &&
+          allToolExecResults.length === 0 &&
+          (options?.turnIntent === "realtime_lookup" || options?.turnIntent === "media_retrieval") &&
+          options?.turnEvidenceInjected !== true
+        ) {
+          // 2026-09-23 扩面：realtime/media 意图轮此前零工具直答无任何拦截
+          //（真实日志：任务面 18 轮里 4 轮零工具）。证据块已注入的轮豁免——
+          // 答的就是刚检索到的事实，不需要再调工具；未注入（前置检索失败/
+          // 路由降级轮）时零工具直答 = 用训练记忆硬答当前事实，必须补搜。
+          gateReason = options?.turnIntent === "media_retrieval"
+            ? "media_intent_never_attempted"
+            : "realtime_intent_never_attempted";
+          gateInstruction = options?.turnIntent === "media_retrieval"
+            ? "用户在找图片/照片/视频，路由系统已把这条消息判定为媒体检索意图，但你还没有调用任何工具就直接回复了。" +
+              "请立即调用 search_images / search_videos（必要时配合 search_web）真实检索，基于真实结果回答；" +
+              "若确实无法检索，请如实向用户说明，不要凭想象描述或编造图片。"
+            : "这条消息需要现实世界的当前信息，路由系统已把它判定为实时查询意图，但本轮既没有注入检索证据块、" +
+              "你也没有调用任何搜索工具就直接回答了。请先调用 search_web 真实检索，拿到结果后再回答用户；" +
+              "若确实查不到，如实说明，不要凭记忆硬答或编造。";
+        } else if (allToolExecResults.length === 0 && isActionAnnouncementOnly(finalText)) {
+          gateReason = "announcement_unfulfilled";
+          gateInstruction =
+            "你刚才只向用户宣告了要做某件事（查/搜/看/办…）但还没有真正调用任何工具、也没有给出任何结果。" +
+            "请立即调用相应工具真正完成这件事并基于真实结果回答用户；若工具不可用或确实办不到，请如实向用户说明。" +
+            "严禁只重复「我去查/稍后告诉你」这类承诺而不兑现。";
+        } else if (
+          finalText.trim() &&
+          hasSubstantiveAttempt &&
+          countSubstantiveOkResults() === 0
+        ) {
+          gateReason = "substantive_tools_attempted_but_none_succeeded";
+          const failedSummary = allToolExecResults
+            .filter((r) => !r.ok)
+            .slice(0, 3)
+            .map((r) => `${r.toolName}: ${JSON.stringify(r.result ?? {}).slice(0, 120)}`)
+            .join("；");
+          gateInstruction =
+            `出口检查：本轮尝试过的工具全部失败${failedSummary ? `（${failedSummary}）` : ""}。` +
+            `请换一个关键词、换一个工具或换数据源再试一次，拿到真实结果后再回答；` +
+            `若所有途径确实都不可用，请如实向用户说明卡点，不要编造结果。`;
+        } else if (!finalText.trim() && allToolExecResults.length > 0) {
+          gateReason = "tools_ran_without_narration";
+          gateInstruction =
+            "你刚才调用了工具但还没有向用户输出任何正文。请立即基于以上工具结果用自然口语回复用户，把关键信息讲清楚；" +
+            "不要输出 JSON 或原始数据结构（那由前端结构化渲染负责）。若结果为空或失败，请如实向用户说明。";
+        }
+        if (gateReason) {
+          exitGateEnforced = true;
+          traceExitGate = { fired: true, reason: gateReason };
+          console.info(`[openai-tool-loop] 出口检查续波：${gateReason}`);
+          messages.push({ role: "assistant", content: finalText || fullText || "" });
+          messages.push({ role: "system", content: gateInstruction });
+          lastAssistantText = "";
+          continue;
+        }
+      }
+      // ── legacy 收尾兜底链（2026-09-05；AGENT_TOOL_ARCH=legacy 时保留）──
       // 旧链中的「强制联网重试」依赖 FRESH_WEB_LOOKUP_RE 等话题词表判定"需要联网"，
       // 属于关键词打地鼠，已删除——"需不需要外部信息"由路由层语义分类承担，
       // "有没有真的查"由下方出口自检（风格判定）承担，不再需要话题词预判。
@@ -1993,6 +2260,7 @@ export async function streamCompletionWithTools(
       // 本轮从未执行过任何工具 且 未强制过 → 注入指令强制补打一波真实工具调用。
       // 全程最多授予一次。
       if (
+        !staticToolArch &&
         isActionAnnouncementOnly(finalText) &&
         allToolExecResults.length === 0 &&
         !announcementEnforced
@@ -2018,7 +2286,7 @@ export async function streamCompletionWithTools(
       // 还有余量 → 注入一次换路续波指令（换关键词/换工具/换数据源），在原轨迹内纠错。
       // 预算耗尽 → 如实收尾（honest 策略），不再有升级哨兵/整轮重放。
       // 仅当本轮有工具可调时生效——零工具轮（对话面）不在这里空转。
-      if (stableApiTools.length > 0) {
+      if (!staticToolArch && stableApiTools.length > 0) {
         const unsatisfiedReason = assessTurnUnsatisfied(finalText);
         if (
           unsatisfiedReason &&
@@ -2055,6 +2323,7 @@ export async function streamCompletionWithTools(
       // 指令强制模型基于工具结果用自然口语回复（任务完成保障，保留）。
       // wave 预算守卫：fast（maxWaves=1）与最后一波不授予，避免 continue 越过预算。
       if (
+        !staticToolArch &&
         !finalText.trim() &&
         allToolExecResults.length > 0 &&
         !narrationEnforced &&
@@ -2092,8 +2361,8 @@ export async function streamCompletionWithTools(
       const metaFilter = createStreamMetaSentenceFilter();
       // 兜底：consumeNormalizedStream 已在咽喉处剥过内联 <think> 块，这里再剥一次
       // （防未来有路径绕过统一 consumer），思考原文绝不进入正式回复。
-      const sanitizedFinalText = stripInternalControlTags(
-        metaFilter(stripInlineThinkBlocks(effectiveFinalText)),
+      const sanitizedFinalText = stripRequestCardTags(
+        stripInternalControlTags(metaFilter(stripInlineThinkBlocks(effectiveFinalText))),
       );
       if (sanitizedFinalText) {
         onDelta(sanitizedFinalText);
@@ -2103,6 +2372,27 @@ export async function streamCompletionWithTools(
         content: sanitizedFinalText || null,
       });
       logPrefixCacheStats();
+      recordTurnTrace({
+        ts: traceStartTs,
+        stage: options?.audit?.stage ?? "main_chat_tools",
+        model,
+        ...(options?.turnIntent ? { turnIntent: options.turnIntent } : {}),
+        ...(options?.turnIntent
+          ? { turnEvidenceInjected: options.turnEvidenceInjected === true }
+          : {}),
+        ...(options?.turnRouteConfidence !== undefined
+          ? { routeConfidence: options.turnRouteConfidence }
+          : {}),
+        visibleTools: registryTools.length,
+        deferredActive: toolSearchPrepared.toolSearchActive,
+        deferredCount: toolSearchPrepared.deferredToolCount,
+        waves: traceWavesUsed,
+        toolCalls: traceToolCalls,
+        ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),
+        ...(traceExitGate ? { exitGate: traceExitGate } : {}),
+        finalTextChars: sanitizedFinalText.length,
+        durationMs: Date.now() - traceStartTs,
+      });
       return sanitizedFinalText;
     }
 
@@ -2203,6 +2493,7 @@ export async function streamCompletionWithTools(
 
     const settledResults = await Promise.allSettled(
       workItems.map(async (item) => {
+        traceCallStartByCallId.set(item.tc.id, Date.now());
         let targetToolName = item.registryToolName;
         let targetArgs = item.parsedArgs;
 
@@ -2315,16 +2606,20 @@ export async function streamCompletionWithTools(
         // promise 在工具结束后 reject 变成 unhandled rejection）；超时后底层工具仍在跑，
         // 信号量已随 race 落定而释放 → 登记残留守卫，同工具的后续调用先等它落定再进
         // 限制器，修复 desktop./browser./phone. 单飞域的互斥破坏。
+        // 2026-09-19 增强：超时落定同时 abort 单次调用信号并透传给 handler——
+        // 子进程/HTTP 类工具可提前退出，不再"不等待但继续占着真实设备"。
         const attemptExec = async (): Promise<ToolExecOutcome> => {
           await awaitOverrunGuardIfAny(targetToolName);
           return executeWithToolLimit(targetToolName, async () => {
-            const toolPromise = ctx.executeTool(targetToolName, targetArgs);
+            const callAbort = new AbortController();
+            const toolPromise = ctx.executeTool(targetToolName, targetArgs, { signal: callAbort.signal });
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {
               return await Promise.race([
                 toolPromise,
                 new Promise<never>((_, reject) => {
                   timer = setTimeout(() => {
+                    callAbort.abort(new ToolExecutionTimeoutError(targetToolName, TOOL_TIMEOUT_MS));
                     registerOverrunGuard(targetToolName, toolPromise);
                     reject(new ToolExecutionTimeoutError(targetToolName, TOOL_TIMEOUT_MS));
                   }, TOOL_TIMEOUT_MS);
@@ -2371,20 +2666,38 @@ export async function streamCompletionWithTools(
               };
             }
           }
-          // 失败确定性重试：非超时失败（瞬时故障/网络抖动）自动重试 1 次；
-          // 超时已烧完整个时间预算，重试只会让前端再等一倍时间，不再重试。
+          // 失败确定性重试：非超时失败（瞬时故障/网络抖动）自动重试至多 2 次，
+          // 第二次带指数退避（500ms）——上游限流/瞬断在 500ms 窗口内恢复的概率
+          // 显著高于立即重打；超时已烧完整个时间预算，不重试。
           const isTimeoutFailure =
             (exec.result as Record<string, unknown> | undefined)?.timeout === true;
           if (!exec.ok && !isTimeoutFailure) {
-            console.warn(
-              `[plan-execute] ${targetToolName} 首次执行失败，确定性重试 1 次: ` +
-                JSON.stringify(exec.result).slice(0, 200),
-            );
-            try {
-              const retried = await attemptExec();
-              if (retried.ok) exec = retried;
-            } catch {
-              /* 保留首次失败结果 */
+            const retryDelaysMs = [0, 500];
+            for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
+              const delay = retryDelaysMs[attempt];
+              if (delay > 0) {
+                await new Promise((r) => setTimeout(r, delay));
+              }
+              if (attempt > 0) {
+                console.warn(
+                  `[plan-execute] ${targetToolName} 第${attempt + 1}次重试（退避 ${delay}ms）: ` +
+                    JSON.stringify(exec.result).slice(0, 200),
+                );
+              } else {
+                console.warn(
+                  `[plan-execute] ${targetToolName} 首次执行失败，确定性重试: ` +
+                    JSON.stringify(exec.result).slice(0, 200),
+                );
+              }
+              try {
+                const retried = await attemptExec();
+                if (retried.ok) {
+                  exec = retried;
+                  break;
+                }
+              } catch {
+                /* 保留上次失败结果 */
+              }
             }
           }
           return exec;
@@ -2517,6 +2830,13 @@ export async function streamCompletionWithTools(
         settled.status === "fulfilled" ? settled.value.wireToolName : item.registryToolName;
 
       toolResults.push({ name: wireToolName, ok: exec.ok });
+      const callStart = traceCallStartByCallId.get(item.tc.id);
+      traceToolCalls.push({
+        name: wireToolName,
+        ok: exec.ok,
+        ms: callStart ? Date.now() - callStart : 0,
+        viaRequestCard: requestCardLoadedNames.has(wireToolName),
+      });
       if (isInteractiveToolName(wireToolName)) {
         waveUsedInteractiveTool = true;
       }
@@ -2545,6 +2865,11 @@ export async function streamCompletionWithTools(
       const fullToolContent = typeof imageNote === "string" && imageNote.trim()
         ? `${toolContent}\n\n${imageNote}`
         : toolContent;
+      // 不可信内容围栏（2026-09-19 P1-1）：外部数据进消息流前统一隔离，
+      // 命中注入模式附加警示；元工具/系统回读结果跳过。
+      const fencedToolContent = shouldFenceToolContent(wireToolName)
+        ? fenceUntrustedToolContent(wireToolName, fullToolContent)
+        : fullToolContent;
       // 对成功的工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
       // 只追加在本波最后一条成功消息上（内容与具体工具无关，逐条重复纯烧 token）。
       // 关键洞察：LLM 重复调用工具的根因是不确定结果是否足够回答。
@@ -2566,7 +2891,9 @@ export async function streamCompletionWithTools(
       messages.push({
         role: "tool",
         tool_call_id: item.tc.id,
-        content: appendedHints ? `${fullToolContent}\n${appendedHints}` : fullToolContent,
+        content: appendedHints
+          ? `${fencedToolContent}\n${appendedHints}`
+          : fencedToolContent,
       });
       if (injectFrames?.length) {
         const frameHint =
@@ -2611,6 +2938,27 @@ export async function streamCompletionWithTools(
           `[plan-execute] wave=${wave} ${toolResults.length} 个工具全部成功，探测通过 → 无 schema 汇总收尾（工具 schema 不再重发）`,
         );
         logPrefixCacheStats();
+        recordTurnTrace({
+          ts: traceStartTs,
+          stage: options?.audit?.stage ?? "main_chat_tools",
+          model,
+          ...(options?.turnIntent ? { turnIntent: options.turnIntent } : {}),
+          ...(options?.turnIntent
+            ? { turnEvidenceInjected: options.turnEvidenceInjected === true }
+            : {}),
+          ...(options?.turnRouteConfidence !== undefined
+            ? { routeConfidence: options.turnRouteConfidence }
+            : {}),
+          visibleTools: registryTools.length,
+          deferredActive: toolSearchPrepared.toolSearchActive,
+          deferredCount: toolSearchPrepared.deferredToolCount,
+          waves: traceWavesUsed,
+          toolCalls: traceToolCalls,
+          ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),
+          ...(traceExitGate ? { exitGate: traceExitGate } : {}),
+          finalTextChars: probe.text.length,
+          durationMs: Date.now() - traceStartTs,
+        });
         return probe.text;
       }
       console.info(`[plan-execute] wave=${wave} 汇总探测报告结果不足，进入 replan 波次`);
@@ -2634,6 +2982,27 @@ export async function streamCompletionWithTools(
       );
     }
   }
+  recordTurnTrace({
+    ts: traceStartTs,
+    stage: options?.audit?.stage ?? "main_chat_tools",
+    model,
+    ...(options?.turnIntent ? { turnIntent: options.turnIntent } : {}),
+    ...(options?.turnIntent
+      ? { turnEvidenceInjected: options.turnEvidenceInjected === true }
+      : {}),
+    ...(options?.turnRouteConfidence !== undefined
+      ? { routeConfidence: options.turnRouteConfidence }
+      : {}),
+    visibleTools: registryTools.length,
+    deferredActive: toolSearchPrepared.toolSearchActive,
+    deferredCount: toolSearchPrepared.deferredToolCount,
+    waves: traceWavesUsed,
+    toolCalls: traceToolCalls,
+    ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),
+    ...(traceExitGate ? { exitGate: traceExitGate } : {}),
+    finalTextChars: finalSummary.text.length,
+    durationMs: Date.now() - traceStartTs,
+  });
   return finalSummary.text;
 
   /**

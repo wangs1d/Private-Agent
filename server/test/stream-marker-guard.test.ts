@@ -73,3 +73,48 @@ test("纯正常流式文本零损失", () => {
   all += g.flush();
   assert.equal(all.replace(/\n/g, ""), "你好呀，今天天气不错。适合出门。");
 });
+
+test("NEXT_UP 事故回归：START 与正文同行时不泄漏块内建议（2026-09-22 睡前提醒）", () => {
+  const g = createStreamMarkerGuard();
+  const full =
+    "说好了，01:00 准时喊你——还有八分钟，够你把手头这点事收个尾。到点我会直接叫你『该睡觉啦』，别装没听见。[NEXT_UP_START]\n" +
+    "提前五分钟再提醒一次\n" +
+    "明早八点叫我起床\n" +
+    "[NEXT_UP_END]";
+  // 按真实流式节奏切成小 chunk
+  let all = "";
+  for (let i = 0; i < full.length; i += 7) all += g.feed(full.slice(i, i + 7));
+  all += g.flush();
+  assert.ok(all.includes("别装没听见。"), `正文丢失：${all}`);
+  assert.ok(!all.includes("提前五分钟再提醒一次"), `建议条目泄漏：${all}`);
+  assert.ok(!all.includes("明早八点叫我起床"), `建议条目泄漏：${all}`);
+  assert.ok(!all.includes("NEXT_UP"), `标记泄漏：${all}`);
+});
+
+test("NEXT_UP 单行完整块（START/END 同行）只留块外文本", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("正文甲[NEXT_UP_START]条目一\n条目二[NEXT_UP_END]正文乙");
+  const rest = g.flush();
+  const all = out + rest;
+  assert.ok(!all.includes("条目一") && !all.includes("条目二"), `块内泄漏：${all}`);
+  assert.ok(all.includes("正文甲"));
+  assert.ok(all.includes("正文乙"));
+});
+
+test("NEXT_UP 协议块（标记独占一行）照旧整体扣下", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("正文。\n[NEXT_UP_START]\n条目一\n条目二\n[NEXT_UP_END]");
+  const rest = g.flush();
+  const all = out + rest;
+  assert.ok(!all.includes("条目一") && !all.includes("条目二"), `块内泄漏：${all}`);
+  assert.ok(all.includes("正文。"));
+});
+
+test("NEXT_UP 行内 END 后的正文照发（与 extraction 的 replace 语义一致）", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("[NEXT_UP_START]\n条目一[NEXT_UP_END]收尾一句。");
+  const rest = g.flush();
+  const all = out + rest;
+  assert.ok(!all.includes("条目一"), `块内泄漏：${all}`);
+  assert.ok(all.includes("收尾一句。"));
+});

@@ -17,17 +17,18 @@ export { compareQuotes } from "./quote-source.js";
 export { QuoteAggregator } from "./quote-aggregator.js";
 export { LocalQuoteSource } from "./local-quote-source.js";
 export {
-  McpQuoteSource,
-  type McpCaller,
-  type McpQuoteSourceConfig,
-} from "./mcp-quote-source.js";
-export {
   BrowserQuoteSource,
   type BrowserRunner,
   type BrowserQuoteSourceConfig,
 } from "./browser-quote-source.js";
 export {
-  createRollingGoHotelSource,
+  createFlyAiHotelSource,
+  createFlyAiFlightSource,
+  createDefaultFlyAiRunner,
+  type FlyAiRunner,
+  type FlyAiRunResult,
+} from "./flyai-quote-source.js";
+export {
   createCtripFlightSource,
   parseCtripFlightText,
 } from "./site-adapters.js";

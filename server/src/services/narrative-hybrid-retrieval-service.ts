@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { Bm25LiteIndex } from "../agent/retrieval/bm25-lite.js";
 import { reciprocalRankFusion } from "../agent/retrieval/rrf.js";
 import {
@@ -7,15 +5,8 @@ import {
   fetchOpenAiCompatibleEmbeddings,
   resolveEmbeddingModel,
 } from "./openai-embedding-client.js";
-import type { NarrativePointPayload } from "./qdrant-narrative-store.js";
-import { QdrantNarrativeStore } from "./qdrant-narrative-store.js";
-
-/** 将任意 chunkId 稳定映射为 RFC UUID（Qdrant 点 id）。 */
-export function stableUuidFromChunkId(chunkId: string): string {
-  const digest = createHash("sha256").update(chunkId).digest();
-  const hex = digest.subarray(0, 16).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}
+import type { NarrativePointPayload } from "./sqlite-narrative-store.js";
+import { SqliteNarrativeStore } from "./sqlite-narrative-store.js";
 
 function envPositiveInt(name: string, fallback: number): number {
   const v = Number.parseInt(process.env[name] ?? "", 10);
@@ -64,13 +55,13 @@ export function splitNarrativeChunks(
 }
 
 /**
- * BM25（进程内）+ Qdrant 向量检索 + RRF 融合 → 拼装进 Prompt 的长期叙事摘录。
+ * BM25（进程内）+ SQLite 向量检索 + RRF 融合 → 拼装进 Prompt 的长期叙事摘录。
  *
- * 进程内状态（BM25 索引 / chunk 原文）重启即丢；首次召回时从 Qdrant scroll
- * 回灌重建（Qdrant 是唯一事实源，payload 携带原文）。
+ * 进程内状态（BM25 索引 / chunk 原文）重启即丢；首次召回时从 SQLite scroll
+ * 回灌重建（narrative-memory.sqlite 是唯一事实源，payload 携带原文）。
  *
  * ENV:
- * - `AGENT_QDRANT_URL`、`AGENT_QDRANT_API_KEY?`、`AGENT_QDRANT_COLLECTION?`
+ * - `AGENT_NARRATIVE_DB_PATH`（SQLite 持久化路径，缺省 data/narrative-memory.sqlite）
  * - `OPENAI_API_KEY` 或沿用对话 Key 做 embeddings；模型经 resolveEmbeddingModel 统一解析
  * - `OPENAI_EMBEDDINGS_URL` 可选，自定义兼容端点
  * - `AGENT_NARRATIVE_MAX_DOCS_PER_ACTOR`、`AGENT_NARRATIVE_*_TOP` 可调
@@ -94,7 +85,7 @@ export class NarrativeHybridRetrievalService {
   private rehydratedActors = new Set<string>();
   private rehydrating = new Map<string, Promise<void>>();
 
-  constructor(private readonly qdrant: QdrantNarrativeStore) {
+  constructor(private readonly store: SqliteNarrativeStore) {
     this.maxDocsPerActor = envPositiveInt("AGENT_NARRATIVE_MAX_DOCS_PER_ACTOR", 800);
     this.bmTop = envPositiveInt("AGENT_NARRATIVE_BM25_TOP", 24);
     this.vecTop = envPositiveInt("AGENT_NARRATIVE_VEC_TOP", 24);
@@ -119,12 +110,12 @@ export class NarrativeHybridRetrievalService {
   }
 
   /**
-   * 从 Qdrant 回灌重建 BM25 词法索引（每 actor 每进程一次）。
+   * 从 SQLite 回灌重建 BM25 词法索引（每 actor 每进程一次）。
    * 失败时标记已完成避免重试风暴——后续 ingest 会继续增量填充。
    */
   private async ensureBmRehydrated(actorId: string): Promise<void> {
     if (this.rehydratedActors.has(actorId)) return;
-    if (!this.qdrant.isEnabled() || !this.embeddingKey) {
+    if (!this.store.isEnabled() || !this.embeddingKey) {
       this.rehydratedActors.add(actorId);
       return;
     }
@@ -132,7 +123,7 @@ export class NarrativeHybridRetrievalService {
     if (!p) {
       const idx = this.bm(actorId);
       p = (async () => {
-        const points = await this.qdrant.scrollByActor(actorId, this.maxDocsPerActor);
+        const points = await this.store.scrollByActor(actorId, this.maxDocsPerActor);
         for (const pt of points) {
           const text = pt.payload?.text;
           const chunkId = pt.payload?.chunkId;
@@ -165,7 +156,7 @@ export class NarrativeHybridRetrievalService {
    * ingest 单行叙事（进化循环 observe、轨迹摘要等）；切块后向量索引批量写入。
    *
    * opts.skipVector：文本短于切块阈值且上游已有 bridge 融合召回（Mem0 向量 ×
-   * 认知图 × FTS）时，Qdrant 向量索引与 Mem0 collection 内容高度重复，跳过可
+   * 认知图 × FTS）时，SQLite 向量索引与 Mem0 collection 内容高度重复，跳过可
    * 省掉一次 embedding API 与一份向量存储；BM25 仍照常增量写入，
    * lexicalPreScreen 的覆盖范围不受影响。
    */
@@ -190,7 +181,7 @@ export class NarrativeHybridRetrievalService {
     });
 
     if (opts?.skipVector) return;
-    if (!this.qdrant.isEnabled() || !this.embeddingKey) return;
+    if (!this.store.isEnabled() || !this.embeddingKey) return;
 
     try {
       // 一次 API 往返嵌入全部 chunk（此前逐块串行调用）
@@ -208,9 +199,9 @@ export class NarrativeHybridRetrievalService {
             chunkId: chunkIds[i]!,
             createdAt: new Date().toISOString(),
           };
-          return this.qdrant.upsertPoint(
+          return this.store.upsertPoint(
             vectors[i]!,
-            stableUuidFromChunkId(chunkIds[i]!),
+            chunkIds[i]!,
             payload,
           );
         }),
@@ -237,14 +228,14 @@ export class NarrativeHybridRetrievalService {
     // 双通道恒开（不要按 BM25 命中数短路）：中文 query 下 BM25 对几乎所有 doc
     // 都有单字/bigram 级命中，按命中数门控会让语义通道长期被屏蔽，融合退化成纯 BM25。
     // 交由 RRF 统一仲裁；外层调用方（turn-lifecycle）有超时兜底。
-    if (this.qdrant.isEnabled() && this.embeddingKey) {
+    if (this.store.isEnabled() && this.embeddingKey) {
       try {
         const { vector } = await fetchOpenAiCompatibleEmbedding({
           apiKey: this.embeddingKey,
           model: this.embeddingModel,
           input: q,
         });
-        const hits = await this.qdrant.search(vector, actorId, this.vecTop);
+        const hits = await this.store.search(vector, actorId, this.vecTop);
         for (const h of hits) {
           this.chunkTexts.set(h.payload.chunkId, h.payload.text);
         }
@@ -293,13 +284,13 @@ export class NarrativeHybridRetrievalService {
 export function formatHybridRecall(texts: string[]): string {
   if (texts.length === 0) return "";
   const parts = texts.map((txt, i) => `[${i + 1}] ${txt}`);
-  return `以下为与当前问题相关的「长期叙事 / 履历」摘录（BM25+Qdrant向量+RRF 融合）：\n${parts.join("\n\n")}`;
+  return `以下为与当前问题相关的「长期叙事 / 履历」摘录（BM25+向量+RRF 融合）：\n${parts.join("\n\n")}`;
 }
 
 export function createNarrativeHybridRetrievalDefault(): NarrativeHybridRetrievalService | null {
   const disabled = process.env.AGENT_MEMORY_HYBRID_DISABLED?.trim().toLowerCase();
   if (disabled === "1" || disabled === "true" || disabled === "yes") return null;
 
-  const store = new QdrantNarrativeStore();
+  const store = new SqliteNarrativeStore();
   return new NarrativeHybridRetrievalService(store);
 }

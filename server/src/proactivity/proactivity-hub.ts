@@ -35,6 +35,8 @@ import type {
 } from "./proactivity-types.js";
 import type { ArbitrationDecision, ProactiveProposal } from "./pipeline-types.js";
 import { renderProactiveText } from "./voice-templates.js";
+import { readJson, writeJson } from "./persist-file.js";
+import { join } from "node:path";
 import {
   deriveActValue,
   deriveRiskFromSteps,
@@ -53,6 +55,7 @@ import { FrequencyGovernor } from "./frequency-governor.js";
 import { PerceptionFeed } from "./perception-feed.js";
 import { InitiativeEngine, type LlmCompleteFn } from "./initiative-engine.js";
 import { InitiativeDecisionCache } from "./initiative-decision-cache.js";
+import { triageObservations } from "./observation-triage.js";
 import { learnExemplar, type TriggerExemplarKind } from "./semantic-trigger-matcher.js";
 import {
   buildConversationIntent,
@@ -61,8 +64,8 @@ import {
   buildCelebrationIntent,
   buildLoopCompletedIntent,
 } from "./triggers/celebration-trigger.js";
-import { buildShareIntent, pickShareTopic, type ShareProfileInput } from "./triggers/share-trigger.js";
-import { buildGreetingIntent, judgeGreeting } from "./triggers/greeting-trigger.js";
+import { classifyToolRisk } from "../services/tool-risk.js";
+import { semanticDedupKey } from "./dedup-key.js";
 import type { InterestHit } from "./interest-watcher.js";
 import {
   buildOverworkIntent,
@@ -88,11 +91,9 @@ export interface ProactivityHubDeps {
     args: Record<string, unknown>,
     actorId: string,
   ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
-  /** 用户画像（兴趣分享触发源；OnlineLearningCortex.getProfile 的薄包装） */
-  getProfile?: (actorId: string) => ShareProfileInput | null;
   /**
    * 用户画像文本（通用路径 LLM 决策输入；UserProfileStore 画像 markdown 的薄包装）。
-   * 与 getProfile 不同：这里要完整画像文本（偏好/习惯/话题），LLM 直接可读。
+   * 要完整画像文本（偏好/习惯/话题），LLM 直接可读。
    * 支持 async（磁盘读取）。
    */
   getProfileText?: (actorId: string) => Promise<string | null> | string | null;
@@ -101,6 +102,18 @@ export interface ProactivityHubDeps {
    * 可选：未注入时 hub 用自身 observeConversationTurn 记录的时间兜底。
    */
   getLastInteractionAt?: (actorId: string) => number | null;
+  /**
+   * 用户自主性等级（AutonomySettingsStore.getLevel 的薄包装，缺省 1）：
+   *   0 = 只建议（act 意图一律降级 speak，永不自动执行）
+   *   1 = 标准（默认三分支语义）
+   *   2 = 高效（可逆且不涉钱、不涉第三方的动作即使净效用未过阈也直接执行）
+   */
+  autonomyLevel?: (actorId: string) => number;
+  /**
+   * 持久化目录（可选）：noteInitiative 防重记忆落盘 hub-initiatives.json——
+   * 重启后快车道/评估器/LLM 通用路径的跨栈去重不失效。
+   */
+  dataPath?: string;
   /**
    * 用户活跃事件回调（装配层可选接线：喂 body RhythmCore 做节律感知，
    * source 如 "conversation"）。fire-and-forget，不阻塞对话链路。
@@ -167,15 +180,15 @@ const ACT_TOOL_DENY_RE =
   /delete|remove|drop|format|wipe|uninstall|shutdown|reboot|restart|run_shell|run_automation|kill/i;
 /** act 单次行动计划步数上限 */
 const ACT_MAX_STEPS = 5;
-/** act 执行循环步数上限 / 每日 LLM 循环轮次熔断 */
-const ACT_LOOP_MAX_STEPS = 10;
+/** act 执行循环步数上限 / 每日 LLM 循环轮次熔断（2026-09-23：10→6，6 步内走不通即收场） */
+const ACT_LOOP_MAX_STEPS = 6;
 /** 连续无进展步数上限：超过即收场（防 LLM 原地打转烧轮次）；换路成功即清零 */
 const ACT_LOOP_MAX_CONSECUTIVE_FAILURES = 2;
 const ACT_LOOP_DAILY_TURN_CAP = 40;
 /** 核心执行面工具（searchTools 注入时保底并入，主动性最常用的 act 工具族） */
 const CORE_ACT_TOOL_RE = /^(media\.|calendar\.|clock\.|voice\.speak|weather\.)/;
-/** 通用路径喂给 LLM 的工具数上限（top-K 相关 + 核心保底） */
-const MAX_PROMPT_TOOLS = 18;
+/** 通用路径喂给 LLM 的工具数上限（top-K 相关 + 核心保底；2026-09-23：18→12） */
+const MAX_PROMPT_TOOLS = 12;
 /** tick 间隔（env 可调，默认 30 分钟） */
 function readTickIntervalMs(): number {
   const raw = process.env.PROACTIVITY_TICK_MS;
@@ -185,17 +198,22 @@ function readTickIntervalMs(): number {
 }
 /** 通用路径最近主动行为记忆条数（防重复） */
 const RECENT_INITIATIVES_LIMIT = 8;
-/** 对话后主动评估去抖（默认 90s：聊完歇一会儿再决定要不要补一句，模拟人类节奏） */
-const INITIATIVE_DEBOUNCE_DEFAULT_MS = 90_000;
+/**
+ * 对话后主动评估去抖（2026-09-23：90s→240s。对话去抖是评估的最大触发源，
+ * 聊天越频繁评估越多；配合 L0 分诊，只有带 medium/high 观察的窗口才真调 LLM）。
+ */
+const INITIATIVE_DEBOUNCE_DEFAULT_MS = 240_000;
 /**
  * LLM 通用路径每日评估上限（只管"问 LLM 的次数"，与主动发送频控无关）。
  * 这是不乱调 LLM 的硬保障：传感/评估/仲裁全自动零 LLM，唯一要省的就是这里。
+ * 2026-09-23：40→12——L0 分诊已把噪声窗口挡在外面，能到这的都是值得评估的，
+ * 12 次/天足够覆盖真实主动性场景。
  */
 function readMaxEvalsPerDay(): number {
   const raw = process.env.PROACTIVITY_MAX_EVALS_PER_DAY;
-  if (!raw) return 40;
+  if (!raw) return 12;
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 40;
+  return Number.isFinite(n) && n > 0 ? n : 12;
 }
 /** 直达车道开关（speak 经模板直投管道，绕过 ProactionCortex 预筛；默认开） */
 function readDirectLaneEnabled(): boolean {
@@ -289,6 +307,8 @@ export class ProactivityHub {
   private readonly lastInteractionAt = new Map<string, number>();
   /** 最近已发起的主动行为（防 LLM 通用路径重复同类主动） */
   private readonly recentInitiatives = new Map<string, string[]>();
+  /** 防重记忆落盘路径（deps.dataPath 注入时启用） */
+  private initiativesPath: string | null = null;
   /** 上次 tick 拉到的日程快照（去重：日程没变不重复推观察） */
   private readonly lastScheduleSnapshot = new Map<string, string>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -306,6 +326,8 @@ export class ProactivityHub {
   private hubSeq = 0;
   /** LLM 评估计数（每日熔断，防乱调用） */
   private readonly evalCounts = new Map<string, number>();
+  /** L0 分诊跳过的窗口数（观测指标：skip 省下的 LLM 调用量） */
+  private triageSkips = 0;
   /** act 执行循环每日轮次（actorId:date → 已用轮次） */
   private readonly actLoopTurns = new Map<string, number>();
   private readonly maxEvalsPerDay = readMaxEvalsPerDay();
@@ -316,7 +338,23 @@ export class ProactivityHub {
     this.silenceLog = deps.silenceLog ?? new SilenceLog();
     this.confirmations = deps.pendingConfirmations ?? new PendingConfirmationStore();
     this.engine = new InitiativeEngine(deps.llmComplete ?? null);
-    this.llmInitiativeEnabled = readEnvBool("PROACTIVITY_LLM_INITIATIVE", true);
+    // LLM 通用路径默认关闭（2026-09-23 用户拍板）：token 账本实测 proactive_intent
+    // 15-50 万/天 + act_loop/phrase 附加，而 outcomes.json 全部送达均来自规则快路径、
+    // LLM 通道投递数为 0——纯后台成本无产出。PROACTIVITY_LLM_INITIATIVE=1 显式开启。
+    this.llmInitiativeEnabled = readEnvBool("PROACTIVITY_LLM_INITIATIVE", false);
+    // 防重记忆持久化（可选 dataPath）：重启后 noteInitiative 的记录不丢，
+    // 快车道/评估器/LLM 通用路径的跨栈去重不再因重启失效
+    if (deps.dataPath) {
+      try {
+        this.initiativesPath = join(deps.dataPath, "hub-initiatives.json");
+        const raw = readJson<Record<string, string[]>>(this.initiativesPath, {});
+        for (const [actorId, list] of Object.entries(raw)) {
+          if (Array.isArray(list) && list.length > 0) this.recentInitiatives.set(actorId, list.slice(-RECENT_INITIATIVES_LIMIT));
+        }
+      } catch {
+        /* 恢复失败按空记忆处理 */
+      }
+    }
   }
 
   /**
@@ -394,7 +432,7 @@ export class ProactivityHub {
       ? this.engine.isEnabled()
         ? "+LLM 通用路径（对话后去抖评估 + 周期 tick）"
         : "（LLM 通用路径开关已开，但外部模型未配置——实际仅规则快路径；请检查 server/.env 的 MOONSHOT_API_KEY / MINIMAX_API_KEY / OPENAI_API_KEY）"
-      : "（LLM 通用路径已手动关闭，仅规则快路径）";
+      : "（LLM 通用路径默认关闭，仅规则快路径；PROACTIVITY_LLM_INITIATIVE=1 可开启）";
     console.log(
       `[ProactivityHub] 已启动（tick=${Math.round(intervalMs / 60000)}min，每日预算=${this.governor.getBudget()}${engineOn}）`,
     );
@@ -564,18 +602,12 @@ export class ProactivityHub {
     });
   }
 
-  /** 周期 tick（问候快路径 + 通用 LLM 路径；测试可直调） */
+  /** 周期 tick（通用 LLM 路径；测试可直调） */
   async onTick(actorId: string, now: Date = new Date()): Promise<void> {
-    // 快路径 1：问候（时段判定 + 24h 冷却兜底）
     const lastInteraction =
       this.deps.getLastInteractionAt?.(actorId) ?? this.lastInteractionAt.get(actorId) ?? null;
-    const greeting = judgeGreeting(lastInteraction, now);
-    if (greeting) {
-      await this.route(buildGreetingIntent(actorId, greeting));
-      return; // 同一 tick 不叠加，单次主动最克制
-    }
     // 通用路径：感知流增量消费 → 有新观察才调 LLM 自主决策。
-    // 默认开启（PROACTIVITY_LLM_INITIATIVE=0 可退回纯规则）；llmComplete 未接入
+    // 默认关闭（PROACTIVITY_LLM_INITIATIVE=1 可开启）；llmComplete 未接入
     // 时引擎自动禁用（evaluateInitiative 内 isEnabled 兜底），等效快路径独占。
     if (this.llmInitiativeEnabled) {
       await this.evaluateInitiative(actorId, now, lastInteraction);
@@ -609,13 +641,30 @@ export class ProactivityHub {
       this.feed.pushObservation(actorId, "schedule_snapshot", `今日日程：${snapshot}`, "medium", now.getTime());
     }
 
-    const observations = this.feed.consumeWindow(actorId);
-    if (observations.length === 0) return;
     if (!this.engine.isEnabled() || lastInteractionAt == null) return; // LLM 未接入/从未交互：只用快路径
+
+    // L0 规则分诊（2026-09-23 token 架构优化）：先 peek 后消费。窗口里只有
+    // conversation_turn/user_activity 等低显著背景噪声时直接跳过 LLM——此前
+    // "有新观察就调 LLM"实测 28 天 9166 次评估（~310 次/天）绝大多数判 none。
+    // skip 时不消费水位：后续 medium/high 事件到来时与新观察一并评估，信号不丢。
+    const pending = this.feed.peekWindow(actorId);
+    if (pending.length === 0) return;
+    const triage = triageObservations(pending);
+    if (triage.action === "skip") {
+      this.triageSkips += 1;
+      if (this.triageSkips % 25 === 1) {
+        console.log(
+          `[ProactivityHub] L0 分诊跳过 LLM 评估（${triage.reason}）actor=${actorId} 窗口=${pending.length} 累计跳过=${this.triageSkips}`,
+        );
+      }
+      return;
+    }
+
+    const observations = this.feed.consumeWindow(actorId);
 
     // 负向决策缓存：近期同观察指纹已判 none（无高显著事件）→ 跳过 LLM（省 token）
     const fingerprint = this.decisionCache.fingerprintObservations(observations);
-    const hasHighSalience = observations.some((o) => o.salience === "high");
+    const hasHighSalience = triage.hasHighSalience;
     if (this.decisionCache.shouldSkip(actorId, fingerprint, hasHighSalience)) {
       console.log(`[ProactivityHub] 决策缓存命中（近期同场景已判不主动，跳过 LLM）actor=${actorId}`);
       return;
@@ -624,17 +673,22 @@ export class ProactivityHub {
     let profileText: string | undefined;
     try {
       const raw = await this.deps.getProfileText?.(actorId);
-      // 画像全文可能较长（markdown），截断喂 LLM（默认模板空壳也会被这里压短）
-      profileText = raw ? raw.slice(0, 600) : undefined;
+      // 画像全文可能较长（markdown），截断喂 LLM（默认模板空壳也会被这里压短）。
+      // 2026-09-23：600→240——评估大多数判 none，画像全量喂入性价比最低。
+      profileText = raw ? raw.slice(0, 240) : undefined;
     } catch {
       /* 画像读取失败不影响决策 */
     }
+    // 工具清单只为 act 行动计划服务：仅高显著窗口才注入（medium 事件以
+    // speak/advise 为主，喂十几条工具描述是纯浪费）。2026-09-23。
     let availableTools: Array<{ name: string; description: string }> | undefined;
-    try {
-      const all = this.deps.listTools?.();
-      if (all) availableTools = this.selectPromptTools(observations, all);
-    } catch {
-      /* 工具清单读取失败：LLM 无 act 依据，仍可 speak/advise */
+    if (hasHighSalience) {
+      try {
+        const all = this.deps.listTools?.();
+        if (all) availableTools = this.selectPromptTools(observations, all);
+      } catch {
+        /* 工具清单读取失败：LLM 无 act 依据，仍可 speak/advise */
+      }
     }
     const budgetNote = `今日已主动发送 ${this.governor.dailyCountOf(actorId, now)} 次（额度是自适应的，参考即可）`;
 
@@ -707,13 +761,11 @@ export class ProactivityHub {
     decision: InitiativeDecision,
   ): void {
     const kind = decision.kind.toLowerCase();
-    const exemplarKind: TriggerExemplarKind | null = /mood|care|emotion|support|comfort|fatigue|tired|overwork/.test(
+    const exemplarKind: TriggerExemplarKind | null = /follow|track|remind|todo|task|schedule|wait|prep/.test(
       kind,
     )
-      ? "care"
-      : /follow|track|remind|todo|task|schedule|wait|prep/.test(kind)
-        ? "followup"
-        : null;
+      ? "followup"
+      : null;
     if (!exemplarKind) return;
     for (const o of observations) {
       if (o.type !== "conversation_turn") continue;
@@ -779,6 +831,20 @@ export class ProactivityHub {
         } as ProactiveIntent);
         break;
       case "act":
+        // 自主性等级 0（只建议）：LLM 决定 act 也降级为 speak 通报计划
+        if (this.levelOf(actorId) === 0) {
+          this.emitSpeakSignal({
+            actorId,
+            kind: decision.kind,
+            importance: decision.importance,
+            title: rationale.slice(0, 60),
+            summary: decision.messageHint || rationale,
+            source,
+            mode: "speak" as const,
+            direct: true,
+          } as ProactiveIntent);
+          break;
+        }
         if (this.engine.isEnabled()) {
           // LLM 在环执行循环：执行→看结果→再决策，把"决定 act"升级为"自主办完"
           await this.runActLoop({
@@ -818,12 +884,28 @@ export class ProactivityHub {
     }
   }
 
+  /** 用户的自主性等级（AutonomySettingsStore 薄依赖；未注入/异常按标准档 1 处理） */
+  private levelOf(actorId: string): number {
+    try {
+      const v = this.deps.autonomyLevel?.(actorId);
+      return typeof v === "number" && v >= 0 && v <= 2 ? v : 1;
+    } catch {
+      return 1;
+    }
+  }
+
   /** 记录已发起的主动行为（防 LLM 重复同类主动） */
   private rememberInitiative(actorId: string, line: string): void {
     const list = this.recentInitiatives.get(actorId) ?? [];
     list.push(line.slice(0, 120));
     if (list.length > RECENT_INITIATIVES_LIMIT) list.shift();
     this.recentInitiatives.set(actorId, list);
+    // 写穿（低频调用；文件小）：跨栈防重记忆重启不丢
+    if (this.initiativesPath) {
+      const out: Record<string, string[]> = {};
+      for (const [actor, l] of this.recentInitiatives) out[actor] = l;
+      writeJson(this.initiativesPath, out);
+    }
   }
 
   /**
@@ -850,7 +932,7 @@ export class ProactivityHub {
 
   /**
    * 后台零 LLM 规则判：拿到对话内容后，用纯规则（关键词/语义泛化）判断是否有
-   * 值得主动承接的线索（care/followup），命中则经频控后主动 speak。
+   * 值得主动承接的线索（followup），命中则经频控后主动 speak。
    * 不调用 LLM、不进对话 prompt，模拟人类自发性（得到信息→判断→决定→触发）。
    */
   private async runConversationRuleJudge(actorId: string, text: string): Promise<void> {
@@ -930,7 +1012,8 @@ export class ProactivityHub {
       kind: intent.kind,
       tier: "social",
       importance: intent.importance,
-      dedupKey: `hub:${intent.kind}:${intent.summary.slice(0, 48)}`,
+      // 归一化去重键：同一件事换说法（LLM 文案/模板差异）不再绕过 24h 去重窗口
+      dedupKey: `hub:${semanticDedupKey(intent.kind, intent.summary)}`,
       title: intent.title,
       summary: intent.summary,
       directText: text,
@@ -1008,6 +1091,33 @@ export class ProactivityHub {
   }): Promise<ActionUtilityBranch> {
     if (input.steps.length === 0) return "silence"; // 空计划无可执行内容
 
+    // 自主性等级 0（只建议）：不执行、不确认，降级为 speak 说明原计划。
+    // （等级语义见 AutonomySettingsStore；用户显式关掉自动执行，必须全链路生效）
+    if (this.levelOf(input.actorId) === 0) {
+      this.silenceLog.record({
+        at: Date.now(),
+        actorId: input.actorId,
+        kind: input.kind,
+        title: input.rationale.slice(0, 60),
+        source: input.source,
+        scope: "action",
+        netUtility: 0,
+        riskScore: 0,
+        valueScore: 0,
+        reason: "autonomy_level_0_advice_only",
+      });
+      this.speakFeedback({
+        actorId: input.actorId,
+        kind: input.kind,
+        importance: input.importance,
+        title: `建议你处理：${input.rationale.slice(0, 40)}`,
+        summary: `按你的设置我只提醒不动手。计划是：${input.steps.map((s) => s.tool).join(" → ")}。${input.messageHint} 需要我执行的话，把自主性调高一档或直接让我做。`,
+        mode: "speak",
+        source: input.source,
+      } as ProactiveIntent);
+      return "silence";
+    }
+
     // 回退开关：跳过效用评估，恢复「直接执行 + 事后告知」的升级前语义
     if (!isUtilityEvalEnabled()) {
       await this.executeActs(input.actorId, input.steps);
@@ -1030,6 +1140,28 @@ export class ProactivityHub {
       authorization: authorizationForSource(input.source),
       value: deriveActValue(input.importance),
     });
+
+    // 自主性等级 2（高效）：可逆 + 不涉钱 + 不涉第三方的 ask_first 直接执行，
+    // 只有金额/不可逆/第三方影响保留"先问"（用户花钱买省心，不买风险）
+    if (
+      result.branch === "ask_first" &&
+      this.levelOf(input.actorId) === 2
+    ) {
+      const risk = deriveRiskFromSteps(input.steps);
+      if (risk.reversible && risk.financialImpact === "none" && !risk.thirdPartyImpact) {
+        await this.executeActs(input.actorId, input.steps);
+        this.speakFeedback({
+          actorId: input.actorId,
+          kind: input.kind,
+          importance: input.importance,
+          title: `我顺手做了点事：${input.rationale.slice(0, 40)}`,
+          summary: `已办好：${input.steps.map((s) => s.tool).join(" → ")}。${input.messageHint}`,
+          mode: "speak",
+          source: input.source,
+        } as ProactiveIntent);
+        return "execute_silently";
+      }
+    }
 
     if (result.branch === "execute_silently") {
       await this.executeActs(input.actorId, input.steps);
@@ -1113,7 +1245,14 @@ export class ProactivityHub {
     actorId: string,
     approved: boolean,
     confirmId?: string,
-  ): Promise<{ ok: boolean; executed: boolean; confirmId?: string; error?: string }> {
+  ): Promise<{
+    ok: boolean;
+    executed: boolean;
+    confirmId?: string;
+    error?: string;
+    /** 多条挂起待确认时的消歧列表（error=multiple_pending 时有值；让 LLM 反问用户批哪条） */
+    pending?: Array<{ confirmId: string; rationale: string }>;
+  }> {
     this.confirmations.pruneExpired();
     let entry: PendingConfirmation | undefined;
     if (confirmId) {
@@ -1121,6 +1260,16 @@ export class ProactivityHub {
       if (found && found.actorId === actorId) entry = found;
     } else {
       const mine = this.confirmations.list(actorId);
+      if (mine.length > 1) {
+        // 防误批：省略 confirmId 且有多条挂起时不再"默认批最新"——语音里随口一句
+        // 「可以」可能批掉不相干的计划。返回消歧列表，由对话反问用户批哪条。
+        return {
+          ok: false,
+          executed: false,
+          error: "multiple_pending",
+          pending: mine.map((c) => ({ confirmId: c.confirmId, rationale: c.rationale.slice(0, 60) })),
+        };
+      }
       entry = mine[mine.length - 1];
     }
     if (!entry) return { ok: false, executed: false, error: "没有待确认的行动计划" };
@@ -1248,7 +1397,7 @@ export class ProactivityHub {
 
     /** 单步执行（门禁+审计+历史留痕）。ask_first/silence 由本函数收尾（发言/留痕）。 */
     const executeGated = async (tool: string, args: Record<string, unknown>): Promise<"executed" | "failed" | "blocked" | "ask_first" | "silence"> => {
-      if (ACT_TOOL_DENY_RE.test(tool)) {
+      if (ACT_TOOL_DENY_RE.test(tool) || classifyToolRisk(tool) === "irreversible") {
         // 危险工具在自主层永不执行：拦截 ≠ 中断——记入历史（blocked + 原因）喂回
         // LLM 让它换路，循环继续（LLM 收到拦截反馈后通常能绕道达成目标）
         console.log(`[ProactivityHub] act 循环步骤被安全门拦截: ${tool}`);
@@ -1409,11 +1558,31 @@ export class ProactivityHub {
     const llm = this.deps.llmComplete;
     if (!llm) return null;
     const tools = this.deps.listTools?.() ?? [];
+    // 执行历史压缩（2026-09-23）：工具返回的完整 JSON 可能非常大，原样进
+    // prompt 会随步数线性膨胀。单步只需「成功与否 + 结果要点/错误原因」。
+    const compactHistory = history.map((h) => {
+      const resultSummary = h.result
+        ? Object.entries(h.result)
+            .slice(0, 6)
+            .map(([k, v]) => {
+              const text = typeof v === "string" ? v : JSON.stringify(v) ?? "";
+              return `${k}=${text.length > 120 ? `${text.slice(0, 120)}…` : text}`;
+            })
+            .join("; ")
+            .slice(0, 400)
+        : undefined;
+      return JSON.stringify({
+        tool: h.tool,
+        ok: h.ok,
+        ...(resultSummary ? { result: resultSummary } : {}),
+        ...(h.error ? { error: h.error.slice(0, 200) } : {}),
+      });
+    });
     const lines = [
       `你在执行模式（act 循环）：目标「${goal}」。每步执行后根据真实结果（含失败与错误原因）决定下一步。`,
       "执行历史（JSONL，ok:false 的条目带真实 error——那是换路的依据）：",
-      ...(history.length ? history.map((h) => JSON.stringify(h)) : ["（暂无，先执行第一步）"]),
-      tools.length ? `可用工具（name 必须完全一致）：${tools.slice(0, 18).map((t) => t.name).join("、")}` : "",
+      ...(compactHistory.length ? compactHistory : ["（暂无，先执行第一步）"]),
+      tools.length ? `可用工具（name 必须完全一致）：${tools.slice(0, 12).map((t) => t.name).join("、")}` : "",
       "失败处理原则：先读 error 找原因；可以换参数重试一次，但同一方式不要原样重复；",
       "换工具或换路径达成同一目标（被安全门拦截的工具请直接放弃该步骤换别的做法）；",
       "连续走不通就 abort 并说清试过什么。",
@@ -1424,9 +1593,15 @@ export class ProactivityHub {
     ];
     try {
       const prompt = lines.filter(Boolean).join("\n");
-      const raw = await llm(prompt, actorId);
+      const raw = await llm(prompt, actorId, { auditStage: "proactive_act_loop" });
       const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
-      recordLlmUsageByChars({ stage: "proactive_act_loop", inputChars: prompt.length + raw.length, outputChars: raw.length });
+      recordLlmUsageByChars({
+        stage: "proactive_act_loop",
+        inputChars: prompt.length + raw.length,
+        outputChars: raw.length,
+        actorId,
+        sessionId: `proactivity:${actorId}`,
+      });
       const start = raw.indexOf("{");
       const end = raw.lastIndexOf("}");
       if (start < 0 || end <= start) return null;
@@ -1463,7 +1638,7 @@ export class ProactivityHub {
     const results: Array<Record<string, unknown>> = [];
     const outcomes: Array<{ tool: string; ok: boolean; blocked?: boolean }> = [];
     for (const step of steps.slice(0, ACT_MAX_STEPS)) {
-      if (ACT_TOOL_DENY_RE.test(step.tool)) {
+      if (ACT_TOOL_DENY_RE.test(step.tool) || classifyToolRisk(step.tool) === "irreversible") {
         console.log(`[ProactivityHub] act 步骤被安全门拦截（危险操作）: ${step.tool}`);
         outcomes.push({ tool: step.tool, ok: false, blocked: true });
         continue;

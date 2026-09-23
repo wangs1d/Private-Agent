@@ -13,11 +13,13 @@
  *     客户端幂等）；
  *   - 防泄漏：入箱 TTL（默认 24h，过期丢弃——用户一天都没上线视为放弃）
  *     + 每会话上限（默认 20 条，超限丢最旧）；
- *   - 进程内单例（与 TaskHub 同风格）：服务器重启时执行中的任务本身不
- *     恢复，无结果可投递；结果文本已由 appendThreadTurn 落 thread。
+ *   - 进程内单例（与 TaskHub 同风格）：执行中任务不随进程恢复，但**结果簿**
+ *     可选落盘（enablePersistence，data/task-plane/task-outbox.json）——重启前
+ *     已入箱未投递的结果重连后照常补投，不再随进程消亡。
  */
 
 import { ServerEventType } from "../protocol.js";
+import { readJson, writeJson } from "../proactivity/persist-file.js";
 
 export type TaskOutboxEntry = {
   sessionId: string;
@@ -33,6 +35,38 @@ const MAX_PER_SESSION = 20;
 
 export class TaskOutbox {
   private readonly entries = new Map<string, TaskOutboxEntry[]>();
+  /** 可选落盘（enablePersistence）：null=纯内存（默认，测试友好） */
+  private persistencePath: string | null = null;
+
+  /**
+   * 启用落盘（bootstrap 调用一次）：加载历史待投递条目（过期照常剔除），
+   * 后续入箱/取空即时写盘——结果条目低频，无需防抖。
+   */
+  enablePersistence(path: string): void {
+    this.persistencePath = path;
+    const raw = readJson<Record<string, TaskOutboxEntry[]>>(path, {});
+    let restored = 0;
+    const now = Date.now();
+    for (const [sessionId, queue] of Object.entries(raw)) {
+      const alive = (queue ?? []).filter((e) => e?.messageId && now - (e.enqueuedAt ?? 0) <= ENTRY_TTL_MS);
+      if (alive.length === 0) continue;
+      this.entries.set(sessionId, alive);
+      restored += alive.length;
+    }
+    if (restored > 0) {
+      console.log(`[TaskOutbox] 离线结果已恢复 ${restored} 条`);
+      this.persist();
+    }
+  }
+
+  private persist(): void {
+    if (!this.persistencePath) return;
+    const out: Record<string, TaskOutboxEntry[]> = {};
+    for (const [sessionId, queue] of this.entries) {
+      if (queue.length > 0) out[sessionId] = queue;
+    }
+    writeJson(this.persistencePath, out);
+  }
 
   /** 投递失败入箱（同 messageId 去重——同一结果只补投一次）。 */
   enqueue(
@@ -54,6 +88,7 @@ export class TaskOutbox {
       enqueuedAt: Date.now(),
     });
     if (queue.length > MAX_PER_SESSION) queue.splice(0, queue.length - MAX_PER_SESSION);
+    this.persist();
   }
 
   /** 取出并清空该会话的待投递条目（FIFO）。 */
@@ -62,6 +97,7 @@ export class TaskOutbox {
     const queue = this.entries.get(sessionId);
     if (!queue || queue.length === 0) return [];
     this.entries.delete(sessionId);
+    this.persist();
     return queue;
   }
 

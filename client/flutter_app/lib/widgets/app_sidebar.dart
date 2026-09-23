@@ -19,13 +19,18 @@ class AppSidebar extends StatefulWidget {
     required this.onSetLightTheme,
     required this.onSetDarkTheme,
     required this.onSetSystemTheme,
-    required this.onOpenMessages,
+    required this.inboxUnread,
+    required this.onInboxUnreadChanged,
     required this.onOpenSettings,
-    required this.onOpenUserMenuHelp,
+    required this.onCheckUpdate,
+    required this.onOpenUserMenuFeedback,
     required this.onOpenDevices,
     required this.onLogout,
-    required this.totalUnread,
   });
+
+  /// 「检查更新」结果浮卡的锚点：浮卡贴在按钮正上方
+  /// （见 core/presentation/update_result_card.dart）
+  static final LayerLink updateButtonLink = LayerLink();
 
   final int tabIndex;
   final ValueChanged<int> onTabSelected;
@@ -42,23 +47,26 @@ class AppSidebar extends StatefulWidget {
   /// 切换「跟随系统」
   final VoidCallback onSetSystemTheme;
 
-  /// 用户菜单「站内信」行:打开右侧消息聚合面板
-  final VoidCallback onOpenMessages;
+  /// 站内信未读数;>0 时在用户菜单「站内信」行显示红底白字小徽标
+  final int inboxUnread;
+
+  /// 站内信已读状态变化:回传最新未读数(消息框内就地已读后同步徽标)
+  final ValueChanged<int> onInboxUnreadChanged;
 
   /// 侧栏底部「设置」按钮:全屏打开设置页
   final VoidCallback onOpenSettings;
 
-  /// 用户菜单「帮助与反馈」行
-  final VoidCallback onOpenUserMenuHelp;
+  /// 侧栏底部「检查更新」按钮:手动触发一次版本检查
+  final Future<void> Function() onCheckUpdate;
+
+  /// 用户菜单「反馈」行:弹出反馈弹窗
+  final VoidCallback onOpenUserMenuFeedback;
 
   /// 用户菜单「我的设备」行:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
 
   /// 用户菜单「退出登录」行
   final VoidCallback onLogout;
-
-  /// 站内信未读总数(0 不显示徽标)
-  final int totalUnread;
 
   @override
   State<AppSidebar> createState() => _AppSidebarState();
@@ -78,6 +86,19 @@ class _AppSidebarState extends State<AppSidebar> {
   static const double _sidebarWidth = 256.0;
   static const EdgeInsets _sidebarPadding =
       EdgeInsets.symmetric(horizontal: 10, vertical: 8);
+
+  /// 「检查更新」进行中:按钮图标换转圈,防止重复点击。
+  bool _checkingUpdate = false;
+
+  Future<void> _handleCheckUpdate() async {
+    if (_checkingUpdate) return;
+    setState(() => _checkingUpdate = true);
+    try {
+      await widget.onCheckUpdate();
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -134,7 +155,8 @@ class _AppSidebarState extends State<AppSidebar> {
                 ),
               ),
               // 头像锚定在侧栏底部最左(与上方导航图标左边距 10 对齐),
-              // 「设置」按钮锚定在最右,二者各占一角,均无描边。
+              // 「设置」「检查更新」按钮成组锚定在最右(更新在最右,设置在其左),
+              // 均无描边。
               Positioned(
                 left: 10,
                 bottom: 8,
@@ -142,13 +164,13 @@ class _AppSidebarState extends State<AppSidebar> {
                   message: "用户菜单",
                   child: SidebarUserMenu(
                     userName: "king",
-                    totalUnread: widget.totalUnread,
+                    inboxUnread: widget.inboxUnread,
                     currentTheme: widget.currentTheme,
                     onSetLightTheme: widget.onSetLightTheme,
                     onSetDarkTheme: widget.onSetDarkTheme,
                     onSetSystemTheme: widget.onSetSystemTheme,
-                    onOpenMessages: widget.onOpenMessages,
-                    onOpenHelp: widget.onOpenUserMenuHelp,
+                    onInboxUnreadChanged: widget.onInboxUnreadChanged,
+                    onOpenFeedback: widget.onOpenUserMenuFeedback,
                     onOpenDevices: widget.onOpenDevices,
                     onLogout: widget.onLogout,
                   ),
@@ -157,7 +179,26 @@ class _AppSidebarState extends State<AppSidebar> {
               Positioned(
                 right: 10,
                 bottom: 8,
-                child: _SidebarSettingsButton(onTap: widget.onOpenSettings),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    _SidebarIconButton(
+                      icon: Icons.settings_outlined,
+                      tooltip: "设置",
+                      onTap: widget.onOpenSettings,
+                    ),
+                    const SizedBox(width: 4),
+                    CompositedTransformTarget(
+                      link: AppSidebar.updateButtonLink,
+                      child: _SidebarIconButton(
+                        icon: Icons.upgrade_rounded,
+                        tooltip: "检查更新",
+                        onTap: _handleCheckUpdate,
+                        loading: _checkingUpdate,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -181,18 +222,28 @@ class SidebarItemSpec {
   final int tabIndex;
 }
 
-/// 侧栏「设置」按钮:锚定在侧栏底部最右侧,与头像同规格但无描边,
-/// 只保留 hover 底色反馈,点击全屏打开设置页。
-class _SidebarSettingsButton extends StatefulWidget {
-  const _SidebarSettingsButton({required this.onTap});
+/// 侧栏底部图标按钮(「设置」「检查更新」):与头像同规格但无描边,
+/// 只保留 hover 底色反馈。
+class _SidebarIconButton extends StatefulWidget {
+  const _SidebarIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.loading = false,
+  });
 
+  final IconData icon;
+  final String tooltip;
   final VoidCallback onTap;
 
+  /// true 时图标位换成转圈(动作进行中,如检查更新),此时颜色取默认态。
+  final bool loading;
+
   @override
-  State<_SidebarSettingsButton> createState() => _SidebarSettingsButtonState();
+  State<_SidebarIconButton> createState() => _SidebarIconButtonState();
 }
 
-class _SidebarSettingsButtonState extends State<_SidebarSettingsButton> {
+class _SidebarIconButtonState extends State<_SidebarIconButton> {
   bool _hovering = false;
 
   @override
@@ -207,7 +258,7 @@ class _SidebarSettingsButtonState extends State<_SidebarSettingsButton> {
         : AppPalette.resolveSidebarIconDefault(variant);
 
     return Tooltip(
-      message: "设置",
+      message: widget.tooltip,
       child: MouseRegion(
         onEnter: (_) => deferSidebarHover(() {
           if (mounted) setState(() => _hovering = true);
@@ -229,7 +280,16 @@ class _SidebarSettingsButtonState extends State<_SidebarSettingsButton> {
               color: bgColor,
               borderRadius: BorderRadius.circular(8),
             ),
-            child: Icon(Icons.settings_outlined, size: 20, color: iconColor),
+            child: widget.loading
+                ? SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(iconColor),
+                    ),
+                  )
+                : Icon(widget.icon, size: 20, color: iconColor),
           ),
         ),
       ),

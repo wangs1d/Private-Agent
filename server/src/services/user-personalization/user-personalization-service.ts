@@ -550,8 +550,30 @@ function toReplyLengthProfileState(v: unknown): ReplyLengthProfileState {
   };
 }
 
-function buildReplyLengthGuidance(userText: string, profile: ReplyLengthProfileState): string {
-  const text = userText.trim();
+/**
+ * 长度偏好归类（供人格静态块适配行）：与 buildReplyLengthGuidance 的长期
+ * 判定同阈值；样本不足（<3）返回 undefined——零信号不注入。
+ */
+export function classifyReplyLengthPreference(
+  profile: ReplyLengthProfileState,
+): "short" | "medium" | "detailed" | undefined {
+  if (profile.sampleCount < 3) return undefined;
+  if (
+    profile.shortPreferenceScore > profile.longPreferenceScore + 1.2 &&
+    profile.avgUserChars <= 28
+  ) {
+    return "short";
+  }
+  if (
+    profile.longPreferenceScore > profile.shortPreferenceScore + 1.2 &&
+    profile.avgUserChars >= 65
+  ) {
+    return "detailed";
+  }
+  return "medium";
+}
+
+function buildReplyLengthGuidance(userText: string, profile: ReplyLengthProfileState): string {  const text = userText.trim();
   const compactText = text.replace(/\s+/g, "");
   const shortExplicit =
     /(简单说|简短点|短一点|一句话|一两句|别展开|直接说结论|长话短说|太长不看|简洁点)/i.test(text);
@@ -642,6 +664,14 @@ export type PersonalizationPromptSlice = {
   userProfile?: string;
   toneGuidance?: string;
   relationshipGuidance?: string;
+  /** 关系亲密度（0~1）：人格模块换算关系档位（persona-core.resolveRelationshipTier） */
+  rapport?: number;
+  /** 学到的调侃容忍度（0~1）：人格 mood 档 gate + 静态块适配行 */
+  humorTolerance?: number;
+  /** 学到的语气偏好（EmotionState.preferredTone）：静态块适配行 */
+  preferredTone?: "humor" | "formal" | "warm" | "balanced";
+  /** 学到的回复长度倾向：静态块适配行（样本不足时缺省） */
+  lengthPreference?: "short" | "medium" | "detailed";
 };
 
 export type PersonalizationRelationshipState = ReturnType<typeof toRelationshipState>;
@@ -762,6 +792,10 @@ export class UserPersonalizationService {
     // 2026-09-11：relationshipGuidance 前置调子旋钮（伙伴面调子的当轮放行开关）。
     return {
       userProfile,
+      rapport: relationship.rapport,
+      humorTolerance: relationship.humorTolerance,
+      preferredTone: state.preferredTone,
+      lengthPreference: classifyReplyLengthPreference(replyLength),
       toneGuidance: [
         userText?.trim() ? buildReplyLengthGuidance(userText, replyLength) : undefined,
         buildToneGuidance(state),

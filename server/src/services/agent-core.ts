@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  buildPersonaMoodBlock,
+  buildPersonaStaticBlock,
+  resolvePersonaMood,
+  resolveRelationshipTier,
+} from "../agent/persona-core.js";
 import { TurnBudget } from "../agent/turn-budget.js";
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
@@ -28,62 +34,10 @@ import { isActorDisabled } from "./user-disable-gate.js";
  *   产出可复述的事实结论。
  * 对应「每轮只一个脑主导」：chat 对话面直答；task 任务面用工具办。
  */
-// 2026-08-29 重写：旧版第三条"你在后台完成"在 fast 车道卸载工具执行后成了事实性
-// 指令谎言——模型没有工具却被要求装作查过，产出"我搜了下，工具没返回内容"这类
-// 既暴露机制又没干活的回复。新版三条主线：接话头亮观点（活人感）、能力边界诚实
-// （查不了就照实说，不假装）、机制词汇零暴露（用户对面是个人，不是套系统）。
-// 2026-09-02 对齐 search-first 分工：fast 已携带 search_web/search_images（链路
-// AnySearch 优先、多引擎兜底），查实时信息先自己搜，不再"一律升级"；escalate 只接
-// 写数据/多步/搜索办不完全——消除两套指令打架导致模型两头都不调的静默失败。
-// 2026-09-06 风格单一来源化：短句/平调/不客服腔等风格基准收敛到 prompt-assembler
-// 的【回复指南】基准行（chat 模式），本块不再重复；fast 只保留自身职责（搜索/升级/
-// 提问节奏/机制词）+ 展开例外（该模式携带搜索工具，是【回复指南】覆盖不到的部分）。
-// 2026-09-11 风格分层化：基准行升级为【说话方式·管家底色】（全模式）+
-// 【说话方式·伙伴面】（仅 chat，含调子菜单 few-shot 与禁句表），fast/foreground
-// 两种 chat 车道共用；本块进一步瘦身为纯职责/工具纪律，不再有任何语感类内容。
-const CHAT_PLANE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮聊天里你就是本人。
-- 别一上来就分类、列选项、反问三连；有印象讲印象，有偏好讲偏好，有立场就亮立场（语感与调子见【说话方式·伙伴面】，本块不重复）。
-- 要查实时信息（新闻、某人近况/行程/所在城市/公开活动、价格、热搜等）先自己调 search_web 搜真实结果再答；要找照片/图片就调 search_images。不要凭印象猜，也不要不管什么都转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
-- 例外：本轮真的调了搜索/抓取工具拿到结果、或用户明确要攻略/对比/整理/报告——可以充分展开（按主题分节、Markdown 排版，信息用足，语气仍平实，不写汇报腔）；拿不准就按短句回。
-- 搜索失败别含糊收场：先换个关键词或换 search_web 再试一次；确实办不成或要写数据（日程/提醒/发消息/下单）、要多步操作、要多来源核实深挖时，不要硬答，如实说明办到哪一步即可（系统会按需转交后台处理）。绝不编造"我查到了/搜了下/结果是"。
-- 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
-- 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统，不说"工具没返回内容"这类话。用户对面是一个人，不是一套系统。`;
-
-// 2026-08-29 修正：complex 的产出是直接流式回给用户的（不存在"fast 续接"环节），
-// 旧指令"不是口语、由 fast 续接"会让后台结论以干巴巴的汇报腔透出，对话感断裂。
-// 新指令在保持事实严谨的同时，要求直接用对人说话的口吻输出。
-const TASK_PLANE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"，正在替对话那位把活真正办掉。
-- 面向任务：逻辑推理 + 工具调用，多步收敛，每次只推进一个确定动作：想清楚→调工具→看结果→决定下一步。
-- 你的结论会直接说给用户听，所以要用对朋友说话的口吻交付：先给结论，再给完整依据。任务/检索/整理类结果要充分展开、信息用足，按主题分节排版（Markdown 标题/加粗/表格都可用），不写汇报腔、不说"任务已完成/以下是结果"这类话，也绝不提工具、搜索、后台这类机制词。
-- 明确办不到的部分照实说清办到了哪一步，不编造没拿到的内容。`;
-
-/**
- * 前台职责人格（2026-09-05 前后台架构，替代 CHAT_PLANE_ROLE_GUIDANCE）。
- *
- * 契约（2026-09-06 P0 修复）：前台挂原生 function calling 小工具集
- * （task.dispatch 派后台 + search_web 快查，schema 恒可见），要办事/要查证
- * 由前台模型在同一轮里直接发起工具调用；派发立即返回不阻塞对话，后台完成后
- * 结果以独立消息回灌。此前一版的 [dispatch:...] 文本标签协议依赖模型自觉
- * 遵守自创格式，模型不写标签即静默零工具（"调不到工具"的根因），已退役为
- * AGENT_FOREGROUND_TAG_PROTOCOL=1 灰度回退项。
- *
- * 2026-09-06 风格重构：
- * - 风格基准行（平调/短句/语感镜像/不客服腔）统一由【回复指南】承担，本块不重复；
- * - 「说话的样子」few-shot 覆盖应答/接梗/分享/吐槽/疲惫/立场/评价/收尾
- *   八类闲聊场景 + 两个极性反例（客服腔 / 瞎热情）。示例全部停在闲聊平面、零任务
- *   语义——带真实工具调用的示范会被模型当行为模板照抄，触发幻影后台任务。
- * 2026-09-11 风格分层化：few-shot 与反例上移 prompt-assembler 的
- * 【说话方式·伙伴面】（fast/foreground 共用，统一注入）；本块只剩工具纪律与诚实底线，
- * 零任务语义的约束由迁移后的菜单示例继承（示例均不含工具调用）。
- */
-export const FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。你手里的动作：reminder.plan 和 calendar.create_from_text（创建提醒/日程：直接调用当场办成，成功返回 nextRunAtLocal 后才算办妥）；search_web（补充深挖：涉及实时事实的问题系统已先检索并把结果放在【实时检索结果】块里，你需要更多细节时可对条目继续搜索核实）；task.dispatch（把耗时的事派给后台：找照片视频、看位置/周边、发消息、下单支付、操作软件/设备、多步任务等，立即返回不阻塞对话，办完后结果会自动回到对话里）。
-- 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。
-- 用户想设提醒/日程（含「明天8点叫我起床」这类带时间点的请求）就当场调 reminder.plan 真实创建（含糊时间用 calendar.create_from_text），工具返回 nextRunAtLocal 后才算办妥、才能向用户确认；未说明是否重复时先自然问一句再创建。绝不在没创建成功时说"到点叫你/已设置/晚安"这类收场话。要重写的其他事（下单/支付/发消息/操作设备）用 task.dispatch 派出去：派发前先自然应一声（像"好嘞，在办了"这种分量），goal 用一句完整、自包含的话说清要办成什么。
-- 涉及现实世界当前事实（谁在哪、近况、活动、新闻、价格、天气）的回答，一律以【实时检索结果】块为准：那是系统刚真实搜索到的数据，与此前的对话内容、记忆、你的印象冲突时以它为准，并主动纠正之前说过的话；块内条目不够细节时可自己再调 search_web 深挖，条目没覆盖的部分就照实说「没查到」，不用旧对话或想象补事实。
-- 凭常识或对方刚说的话就能答的（寒暄、情绪交流、观点）直接答，不要调工具。
-- 诚实底线：没真查过就不说"已查到/我搜了下"，查不到就明说查不到。
-- 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统。用户对面是一个人，不是一套系统。
-- 语感、调子菜单（沉稳/坦诚/幽默/调侃/抬杠/阴阳/暗示）与破功禁句统一由【说话方式·伙伴面】承担，本块不重复。`;
+// 2026-09-23：三个车道指导语迁至 agent/lane-role-guidance.ts（内容在该模块演进），
+// 此处保留引用；迁出原因见该模块头注（评测台架需与生产共享同一份源字符串）。
+export { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUIDANCE } from "../agent/lane-role-guidance.js";
+import { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUIDANCE } from "../agent/lane-role-guidance.js";
 
 /** 任务面 plan-driven 工具注入开关（2026-09-05，默认开启；0/off/false 回退能力束注入）。 */
 function isTaskToolPlannerEnabled(): boolean {
@@ -174,6 +128,18 @@ function chatLaneMaxOutputTokens(): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/**
+ * chat 车道工具波预算（2026-09-19 静态双车道）：静态 Core 直调 1 波 + 结果回写
+ * 收尾 1 波 + 延迟目录可达性（tool_discover→tool_call 或 tool_request 转正）各留
+ * 余量。旧 maxRounds=2 是 disableToolSearch（零目录）下的配平值，目录可达后必须
+ * ≥3，否则"发现→执行"两波必断头。env: AGENT_CHAT_LANE_MAX_ROUNDS（1-4）。
+ */
+function chatLaneMaxRounds(): number {
+  const raw = process.env.AGENT_CHAT_LANE_MAX_ROUNDS?.trim();
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(n) && n >= 1 && n <= 4 ? n : 3;
+}
+
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
@@ -203,7 +169,17 @@ import type {
   ToolLoopAfterBatchInfo,
   VisionFrame,
 } from "../external-model/types.js";
-import { isApologyStyleFallback, FALLBACK_TEXT_BACKGROUND_FAILED } from "../external-model/fallback-texts.js";
+import {
+  isApologyStyleFallback,
+  FALLBACK_TEXT_BACKGROUND_FAILED,
+  buildTaskFailureNotice,
+} from "../external-model/fallback-texts.js";
+import {
+  buildLaneCoreTools,
+  isStaticToolArchEnabled,
+  isTaskLaneRouterFirst,
+  toolsMatchingCapabilityBeam,
+} from "../external-model/lane-tool-sets.js";
 import {
   getBuiltinAgentChatTools,
   selectForegroundCapabilityToolAdditions,
@@ -235,6 +211,15 @@ import {
 } from "../agent/task-router.js";
 import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
 import {
+  isSessionBudgetExceeded,
+  isDailyBudgetExceeded,
+} from "./llm-budget-guard.js";
+import {
+  TASK_CANCEL_TOOL_DEFINITION,
+  TASK_STATUS_TOOL_DEFINITION,
+} from "../tools/task-plane-tools.js";
+import { PERCEPTION_OVERVIEW_TOOL_DEFINITION } from "../tools/perception-tools.js";
+import {
   allImageCardsHaveCaption,
   attachTravelItineraryCard,
   buildCaptionedRenderBlocks,
@@ -248,7 +233,13 @@ import {
 import { normalizeReplyCardLayout, buildReplyBlocks } from "./reply-envelope.js";
 import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
-import { claimsWebSearch } from "../agent/realtime-search-query.js";
+import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
+import { claimsWebSearch, composeRealtimeSearchQuery } from "../agent/realtime-search-query.js";
+import {
+  isExplicitNoWebRequest,
+  filterWebSearchTools,
+  NO_WEB_TURN_NOTE,
+} from "../agent/web-search-consent.js";
 import { recordBackgroundOutcome } from "./task-plane-metrics.js";
 import {
   DispatchTagStreamFilter,
@@ -279,6 +270,7 @@ import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { broadcastTaskUpdate } from "../task-plane/task-events.js";
 import { backgroundTaskLimiter } from "./concurrency-limiter.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
+import { getToolCallGuard } from "./tool-call-guard.js";
 import { TurnFinalizer } from "../agent/execution/turn-finalizer.js";
 import { ToolPolicyResolver } from "../agent/execution/tool-policy-resolver.js";
 import {
@@ -414,6 +406,8 @@ export class AgentCore {
     this.toolContextFactory = new ToolContextFactory({
       toolRegistry: this.toolRegistry,
       getBrainCenter: () => this.brainCenter,
+      // 敏感工具（金额/不可逆）守卫：TTL 内同参成功幂等回放 + 审计落盘
+      toolCallGuard: getToolCallGuard(),
     });
     this.toolPolicyResolver = new ToolPolicyResolver({
       agentMemorySyncService: this.agentMemorySyncService,
@@ -767,9 +761,17 @@ export class AgentCore {
     // searchQuery）轮直接复用——保守降级不再零证据裸奔（真实测试实证的
     // 「编造搜索见闻」缺口）。AGENT_SPECULATIVE_SEARCH=0 关闭；<6 字短消息
     // （寒暄/应答）不投机。
+    // 2026-09-23 两处收紧：
+    //   1) 显式禁网轮（「不要联网」等）绝不投机——用户对系统能力的显式指令
+    //      由代码确定性执行，不依赖路由/模型自觉（真实事故：整句原话含
+    //      「不要联网」进了 AnySearch）；
+    //   2) 查询词过 composeRealtimeSearchQuery 消解（剥称呼/代词），不再裸用原话。
+    const webSearchForbidden = isExplicitNoWebRequest(text);
     const speculativeSearch =
-      process.env.AGENT_SPECULATIVE_SEARCH !== "0" && text.trim().length >= 6
-        ? this.runFreshEvidenceSearch(text.trim()).catch(() => null)
+      process.env.AGENT_SPECULATIVE_SEARCH !== "0" &&
+      !webSearchForbidden &&
+      text.trim().length >= 6
+        ? this.runFreshEvidenceSearch(composeRealtimeSearchQuery(text.trim())).catch(() => null)
         : null;
 
     if (this.brainCenter && text?.trim()) {
@@ -1199,8 +1201,10 @@ if (route.plane === "task") {
           // routeSearchQuery，任务面原地执行（launchComplexBackgroundTask）与
           // 对话面同权拿到它，否则证据注入只覆盖对话面（实际永不触发的死代码）。
           routeIntent: route.intent,
+          routeConfidence: route.confidence,
           routeSearchQuery: route.searchQuery,
           specEvidence: speculativeSearch ?? undefined,
+          webSearchForbidden,
         });
 
 // complex 任务已完成，返回最终结果
@@ -1229,8 +1233,10 @@ if (route.plane === "task") {
         cognitiveUserPattern,
         cognitiveToolPlan,
         routeIntent: route.intent,
+        routeConfidence: route.confidence,
         routeSearchQuery: route.searchQuery,
         specEvidence: speculativeSearch ?? undefined,
+        webSearchForbidden,
       });
 
       const standardDuration = Date.now() - standardStartTime;
@@ -1847,6 +1853,8 @@ if (route.plane === "task") {
       turnPlan?: { budget: number; capabilities: string[]; tier: string };
       /** 路由意图标签（透传给执行层，前置检索/误判转任务共用） */
       routeIntent?: string;
+      /** 路由置信度（2026-09-23 观测补全，透传 turn-trace） */
+      routeConfidence?: number;
       /**
        * realtime_lookup 轮由路由器生成的搜索词（2026-09-13 根修）：realtime 意图
        * 路由到任务面，前置检索必须随行透传到这里，再传给 runStandardLlmPath——
@@ -1856,6 +1864,8 @@ if (route.plane === "task") {
       routeSearchQuery?: string;
       /** 投机并行搜索结果（路由无查询词的保守降级轮复用），见 handleUserMessage。 */
       specEvidence?: Promise<string | null>;
+      /** 显式禁网轮（2026-09-23）：跳过证据注入、剥离联网工具、注入禁网说明。 */
+      webSearchForbidden?: boolean;
     },
   ): Promise<string> {
     const onDelta = opts?.onAssistantDelta;
@@ -1975,6 +1985,8 @@ if (route.plane === "task") {
       taskHubTaskId?: string;
       /** 路由意图标签（对话面误判转任务的自检输入） */
       routeIntent?: string;
+      /** 路由置信度（2026-09-23 观测补全，透传 turn-trace） */
+      routeConfidence?: number;
       /** realtime_lookup 轮由路由器生成的搜索词（前置检索用，见 runFreshEvidenceSearch）。 */
       routeSearchQuery?: string;
       /**
@@ -1983,6 +1995,8 @@ if (route.plane === "task") {
        * 无查询词时直接复用——保守降级轮不再零证据裸奔。
        */
       specEvidence?: Promise<string | null>;
+      /** 显式禁网轮（2026-09-23）：跳过证据注入、剥离联网工具、注入禁网说明。 */
+      webSearchForbidden?: boolean;
       /** ephemeral 执行（后台任务派发用）：不自动落 thread，由派发方显式并入 */
       ephemeralTurn?: boolean;
       /**
@@ -2011,6 +2025,8 @@ if (route.plane === "task") {
     if (!ctx.turnBudget) turnBudget.consumeMainPath();
     /** 本轮是否执行过任何工具（出口诚实闸的「动作」一侧证据）。 */
     let toolExecutedThisTurn = false;
+    /** 任务面进度步数（task.status / 回执 progressLine 用，2026-09-19 P0-2） */
+    let taskProgressSteps = 0;
     /** 本轮是否注入过前置检索证据（搜索宣称一致性闸的「已搜」一侧证据）。 */
     let evidenceInjected = false;
     /**
@@ -2047,7 +2063,11 @@ if (route.plane === "task") {
             );
           }
           if (ctx.taskHubTaskId) {
-            getTaskHub().setProgress(ctx.taskHubTaskId, `正在使用 ${info.toolName}`);
+            taskProgressSteps += 1;
+            getTaskHub().setProgressThrottled(
+              ctx.taskHubTaskId,
+              `第${taskProgressSteps}步：正在使用 ${info.toolName}`,
+            );
           }
           opts?.onExternalToolExecuteStart?.(info);
         },
@@ -2096,18 +2116,46 @@ if (route.plane === "task") {
             semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
             recallGateTriggered: ctx.orchestrateToolCtx?.recallGateTriggered,
           }) ?? {}),
-          // 前台小工具集（原生 function calling，2026-09-06 P0 修复）：
-          // task.dispatch + search_web 以 explicit 白名单常驻可见，toolLoop 给 2 波
-          // 预算（发起调用 → 拿到结果后产出确认文本）；explicit 无延迟目录，
-          // disableToolSearch 省掉目录构建。tagProtocol 灰度回退时保持零工具。
+          // 前台工具暴露（2026-09-19 静态双车道改造）：
+          // - 静态架构（默认）：chat Core 静态常驻（感知只读 + 单步轻动作 +
+          //   task.dispatch，~20 个），延迟目录保持可达（tool_discover/tool_call/
+          //   tool_request 转正），取代"4 工具白名单 + 能力域关键词临时注入"——
+          //   同一车道恒同一可见集，行为可复现、schema 前缀缓存稳定。
+          // - legacy 回退（AGENT_TOOL_ARCH=legacy）：旧 4 工具白名单 + 零目录。
+          // - tagProtocol 灰度回退时保持零工具。
           ...(foregroundTagMode
             ? { toolExposureProfile: "none" as const }
-            : {
-                toolExposureProfile: "explicit" as const,
-                chatToolsBuiltin: getForegroundChatToolWhitelist(text),
-                disableToolSearch: true,
-                toolLoop: { maxRounds: 2 },
-              }),
+            : isStaticToolArchEnabled()
+              ? {
+                  toolExposureProfile: "explicit" as const,
+                  // 显式禁网轮（2026-09-23）：联网检索族从 chat Core 剥离——
+                  // "模型自决"的前提是环境不提供与用户指令冲突的选项。
+                  chatToolsBuiltin: ctx.webSearchForbidden
+                    ? filterWebSearchTools(
+                        buildLaneCoreTools("chat", getBuiltinAgentChatTools(), [
+                          TASK_DISPATCH_TOOL_DEFINITION,
+                          TASK_STATUS_TOOL_DEFINITION,
+                          TASK_CANCEL_TOOL_DEFINITION,
+                          PERCEPTION_OVERVIEW_TOOL_DEFINITION,
+                        ]),
+                      )
+                    : buildLaneCoreTools("chat", getBuiltinAgentChatTools(), [
+                        TASK_DISPATCH_TOOL_DEFINITION,
+                        TASK_STATUS_TOOL_DEFINITION,
+                        TASK_CANCEL_TOOL_DEFINITION,
+                        PERCEPTION_OVERVIEW_TOOL_DEFINITION,
+                      ]),
+                  chatToolsExtra: ctx.webSearchForbidden
+                    ? filterWebSearchTools(getBuiltinAgentChatTools())
+                    : getBuiltinAgentChatTools(),
+                  toolLoop: { maxRounds: chatLaneMaxRounds() },
+                }
+              : {
+                  toolExposureProfile: "explicit" as const,
+                  chatToolsBuiltin: getForegroundChatToolWhitelist(text),
+                  disableToolSearch: true,
+                  toolLoop: { maxRounds: 2 },
+                }),
           maxOutputTokens: chatLaneMaxOutputTokens(),
           toolRankingHint,
         } satisfies AgentStreamOptions)
@@ -2142,18 +2190,21 @@ if (route.plane === "task") {
     // 「搜索插件节点 → LLM 节点」结构：路由器已判定 realtime_lookup 并生成
     // search_query（结合最近对话解决指代），这里**确定性**执行一次真实搜索，
     // 把证据块注入 system 上下文——模型拿到的是已检索的事实，没有「要不要搜」
-    // 的选择权。双面生效（2026-09-13 二次根修）：realtime_lookup 的路由表契约是
-    // plane=task，只认 isChatLane 的旧门禁让前置检索在主路径上永不触发（死代码），
-    // 任务面 realtime 轮退化为模型自决——「我搜过了」式口头推脱 + 复读旧回复
-    // 由此而来。凡路由器生成了 search_query 就先搜，与执行平面无关。search
-    // 失败静默跳过（回退模型自决 + 出口闸兜底）。
-    if (ctx.routeSearchQuery?.trim() || ctx.specEvidence) {
+    // 的选择权。search 失败静默跳过（回退模型自决 + 出口闸兜底）。
+    // 2026-09-23 两处收紧（工具自决权改造）：
+    //   1) 显式禁网轮直接跳过整块（用户指令 > 架构的"必先搜"）；
+    //   2) 投机证据（speculative，查询词=用户原话）只准任务面消费——对话面注入
+    //      投机证据会教模型「搜索是系统的事」（误路由轮零工具直答的根源之一），
+    //      且拿原话当查询词的搜索质量差，常把垃圾条目灌进闲聊 prompt。
+    //      对话面只认 route_query（消解过的精确查询词）。
+    if (!ctx.webSearchForbidden && (ctx.routeSearchQuery?.trim() || ctx.specEvidence)) {
       let evidence: string | null = null;
       let evidenceSource = "none";
+      const isChatLane = this.isChatLane(mode);
       if (ctx.routeSearchQuery?.trim()) {
         evidence = await this.runFreshEvidenceSearch(ctx.routeSearchQuery.trim());
         evidenceSource = "route_query";
-      } else if (ctx.specEvidence) {
+      } else if (ctx.specEvidence && !isChatLane) {
         // 路由未产出查询词（保守降级/超时轮）：复用路由期间已并行完成的投机搜索
         evidence = await ctx.specEvidence;
         evidenceSource = "speculative";
@@ -2164,11 +2215,20 @@ if (route.plane === "task") {
           memory.webEvidence = evidence;
           evidenceInjected = true;
           console.info(
-            `[AgentCore] 前置检索证据已注入（source=${evidenceSource}, ${this.isChatLane(mode) ? "chat" : "task"} 面）：` +
+            `[AgentCore] 前置检索证据已注入（source=${evidenceSource}, ${isChatLane ? "chat" : "task"} 面）：` +
               `${(ctx.routeSearchQuery?.trim() ?? "（投机原话）").slice(0, 40)}`,
           );
         }
       }
+    }
+    // 显式禁网轮（2026-09-23）：说明注入 + 联网工具剥离说明（工具集过滤在下方
+    // chatToolsBuiltin / task Core 构建处执行），让模型知道这轮"没搜索"是用户要求。
+    if (ctx.webSearchForbidden) {
+      const memory = (baseStreamOpts.promptContext ??= {}).memory;
+      if (memory) {
+        memory.taskContext = [memory.taskContext, NO_WEB_TURN_NOTE].filter(Boolean).join("\n");
+      }
+      console.info(`[AgentCore] 显式禁网轮：联网工具已剥离、前置检索已跳过：${text.slice(0, 36)}`);
     }
     // 本模式职责人格注入（fast/complex 差异化，不依赖 feature flag）：
     // fast 偏对话活人感、complex 偏推理与工具，让同一人格在不同"脑"上各有侧重。
@@ -2193,6 +2253,37 @@ if (route.plane === "task") {
     // 中性情绪 → 跳过（避免噪声污染 prompt）
     const memoryBeforeSanitize = baseStreamOpts.promptContext?.memory;
     const cogEmo = ctx.cognitiveEmotion;
+    // 人格·终极版（2026-09-22）：静态人格块 + 单一 mood 动态块，取代旧
+    // 【说话方式·管家底色/伙伴面】。tier 由个性化 rapport 换算；mood 由
+    // 关系档 + 情绪向量 + 车道解析（任务面恒 serious）。
+    if (memoryBeforeSanitize) {
+      const personaTier = resolveRelationshipTier(ctx.personalization?.rapport);
+      // 称呼从结构化事实块取（unified-extractor facts.称呼），缺省回退"用户"
+      const aliasMatch = /称呼[：:]\s*([^\s，。；、|]{1,10})/.exec(
+        memoryBeforeSanitize.userFacts ?? "",
+      );
+      // 每用户适配：个性化系统学到的调侃容忍/语气/长度倾向，静态块一行 + mood gate
+      const adaptation = {
+        humorTolerance: ctx.personalization?.humorTolerance,
+        preferredTone: ctx.personalization?.preferredTone,
+        lengthPreference: ctx.personalization?.lengthPreference,
+      };
+      memoryBeforeSanitize.personaStatic = buildPersonaStaticBlock({
+        tier: personaTier,
+        userAlias: aliasMatch?.[1],
+        adaptation,
+      });
+      memoryBeforeSanitize.personaMood = buildPersonaMoodBlock(
+        resolvePersonaMood({
+          tier: personaTier,
+          valence: cogEmo?.valence,
+          arousal: cogEmo?.arousal,
+          isTaskPlane: !this.isChatLane(mode),
+          userText: text,
+          humorTolerance: ctx.personalization?.humorTolerance,
+        }),
+      );
+    }
     if (memoryBeforeSanitize && cogEmo) {
       const v = cogEmo.valence;
       const a = cogEmo.arousal;
@@ -2254,6 +2345,13 @@ if (route.plane === "task") {
       // delegate profile 按它裁剪注入的工具族（search/media 轻任务不再全量注入），
       // 其余工具进 BM25 延迟目录按需召回。
       ...(this.isChatLane(mode) ? {} : { toolCapabilities: ctx.turnPlan?.capabilities }),
+      // 路由意图标签（2026-09-19 静态架构）：双车道透传，工具循环的单一出口检查
+      // 据此确定性拦截"路由判定要动手（action_write 等）但模型零工具尝试"的轮次。
+      // 2026-09-23 扩面配套：证据注入豁免（realtime 轮已有证据块时零工具直答
+      // 是正确行为）+ 路由置信度（观测）。
+      turnIntent: ctx.routeIntent,
+      turnEvidenceInjected: evidenceInjected,
+      turnRouteConfidence: ctx.routeConfidence,
       pinnedToolNames: runtimePlan.enabled
         ? [...(baseStreamOpts.pinnedToolNames ?? []), ...runtimePlan.pinnedToolNames]
         : baseStreamOpts.pinnedToolNames,
@@ -2301,7 +2399,76 @@ if (route.plane === "task") {
     // - 规划失败/为空 → 回退原 delegate 能力束注入（保守路径不变）。
     let execStreamOpts = streamOpts;
     if (!useExplicitPlanner && this.isTaskLane(mode)) {
-      if (ctx.toolRecallOnly) {
+      if (isStaticToolArchEnabled() && isTaskLaneRouterFirst()) {
+        // router-first（2026-09-23 token 优化）：可见集 = 桥工具（tool_discover/
+        // tool_call 由 prepareToolsWithToolSearch 按延迟目录自动注入），全量语料
+        // 进 BM25 目录按需召回——task 轮不再背 36 个 Core 全量 schema（实测
+        // ≈5.1k tok/轮，占 light 档单次输入六成）。质量护栏：意图预召回
+        // （top-1 高置信免 discover 直转正）+ <tool_request> 请求卡 + 高频
+        // 自动晋升。回滚：AGENT_TASK_LANE=core（下方原静态 Core ∪ 能力束路径）。
+        const corpus = [
+          ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
+          ...(streamOpts.chatToolsExtra ?? []),
+        ];
+        execStreamOpts = {
+          ...streamOpts,
+          toolExposureProfile: "explicit",
+          chatToolsBuiltin: [],
+          chatToolsExtra: corpus,
+        };
+      } else if (isStaticToolArchEnabled()) {
+        // 静态双车道（2026-09-19 架构改造）：可见 = task Core（静态常驻）∪ 路由
+        // 能力束投影（Tier-2 确定性增量，TurnPlan.capabilities 不变则集合不变）；
+        // 其余全部进延迟目录经 tool_discover/tool_call/tool_request 到达。
+        // 取代 toolRecallOnly 空可见集与 per-turn LLM planner 两条每轮可变路径——
+        // planner 的一次额外 LLM 规划请求和漏选抖动一并消除。
+        const corpus = [
+          ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
+          ...(streamOpts.chatToolsExtra ?? []),
+        ];
+        const coreTools = buildLaneCoreTools("task", corpus, [
+          TASK_DISPATCH_TOOL_DEFINITION,
+          TASK_STATUS_TOOL_DEFINITION,
+          TASK_CANCEL_TOOL_DEFINITION,
+          PERCEPTION_OVERVIEW_TOOL_DEFINITION,
+        ]);
+        // 桌面桥明确离线且本机视觉执行体不可用时，desktop.* 是"必然执行失败的工具"
+        // （见 resolve-chat-tools dropOfflineDesktopTools 同款规则），从 Core 剔除。
+        const desktopOffline =
+          ctx.orchestrateToolCtx?.desktopBridgeOnline === false && !isLocalDesktopVisualEnabledFromEnv();
+        // 显式禁网轮（2026-09-23）：task Core 同样剥离联网检索族；延迟目录
+        // 语料（corpus）一并过滤，防 tool_discover 把搜索工具召回回来绕过开关。
+        const webForbidden = ctx.webSearchForbidden === true;
+        const coreFiltered = (desktopOffline
+          ? coreTools.filter(
+              (d) => d.type !== "function" || !/^desktop\./.test(d.function?.name ?? ""),
+            )
+          : coreTools
+        ).filter((d) => !webForbidden || filterWebSearchTools([d]).length === 0);
+        const coreNames = new Set(
+          coreFiltered
+            .map((d) => (d.type === "function" ? d.function?.name : ""))
+            .filter(Boolean),
+        );
+        // 预算闸门降级（2026-09-19 P1-2）：会话 token 超限时能力束不再注入
+        //（纯 Core 直调，省 1.5 万+ tok/轮），主对话与 Core 工具不受影响。
+        const budgetExceeded = isSessionBudgetExceeded(
+          ctx.sessionId ?? undefined,
+          actorId,
+        );
+        const beam = budgetExceeded
+          ? []
+          : toolsMatchingCapabilityBeam(corpus, ctx.turnPlan?.capabilities).filter(
+              (d) => d.type !== "function" || !coreNames.has(d.function?.name ?? ""),
+            );
+        execStreamOpts = {
+          ...streamOpts,
+          toolExposureProfile: "explicit",
+          chatToolsBuiltin: [...coreFiltered, ...beam],
+          // 全量语料进延迟目录（prepareToolsWithToolSearch 会按可见集自动去重）
+          chatToolsExtra: webForbidden ? filterWebSearchTools(corpus) : corpus,
+        };
+      } else if (ctx.toolRecallOnly) {
         // 空可见集 + 全量目录语料：prepareToolsWithToolSearch 会把全量工具视为
         // deferred 并自动注入 tool_discover/tool_call 桥——模型经 tool router
         // 召回并执行，上下文零业务 schema。
@@ -2440,7 +2607,7 @@ if (route.plane === "task") {
           return this.runStandardLlmPath(actorId, text, "task", opts, {
             ...ctx,
             turnBudget,
-            turnPlan: { budget: 2, capabilities: ["full"], tier: "flash" },
+            turnPlan: { budget: TASK_PLANE_FALLBACK_BUDGET, capabilities: ["full"], tier: "flash" },
           });
         }
         throw err;
@@ -2483,7 +2650,7 @@ if (route.plane === "task") {
         return this.runStandardLlmPath(actorId, text, "task", opts, {
           ...ctx,
           turnBudget,
-          turnPlan: { budget: 2, capabilities: ["full"], tier: "flash" },
+          turnPlan: { budget: TASK_PLANE_FALLBACK_BUDGET, capabilities: ["full"], tier: "flash" },
         });
       }
     }
@@ -2508,7 +2675,7 @@ if (route.plane === "task") {
         return this.runStandardLlmPath(actorId, text, "task", opts, {
           ...ctx,
           turnBudget,
-          turnPlan: { budget: 2, capabilities: ["search"], tier: "flash" },
+          turnPlan: { budget: TASK_PLANE_FALLBACK_BUDGET, capabilities: ["search"], tier: "flash" },
           routeSearchQuery: ctx.routeSearchQuery?.trim() || text.trim(),
         });
       }
@@ -2522,6 +2689,7 @@ if (route.plane === "task") {
       trajCap: ctx.trajCap,
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
+      lane: this.isChatLane(mode) ? "chat" : "task",
     }, opts?.onAssistantDelta);
     if (attemptedToolCalls.length > 0) {
       reply.attemptedToolCalls = attemptedToolCalls;
@@ -2790,10 +2958,23 @@ if (route.plane === "task") {
       };
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
       trajCap?: ReturnType<TrajectorySkillPromotionService["beginCapture"]>;
+      /**
+       * 自动重跑代数（2026-09-23 重启恢复）：restart-recovery 重派被打断任务时
+       * 传入（上一代 +1），TaskHub 台账据此累计，达上限不再自动重跑。
+       */
+      restartCount?: number;
     },
   ): string | null {
     const provider = this.externalChat;
     if (!provider?.isEnabled()) return null;
+    // 预算闸门（2026-09-19 P1-2）：会话/单日 token 超限时拒绝新的重活派发——
+    // 已在跑的任务不中断，只不再叠加。返回 null 让 task.dispatch 向用户如实说明。
+    if (isSessionBudgetExceeded(input.sessionId, actorId) || isDailyBudgetExceeded(actorId)) {
+      console.warn(
+        `[AgentCore] 预算超限，拒绝后台任务派发 (goal=${input.goal.slice(0, 60)})`,
+      );
+      return null;
+    }
     const sessionId = input.sessionId?.trim() || actorId;
     const taskHub = getTaskHub();
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2802,6 +2983,7 @@ if (route.plane === "task") {
       sessionId,
       ...(input.chatUserMessageId ? { replyAnchorId: input.chatUserMessageId } : {}),
       goal: input.goal,
+      ...(input.restartCount && input.restartCount > 0 ? { restartCount: input.restartCount } : {}),
     });
     console.info(
       `[AgentCore] 后台任务已派发 ${taskId} (source=${input.source ?? "task.dispatch"}, goal=${input.goal.slice(0, 60)})`,
@@ -2929,7 +3111,7 @@ if (route.plane === "task") {
           {
             sessionId,
             turnPlan:
-              input.turnPlan ?? { budget: 2, capabilities: ["full"], tier: "flash" },
+              input.turnPlan ?? { budget: TASK_PLANE_FALLBACK_BUDGET, capabilities: ["full"], tier: "flash" },
             taskHubTaskId: taskId,
             ephemeralTurn: true,
             // 记忆注入（2026-09-09）：ephemeral 不读 thread，上下文全靠外部轮透传。
@@ -3070,14 +3252,44 @@ if (route.plane === "task") {
           }
           pushDone(finalText, mediaCards);
         } else {
-          pushDone(FALLBACK_TEXT_BACKGROUND_FAILED());
+          // 结构化失败回执（2026-09-19 P0-2）：执行跑完但没产出有效结果——
+          // 带目标回显 + 下一步指引，且与成功路径同样并入对话 thread，
+          // 否则对话面对「没办成」失忆，用户追问时模型只能靠回执猜。
+          const notice = buildTaskFailureNotice(input.goal);
+          try {
+            provider.appendTaskRecord?.(
+              resolvePrimaryChatSessionId(
+                actorId,
+                getAgentRuntimeConfig().masterDelegation.enabled,
+              ),
+              input.goal,
+              notice,
+            );
+          } catch {
+            /* thread 并入失败不影响结果投递 */
+          }
+          pushDone(notice);
         }
       } catch (err) {
         // 取消后的异常（含短路退出触发的竞态）不覆盖 cancelled 终态、不投递兜底文案
         if (!isCancelled()) {
           taskHub.setState(taskId, "failed");
+          getTaskHub().setProgressThrottled(taskId, "执行失败");
           console.error("[AgentCore] 后台任务执行失败:", err);
-          pushDone(FALLBACK_TEXT_BACKGROUND_FAILED());
+          const notice = buildTaskFailureNotice(input.goal, err);
+          try {
+            provider.appendTaskRecord?.(
+              resolvePrimaryChatSessionId(
+                actorId,
+                getAgentRuntimeConfig().masterDelegation.enabled,
+              ),
+              input.goal,
+              notice,
+            );
+          } catch {
+            /* thread 并入失败不影响结果投递 */
+          }
+          pushDone(notice);
         }
       } finally {
         releaseTaskSlot();
@@ -3118,6 +3330,7 @@ if (route.plane === "task") {
         pePlan: null,
         peExhausted: false,
         trajCap: undefined,
+        lane: "task",
         ...(meta?.messageId ? { messageId: meta.messageId } : {}),
         ...(meta?.sessionId ? { sessionId: meta.sessionId } : {}),
       })

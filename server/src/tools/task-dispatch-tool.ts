@@ -84,7 +84,9 @@ export function registerTaskDispatchTool(
     if (!taskId) {
       return {
         ok: false,
-        error: "后台任务通道未就绪（launch 未注入），请直接告知用户暂时无法代办",
+        error:
+          "后台任务通道不可用（未就绪或本会话 token 预算已达上限），" +
+          "请如实告知用户暂时无法代办，不要编造执行结果",
       };
     }
 

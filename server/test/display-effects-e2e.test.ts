@@ -31,6 +31,8 @@ interface ExecutedScenario {
   registry?: ReadonlyArray<ExecutedToolReceipt>;
   video?: ReadonlyArray<ExecutedToolReceipt>;
   travel?: { toolName: string; result: Record<string, unknown> };
+  /** 搜索类媒体（search_images 等）有真实产出 → 文字搜索卡让位 */
+  searchMediaHasItems?: boolean;
 }
 
 /** 回放一次真实 tool-loop 轮次：LLM 末轮只输出正文，工具回执从回调聚合。 */
@@ -48,6 +50,7 @@ function runLoopTurn(userText: string, llmFinalText: string, executed: ExecutedS
     travelResult: executed.travel?.result,
     weatherResults: executed.weather,
     searchResults: executed.search,
+    searchMediaHasItems: executed.searchMediaHasItems,
     registryResults: executed.registry,
     videoResults: executed.video,
   });
@@ -121,6 +124,52 @@ test("search: 新闻搜索 → search_result 卡（条目带 url）", () => {
   const items = card.items as Array<{ url?: string }>;
   assert.ok(items.length >= 3);
   assert.ok(items.every((i) => !!i.url), "每个条目应带 url 供前端跳转");
+});
+
+test("search×media 意图仲裁：搜照片轮次带 search_web 回执 → 文字卡整卡让位", () => {
+  // 真实场景（2026-09-22 17:26 轮）：规划波次并行派 search_images + search_web，
+  // 照片经 mediaCards 渲染后，8 条文字搜索列表再叠一张卡属冗余（用户定调）。
+  const out = runLoopTurn(
+    "搜索她的照片",
+    "她的近况照片帮你看了一圈，最近的动态也在正文里说过了。",
+    {
+      searchMediaHasItems: true,
+      search: [
+        {
+          toolName: "search_web",
+          result: {
+            ok: true,
+            items: [
+              { title: "刘浩存 2026-08-07 专访", url: "https://news.example.com/a", snippet: "央视专访" },
+              { title: "刘浩存-维基百科", url: "https://wiki.example.com/b", snippet: "剧目列表" },
+            ],
+          },
+        },
+      ],
+    },
+  );
+  assert.equal(parseCardBlock(out), null, `有图轮次不应附任何文字卡，实际: ${out.slice(0, 300)}`);
+  assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"), "不应残留卡片标记");
+  assert.ok(out.startsWith("她的近况照片帮你看了一圈"), "口语正文应完整保留");
+});
+
+test("search×media 零图兜底：搜图全挂时文字卡照常附", () => {
+  const searchReceipts: ReadonlyArray<ExecutedToolReceipt> = [
+    {
+      toolName: "search_web",
+      result: {
+        ok: true,
+        items: [{ title: "唯一的信息来源", url: "https://news.example.com/a", snippet: "s" }],
+      },
+    },
+  ];
+  // searchMediaHasItems 缺省（= 媒体 0 产出）→ 不让位，文字卡兜底
+  const out = runLoopTurn("搜索她的照片", "照片源这轮没拿到，先把查到的资料放这里。", {
+    search: searchReceipts,
+  });
+  const card = parseCardBlock(out);
+  assert.ok(card, `零图轮应兜底附文字卡，实际: ${out.slice(0, 300)}`);
+  assert.equal(card.cardType, "search_result");
 });
 
 test("wallet: 查余额 → wallet 卡", () => {

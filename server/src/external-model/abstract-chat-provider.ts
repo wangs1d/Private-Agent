@@ -352,6 +352,11 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             // 复活——提醒/搜索轮 discover 成功后 call 不到工具，只剩口头承诺。
             toolSearchSourceTools: searchableForTurn,
             maxRounds: effectiveStreamOpts.toolLoop?.maxRounds,
+            // 路由意图标签：出口检查用它确定性拦截"声明要动手但零工具尝试"的轮次
+            turnIntent: effectiveStreamOpts.turnIntent,
+            // 证据注入豁免 + 路由置信度（2026-09-23 扩面配套，见工具循环出口检查处）
+            turnEvidenceInjected: effectiveStreamOpts.turnEvidenceInjected,
+            turnRouteConfidence: effectiveStreamOpts.turnRouteConfidence,
             extraBody,
             promptCache: promptPlan.promptCache,
             requestSystemMessages: promptPlan.requestSystemMessages,

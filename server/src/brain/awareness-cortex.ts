@@ -68,7 +68,7 @@ interface ScheduleTaskLike {
     sessionId: string,
     range?: { from?: string; to?: string },
   ): Array<{
-    status: "active" | "paused" | "completed" | "cancelled";
+    status: "active" | "paused" | "completed" | "cancelled" | "failed";
     runAt: string;
     nextRunAt: string | null;
     kind: string;

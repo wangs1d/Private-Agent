@@ -114,9 +114,11 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "emotionState",
   // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
   "modeRoleGuidance",
-  // 回复风格模式（chat/task）：决定【说话方式·伙伴面】是否注入；剥离会让
-  // 后台任务交付重新吃到闲聊调子约束
+  // 回复风格模式（chat/task）：车道标记，供审计与车道相关逻辑使用
   "replyStyleMode",
+  // 人格·终极版：静态人格块常驻稳定层；动态 mood 块每轮单一状态
+  "personaStatic",
+  "personaMood",
 ];
 
 const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
@@ -128,6 +130,8 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "userProfile",
   "userLocation",
   "dailyDigest",
+  // 人格·终极版动态块：mood 每轮变化，归动态层
+  "personaMood",
   "narrativeRecall",
   "memorySummary",
   "memoryPreferences",

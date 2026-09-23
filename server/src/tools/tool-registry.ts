@@ -36,6 +36,8 @@ export type ToolContext = {
   desktopBridgeOnline?: boolean;
   /** 手机桥接在线时允许 phone.* */
   phoneBridgeOnline?: boolean;
+  /** 单次调用取消信号（工具循环超时即 abort；子进程/HTTP 类 handler 可消费提前退出） */
+  signal?: AbortSignal;
 };
 
 export type ToolHandler = (input: Record<string, unknown>, context: ToolContext) => Promise<Record<string, unknown>>;
@@ -122,6 +124,10 @@ const CACHEABLE_TOOLS = new Set([
   "info.inspect_webpage",
   "info.navigate_site",
   "info.search",
+  "hot_rankings",
+  // 注意：用户维度只读工具（wallet.get_*/calendar.list_tasks/brain.recall/
+  // perception.overview 等）故意不进——缓存键只有 name+input，跨 actor 复用
+  // 会串台；actor 无关的全网热搜才安全。
 ]);
 
 /** 生成工具缓存键 */

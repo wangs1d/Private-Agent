@@ -27,6 +27,8 @@ export interface ToolCardItem {
   /** A/B 对比类条目的分侧标注 */
   side?: string;
   sideLabel?: string;
+  /** product_compare 卡：分侧大图（商品图/试色图），随 side 标注归属 */
+  image?: string;
 }
 
 export interface ToolCardPayload {
@@ -35,6 +37,20 @@ export interface ToolCardPayload {
   footer?: string;
   /** 前端 _SpecializedCard 的卡型：weather/schedule/wallet/order/file 或空串=通用 */
   cardType: string;
+  /** product_compare 卡：分侧大图头部（A/B 两列并排，试色/商品图） */
+  sides?: Array<{
+    side: string;
+    label: string;
+    priceLabel?: string;
+    image?: string;
+  }>;
+  /** product_compare 卡：参数对比（已转置：维度为行、sides 为列） */
+  compare?: {
+    dims: string[];
+    rows: Array<{ label: string; values: string[] }>;
+  };
+  /** product_compare 卡：评测/试色视频入口 */
+  videos?: Array<{ title: string; url?: string; source?: string }>;
 }
 
 type ToolCardBuilder = (result: Record<string, unknown>) => ToolCardPayload | null;
@@ -66,6 +82,107 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
    */
   "search_web": (r) => buildSearchCardFromItems(r.items),
   "info.search": (r) => buildSearchCardFromItems(r.items),
+
+  /**
+   * shopping.suggest → product_compare 卡（二分化对比）。
+   * 候选按 side A/B/C 分侧（≤3）：sides 承载大图头部（商品图/试色图），
+   * items 承载依据(check)与注意点(warn)并带 side/sideLabel 归属；
+   * compare 承载转置参数表；videos 承载试色/评测视频入口。
+   * 客户端 agent_result_parser 对 cardType=product_compare 消费以上字段。
+   */
+  "shopping.suggest": (r) => {
+    const rec = r.recommendation as
+      | {
+          query?: unknown;
+          candidates?: Array<{
+            productId?: unknown;
+            brand?: unknown;
+            name?: unknown;
+            priceLabel?: unknown;
+            image?: unknown;
+            reasons?: unknown;
+            cautions?: unknown;
+            videos?: unknown;
+          }>;
+          compare?: { dims?: unknown; rows?: unknown };
+        }
+      | undefined
+      | null;
+    if (!rec || !Array.isArray(rec.candidates) || rec.candidates.length === 0) return null;
+
+    const sides: NonNullable<ToolCardPayload["sides"]> = [];
+    const items: ToolCardItem[] = [];
+    const videos: NonNullable<ToolCardPayload["videos"]> = [];
+    const sideNames = ["A", "B", "C"];
+    let index = 0;
+    for (const c of rec.candidates.slice(0, 3)) {
+      const side = sideNames[index] ?? String(index + 1);
+      const brand = str(c.brand);
+      const name = str(c.name);
+      const label = [brand, name].filter(Boolean).join(" ") || `候选${index + 1}`;
+      sides.push({
+        side,
+        label,
+        priceLabel: str(c.priceLabel) || undefined,
+        image: str(c.image) || undefined,
+      });
+      for (const t of (Array.isArray(c.reasons) ? c.reasons : []).filter((x) => typeof x === "string")) {
+        items.push({ type: "check", text: t as string, side, sideLabel: label });
+      }
+      for (const t of (Array.isArray(c.cautions) ? c.cautions : []).filter((x) => typeof x === "string")) {
+        items.push({ type: "warn", text: t as string, side, sideLabel: label });
+      }
+      for (const v of (Array.isArray(c.videos) ? c.videos : []).filter(
+        (x): x is { title?: unknown; url?: unknown; source?: unknown } => typeof x === "object" && x !== null,
+      )) {
+        const title = str((v as { title?: unknown }).title);
+        if (title) {
+          videos.push({
+            title,
+            url: str((v as { url?: unknown }).url) || undefined,
+            source: str((v as { source?: unknown }).source) || undefined,
+          });
+        }
+      }
+      index += 1;
+    }
+
+    // 参数对比（已由引擎转置：label=维度，values 与 sides 一一对应）
+    const cmp = rec.compare;
+    const compare =
+      cmp && Array.isArray(cmp.dims) && Array.isArray(cmp.rows)
+        ? {
+            dims: cmp.dims.filter((d): d is string => typeof d === "string"),
+            rows: cmp.rows
+              .filter(
+                (row): row is { label: string; values: string[] } =>
+                  typeof row === "object" &&
+                  row !== null &&
+                  typeof (row as { label?: unknown }).label === "string" &&
+                  Array.isArray((row as { values?: unknown }).values),
+              )
+              .map((row) => ({
+                label: row.label,
+                values: (row.values as unknown[]).filter((v): v is string => typeof v === "string"),
+              })),
+          }
+        : undefined;
+
+    const first = rec.candidates[0];
+    const query = str(r.query) || str(r.item) || "选品";
+    return {
+      title:
+        rec.candidates.length > 1
+          ? `对比结论 · 二选一并排看`
+          : `推荐结论 · ${first ? [str(first.brand), str(first.name)].filter(Boolean).join(" ") : query}`,
+      cardType: "product_compare",
+      sides,
+      items,
+      ...(compare && compare.rows.length > 0 ? { compare } : {}),
+      ...(videos.length > 0 ? { videos } : {}),
+      footer: "参数来自商品库，价格以实际渠道为准",
+    };
+  },
 
   "weather.get_local": (r) => {
     const weatherText = str(r.weatherText);
@@ -329,6 +446,10 @@ function buildCardMarker(payload: ToolCardPayload, leadText: string): string {
     actions: [],
     speak: "",
     cardId,
+    // 扩展卡型的附加协议字段（product_compare 的分侧大图/转置对比表/视频入口）
+    ...(payload.sides ? { sides: payload.sides } : {}),
+    ...(payload.compare ? { compare: payload.compare } : {}),
+    ...(payload.videos ? { videos: payload.videos } : {}),
   });
   const parts: string[] = [];
   if (leadText.trim()) parts.push(leadText.trim());
@@ -361,11 +482,18 @@ export function tryAttachToolResultCard(
  * （与媒体/行程同理），必须从 onExternalToolExecuted 聚合的真实结果附卡。
  * 多次搜索的条目按 url 去重合并为一张 search_result 卡（上限 8 条），
  * 避免逐次附卡刷屏。正文已带结构化标记时不动（优先级让位给 L2/其他 L1 路径）。
+ *
+ * yieldToSearchMedia（意图仲裁，2026-09-22）：本轮搜索类媒体
+ * （search_images/search_images_batch/search_videos）有真实产出时整卡让位——
+ * 照片/视频已是本轮主形态，找图场景再附 8 条文字列表属冗余。媒体 0 产出时
+ * 调用方不传该标志，文字卡照常附（兜底保证本轮仍有结构化结果）。
  */
 export function attachSearchResultCardFromExecuted(
   text: string,
   executed: ReadonlyArray<{ toolName: string; result: Record<string, unknown> }>,
+  opts?: { yieldToSearchMedia?: boolean },
 ): string {
+  if (opts?.yieldToSearchMedia) return text;
   if (containsStructuredMarker(text)) return text;
   const searchResults = executed.filter((mt) =>
     mt.toolName === "search_web" || mt.toolName === "info.search",

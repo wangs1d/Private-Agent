@@ -10,7 +10,8 @@
  * 顺序即优先级（先附上的卡生效，后续 attach 各自含结构化标记 guard 让位）：
  *   1. travel_itinerary 行程卡（直跑 + loop 冷层回捞，handler 解析后传入）
  *   2. weather 天气卡（loop 多次调用合并为一张多地卡）
- *   3. search_result 搜索卡（loop 多次调用按 url 去重合并）
+ *   3. search_result 搜索卡（loop 多次调用按 url 去重合并；搜索类媒体有产出
+ *      时整卡让位——照片是主形态，意图仲裁见 searchMediaHasItems）
  *   4. 其余注册工具卡（wallet/schedule/order/比价…，按执行顺序取第一张）
  *   5. video 媒体标记（[RENDER_AS:video]，loop 捕获优先、直跑回执兜底）
  */
@@ -109,6 +110,13 @@ export interface DeterministicCardChainInput {
   weatherResults?: ReadonlyArray<ExecutedToolReceipt>;
   /** tool-loop 聚合的搜索回执（按执行顺序）。 */
   searchResults?: ReadonlyArray<ExecutedToolReceipt>;
+  /**
+   * 本轮搜索类媒体（search_images/search_images_batch/search_videos）是否有
+   * 真实产出（extractMediaCards 组装出卡）。true 时 search_result 文字卡整卡
+   * 让位——照片是主形态，文字列表冗余；false/缺省时搜索卡照常附（零图兜底）。
+   * image.generate 生图不算搜索证据，不计入。
+   */
+  searchMediaHasItems?: boolean;
   /** 其余注册工具回执（wallet/calendar/shopping…，按执行顺序）。 */
   registryResults?: ReadonlyArray<ExecutedToolReceipt>;
   /** 视频抓取回执（loop 捕获在前、直跑兜底在后；取最后一条）。 */
@@ -120,7 +128,9 @@ export function attachDeterministicCards(input: DeterministicCardChainInput): st
   let text = input.text;
   text = attachTravelItineraryCard(text, input.travelToolName, input.travelResult);
   text = attachWeatherResultCardFromExecuted(text, input.weatherResults ?? []);
-  text = attachSearchResultCardFromExecuted(text, input.searchResults ?? []);
+  text = attachSearchResultCardFromExecuted(text, input.searchResults ?? [], {
+    yieldToSearchMedia: input.searchMediaHasItems === true,
+  });
   for (const mt of input.registryResults ?? []) {
     const marked = tryAttachToolResultCard(text, mt.toolName, mt.result);
     if (marked) {

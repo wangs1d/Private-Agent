@@ -523,7 +523,7 @@ void DesktopNotificationWindow::Show(const std::string& title,
   // 显示前先绘制完整第一帧（含玻璃底），避免弹出瞬间出现空帧
   {
     HDC wdc = GetWindowDC(window_handle_);
-    Paint(window_handle_, wdc);
+    PaintBuffered(window_handle_, wdc);
     ReleaseDC(window_handle_, wdc);
   }
   // 原子定位+显示——NOACTIVATE 不抢焦点，避免仅靠 SWP_SHOWWINDOW
@@ -804,6 +804,25 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
   g.Flush(FlushIntentionSync);
 }
 
+void DesktopNotificationWindow::PaintBuffered(HWND hwnd, HDC hdc) {
+  const int w = kWindowWidth;
+  const int h = window_height_;
+  HDC mem       = CreateCompatibleDC(hdc);
+  HBITMAP bmp   = CreateCompatibleBitmap(hdc, w, h);
+  if (!mem || !bmp) {
+    if (mem) DeleteDC(mem);
+    if (bmp) DeleteObject(bmp);
+    Paint(hwnd, hdc);  // 缓冲分配失败退回直画（有闪但不黑屏）
+    return;
+  }
+  HGDIOBJ old_bmp = SelectObject(mem, bmp);
+  Paint(hwnd, mem);
+  BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
+  SelectObject(mem, old_bmp);
+  DeleteObject(bmp);
+  DeleteDC(mem);
+}
+
 // ═══════════════════════════════ 消息处理 ══════════════════════════════
 
 LRESULT CALLBACK DesktopNotificationWindow::WndProc(HWND hwnd, UINT message,
@@ -828,7 +847,7 @@ LRESULT DesktopNotificationWindow::HandleMessage(HWND hwnd, UINT message,
     case WM_PAINT: {
       PAINTSTRUCT ps;
       HDC hdc = BeginPaint(hwnd, &ps);
-      Paint(hwnd, hdc);
+      PaintBuffered(hwnd, hdc);
       EndPaint(hwnd, &ps);
       return 0;
     }

@@ -17,7 +17,19 @@
 #>
 param(
   [ValidateSet('Release', 'Debug', 'Both')]
-  [string] $Configuration = 'Release'
+  [string] $Configuration = 'Release',
+  # 发布版服务器地址：不传时客户端默认连 http://127.0.0.1:3000（仅本机联调）。
+  # 发给用户的安装包必须烤进真实服务器，例：
+  #   .\build_windows_release.ps1 -HttpBase https://your-server-domain
+  [string] $HttpBase = '',
+  # 版本清单（更新检查）地址：byok 捆绑形态下 chat 走本地 runtime，而版本控制面
+  # 在云端，必须单独烤入。默认烤入 ECS——控制面常量是编译期烤死的，漏传时客户端
+  # 静默回落 127.0.0.1:3000，更新检查/反馈失联（0.2.1 与本地 Debug 均翻过车）。
+  # 确要回落本地联调请显式传空：-UpdateManifestUrl ''
+  [string] $UpdateManifestUrl = 'http://47.98.122.29:3000',
+  # 控制面（管理后台所在服务器）：反馈/站内信等运营数据走这里。默认烤入 ECS，
+  # 本地构建也能在后台看到反馈；确要回落本地请显式传空：-ControlPlaneUrl ''
+  [string] $ControlPlaneUrl = 'http://47.98.122.29:3000'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -126,13 +138,24 @@ function Invoke-BuildAndDeploy {
     [string] $Mode
   )
 
+  $dartDefines = @()
+  if ($HttpBase) { $dartDefines += @('--dart-define', "HTTP_BASE=$HttpBase") }
+  if ($UpdateManifestUrl) { $dartDefines += @('--dart-define', "UPDATE_MANIFEST_URL=$UpdateManifestUrl") }
+  if ($ControlPlaneUrl) { $dartDefines += @('--dart-define', "CONTROL_PLANE_URL=$ControlPlaneUrl") }
+
   if ($Mode -eq 'Release') {
-    Write-Host 'flutter build windows --release'
-    & $flutterExe build windows --release
+    if (-not $UpdateManifestUrl -or -not $ControlPlaneUrl) {
+      # 静默回落是隐形坑：0.2.1 安装包因此把用户反馈全落在了本机库
+      Write-Host 'WARNING: 本次 Release 构建未烤入 UpdateManifestUrl / ControlPlaneUrl，' -ForegroundColor Yellow
+      Write-Host '  更新检查与用户反馈将回落 httpBase（本地 127.0.0.1:3000），云端后台收不到。' -ForegroundColor Yellow
+      Write-Host '  需联调后台或发用户请加：-UpdateManifestUrl http://47.98.122.29:3000 -ControlPlaneUrl http://47.98.122.29:3000' -ForegroundColor Yellow
+    }
+    Write-Host "flutter build windows --release $($dartDefines -join ' ')"
+    & $flutterExe build windows --release @dartDefines
   }
   else {
-    Write-Host 'flutter build windows --debug'
-    & $flutterExe build windows --debug
+    Write-Host "flutter build windows --debug $($dartDefines -join ' ')"
+    & $flutterExe build windows --debug @dartDefines
   }
   Assert-FlutterOk "flutter build windows ($Mode)"
 

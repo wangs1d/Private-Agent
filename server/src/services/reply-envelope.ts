@@ -235,6 +235,84 @@ function scanCardSegments(text: string): ReplyBlock[] | null {
 }
 
 /**
+ * 从 finalText 提取「接下来你可以」接续建议块（NEXT_UP 协议，见
+ * render-protocol-prompt.ts 第三节），并把标记块从正文剥离。
+ *
+ * done 载荷以 followups 字段独立下发、不落历史文本（时机性内容：对话推进后
+ * 旧建议即失效，落历史反成噪音）；纯文本渠道拿到的正文也已无此块。
+ *
+ * 规则：块内逐行一条，剥掉行首列表符；1-3 条、每条 >40 字丢弃；无配对 END
+ * 不提取（残缺块只按孤立标记兜底剥离，宁可不给不给脏的）。
+ */
+const NEXT_UP_BLOCK_RE = /\[NEXT_UP_START\]\s*([\s\S]*?)\[NEXT_UP_END\]/;
+
+/**
+ * 块外复读兜底（2026-09-22）：模型偶尔会把建议在正文里再写一遍——跟在正文
+ * 句号后、无标记、常无分隔拼接。只剥正文**末尾**与建议条目（或其无分隔拼接）
+ * 完全一致的行，正文与 chips 不出现双份；正文中间的普通句子不受影响。
+ */
+function stripTrailingFollowupEcho(text: string, followups: string[]): string {
+  const lines = text.split("\n");
+  const echoes = new Set(followups);
+  echoes.add(followups.join(""));
+  let dropped = false;
+  while (lines.length > 0) {
+    const raw = lines[lines.length - 1].trim();
+    if (!raw) {
+      lines.pop();
+      continue;
+    }
+    const item = raw.replace(/^[-*•\d.、\s]+/, "").trim();
+    if (echoes.has(item)) {
+      lines.pop();
+      dropped = true;
+      continue;
+    }
+    break;
+  }
+  // 建议簇上方若还挂着协议标题行（「接下来你可以：」），一并剥掉
+  if (dropped && lines.length > 0) {
+    const label = lines[lines.length - 1].replace(/^[-*•\d.、\s]+/, "").trim();
+    if (label === "接下来你可以" || label === "接下来你可以：" || label === "接下来你可以:") {
+      lines.pop();
+    }
+  }
+  return lines.join("\n");
+}
+
+export function extractNextUpSuggestions(
+  text: string,
+): { text: string; followups: string[] } {
+  if (!text || !text.includes("[NEXT_UP_START]")) {
+    return { text, followups: <string[]>[] };
+  }
+  let followups: string[] = [];
+  let out = text;
+  const match = NEXT_UP_BLOCK_RE.exec(text);
+  // 残缺块打捞（2026-09-22 真机实证）：模型偶尔漏发 END——旧逻辑只剥孤立标记，
+  // 块内建议文案原样漏进正文（用户在回复尾部看到第二人称任务句）。
+  // 现在无配对 END 时按同样过滤规则打捞 START 之后的内容。
+  const malformedTail = match ? null : text.split(/\[NEXT_UP_START\]/)[1];
+  const rawBlock = match?.[1] ?? malformedTail;
+  if (rawBlock) {
+    followups = rawBlock
+      .split("\n")
+      .map((line) => line.replace(/^[-*•\d.、\s]+/, "").trim())
+      .filter((line) => line.length > 0 && line.length <= 40)
+      .slice(0, 3);
+    const cutFrom = match
+      ? text.indexOf(match[0])
+      : text.indexOf("[NEXT_UP_START]");
+    out = (cutFrom > 0 ? text.slice(0, cutFrom) : "").trim();
+    if (followups.length > 0) {
+      out = stripTrailingFollowupEcho(out, followups);
+    }
+  }
+  out = out.replace(/\[NEXT_UP_(?:START|END)\]/g, "");
+  return { text: out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), followups };
+}
+
+/**
  * 纯文本渠道编码器（能力协商的 plain 端）。
  *
  * 根因修正：此前微信桥等纯文本渠道走"整条链路 plainTextMode 禁卡"，与富文本
@@ -275,13 +353,16 @@ export function stripMarkersToPlainText(text: string): string {
   const blockRe = /\[(?:DATA_BRIEF_START|VIDEO_MEDIA_START|CHAT_MEDIA_START|CONTENT_SUMMARY_V2_START)\]([\s\S]*?)\[(?:DATA_BRIEF_END|VIDEO_MEDIA_END|CHAT_MEDIA_END|CONTENT_SUMMARY_V2_END)\]/g;
   out = out.replace(blockRe, (_m, rawJson: string) => blockToPlainText(String(rawJson)));
 
+  // 2.5 接续建议块 → 纯文本渠道直接丢弃（点不了，透出反成噪音）
+  out = out.replace(/\[NEXT_UP_START\][\s\S]*?\[NEXT_UP_END\]/g, "");
+
   // 3. 标记行剥除（RENDER_HINT / RENDER_AS / 残留孤立标记）
   out = out
     .split("\n")
     .filter((line) => !/^[ \t]*\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+)\][ \t]*$/.test(line))
     .join("\n");
   out = out.replace(
-    /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CHAT_MEDIA_START|CHAT_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|IMAGE_RESULT_START|IMAGE_RESULT_END)\]/g,
+    /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CHAT_MEDIA_START|CHAT_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|IMAGE_RESULT_START|IMAGE_RESULT_END|NEXT_UP_START|NEXT_UP_END)\]/g,
     "",
   );
 

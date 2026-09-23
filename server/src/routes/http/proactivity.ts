@@ -9,12 +9,15 @@
 // POST /api/proactivity/push/test —— 给指定 actor 发一条测试推送（验证通道连通）。
 import type { FastifyInstance } from "fastify";
 
+import { resolveActorId } from "../../agent/actor-id.js";
 import type { ProactivePipeline } from "../../proactivity/proactive-pipeline.js";
 import type { MobilePushService } from "../../proactivity/mobile-push-service.js";
 import type { ProactivitySuppressionStore } from "../../proactivity/suppression-store.js";
 import type { ProactiveOutcome } from "../../proactivity/pipeline-types.js";
 
 const ALLOWED_OUTCOMES = new Set<ProactiveOutcome>([
+  "delivered",
+  "viewed",
   "accepted",
   "dismissed",
   "snoozed",
@@ -27,12 +30,12 @@ const ALLOWED_PUSH_PROVIDERS = new Set(["jpush", "bark", "webhook"]);
 /** 用户语义化反馈动作（一键"太多了/别推这个"直通频控与静音表） */
 const ALLOWED_FEEDBACK_ACTIONS = new Set(["too_many", "mute_topic", "resume_topic", "like"]);
 
-/** 允许被反馈静音的触达类别：与抑制表路由白名单对齐 + 简报系 kind */
+/** 允许被反馈静音的触达类别：与抑制表路由白名单对齐 + 简报系 kind
+ *  （greeting 仍被晨间简报 proposalKind 使用，不可删） */
 const FEEDBACK_SUPPRESSIBLE_KINDS = new Set([
   "greeting",
   "interest_share",
   "interest_alert",
-  "care",
   "followup",
   "task_celebration",
   "overwork_care",
@@ -307,5 +310,49 @@ export function registerProactivityPipelineRoutes(
       deliveryId: `test_${Date.now().toString(36)}`,
     });
     return { ok: result.ok, provider: result.provider, reason: result.reason };
+  });
+}
+
+/**
+ * 自主性设置路由（GET/PUT /api/autonomy）：
+ *   GET  ?userId=&sessionId=            → { level, dndUntil }
+ *   PUT  { level?, dndUntil? }          → 更新并返回新设置
+ * level: 0=只建议 1=标准 2=高效；dndUntil: epoch ms（0=关闭勿扰）。
+ */
+export function registerAutonomyRoutes(
+  app: FastifyInstance,
+  deps: {
+    autonomySettings: { get: (actorId: string) => { level: number; dndUntil: number }; setLevel: (actorId: string, level: 0 | 1 | 2) => { level: number; dndUntil: number }; setDnd: (actorId: string, untilMs: number) => { level: number; dndUntil: number } } | null;
+  },
+): void {
+  if (!deps.autonomySettings) return;
+
+  app.get("/api/autonomy", async (request) => {
+    const query = request.query as { userId?: string; sessionId?: string };
+    const actorId = resolveActorId({ userId: query.userId, sessionId: query.sessionId ?? "" });
+    const settings = deps.autonomySettings!.get(actorId);
+    return { ok: true, actorId, ...settings };
+  });
+
+  app.put("/api/autonomy", async (request, reply) => {
+    const body = (request.body ?? {}) as { userId?: string; sessionId?: string; level?: number; dndUntil?: number };
+    const actorId = resolveActorId({ userId: body.userId ?? "", sessionId: body.sessionId ?? "" });
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
+    let settings: { level: number; dndUntil: number } = deps.autonomySettings!.get(actorId);
+    if (body.level !== undefined) {
+      const level = Number(body.level);
+      if (![0, 1, 2].includes(level)) {
+        return reply.code(400).send({ ok: false, error: "level 必须是 0（只建议）/ 1（标准）/ 2（高效）" });
+      }
+      settings = deps.autonomySettings!.setLevel(actorId, level as 0 | 1 | 2);
+    }
+    if (body.dndUntil !== undefined) {
+      const until = Number(body.dndUntil);
+      if (!Number.isFinite(until) || until < 0) {
+        return reply.code(400).send({ ok: false, error: "dndUntil 必须是非负 epoch 毫秒（0=关闭勿扰）" });
+      }
+      settings = deps.autonomySettings!.setDnd(actorId, until);
+    }
+    return { ok: true, actorId, ...settings };
   });
 }

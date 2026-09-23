@@ -1,5 +1,5 @@
 // ProactivityHub（主动性多元化模块）集成单测：
-// 快路径（任务恭喜/待办闭环/过劳干预/问候）、通用 LLM 路径（speak/act/advise 路由）、
+// 快路径（任务恭喜/待办闭环/过劳干预）、通用 LLM 路径（speak/act/advise 路由）、
 // act 黑名单安全门、media.search → media.play 链式填参、频控拦截、LLM 零开销路径、
 // 负向决策缓存（重复场景免 LLM）、searchTools top-K 工具选择、LLM 决策蒸馏。
 import assert from "node:assert/strict";
@@ -12,7 +12,7 @@ import { resetExemplars } from "../src/proactivity/semantic-trigger-matcher.js";
 import { detectConversationProactiveHook } from "../src/proactivity/triggers/conversation-triggers.js";
 
 // 通用 LLM 路径默认开启（PROACTIVITY_LLM_INITIATIVE 默认 1），但需 llmComplete 注入才实际生效。
-// 本文件显式设 1 以不依赖默认值；互不串扰的干扰已在 onTick 内按 greeting/快路径先行短路。
+// 本文件显式设 1 以不依赖默认值。
 process.env.PROACTIVITY_LLM_INITIATIVE = "1";
 
 // 语义范例是模块级状态（决策蒸馏会在线扩充）——每个用例前重置，
@@ -149,7 +149,7 @@ test("快路径：非 overwork 的节律信号被忽略", async () => {
   assert.equal(signals.length, 0);
 });
 
-test("快路径：早晨 + 长静默 → greeting 问候（speak）", async () => {
+test("问候已下线：早晨 + 长静默 → tick 静默（不再主动问候）", async () => {
   const morning = atHour(8);
   const lastInteraction = new Date(morning.getTime() - 12 * 60 * 60 * 1000); // 昨晚 20:00，静默恒 12h
   const { deps, signals } = makeDeps({
@@ -157,8 +157,7 @@ test("快路径：早晨 + 长静默 → greeting 问候（speak）", async () =
   });
   const hub = new ProactivityHub(deps);
   await hub.onTick(ACTOR, morning);
-  assert.equal(signals.length, 1);
-  assert.equal(signals[0].kind, "greeting");
+  assert.equal(signals.length, 0);
 });
 
 test("快路径：从未交互 → tick 静默（不冷启动打扰）", async () => {
@@ -170,7 +169,20 @@ test("快路径：从未交互 → tick 静默（不冷启动打扰）", async (
 
 // ── 通用 LLM 路径 ─────────────────────────────────────
 
-/** 观察已入 feed 的通用路径测试基座（对话轮不命中 care/followup 正则） */
+/**
+ * L0 分诊（2026-09-23）后，通用路径只评估带 medium/high 观察的窗口
+ * （纯 conversation_turn/user_activity 低显著噪声直接跳过）。
+ * 测试基座补一条日程变化观察，模拟"值得评估"的窗口。
+ */
+function pushEvalWorthyObservation(
+  hub: ProactivityHub,
+  content = "今日日程：15:00 例会",
+  salience: "medium" | "high" = "medium",
+): void {
+  hub.getFeed().pushObservation(ACTOR, "schedule_snapshot", content, salience, Date.now());
+}
+
+/** 观察已入 feed 的通用路径测试基座（对话轮不命中 followup 正则） */
 async function tickWithDecision(
   reply: string,
   now: Date = atHour(15),
@@ -183,6 +195,7 @@ async function tickWithDecision(
   const { deps, signals, toolCalls } = makeDeps({ llmComplete });
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计"); // 命中 feed，不命中规则正则
+  pushEvalWorthyObservation(hub); // L0 分诊要求窗口含 medium+ 观察才调 LLM
   await flush(); // observe 内部 handleConversation 为 null，无路由
   await hub.onTick(ACTOR, now);
   return { hub, signals, toolCalls, llmCalls };
@@ -249,6 +262,7 @@ test("通用路径：循环内危险工具被安全门拦截并反馈 LLM，无�
   const { deps, signals, toolCalls } = makeDeps({ llmComplete });
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  pushEvalWorthyObservation(hub); // L0 分诊：medium 观察让窗口进入评估
   await flush();
   await hub.onTick(ACTOR, atHour(15));
   // 危险工具永不执行；LLM 收到拦截反馈后改用无害步骤达成目标
@@ -295,6 +309,7 @@ test("通用路径：步骤失败 → LLM 看到真实错误换工具达成目�
   } as never);
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  pushEvalWorthyObservation(hub); // L0 分诊：medium 观察让窗口进入评估
   await flush();
   await hub.onTick(ACTOR, atHour(15));
   // 失败的方式尝试过一次，随后换路成功
@@ -329,6 +344,7 @@ test("通用路径：连续失败无进展 → 预算内收场并诚实交代没
   } as never);
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  pushEvalWorthyObservation(hub); // L0 分诊：medium 观察让窗口进入评估
   await flush();
   await hub.onTick(ACTOR, atHour(15));
   // 种子失败 + 1 次换路尝试仍失败（连续 2 次无进展）→ 收场，不无限烧轮次
@@ -382,6 +398,7 @@ test("零开销：无新观察的 tick 不调 LLM", async () => {
   const { deps, signals } = makeDeps({ llmComplete });
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  pushEvalWorthyObservation(hub); // L0 分诊：medium 观察让首 tick 进入评估
   await hub.onTick(ACTOR, atHour(15)); // 第一次：消费观察，调 LLM（返回 none）
   assert.equal(llmCalls, 1);
   assert.equal(signals.length, 0);
@@ -390,12 +407,36 @@ test("零开销：无新观察的 tick 不调 LLM", async () => {
   assert.equal(llmCalls, 1); // LLM 未被再次调用
 });
 
+test("L0 分诊：纯低显著噪声窗口不调 LLM（跳过且不消费水位）", async () => {
+  let llmCalls = 0;
+  const llmComplete: LlmCompleteFn = async () => {
+    llmCalls += 1;
+    return NONE_REPLY;
+  };
+  const { deps } = makeDeps({ llmComplete });
+  const hub = new ProactivityHub(deps);
+  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计"); // 只有 low 显著观察
+  await hub.onTick(ACTOR, atHour(15));
+  assert.equal(llmCalls, 0); // L0 分诊跳过，零 LLM
+
+  // 跳过不消费水位：随后 medium 事件到来时一并评估（信号不丢）
+  pushEvalWorthyObservation(hub);
+  await hub.onTick(ACTOR, atHour(15, 30));
+  assert.equal(llmCalls, 1);
+  // 对话轮观察没有被分诊丢弃（仍在新评估的上下文窗口里）
+  const sawConversationTurn = hub
+    .getFeed()
+    .recent(ACTOR, 8)
+    .some((o) => o.type === "conversation_turn");
+  assert.ok(sawConversationTurn);
+});
+
 test("LLM 未注入：通用路径静默禁用（只走快路径）", async () => {
   const { deps, signals } = makeDeps();
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
   await hub.onTick(ACTOR, atHour(15));
-  assert.equal(signals.length, 0); // 无 greeting 条件、无规则命中 → 静默
+  assert.equal(signals.length, 0); // 问候快路径已下线、无规则命中 → 静默
 });
 
 // ── 频控 ─────────────────────────────────────────────
@@ -494,16 +535,19 @@ test("决策缓存：同观察窗口重复判 none → 第二次跳过 LLM（省
   });
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  pushEvalWorthyObservation(hub);
   await hub.onTick(ACTOR, atHour(15)); // 第一次：调 LLM → none → 记入负向缓存
   assert.equal(llmCalls, 1);
 
   // 完全相同的观察再来一轮（对话内容与来源均相同 → 指纹相同）→ 缓存命中跳过
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  pushEvalWorthyObservation(hub); // 同内容 medium 观察 → 指纹不变
   await hub.onTick(ACTOR, atHour(15, 30));
   assert.equal(llmCalls, 1);
 
   // 不同观察（指纹不同）→ 重新调 LLM
   hub.observeConversationTurn(ACTOR, "换了话题，在整理这周的会议纪要");
+  pushEvalWorthyObservation(hub, "今日日程：16:00 改期");
   await hub.onTick(ACTOR, atHour(16));
   assert.equal(llmCalls, 2);
 });
@@ -539,29 +583,32 @@ test("searchTools 注入：prompt 只含核心保底 + top-K 相关工具（全�
   });
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
+  // 工具清单只在 act 价值窗口（high 显著）注入——2026-09-23 起medium 窗口不带工具
+  pushEvalWorthyObservation(hub, "未读消息爆发：3 条新消息", "high");
   await hub.onTick(ACTOR, atHour(15));
 
   const prompt = prompts[0];
   const toolNames = all.map((t) => t.name).filter((n) => prompt.includes(`- ${n}：`));
-  // 核心 10 + 相关 3 = 13；未相关的 misc.tool_3+ 不进 prompt（token 压缩生效）
-  assert.equal(toolNames.length, 13);
+  // 核心 10 + 相关 top-K 凑满上限 12（MAX_PROMPT_TOOLS 2026-09-23: 18→12）；
+  // 未相关的 misc.tool_2+ 不进 prompt（token 压缩生效）
+  assert.equal(toolNames.length, 12);
   assert.ok(prompt.includes("- media.search："));
   assert.ok(prompt.includes("- misc.tool_0："));
-  assert.ok(!prompt.includes("- misc.tool_3："));
+  assert.ok(!prompt.includes("- misc.tool_2："));
 });
 
-test("决策蒸馏：LLM 对话主动决策（care 类 kind）→ 原话固化为快路径范例", async () => {
+test("决策蒸馏：LLM 对话主动决策（followup 类 kind）→ 原话固化为快路径范例", async () => {
   resetExemplars();
-  const text = "这周连着开了好几个通宵会"; // 正则无「通宵」、种子范例无重叠 → 学习前不命中
+  const text = "这个先记着，我下午过来对一下数值"; // 正则无「记着」、种子范例无重叠 → 学习前不命中
   assert.equal(detectConversationProactiveHook(text), null);
 
   const llmComplete: LlmCompleteFn = async () =>
     JSON.stringify({
       mode: "speak",
-      kind: "mood_support", // 匹配 care 蒸馏正则
+      kind: "task_followup", // 匹配 followup 蒸馏正则
       importance: "medium",
-      rationale: "用户连轴转了一整周",
-      messageHint: "心疼一句，劝他别硬扛",
+      rationale: "用户有个待对数值的事等着跟进",
+      messageHint: "晚点主动问一句结果",
       actions: [],
     });
   const { deps, signals } = makeDeps({
@@ -570,12 +617,13 @@ test("决策蒸馏：LLM 对话主动决策（care 类 kind）→ 原话固化�
   });
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, text);
+  pushEvalWorthyObservation(hub);
   await hub.onTick(ACTOR, atHour(15));
   assert.equal(signals.length, 1); // LLM speak 决策发布信号
 
   // 蒸馏生效：同样的话此后走零 LLM 快路径语义层命中
   const hook = detectConversationProactiveHook(text);
   assert.ok(hook);
-  assert.equal(hook.kind, "care");
+  assert.equal(hook.kind, "followup");
   assert.equal(hook.importance, "medium");
 });

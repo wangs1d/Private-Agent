@@ -60,6 +60,7 @@ export type ProposalVerdict =
 /** 一次触达的生命周期结果（delivered 为初始态，由客户端回传更新） */
 export type ProactiveOutcome =
   | "delivered"
+  | "viewed"
   | "accepted"
   | "dismissed"
   | "snoozed"

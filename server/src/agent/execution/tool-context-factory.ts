@@ -7,6 +7,7 @@ import type { AgentAccessMode } from "../agent-access-mode.js";
 import type { BrainCenter } from "../../brain/index.js";
 import type { ClientLocationWire } from "../../types/client-location.js";
 import type { ToolContext, ToolRegistry } from "../../tools/tool-registry.js";
+import type { ToolCallGuard } from "../../services/tool-call-guard.js";
 
 export type ToolExecutionAccess = {
   agentAccessMode?: AgentAccessMode;
@@ -31,6 +32,8 @@ export type ToolExecutionBase = {
 export type ToolContextFactoryDeps = {
   toolRegistry: ToolRegistry;
   getBrainCenter: () => BrainCenter | null;
+  /** 敏感工具（金额/不可逆）守卫：持久幂等回放 + 审计落盘（bootstrap 注入，缺省不启用） */
+  toolCallGuard?: ToolCallGuard;
 };
 
 export type ToolContextCallbacks = {
@@ -45,7 +48,7 @@ export class ToolContextFactory {
   create(base: ToolExecutionBase, callbacks: ToolContextCallbacks = {}): ChatToolExecutionContext {
     return {
       getCachedToolResult: (name, args) => this.deps.toolRegistry.getCachedResult(name, args),
-      executeTool: (name, args) => this.execute(name, args, base),
+      executeTool: (name, args, extras) => this.execute(name, args, base, extras?.signal),
       onToolExecuteStart: callbacks.onToolExecuteStart,
       onAgentStatusLine: callbacks.onAgentStatusLine,
       onToolExecuted: callbacks.onToolExecuted,
@@ -56,7 +59,26 @@ export class ToolContextFactory {
     name: string,
     args: Record<string, unknown>,
     base: ToolExecutionBase,
+    signal?: AbortSignal,
   ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
+    // 敏感工具幂等闸：TTL 内同 actor+工具+参数已成功 → 回放结果不重复执行
+    // （防跨轮重试/重启恢复后的重复下单/重复转账）；guardNote 让模型如实转告用户
+    const guard = this.deps.toolCallGuard;
+    if (guard) {
+      const replay = guard.checkReplay(base.actorId, name, args);
+      if (replay) {
+        console.log(`[ToolCallGuard] 幂等回放 tool=${name} actor=${base.actorId}（未重复执行）`);
+        return {
+          ok: true,
+          result: {
+            ...replay.result,
+            idempotentReplay: true,
+            guardNote: `同参数的「${name}」在 ${guard.ttlMinutes()} 分钟内已成功执行，本次为防重复操作的幂等回放，未再次执行。请如实告知用户。`,
+          },
+        };
+      }
+    }
+
     const brainCenter = this.deps.getBrainCenter();
     const brainSafety = brainCenter?.checkSafety(
       { tool: name, args },
@@ -67,6 +89,7 @@ export class ToolContextFactory {
       },
     );
     if (brainSafety && !brainSafety.allowed) {
+      guard?.record(base.actorId, name, args, false, { error: brainSafety.reason, blockedBy: "brain_center" });
       return {
         ok: false,
         result: {
@@ -79,18 +102,22 @@ export class ToolContextFactory {
 
     const bodyGateway = brainCenter?.getBodyGateway();
     if (bodyGateway?.hasRoute(name)) {
-      return bodyGateway.execute({
+      const out = await bodyGateway.execute({
         tool: name,
         args,
         actorId: base.actorId,
         source: base.source,
       });
+      guard?.record(base.actorId, name, args, out.ok, out.result);
+      return out;
     }
 
-    return this.deps.toolRegistry.execute(name, args, this.toToolContext(base));
+    const out = await this.deps.toolRegistry.execute(name, args, this.toToolContext(base, signal));
+    guard?.record(base.actorId, name, args, out.ok, out.result);
+    return out;
   }
 
-  private toToolContext(base: ToolExecutionBase): ToolContext {
+  private toToolContext(base: ToolExecutionBase, signal?: AbortSignal): ToolContext {
     return {
       sessionId: base.sessionId,
       userId: base.userId,
@@ -103,6 +130,8 @@ export class ToolContextFactory {
       // 按需位置：透传 locationCoordinator 的 requestLocation，天气等位置类工具
       // 在缺少经纬度时才能向客户端下发 agent.location_request 请求实时 GPS。
       requestLocation: base.access?.requestLocation,
+      // 单次调用取消信号（工具循环超时即 abort）：子进程/HTTP 类 handler 可消费
+      ...(signal ? { signal } : {}),
     };
   }
 }

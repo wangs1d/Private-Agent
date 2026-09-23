@@ -49,6 +49,8 @@ export class PendingConfirmationStore {
   private dirty = false;
   /** 可注入时钟（测试/集成冒烟用；默认真实系统时间） */
   private readonly nowFn: () => number;
+  /** 过期通知（bootstrap/hub 注入）：确认超时不再静默作废，用户会收到"没等到回复已取消"的说明 */
+  private expiredHandler: ((entries: PendingConfirmation[]) => void) | null = null;
 
   constructor(private readonly path?: string, nowFn?: () => number) {
     this.nowFn = nowFn ?? (() => Date.now());
@@ -58,6 +60,11 @@ export class PendingConfirmationStore {
         if (e.expiresAt > this.nowFn()) this.entries.set(e.confirmId, e); // 过期的恢复即弃
       }
     }
+  }
+
+  /** 注入过期回调（批量：一次 prune 命中的全部过期条目；异常由调用方消化） */
+  setExpiredHandler(handler: ((entries: PendingConfirmation[]) => void) | null): void {
+    this.expiredHandler = handler;
   }
 
   /** 登记一条待确认（自动剔除过期并落盘） */
@@ -100,12 +107,21 @@ export class PendingConfirmationStore {
     return this.entries.size;
   }
 
-  /** 剔除过期未回复的确认（静默作废，不执行） */
+  /** 剔除过期未回复的确认（不再静默：命中的条目批量回调 expiredHandler 通知用户） */
   pruneExpired(now = this.nowFn()): void {
+    const expired: PendingConfirmation[] = [];
     for (const [id, e] of this.entries) {
       if (e.expiresAt <= now) {
         this.entries.delete(id);
+        expired.push(e);
         this.dirty = true;
+      }
+    }
+    if (expired.length > 0) {
+      try {
+        this.expiredHandler?.(expired);
+      } catch {
+        /* 通知失败不影响清理 */
       }
     }
   }

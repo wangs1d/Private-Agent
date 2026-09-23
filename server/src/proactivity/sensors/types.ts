@@ -19,7 +19,9 @@ export type SignalStream =
   | "interest"
   | "weather"
   | "device"
-  | "goal";
+  | "goal"
+  | "file"
+  | "clipboard";
 
 export type SignalSalience = "high" | "medium" | "low";
 

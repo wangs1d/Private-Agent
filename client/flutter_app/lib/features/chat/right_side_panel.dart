@@ -1,17 +1,14 @@
 import "dart:async" show Timer, unawaited;
 import "dart:math" show max, min;
 
-import "package:flutter/foundation.dart" show kIsWeb, defaultTargetPlatform;
 import "package:flutter/material.dart";
 
 import "../../core/models/schedule_models.dart";
-import "../../core/services/desk_pet_session.dart";
 import "../../core/services/device_api_client.dart";
 import "../../core/services/right_panel_tool_preference.dart";
 import "../../core/services/schedule_floating_launcher.dart";
 import "../../core/services/schedule_preference.dart";
 import "../../core/theme/app_theme.dart";
-import "agent_activity_section.dart";
 
 const Color _kAccentBlue = Color(0xFF18D6F3);
 
@@ -25,11 +22,12 @@ const double _kTimelineRowHeight = 24.0;
 /// 时间轴最多展示的行数，超出的折叠进底部「查看全部」。
 const int _kMaxVisibleEvents = 5;
 
-/// 「常用工具」上方内容区（代办足迹 + 今日安排）的固定高度。
-/// 高度恒定 → 工具区起点 Y 恒定，代办足迹条目增减、日程事项增减都只
-/// 在这块区域内部消化（超出内部滚动），不会再把工具区推上推下。
-/// 取值略小于两区块满载总高（≈600），绝大多数情况无需内部滚动。
-const double _kUpperAreaFixedHeight = 560.0;
+/// 「常用工具」上方内容区（今日安排）的固定高度。
+/// 高度恒定 → 工具区起点 Y 恒定，日程事项增减只在这块区域内部消化
+/// （超出内部滚动），不会再把工具区推上推下。
+/// 取值略大于日程卡满载总高（≈330：头部+日程带+焦点卡+5 行时间轴+尾行），
+/// 绝大多数情况无需内部滚动；原足迹卡删除后由 560 收窄至此。
+const double _kUpperAreaFixedHeight = 340.0;
 
 /// 今日安排标题简洁化：剥离「该X啦」提醒式包装、指令前缀、元描述前缀、
 /// 以及和左侧时间列重复的时间词，再清理冗余代词词头，只保留核心文案
@@ -148,7 +146,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
     _scheduleTicker = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
-    DeskPetSession.instance.addListener(_onDeskPetChanged);
     // 主题切换时同步悬浮窗配色（窗口未创建时为 no-op）
     AppThemeController.instance.addListener(_onAppThemeChanged);
     unawaited(_loadToolLayout());
@@ -204,7 +201,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
   void dispose() {
     _scheduleTicker?.cancel();
     _devicePollTimer?.cancel();
-    DeskPetSession.instance.removeListener(_onDeskPetChanged);
     AppThemeController.instance.removeListener(_onAppThemeChanged);
     ScheduleFloatingLauncher.activeNotifier
         .removeListener(_onScheduleWindowChanged);
@@ -241,10 +237,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
     } catch (_) {
       // 静默失败：手机工具不显示副标签即可
     }
-  }
-
-  void _onDeskPetChanged() {
-    if (mounted) setState(() {});
   }
 
   Future<void> _loadSchedulePreference() async {
@@ -340,29 +332,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
     );
   }
 
-  void _logDeskPetEvent(String action) {
-    debugPrint(
-      '[DeskPet] action=$action | platform=$_currentPlatformTag | timestamp=${DateTime.now().toIso8601String()}',
-    );
-  }
-
-  String get _currentPlatformTag => kIsWeb
-      ? 'web'
-      : defaultTargetPlatform.toString().split('.').last.toLowerCase();
-
-  Future<void> _onSummonPet() async {
-    _logDeskPetEvent('summon_clicked');
-    final bool ok = await DeskPetSession.instance.summon();
-    if (!mounted) return;
-    _logDeskPetEvent(ok ? 'summon_succeeded' : 'summon_failed');
-  }
-
-  Future<void> _onDismissPet() async {
-    _logDeskPetEvent('dismiss_clicked');
-    await DeskPetSession.instance.dismiss();
-    _logDeskPetEvent('dismiss_succeeded');
-  }
-
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
@@ -381,7 +350,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
         child: LayoutBuilder(
           builder: (BuildContext context, BoxConstraints constraints) {
             // 矮窗口时按可用高度压缩上方固定区（保底 180），
-            // 保证工具区与桌宠按钮始终可见。340 ≈ 工具区编辑态 + 底部按钮 + 间距余量。
+            // 保证工具区始终可见。340 ≈ 工具区编辑态 + 间距余量。
             final double upperHeight = max(
               180.0,
               min(_kUpperAreaFixedHeight, constraints.maxHeight - 340),
@@ -399,9 +368,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: <Widget>[
-                        // 助手动态卡：Agent 主动代办结果台账（顶替原天气 Header 的面板首位）
-                        const AgentActivitySection(),
-                        const SizedBox(height: 12),
                         if (!_useDesktopFloating) _buildScheduleSection(),
                       ],
                     ),
@@ -412,8 +378,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
                   padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
                   child: _buildToolsSection(cs),
                 ),
-                const Spacer(),
-                _buildPetFooter(cs),
               ],
             );
           },
@@ -1288,70 +1252,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 底部：桌宠唤醒按钮
-  // ═══════════════════════════════════════════════════════════
-  Widget _buildPetFooter(ColorScheme cs) {
-    final bool summoned = DeskPetSession.instance.isSummoned;
-    final bool supported = DeskPetSession.isSupported;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 8, 14, 14),
-      decoration: BoxDecoration(
-        border: Border(
-          top: BorderSide(
-            color: cs.outline.withValues(alpha: 0.2),
-          ),
-        ),
-      ),
-      child: Center(
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(999),
-            onTap: supported
-                ? () {
-                    if (summoned) {
-                      unawaited(_onDismissPet());
-                    } else {
-                      unawaited(_onSummonPet());
-                    }
-                  }
-                : null,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-              decoration: BoxDecoration(
-                color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(
-                    color: cs.outline.withValues(alpha: 0.3)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  Icon(
-                    summoned
-                        ? Icons.nightlight_round
-                        : Icons.wb_sunny_outlined,
-                    size: 13,
-                    color: cs.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 5),
-                  Text(
-                    summoned ? "休眠桌宠" : "唤醒桌宠",
-                    style: TextStyle(
-                        fontSize: 11,
-                        color: cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w500),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
 }
 
 /// 「今日安排」卡片的配色皮肤：深色 / 暖色两套，

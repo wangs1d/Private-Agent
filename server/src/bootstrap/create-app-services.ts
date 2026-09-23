@@ -18,6 +18,7 @@ import {
 import { createExternalChatProviderFromEnv } from "../external-model/index.js";
 import { createPictureKit } from "@private-ai-agent/picture";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
+import { createRecommendationCatalog } from "../recommendation/index.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
@@ -56,6 +57,13 @@ import { createMemoryFtsStoreIfEnabled } from "../agentic-memory/fts-store.js";
 import { getMemoryHealthSnapshot } from "../agentic-memory/health.js";
 import { registerCommitmentTools, MEMORY_INVALIDATION_CHAT_TOOLS } from "../tools/commitment-tools.js";
 import { registerTaskDispatchTool } from "../tools/task-dispatch-tool.js";
+import { registerTaskPlaneTools } from "../tools/task-plane-tools.js";
+import { getAgentTaskStore } from "../services/agent-task-store.js";
+import { getAgentTaskOrchestrator } from "../services/agent-task-orchestrator.js";
+import { getTaskHub } from "../task-plane/task-hub.js";
+import { getTaskOutbox } from "../task-plane/task-outbox.js";
+import { scheduleInterruptedTaskRecovery } from "../task-plane/restart-recovery.js";
+import { AutonomySettingsStore } from "../services/autonomy-settings-store.js";
 import { registerGeofenceTools } from "../tools/geofence-tools.js";
 import { GeofenceService, isPublicHttpUrl } from "../services/geofence-service.js";
 import { LocationHistoryService } from "../services/location-history-service.js";
@@ -445,9 +453,17 @@ import { OutcomeStore } from "../proactivity/outcome-store.js";
 // ─── 五层主动性架构（传感→评估→仲裁→目标→表达）───
 import { SensorKernel, registerFeeder } from "../proactivity/sensors/kernel.js";
 import { ScreenSensor } from "../proactivity/sensors/screen-sensor.js";
+import { FileWatcherSensor } from "../proactivity/sensors/file-watcher.js";
+import { ClipboardSensor, isClipboardSensorEnabled } from "../proactivity/sensors/clipboard-sensor.js";
+import { registerPerceptionOverviewTool } from "../tools/perception-tools.js";
 import { ScheduleSensor } from "../proactivity/sensors/schedule-sensor.js";
 import { ArbiterV2 } from "../proactivity/arbiter-v2.js";
-import { EvaluatorChain, appendEventAudit, type EventAuditRecord } from "../proactivity/evaluators/evaluator-chain.js";
+import {
+  EvaluatorChain,
+  appendEventAudit,
+  bridgeSensorKernelToChain,
+  type EventAuditRecord,
+} from "../proactivity/evaluators/evaluator-chain.js";
 import { buildBuiltinEvaluators } from "../proactivity/evaluators/builtin-evaluators.js";
 import { GoalBoard } from "../proactivity/goal-board.js";
 import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
@@ -745,11 +761,11 @@ export async function createAppServices(): Promise<AppServices> {
   // 单笔/单日限额 + 订单落库 + 承诺板跟踪；Provider 按 BOOKING_MODE 组装）。
   // 承诺板在下方 agentic-memory 装配段构造后经 setCommitmentBoard 注入。
   const bookingConfig = getBookingConfig();
-  // 实时报价比价抽象层：local 价格库保底 + MCP 实时源（RollingGo 酒店）+
-  // 浏览器代查源（携程机票）。源可用性由各自 fetch 内部判定（MCP 未配置 /
-  // Playwright 未装都如实返回空），聚合器汇总，故这里无条件挂载。
+  // 实时报价比价抽象层：local 价格库保底 + 飞猪 FlyAI CLI 实时源（酒店/机票，
+  // 装 flyai CLI 即出价：npm i -g @fly-ai/flyai-cli）+ 浏览器代查源（携程机票）。
+  // 源可用性由各自 fetch 内部判定（CLI 未装 / Playwright 未装都如实返回错误），
+  // 聚合器汇总，故这里无条件挂载。
   const quoteAggregator = buildQuoteAggregator({
-    mcpCaller: mcpClientService,
     browserRunner: agentBrowserService,
   });
   const bookingProviders = buildDefaultBookingProviders(bookingConfig, { quoteAggregator });
@@ -981,6 +997,10 @@ export async function createAppServices(): Promise<AppServices> {
         return null;
       })(),
   });
+  // 任务委派闭环的对话面查询/取消原语（2026-09-19 P0-2）：task.status 零 LLM
+  // 直答结构化查询、task.cancel 与客户端 chat.task_cancel 同语义（终态标记 →
+  // dispatchBackgroundTask 的 isCancelled 软取消生效）。
+  registerTaskPlaneTools(toolRegistry);
   // 注册能力模块（image-gen / file-doc / email-sms / ...）
   // 通过 setCapabilityModuleDeps 让 getBuiltinAgentChatTools 自动合并 ChatCompletionTool；
   // 通过 setExtraIntentRules 把模块意图元数据合并到 BM25 调权；
@@ -1795,7 +1815,62 @@ export async function createAppServices(): Promise<AppServices> {
   }
 
   const scheduleIntentService = new ScheduleIntentService(externalChat);
-  registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
+  // 购物建议商品库（runtime 内置能力）：shopping.suggest 工具数据源；数据落 data/recommendation/。
+  const recommendationCatalog = createRecommendationCatalog(
+    join(process.cwd(), "data", "recommendation"),
+  );
+  registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService, {
+    catalog: recommendationCatalog,
+    // 缺图候选网搜补图：searchImages 拿真实图源并转存 PNG（本地相对路径），
+    // 保证 product_compare 卡默认带图；无结果/失败返回 null 静默降级。
+    // 转存落固定共享命名空间（非触发用户个人目录）：照片按 productId 进程级
+    // 缓存跨用户复用，图是功能共享资产、不属于任何账号（盘上无清理任务）。
+    webImageSearch: async (query) => {
+      const res = await upstreamSearchService.searchImages(query, 1, "shared-product-img");
+      return res.items[0]?.mediaUrl ?? null;
+    },
+    // 每轮实时决策：结合用户画像/习惯（长期画像 + 记忆 KV），由 ephemeral LLM
+    // 单轮调用重排候选并按用户场景改写推荐话术；不可用/失败降级商品库原始文案。
+    personalization: {
+      buildUserContext: async (actorId) => {
+        const parts: string[] = [];
+        try {
+          const slice = await userPersonalizationService?.getPromptSlice(actorId);
+          if (slice?.userProfile) parts.push(slice.userProfile);
+        } catch {
+          /* 画像缺失不阻断推荐 */
+        }
+        try {
+          const { entries } = agentMemorySyncService.getSnapshot(actorId, ["user_profile"]);
+          if (typeof entries.user_profile === "string") parts.push(entries.user_profile);
+        } catch {
+          /* 同上 */
+        }
+        const digest = parts.join("\n").trim();
+        return digest.length > 0 ? digest.slice(0, 1800) : null;
+      },
+      llmComplete: externalChat?.isEnabled()
+        ? async (system, userText) => {
+            let full = "";
+            await externalChat!.streamCompletion(
+              `shopping-suggest-${Date.now()}`,
+              { text: userText },
+              (delta: string) => {
+                full += delta;
+              },
+              undefined,
+              {
+                systemPromptOverride: system,
+                ephemeralTurn: true,
+                disableThinking: true,
+                maxThreadMessages: 0,
+              },
+            );
+            return full;
+          }
+        : null,
+    },
+  });
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService, scheduleConflictService);
   const smartHomeService = new SmartHomeService();
   registerSmartHomeTools(toolRegistry, smartHomeService);
@@ -1991,7 +2066,13 @@ export async function createAppServices(): Promise<AppServices> {
     if (!prompt) {
       throw new Error("Agent 自动化任务缺少 prompt");
     }
-    const accessMode = task.agentTask?.accessMode ?? "full";
+    // 无人值守任务默认沙箱权限（收紧）：定时 agent_task 没有用户在场确认，
+    // 默认 full 等于给了一个可自主执行任意工具（含金额/外发类）的常驻后门。
+    // 显式声明 accessMode 的任务不受影响；确需旧行为可设
+    // SCHEDULE_AGENT_TASK_DEFAULT_ACCESS_MODE=full。
+    const accessMode =
+      task.agentTask?.accessMode ??
+      (process.env.SCHEDULE_AGENT_TASK_DEFAULT_ACCESS_MODE === "full" ? "full" : "sandbox");
     wsConnectionRegistry.trySend(
       task.sessionId,
       JSON.stringify({
@@ -2636,12 +2717,13 @@ export async function createAppServices(): Promise<AppServices> {
 
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
+  const desktopVisual = createDesktopVisualFromEnv();
   const visionPeriodicScheduler = new VisionPeriodicScheduler({
     runtime,
     wsRegistry: wsConnectionRegistry,
+    // 懒引用（desktopVisual 在上方一行才创建；桥/本机视觉均走该端口）
+    getVisualPort: () => desktopVisual,
   });
-
-  const desktopVisual = createDesktopVisualFromEnv();
   // 主动性在场服务引用（proactivityPresence 在下方才构造；桌面同步回调运行时已就绪）
   let proactivityPresenceRef: import("../proactivity/presence-service.js").PresenceService | null = null;
   const desktopBridgeCoordinator = new DesktopBridgeCoordinator({
@@ -3794,11 +3876,11 @@ export async function createAppServices(): Promise<AppServices> {
   );
 
   // ─── ProactivityHub 主动性多元化模块装配 ───
-  // 多元触发（对话关怀/任务恭喜/待办闭环/过劳干预/问候/兴趣分享）+ 全局频控
-  // （FrequencyGovernor：每日预算 + 分 kind 冷却 + 静默时段）+ 三种行为模式：
+  // 多元触发（对话关怀/任务恭喜/待办闭环/过劳干预/问候）+ 全局频控
+  // （FrequencyGovernor：每日预算 + 分 kind 冷却 + 静默时段）+ 两种行为模式：
   //   speak → LifeSignalHub 发布 → BrainCenter.decide → ProactionCortex 既有闭环
   //   act   → 白名单工具静默后台执行（media/calendar/smart_home，无删除类）
-  //   advise → AdviceStore 入队 → 下一轮对话 prompt 注入【Agent 主动建议】
+  // （advise 模式已随 AdviceStore 死代码一并移除：advise 请求统一改道 speak）
   //
   // 负反馈抑制表（Task 20 统一频控框架）：用户「别再提醒我这个」类负反馈的
   // 持久化抑制（data/proactivity-suppression/{actorId}.json，kind + 关键词），
@@ -3812,6 +3894,11 @@ export async function createAppServices(): Promise<AppServices> {
   // 共享频控器：hub 快路径与统一管道同一预算口径（单一预算才是真预算），
   // 状态由 ProactivePipeline 落盘 data/proactivity/frequency.json，重启恢复
   const proactivityGovernor = new FrequencyGovernor();
+  // 每用户自主性等级 + 勿扰（客户端设置页可调；等级经 hub 执行端生效，勿扰经 governor 全局生效）
+  const autonomySettings = new AutonomySettingsStore(
+    join(process.cwd(), "data", "autonomy-settings.json"),
+  );
+  proactivityGovernor.setDndCheck((actorId) => autonomySettings.isDnd(actorId));
   // 在场感知（active/idle/offline）：WS 连接事件 + 对话活跃喂入，供仲裁择时与投递选通道
   const proactivityPresence = new PresenceService();
   proactivityPresenceRef = proactivityPresence;
@@ -3841,12 +3928,7 @@ export async function createAppServices(): Promise<AppServices> {
     // L3 弹窗卡（reminder_popup：客户端弹需点掉的对话框）
     sendPopup: (actorId, payload) =>
       Promise.resolve(wsConnectionRegistry.trySend(actorId, JSON.stringify(payload))),
-    // L4 语音播报（VoiceCapabilityService 合成 + WS 一站式）
-    sendVoice: (actorId, text) =>
-      Promise.resolve(voiceCapabilityService.pushProactiveVoice(actorId, "提醒", text))
-        .then((ok) => ok === true)
-        .catch(() => false),
-    // L5 虚拟来电（reminder 风格振铃；仅 interrupt 事件会到达此级）
+    // L4 虚拟来电（reminder 风格振铃；仅 interrupt 事件会到达此级）
     placeCall: (actorId, text) =>
       virtualPhoneService
         .callUserWithRinging({
@@ -3865,6 +3947,10 @@ export async function createAppServices(): Promise<AppServices> {
     frequencyGovernor: proactivityGovernor,
     silenceLog: proactivitySilenceLog,
     pendingConfirmations: proactivityConfirmations,
+    // 每用户自主性等级：0=只建议 1=标准 2=高效（客户端设置页可调）
+    autonomyLevel: (actorId) => autonomySettings.getLevel(actorId),
+    // 防重记忆持久化：跨栈去重重启不失效
+    dataPath: join(process.cwd(), "data", "proactivity"),
     // 分级触达：ask_first 挂起确认 → Router 投递+升级（hub 的 speak 信号已投
     // chat，这里 assumeDelivered 避免双发；未响应时步进升 popup/voice）
     onPendingConfirmation: (entry) => {
@@ -3911,19 +3997,6 @@ export async function createAppServices(): Promise<AppServices> {
         userId: actorId,
         agentAccessMode: "full",
       }),
-    // 兴趣分享触发源：OnlineLearningCortex 画像（偏好权重 = confidence × stability）
-    getProfile: (actorId) => {
-      const olc = brainCenter?.getOnlineLearningCortex();
-      if (!olc) return null;
-      const profile = olc.getProfile(actorId);
-      return {
-        preferences: profile.preferences.map((e) => ({
-          value: e.value,
-          effectiveWeight: e.confidence * e.stability,
-        })),
-        topics: profile.topics,
-      };
-    },
     // 对话活跃事件 → 节律感知 + 在场感知（连续工作/深夜检测 + active/idle 判定的数据源）
     onUserActivity: (actorId, source) => {
       rhythmCore?.noteActivity(actorId, source);
@@ -3931,12 +4004,14 @@ export async function createAppServices(): Promise<AppServices> {
     },
     // ── 通用主动性路径（Jarvis 式：感知 → LLM 自主决策 → speak/act/advise） ──
     // LLM 完成函数：InitiativeEngine 决策用（ephemeralTurn 不污染会话线程）。
-    // PROACTIVITY_MODEL 可路由到快/便宜模型——主动性决策不需要主力模型的质量
+    // PROACTIVITY_MODEL 可路由到快/便宜模型——主动性决策不需要主力模型的质量。
+    // sessionId 用稳定 id（proactivity:actorId）：评估频率高，若每次拼 Date.now()
+    // 会把 BudgetGuard 的会话桶刷爆（500 上限滚动淘汰，挤掉真实会话的记账）。
     llmComplete: externalChat?.isEnabled()
-      ? async (prompt, sessionId) => {
+      ? async (prompt, sessionId, opts) => {
           let full = "";
           await externalChat!.streamCompletion(
-            `proactivity-${sessionId}-${Date.now()}`,
+            `proactivity:${sessionId}`,
             { text: prompt },
             (delta: string) => {
               full += delta;
@@ -3947,6 +4022,9 @@ export async function createAppServices(): Promise<AppServices> {
               ephemeralTurn: true,
               disableThinking: true,
               maxThreadMessages: 0,
+              // usage 归因（2026-09-23）：API 真实 usage 此前默认记进 main_chat，
+              // 主动性侧优化效果无法度量。auditStage 由调用方声明（评估/act 步）。
+              ...(opts?.auditStage ? { auditStage: opts.auditStage } : {}),
               ...(process.env.PROACTIVITY_MODEL
                 ? { modelOverride: process.env.PROACTIVITY_MODEL }
                 : {}),
@@ -4162,6 +4240,42 @@ export async function createAppServices(): Promise<AppServices> {
   interestWatcher.start();
   proactivityHub.start();
   console.log("[Bootstrap] ProactivityHub 已装配（多元触发 + 频控 + speak/act/advise）");
+  // 定时任务死信通知：连续失败进入死信（停止重试）时主动告知一次，不再无人知晓地空烧
+  scheduleTaskService.setTaskDeadLetterHandler((task) => {
+    proactivityHub.submitIntent({
+      actorId: task.sessionId,
+      kind: "life_reminder",
+      importance: "medium",
+      title: `定时任务「${task.title ?? task.description.slice(0, 30)}」已暂停`,
+      summary:
+        `这个任务连续 ${task.consecutiveFailures ?? 0} 次执行失败（${task.lastError ?? "原因未知"}），` +
+        `我先停止自动重试，避免继续空跑。想让我修好后恢复，随时说一声。`,
+      mode: "speak",
+      source: "time",
+    });
+  });
+  // 确认超时不再静默：过期未回复的确认逐条告知用户（"没等到回复，先不做了"）。
+  // 防重入：通知路径若再触发 prune（理论上不会）不递归。
+  let notifyingExpiredConfirmations = false;
+  proactivityConfirmations.setExpiredHandler((entries) => {
+    if (notifyingExpiredConfirmations || entries.length === 0) return;
+    notifyingExpiredConfirmations = true;
+    try {
+      for (const e of entries) {
+        proactivityHub.submitIntent({
+          actorId: e.actorId,
+          kind: "life_reminder",
+          importance: "low",
+          title: "确认超时已取消",
+          summary: `刚才想请你确认的「${e.rationale.slice(0, 60)}」一直没等到回复，我先不做了。需要的话随时说一声。`,
+          mode: "speak",
+          source: "confirmation_expiry",
+        });
+      }
+    } finally {
+      notifyingExpiredConfirmations = false;
+    }
+  });
 
   // ─── 五层主动性架构装配（L1 传感 → L2 评估 → L3 仲裁 → L4 目标）───
   // 全部零 LLM：传感层持续追踪状态 delta，评估器把 delta 变成事件，
@@ -4175,7 +4289,22 @@ export async function createAppServices(): Promise<AppServices> {
   const scheduleSensor = new ScheduleSensor({ listTasks: () => scheduleTaskService.listAllTasks() });
   sensorKernel.register(screenSensor);
   sensorKernel.register(scheduleSensor);
+  // ─── 持续感知补全（2026-09-19 P0-1）：文件系统 + 剪贴板传感器 ───
+  // file_watcher：fs.watch 递归监听（env AGENT_FILE_WATCH_DIRS，缺省下载目录），
+  //   只报文件名/动作不读内容；clipboard_watch：30s 哈希比对，只落预览+长度。
+  //   感知回溯查询经 perception.overview 工具暴露给对话面。
+  const fileWatcherSensor = new FileWatcherSensor();
+  sensorKernel.register(fileWatcherSensor);
+  if (isClipboardSensorEnabled()) {
+    sensorKernel.register(new ClipboardSensor({ visualPort: desktopVisual }));
+  }
+  registerPerceptionOverviewTool(toolRegistry, {
+    kernel: sensorKernel,
+    screenFocus: () => screenSensor.latest(),
+  });
   const goalFeeder = registerFeeder(sensorKernel, "goal_board", "goal");
+  /** 入站消息 feeder（unread_burst 评估器的数据源；MessageHub onInbound 推送） */
+  const messageFeeder = registerFeeder(sensorKernel, "message_hub", "message");
   /** 物理设备 feeder 缓存（sensorId → emit；device-signal 上行入口用） */
   const deviceFeeders = new Map<string, (signal: { actorId?: string; at: number; fingerprint: string; salience: "high" | "medium" | "low"; payload?: Record<string, unknown> }) => void>();
   const primaryActor = (): string | null => {
@@ -4380,6 +4509,20 @@ export async function createAppServices(): Promise<AppServices> {
         .sort((a, b) => (a.dueAt as number) - (b.dueAt as number));
     },
     weatherLine: () => weatherLineCache,
+    // 未读发件人（digest/晨报拼接）：MessageHub 会话表中 unreadCount>0 的对端
+    unreadSenders: () => {
+      const actorId = primaryActor();
+      if (!actorId) return [];
+      try {
+        return messageHubService
+          .listConversations(actorId, { limit: 20 })
+          .filter((c) => c.unreadCount > 0)
+          .map((c) => c.participantName || c.title || String(c.platform))
+          .slice(0, 5);
+      } catch {
+        return [];
+      }
+    },
     readyGoals: () =>
       goalBoard.readyTray().map((g) => ({ title: g.title, body: String(g.payload?.body ?? g.title) })),
     interestLines: () => {
@@ -4396,10 +4539,15 @@ export async function createAppServices(): Promise<AppServices> {
   const evaluatorChain = new EvaluatorChain({
     defaultActorId: primaryActor,
     services: builtinServices,
+    // 评估器私有状态 + 事件去重指纹落盘：重启不重发、马拉松计时不清零
+    dataPath: proactivityFabricPath,
   });
   for (const evaluator of buildBuiltinEvaluators(builtinServices)) {
     evaluatorChain.register(evaluator);
   }
+  // L1→L2 桥接：传感信号进评估器链（此前生产装配缺这行，away_return/meeting_soon/
+  // work_marathon/unread_burst/sleep_boundary/goal_ready 从未产出过事件）
+  bridgeSensorKernelToChain(sensorKernel, evaluatorChain);
   console.log("[Bootstrap] 主动性五层架构已装配（传感/评估/仲裁/目标，零 LLM）");
 
   // ─── 购物降价监控装配（复用 InterestWatcher 轮询模式，tick=PRICE_WATCH_TICK_MS 默认 60min）───
@@ -4709,6 +4857,14 @@ export async function createAppServices(): Promise<AppServices> {
   const agentActivityStore = new AgentActivityStore(
     join(process.cwd(), "data", "proactivity", "activities.json"),
   );
+  // 任务面台账/离线结果落盘：重启后台账恢复（非终态如实标记 failed，
+  // "怎么样了"答得出"重启中断"）；已入箱未投递的任务结果重连后照常补投
+  getTaskHub().enablePersistence(join(process.cwd(), "data", "task-plane", "task-hub.json"));
+  getTaskOutbox().enablePersistence(join(process.cwd(), "data", "task-plane", "task-outbox.json"));
+  // 被打断任务收口 + 自动重跑（2026-09-23）：清扫只标 failed（无连接无监听，
+  // 终态送不出去），由 restart-recovery 延迟统一处理——沿原结果通道推收口
+  // 通知（状态带据此收口），再把"被重启错杀"的任务自动重派（代数封顶防死循环）。
+  scheduleInterruptedTaskRecovery({ agentCore, registry: wsConnectionRegistry });
   // 足迹卡实时刷新：新条目落库即向该 actor 在线设备推 agent.activity_new
   // （客户端收到后立即重拉台账，替代 1 分钟轮询的滞后；离线时推丢由轮询兜底）
   agentActivityStore.onRecord = (activity) => {
@@ -5082,6 +5238,15 @@ export async function createAppServices(): Promise<AppServices> {
   });
   messageHubService.onInbound = (input) => {
     messageWatchTrigger.handleInbound(input);
+    // 入站消息 → 传感内核 message 流（unread_burst 评估器数据源；30min 窗口 ≥3 条触发）
+    messageFeeder({
+      actorId: input.actorId,
+      at: Date.now(),
+      fingerprint: `msg:${input.actorId}:${input.platform}:${input.channelId}:${Date.now()}:${input.text.slice(0, 24)}`,
+      salience: "low",
+      delta: `来自 ${input.participantName || input.senderName || input.title || input.platform} 的新消息`,
+      payload: { sender: input.participantName || input.senderName || input.title || String(input.platform) },
+    });
     // 微信支付服务通知 → 零 LLM 解析 → 静默自动入账（只落库不推送，查询走 finance.* 工具）
     void financeIngestService.handleInboundMessage(input).catch(() => {});
   };
@@ -5189,6 +5354,10 @@ export async function createAppServices(): Promise<AppServices> {
     proactivityHub,
     activityStore: agentActivityStore,
     featureCatalog,
+    // 任务审批接入（2026-09-19 P1-1）：awaiting_approval 任务进收件箱，
+    // approve/reject 委托编排器（审批后真续跑，不再「批了不跑」）
+    taskStore: getAgentTaskStore(),
+    taskOrchestrator: getAgentTaskOrchestrator(),
     reachRouter,
   });
 
@@ -5200,6 +5369,8 @@ export async function createAppServices(): Promise<AppServices> {
     toolRegistry,
     skillManager,
     featureCatalog,
+    recommendationCatalog,
+    autonomySettings,
     travelPlanningService,
     skillMetadataValidator,
     realFundsWallet,
@@ -5377,6 +5548,13 @@ export async function createAppServices(): Promise<AppServices> {
     subscriptionAuditService.stop();
     billManagementService.stop();
     eveningDigestScheduler.stop();
+    // 推送 token 注册表兜底落盘（register/unregister 已写穿，此处防未来新写路径漏刷）
+    proactivePushService.flush();
+    // 任务面台账强制落盘（1s 防抖窗口内的变更不丢）
+    getTaskHub().flushPersistence();
+    // 五层架构：评估器状态强制落盘（马拉松计时/事件去重指纹）
+    evaluatorChain.stop();
+    sensorKernel.stop();
     // 女性关怀：停经期提醒调度 + 加密数据落盘
     periodCareService.stop();
     void periodCareService.flush();

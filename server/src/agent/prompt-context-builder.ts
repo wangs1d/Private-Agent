@@ -49,7 +49,6 @@ import type { PersonalizationPromptSlice } from "../services/user-personalizatio
 import { dedupeMemoryLines, semanticFingerprint, contentTokenSet, tokenOverlapRatio } from "../services/memory-record-utils.js";
 import { markInjectedMemory } from "../services/memory-echo-guard.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
-import type { AdviceStore } from "../proactivity/advice-store.js";
 import { redactSensitiveText } from "../utils/redact.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
@@ -439,9 +438,6 @@ export class PromptContextBuilder {
 
   private personalityProvider: ((actorId: string) => PersonalityCore | null) | null = null;
 
-/** ProactivityHub advise 队列（setProactivityHub 时由 agent-core 注入） */
-  private adviceStore: AdviceStore | null = null;
-
   /**
    * 用户兴趣关注列表拉取器（InterestWatcher.listForPrompt 的薄包装）。
    * 每轮 assembleMemory 拉取注入【用户兴趣关注列表】块：
@@ -450,15 +446,6 @@ export class PromptContextBuilder {
    * 无兴趣时返回 null（零注入）。
    */
   private interestListProvider: ((actorId: string) => string | null) | null = null;
-
-  /**
-   * 注入 ProactivityHub 的建议队列（advise 模式载体）。
-   * 每轮 assembleMemory 时 drain 出未消费建议注入【Agent 主动建议】块，
-   * 由 agent 在正常回复中自然带出；无建议时零开销。
-   */
-  setAdviceStore(store: AdviceStore | null): void {
-    this.adviceStore = store;
-  }
 
   /**
    * 注入用户兴趣列表拉取器（InterestWatcher 接线；通常经 agent-core 转发）。
@@ -743,24 +730,6 @@ export class PromptContextBuilder {
       }
     }
 
-// ProactivityHub advise 模式：drain 出排队中的主动建议，注入【Agent 主动建议】块。
-    // 取出即清空（无建议时零开销）；由 agent 在本轮回复中自然带出，不打断用户。
-    let proactiveAdviceBlock: string | undefined;    if (this.adviceStore) {
-      try {
-        const advices = this.adviceStore.drain(input.actorId);
-        if (advices.length > 0) {
-          const lines = advices.map((a) => `- ${a.text}`);
-          proactiveAdviceBlock = [
-            `【Agent 主动建议】`,
-            `（后台观察到的建议；别逐条宣读，选合适时机一两句自然带出）`,
-            ...lines,
-          ].join("\n");
-        }
-      } catch (err) {
-        console.log(`[PromptContextBuilder] advice 注入失败（忽略）: ${err}`);
-      }
-    }
-
     // 用户兴趣关注列表（InterestWatcher 接线）：注入【用户兴趣关注列表】块。
     // 让 agent 知道用户在长期关注什么（话题接得住）；附工具引导：听到新的长期
     // 兴趣时调 interest.manage 记录。无列表时零注入。
@@ -860,7 +829,6 @@ export class PromptContextBuilder {
       ...(compactTravelState ? { travelState: compactTravelState } : {}),
       ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
-      ...(proactiveAdviceBlock ? { proactiveAdvice: proactiveAdviceBlock } : {}),
       ...(interestListBlock ? { interestList: interestListBlock } : {}),
       // commitmentBoard（未兑现承诺块）不再构建：prompt-assembler 从不渲染该字段，
       // 每轮白查一次承诺板。承诺信息仍经 KV memory_commitments 与 epitome 注入。

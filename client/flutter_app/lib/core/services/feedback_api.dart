@@ -4,6 +4,7 @@ import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
 import "access_auth_api.dart";
+import "install_identity.dart";
 
 /// 反馈提交/查询的通用结果包装。
 class FeedbackResult<T> {
@@ -76,10 +77,13 @@ class FeedbackRecord {
       };
 }
 
-/// 帮助与反馈 API 客户端。
+/// 反馈 API 客户端（用户菜单「反馈」弹窗使用）。
+///
+/// 走控制面（[ApiConfig.controlPlaneBase]，管理后台所在服务器）而不是
+/// 本地 runtime —— 否则捆绑用户的反馈落在本机数据库，后台永远收不到。
 class FeedbackApi {
   FeedbackApi({String? baseUrl, http.Client? client})
-      : _baseUrl = baseUrl ?? ApiConfig.httpBase,
+      : _baseUrl = baseUrl ?? ApiConfig.controlPlaneBase,
         _client = client ?? http.Client();
 
   final String _baseUrl;
@@ -106,7 +110,8 @@ class FeedbackApi {
             Uri.parse("$_baseUrl/api/feedback"),
             headers: _headers,
             body: jsonEncode(<String, dynamic>{
-              "userId": ApiConfig.effectiveActorId,
+              // 控制面身份：稳定安装 ID（或部署配置的 USER_ID），避免全员撞同一 sessionId
+              "userId": await InstallIdentity.instance.actorId(),
               "type": type,
               "title": title,
               "description": description,
@@ -136,8 +141,8 @@ class FeedbackApi {
     try {
       final Uri uri = Uri.parse("$_baseUrl/api/feedback").replace(
         queryParameters: <String, String>{
-          "userId": ApiConfig.effectiveActorId,
-          "actorId": ApiConfig.effectiveActorId,
+          "userId": await InstallIdentity.instance.actorId(),
+          "actorId": await InstallIdentity.instance.actorId(),
           "limit": "$limit",
         },
       );

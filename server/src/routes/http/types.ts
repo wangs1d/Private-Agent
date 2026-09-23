@@ -120,6 +120,8 @@ export type HttpRouteDeps = {
    * 未注入时 /sensors 与 /selftest 端点不可用。
    */
   proactivityFabric?: import("../../routes/http/proactivity.js").ProactivityFabricDeps | null;
+  /** 每用户自主性等级 + 勿扰（GET/PUT /api/autonomy）；可选，未注入时路由不挂载 */
+  autonomySettings?: import("../../services/autonomy-settings-store.js").AutonomySettingsStore | null;
   /** 助手动态台账（右侧面板「助手动态」卡数据源） */
   agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
   /** 承诺板（主页「盯着」小节数据源；未启用时该小节为空） */
@@ -156,4 +158,6 @@ export type HttpRouteDeps = {
   travelPlanningService?: import("../../skills/travel-planning/travel-planning-service.js").PlanningService;
   /** Feature Catalog 能力分类目录（未装配时 /api/catalog/* 端点返回 503） */
   featureCatalog?: import("../../catalog/index.js").FeatureCatalog;
+  /** 购物建议商品库（runtime 内置能力，shopping.suggest 工具数据源；未装配时只读端点 503） */
+  recommendationCatalog?: import("../../recommendation/index.js").ProductCatalog;
 };

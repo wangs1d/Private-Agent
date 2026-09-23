@@ -298,7 +298,7 @@ test("GoalBoard: 会前准备包预执行 → ready 进托盘 → goal 信号", 
 
 test("模板: 各 kind 渲染非空且带上下文", () => {
   const now = new Date(MockClock.localAt(8, 0));
-  assert.ok(renderProactiveText("greeting", { now }).includes("早"));
+  assert.ok(renderProactiveText("away_return", { now }).length > 0);
   assert.ok(renderProactiveText("interest_alert", { name: "刘浩存", excerpt: "新电影开机" }).includes("刘浩存"));
   assert.ok(renderProactiveText("overwork_care", { hours: 4 }).includes("4"));
   assert.ok(renderProactiveText("unknown_kind_xyz", { title: "测试" }).length > 0, "未知 kind 有兜底");
@@ -371,12 +371,12 @@ test("直达车道关闭时回退 LifeSignal 路径（向后兼容）", async ()
   });
   hub.submitIntent({
     actorId: "user-1",
-    kind: "greeting",
+    kind: "interest_share",
     importance: "low",
     title: "t",
     summary: "s",
     mode: "speak",
-    source: "time",
+    source: "profile",
   });
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(published, 1);

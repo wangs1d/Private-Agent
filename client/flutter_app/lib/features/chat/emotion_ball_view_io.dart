@@ -17,16 +17,6 @@ import "emotion_ball_view_stub.dart" as fallback;
 /// 表情切换:改 [EmotionBallView.emotion] 即可,内部通过
 /// `executeScript("window.__ball.setEmotion(id)")` 驱动,带过渡形变动画。
 class EmotionBallView extends StatefulWidget {
-  const EmotionBallView({
-    super.key,
-    this.emotion = "02",
-    this.size,
-    this.bodyColor,
-    this.eyeColor,
-    this.showEffects = false,
-    this.eyeScale,
-  });
-
   /// 当前表情 ID(emotion-ball 的 emotionId)。
   /// 常用:"02" 待机放空 / "30" 思考中 / "40" 检索资料 / "32" 处理中忙碌。
   final String emotion;
@@ -44,6 +34,22 @@ class EmotionBallView extends StatefulWidget {
 
   /// 眼睛占比放大系数(小尺寸下保证表情可读),null 时用引擎默认 1。
   final double? eyeScale;
+
+  /// 弹跳头顶余量:向上扩高动画画布,给待机小动作的弹跳顶点留出完整空间,
+  /// 球体任何时刻都不会被视口裁掉上半截。代价是球在框内等比略缩,
+  /// 调用方需适当放大 [size] 补偿。默认关闭,保持既有实例视觉不变。
+  final bool fitBounce;
+
+  const EmotionBallView({
+    super.key,
+    this.emotion = "02",
+    this.size,
+    this.bodyColor,
+    this.eyeColor,
+    this.showEffects = false,
+    this.eyeScale,
+    this.fitBounce = false,
+  });
 
   @override
   State<EmotionBallView> createState() => _EmotionBallViewState();
@@ -72,6 +78,7 @@ class _EmotionBallViewState extends State<EmotionBallView> {
       if (widget.eyeColor != null) "eyeColor": _hex(widget.eyeColor!),
       if (widget.showEffects) "effects": true,
       if (widget.eyeScale != null) "eyeScale": widget.eyeScale,
+      if (widget.fitBounce) "fitBounce": true,
     };
     return html.replaceAll("__BALL_BOOT_JSON__", jsonEncode(boot));
   }
@@ -118,8 +125,9 @@ class _EmotionBallViewState extends State<EmotionBallView> {
     if (!Platform.isWindows) return;
     if (widget.bodyColor != oldWidget.bodyColor ||
         widget.eyeColor != oldWidget.eyeColor ||
-        widget.showEffects != oldWidget.showEffects) {
-      // 主题色 / 特效开关只在引擎构造时生效,变化需要重建页面。
+        widget.showEffects != oldWidget.showEffects ||
+        widget.fitBounce != oldWidget.fitBounce) {
+      // 主题色 / 特效开关 / 画布余量只在引擎构造时生效,变化需要重建页面。
       _controller?.dispose();
       _controller = null;
       unawaited(_initWebView());
@@ -153,6 +161,7 @@ class _EmotionBallViewState extends State<EmotionBallView> {
         eyeColor: widget.eyeColor,
         showEffects: widget.showEffects,
         eyeScale: widget.eyeScale,
+        fitBounce: widget.fitBounce,
       );
     }
     final WebviewController? controller = _controller;

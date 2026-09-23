@@ -153,7 +153,9 @@ export class ProactivePipeline {
     const prev = this.deps.outcomes.findByDeliveryId(deliveryId);
     if (!prev) return false;
     this.deps.outcomes.record({ ...prev, outcome, at: Date.now() });
-    if (!POSITIVE.has(outcome) && outcome !== "delivered") {
+    // viewed = 应用内已展示（impression），非用户决策：不算负反馈，
+    // 也不进接受率分母（outcome-store.acceptanceRate 排除），避免污染学习信号
+    if (!POSITIVE.has(outcome) && outcome !== "delivered" && outcome !== "viewed") {
       this.deps.governor.noteOutcome(prev.kind, false);
     }
     const rate = this.deps.outcomes.acceptanceRate(prev.kind);

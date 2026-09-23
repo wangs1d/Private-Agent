@@ -1,0 +1,153 @@
+{
+  "summary": {
+    "label": "noise-old",
+    "guidanceMode": "old",
+    "repeats": 3,
+    "toolNeededTurns": 9,
+    "toolDecisionRate": 1,
+    "toolGroundedRate": 1,
+    "pureChatTurns": 0,
+    "pureChatPurityRate": 0,
+    "fabricatedClaims": 0,
+    "avgLatencyMs": 9226,
+    "at": "2026-09-22T17:20:03.811Z"
+  },
+  "rows": [
+    {
+      "text": "她最近在忙什么啊？",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "search_web",
+        "search_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 4,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1136,
+      "ms": 13289
+    },
+    {
+      "text": "她最近在忙什么啊？",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "search_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 3,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 932,
+      "ms": 9985
+    },
+    {
+      "text": "她最近在忙什么啊？",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "clock.get_current_time",
+        "search_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 3,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1337,
+      "ms": 8573
+    },
+    {
+      "text": "上次说的那部电影上映了吗？",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "clock.get_current_time",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 871,
+      "ms": 7531
+    },
+    {
+      "text": "上次说的那部电影上映了吗？",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 770,
+      "ms": 6389
+    },
+    {
+      "text": "上次说的那部电影上映了吗？",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 796,
+      "ms": 7037
+    },
+    {
+      "text": "她微博最近更新了吗",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 846,
+      "ms": 7436
+    },
+    {
+      "text": "她微博最近更新了吗",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "search_web",
+        "search_web",
+        "fetch_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 5,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1003,
+      "ms": 14579
+    },
+    {
+      "text": "她微博最近更新了吗",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "search_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 3,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 922,
+      "ms": 8219
+    }
+  ]
+}

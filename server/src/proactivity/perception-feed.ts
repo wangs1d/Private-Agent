@@ -55,6 +55,15 @@ export class PerceptionFeed {
     return fresh;
   }
 
+  /**
+   * 只读增量窗口（不推进水位）。L0 分诊用：skip 时窗口保持未消费，
+   * 后续 medium/high 事件到来时与新观察一并评估（信号不丢）。
+   */
+  peekWindow(actorId: string): Observation[] {
+    const list = this.actors.get(actorId) ?? [];
+    return list.slice(this.consumedAt.get(actorId) ?? 0);
+  }
+
   /** 只读最近 N 条（背景上下文，不推进水位） */
   recent(actorId: string, limit: number = DEFAULT_RECENT): Observation[] {
     const list = this.actors.get(actorId) ?? [];

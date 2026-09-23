@@ -7,12 +7,12 @@ import type { FastifyInstance } from "fastify";
 
 import type { ProactivitySuppressionStore } from "../../proactivity/suppression-store.js";
 
-/** 允许的触达类别（白名单防任意 kind 注入；列表与频控 kind 对齐） */
+/** 允许的触达类别（白名单防任意 kind 注入；列表与频控 kind 对齐；
+ *  greeting 仍被晨间简报 proposalKind 使用，不可删） */
 const ALLOWED_KINDS = new Set([
   "greeting",
   "interest_share",
   "interest_alert",
-  "care",
   "followup",
   "task_celebration",
   "overwork_care",

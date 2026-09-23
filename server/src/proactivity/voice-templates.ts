@@ -45,50 +45,14 @@ function pick(variants: Array<(c: TemplateCtx) => string>, c: TemplateCtx): stri
   return variants[idx](c);
 }
 
-function fmtTasks(c: TemplateCtx): string {
-  const items = (c.items ?? []).filter(Boolean);
-  if (items.length === 0) return "";
-  if (items.length === 1) return `今天只有一件：${items[0]}。`;
-  return `今天排着 ${items.length} 件事，头一件是${items[0]}。`;
-}
-
 /**
  * 主动开口文本渲染入口。kind 对应 ProactiveIntentKind / 评估器 id，
  * 未知 kind 落到通用族（用 title/body 兜底），永不返回空。
  */
 export function renderProactiveText(kind: string, ctx: TemplateCtx): string {
   const now = ctx.now ?? new Date();
-  const hour = now.getHours();
   const c: TemplateCtx = { ...ctx, now };
   switch (kind) {
-    // ── 问候 ──
-    case "greeting":
-    case "greeting_morning":
-      if (hour < 11) {
-        return pick(
-          [
-            (x) => `早。${fmtTasks(x) || "今天没什么排期，随便忙点自己喜欢的。"}`,
-            (x) => `起了？${fmtTasks(x)}`,
-            (x) => `早上好。${x.weather ? `今天${x.weather}。` : ""}${fmtTasks(x)}`,
-          ],
-          c,
-        );
-      }
-      return pick(
-        [
-          () => "忙完了？还是刚偷得半日闲。",
-          () => "好久没动静了，最近怎么样？",
-        ],
-        c,
-      );
-    case "greeting_long_absence":
-      return pick(
-        [
-          () => "好几天没聊了。最近还好吗？",
-          (x) => `有阵子没见了${x.topic ? `，之前${x.topic}的事后来怎么样了` : ""}？`,
-        ],
-        c,
-      );
     case "away_return":
       return pick(
         [
@@ -98,14 +62,6 @@ export function renderProactiveText(kind: string, ctx: TemplateCtx): string {
         c,
       );
     // ── 关怀 ──
-    case "care":
-      return pick(
-        [
-          () => "刚才那句我记着呢。不用马上回我，想聊的时候说一声。",
-          () => "听着不太轻松。我不多问，需要的话我一直都在。",
-        ],
-        c,
-      );
     case "overwork_care":
     case "work_marathon":
       return pick(

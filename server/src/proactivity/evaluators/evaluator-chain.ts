@@ -118,6 +118,24 @@ export function appendEventAudit(logPath: string, rec: EventAuditRecord): void {
   }
 }
 
+/**
+ * L1→L2 一行桥接：内核信号进评估器链缓冲。bootstrap 与测试共用同一接线函数——
+ * 五层架构曾因生产装配漏掉这行导致流式评估器全部空转（events.ndjson 只有 digest_beat），
+ * 收敛成显式助手后，接线回归由 proactivity-wiring.test.ts 守卫。
+ */
+export function bridgeSensorKernelToChain(
+  kernel: { onSignal(listener: (signal: Signal) => void): () => void },
+  chain: EvaluatorChain,
+): () => void {
+  return kernel.onSignal((signal) => {
+    try {
+      chain.handleSignal(signal);
+    } catch {
+      /* 单信号缓冲失败不影响内核分发 */
+    }
+  });
+}
+
 /** 序列化评估器状态：Map/Set 展开为标记对象，其余 JSON 原生 */
 function serializeValue(v: unknown): unknown {
   if (v instanceof Map) return { __t: "map", e: [...v].map(([k, val]) => [k, serializeValue(val)]) };

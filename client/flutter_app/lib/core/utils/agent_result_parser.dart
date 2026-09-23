@@ -155,6 +155,75 @@ class AgentResultAction {
       };
 }
 
+/// product_compare 卡：分侧大图头部（商品图/试色图 + 品名 + 参考价）
+class AgentResultCardSide {
+  const AgentResultCardSide({
+    required this.side,
+    required this.label,
+    this.priceLabel,
+    this.image,
+  });
+
+  factory AgentResultCardSide.fromJson(Map<String, dynamic> json) =>
+      AgentResultCardSide(
+        side: json["side"]?.toString() ?? "",
+        label: json["label"]?.toString() ?? "",
+        priceLabel: json["priceLabel"]?.toString(),
+        image: json["image"]?.toString(),
+      );
+
+  final String side;
+  final String label;
+  final String? priceLabel;
+  final String? image;
+}
+
+/// product_compare 卡：参数对比（已转置：维度为行、sides 为列）
+class AgentResultCompareTable {
+  const AgentResultCompareTable({
+    required this.dims,
+    required this.rows,
+  });
+
+  factory AgentResultCompareTable.fromJson(Map<String, dynamic> json) {
+    final List<dynamic>? rawRows = json["rows"] as List<dynamic>?;
+    return AgentResultCompareTable(
+      dims: (json["dims"] as List<dynamic>? ?? const <dynamic>[])
+          .map((e) => e.toString())
+          .toList(growable: false),
+      rows: (rawRows ?? const <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .map((row) => MapEntry(
+                row["label"]?.toString() ?? "",
+                (row["values"] as List<dynamic>? ?? const <dynamic>[])
+                    .map((e) => e.toString())
+                    .toList(growable: false),
+              ))
+          .toList(growable: false),
+    );
+  }
+
+  final List<String> dims;
+  /// (维度, 各侧取值) —— values 顺序与 sides 一致
+  final List<MapEntry<String, List<String>>> rows;
+}
+
+/// product_compare 卡：评测/试色视频入口
+class AgentResultCardVideo {
+  const AgentResultCardVideo({required this.title, this.url, this.source});
+
+  factory AgentResultCardVideo.fromJson(Map<String, dynamic> json) =>
+      AgentResultCardVideo(
+        title: json["title"]?.toString() ?? "",
+        url: json["url"]?.toString(),
+        source: json["source"]?.toString(),
+      );
+
+  final String title;
+  final String? url;
+  final String? source;
+}
+
 class AgentResultData {
   const AgentResultData({
     this.avatar = "NB",
@@ -171,6 +240,9 @@ class AgentResultData {
     this.groupTitle,
     this.sideA,
     this.sideB,
+    this.sides = const <AgentResultCardSide>[],
+    this.compare,
+    this.videos = const <AgentResultCardVideo>[],
   });
 
   /// 智能体头像缩写（默认 "NB"）。
@@ -222,6 +294,15 @@ class AgentResultData {
   final String? sideA;
   final String? sideB;
 
+  /// product_compare 卡（shopping.suggest）：分侧大图头部（商品图/试色图）。
+  final List<AgentResultCardSide> sides;
+
+  /// product_compare 卡：参数对比（已转置：维度为行、sides 为列）。
+  final AgentResultCompareTable? compare;
+
+  /// product_compare 卡：评测/试色视频入口。
+  final List<AgentResultCardVideo> videos;
+
   factory AgentResultData.fromJson(Map<String, dynamic> json) {
     final List<dynamic>? rawItems = json["items"] as List<dynamic>?;
     final List<dynamic>? rawActions = json["actions"] as List<dynamic>?;
@@ -247,6 +328,18 @@ class AgentResultData {
       speak: json["speak"]?.toString() ?? "",
       travelPlan: rawTravelPlan,
       autoOpen: json["autoOpen"] == true,
+      sides: (json["sides"] as List<dynamic>? ?? const <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .map(AgentResultCardSide.fromJson)
+          .toList(growable: false),
+      compare: json["compare"] is Map<String, dynamic>
+          ? AgentResultCompareTable.fromJson(
+              json["compare"] as Map<String, dynamic>)
+          : null,
+      videos: (json["videos"] as List<dynamic>? ?? const <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .map(AgentResultCardVideo.fromJson)
+          .toList(growable: false),
     );
   }
 
@@ -263,6 +356,26 @@ class AgentResultData {
         "speak": speak,
         if (travelPlan != null) "travelPlan": travelPlan,
         "autoOpen": autoOpen,
+        "sides": sides.map((AgentResultCardSide e) => <String, dynamic>{
+              "side": e.side,
+              "label": e.label,
+              if (e.priceLabel != null) "priceLabel": e.priceLabel,
+              if (e.image != null) "image": e.image,
+            }).toList(),
+        "compare": compare == null
+            ? null
+            : <String, dynamic>{
+                "dims": compare!.dims,
+                "rows": [
+                  for (final MapEntry<String, List<String>> row in compare!.rows)
+                    <String, dynamic>{"label": row.key, "values": row.value},
+                ],
+              },
+        "videos": videos.map((AgentResultCardVideo e) => <String, dynamic>{
+              "title": e.title,
+              if (e.url != null) "url": e.url,
+              if (e.source != null) "source": e.source,
+            }).toList(),
         if (groupTitle != null) "groupTitle": groupTitle,
         if (sideA != null) "sideA": sideA,
         if (sideB != null) "sideB": sideB,

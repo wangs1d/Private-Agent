@@ -4,7 +4,7 @@
  * 支持三种连接方式：
  * 1. mcporter 模式：通过 mcporter CLI 代理调用（与 UpstreamSearchService 一致）
  * 2. stdio 模式：直接 spawn MCP Server 子进程，通过 JSON-RPC 2.0 / stdio 通信
- * 3. http 模式：远程 streamable-http 端点（如 RollingGo 酒店 MCP），请求头鉴权
+ * 3. http 模式：远程 streamable-http 端点（如滴滴/瑞幸等远程 MCP），请求头鉴权
  */
 
 import { ChildProcess, execFile, spawn } from "node:child_process";

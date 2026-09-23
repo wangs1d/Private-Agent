@@ -110,6 +110,7 @@ class ChatMessage {
     this.renderBlocks,
     this.replyBlocks,
     this.pendingMediaCards,
+    this.followUpPrompts,
     this.taskId,
     this.taskState,
     this.taskGoal,
@@ -195,6 +196,14 @@ class ChatMessage {
   /// 前端把图插到正在打字的正文下方实时展示；`chat.assistant_done` 到达后
   /// 以 `renderBlocks` 的最终顺序渲染，此字段被清空。
   final List<Map<String, dynamic>>? pendingMediaCards;
+
+  /// 「接下来你可以」接续建议（NEXT_UP 协议，瞬态不持久化）。
+  ///
+  /// 来自服务端 `chat.assistant_done` 的 `followups` 字段：模型在回复末尾按需
+  /// 生成的下一步任务句（1-3 条，用户口吻），服务端已从正文剥离标记。前端在
+  /// 消息气泡下方渲染成可点击胶囊，点击即当作新消息发出。时机性内容——仅随
+  /// done 实时下发，历史消息不带（对话推进后旧建议即失效）。
+  final List<String>? followUpPrompts;
 
   // ===== 后台任务回执（contentType="task_receipt" 专用，2026-09-08）=====
   //

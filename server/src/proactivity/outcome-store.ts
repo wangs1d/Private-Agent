@@ -49,7 +49,10 @@ export class OutcomeStore {
 
   /** 某 kind 近 withinMs 的接受率（accepted/replied/snoozed 算正反馈）；样本不足返回 null */
   acceptanceRate(kind: string, withinMs = 7 * 24 * 60 * 60 * 1000, now = Date.now()): number | null {
-    const recent = this.records.filter((r) => r.kind === kind && now - r.at <= withinMs);
+    // viewed（应用内 impression）不进分母——它是展示事实而非用户决策，计入会稀释接受率
+    const recent = this.records.filter(
+      (r) => r.kind === kind && now - r.at <= withinMs && r.outcome !== "viewed",
+    );
     if (recent.length < 5) return null;
     const positive = recent.filter((r) => POSITIVE_OUTCOMES.has(r.outcome)).length;
     return positive / recent.length;

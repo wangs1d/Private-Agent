@@ -95,14 +95,18 @@ export function registerVisionTools(
     const url = String(input.url ?? "").trim();
     const intervalSeconds = Number(input.intervalSeconds);
     const prompt = input.prompt != null ? String(input.prompt) : undefined;
-    const r = periodic.startJob(actorId, { url, intervalSeconds, prompt });
+    const source = input.source === "desktop" ? "desktop" as const : "http" as const;
+    const r = periodic.startJob(actorId, { url, intervalSeconds, prompt, source });
     if (!r.ok) {
       return { ok: false, error: r.error };
     }
     return {
       ok: true,
       jobId: r.jobId,
-      message: "已启动服务端定时拉流抓帧；每个周期会向模型发送带图消息（需 WebSocket 在线接收回复）。",
+      message:
+        source === "desktop"
+          ? "已启动本机屏幕定时巡检；每个周期截屏送模型推理（需 WebSocket 在线接收回复）。"
+          : "已启动服务端定时拉流抓帧；每个周期会向模型发送带图消息（需 WebSocket 在线接收回复）。",
     };
   });
 

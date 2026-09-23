@@ -1,9 +1,9 @@
 // Agent 主页数据聚合 API：
-//   GET /api/agent-homepage  — 主页全量（header 档案 + 此刻 + 自己的动态 + 自我介绍）
-//   GET /api/agent-now       — 右栏预览卡轻量块（盯着 + 最近足迹），挂载/轮询/推送后重拉
+//   GET /api/agent-homepage  — 主页全量（header 档案 + 自己的动态 + 自我介绍）
+//   GET /api/agent-now       — 右上角足迹卡轻量块（盯着 + 最近足迹），挂载/轮询/推送后重拉
 //
 // 数据源全部复用现有服务，不新增存储：
-//   档案/签名/此刻一行字/自我介绍 → user-preferences agentProfile（agent.update_homepage 维护）
+//   档案/签名/自我介绍           → user-preferences agentProfile（agent.update_homepage 维护）
 //   盯着（进行时）               → CommitmentBoard active 承诺
 //   最近足迹（完成时）           → AgentActivityStore
 //   动态                         → SocialFeedService 里 authorSessionId == 自己的帖子
@@ -144,11 +144,6 @@ export function registerAgentHomepageRoutes(
         origin: profile.nameOrigin,
         updatedAt: profile.updatedAt ?? new Date().toISOString(),
       },
-      now: {
-        watching: watchingCommitments(deps, actorId, 5),
-        recent: recentActivities(deps, actorId, 10),
-        nowLine: profile.nowLine,
-      },
       posts: ownPosts(deps, actorId, 20, profile.pinnedPostId),
     };
   });
@@ -187,14 +182,13 @@ export function registerAgentHomepageRoutes(
     }
   });
 
-  // 用户驱动的主页文案编辑（签名/状态/此刻/自我介绍/置顶），与 agent.update_homepage 同管道
+  // 用户驱动的主页文案编辑（签名/状态/自我介绍/置顶），与 agent.update_homepage 同管道
   app.post("/api/agent-homepage/patch", async (request, reply) => {
     const body = request.body as {
       sessionId?: string;
       userId?: string;
       signature?: string;
       statusText?: string;
-      nowLine?: string;
       intro?: string;
       pinnedPostId?: string | null;
     };
@@ -203,7 +197,6 @@ export function registerAgentHomepageRoutes(
     const patch: Record<string, unknown> = {};
     if (body.signature !== undefined) patch.signature = String(body.signature);
     if (body.statusText !== undefined) patch.statusText = String(body.statusText);
-    if (body.nowLine !== undefined) patch.nowLine = String(body.nowLine);
     if (body.intro !== undefined) patch.intro = String(body.intro);
     if (body.pinnedPostId !== undefined) {
       const pinned = body.pinnedPostId === null ? "" : String(body.pinnedPostId);

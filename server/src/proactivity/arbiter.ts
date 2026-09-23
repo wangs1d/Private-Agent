@@ -3,6 +3,7 @@
 // 纯规则零 LLM（LLM 只出现在 speak 话术生成与可选竞争仲裁），确定可测。
 import { deriveNotifyValue, evaluateActionUtility, isUtilityEvalEnabled, type ActionUtilityResult } from "./action-utility.js";
 import type { ArbitrationDecision, ProactiveProposal, PresenceState } from "./pipeline-types.js";
+import { isQuietHourNow, nextQuietEnd } from "./quiet-hours.js";
 
 export type GovernorVerdict = { allowed: boolean; reason: string };
 
@@ -16,8 +17,6 @@ export type ArbiterContext = {
   socialCanTrigger: (actorId: string, kind: string, importance: "high" | "medium" | "low") => GovernorVerdict;
 };
 
-export const QUIET_HOUR_START = 23;
-export const QUIET_HOUR_END = 7;
 /** 对话进行中的判定窗口 */
 export const IN_CONVERSATION_WINDOW_MS = 90_000;
 /** 对话中被打断提案的短延迟 */
@@ -25,17 +24,8 @@ export const CONVERSATION_DEFER_MS = 90_000;
 /** 投递竞态重试间隔（仲裁时在线、发送时已全部掉线 → 待发区保留稍后重试，重连即达） */
 export const DELIVERY_RETRY_MS = 30_000;
 
-export function isQuietHourNow(d: Date): boolean {
-  return d.getHours() >= QUIET_HOUR_START || d.getHours() < QUIET_HOUR_END;
-}
-
-/** 下一个静默结束时刻（静默期提案 defer 到早晨，而非丢弃） */
-export function nextQuietEnd(now: Date): number {
-  const end = new Date(now);
-  end.setHours(QUIET_HOUR_END, 0, 0, 0);
-  if (now.getHours() >= QUIET_HOUR_START) end.setDate(end.getDate() + 1);
-  return end.getTime();
-}
+// 静默时段统一收敛至 quiet-hours.ts（env 可配）；此处 re-export 保持既有导入兼容
+export { isQuietHourNow, nextQuietEnd, quietHourWindow as quietHoursWindow } from "./quiet-hours.js";
 
 export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): ArbitrationDecision {
   // 效用评估（方案 A/B，仲裁链最前面）：声明了 utility 的提案先过三分支判定。

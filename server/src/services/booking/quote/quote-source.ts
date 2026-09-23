@@ -7,7 +7,7 @@
  * 本抽象层把「报价来源」标准化：每个源实现 `QuoteSource`，由
  * `QuoteAggregator` 并行拉取、归一、比价。源分三类（诚实降级，不谎报）：
  *   - local：本地价格库（PricingService），priceSource=estimated/list
- *   - mcp：官方/合作方 MCP（如滴滴 taxi_estimate、RollingGo searchHotels），priceSource=api
+ *   - cli：官方/合作方 CLI 查询（如飞猪 flyai search-hotel/search-flight），priceSource=api
  *   - browser：无头浏览器代查商家站点，priceSource=scraped
  *
  * 设计约束：
@@ -86,6 +86,12 @@ export interface TravelQuote {
   priceSource: QuotePriceSource;
   /** 来源说明（如实转告用户） */
   note?: string;
+  /** 商家预订/收银台链接（如飞猪 detailUrl/jumpUrl）；可直接作 travel_booking.book 的 cashierUrl */
+  bookingUrl?: string;
+  /** 商品主图 URL（来源平台真实图，如飞猪 mainPic）；无真实图时不填，绝不拿占位图冒充 */
+  mainPicUrl?: string;
+  /** 平台评分（如飞猪 rate，0-5）；平台未返回时不填 */
+  rating?: number;
   /** 报价抓取时间戳（ms） */
   fetchedAt: number;
 }

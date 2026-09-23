@@ -172,7 +172,14 @@ export interface ProactivityHubToolFacade {
     actorId: string,
     approved: boolean,
     confirmId?: string,
-  ): Promise<{ ok: boolean; executed: boolean; confirmId?: string; error?: string }>;
+  ): Promise<{
+    ok: boolean;
+    executed: boolean;
+    confirmId?: string;
+    error?: string;
+    /** 多条挂起待确认时的消歧列表（error=multiple_pending 时有值） */
+    pending?: Array<{ confirmId: string; rationale: string }>;
+  }>;
   searchSilences(opts: {
     actorId?: string;
     keyword?: string;
@@ -276,6 +283,16 @@ export function registerProactivityConfirmTools(
           }
           const confirmId = input?.confirmId ? String(input.confirmId) : undefined;
           const result = await hub.resolveConfirmation(actorId, approved, confirmId);
+          if (!result.ok && result.error === "multiple_pending") {
+            return {
+              ok: false,
+              error:
+                `当前有 ${result.pending?.length ?? 0} 条待确认计划，用户没有指明批哪一条。` +
+                `请先向用户复述各条事项并确认批的是哪一条，再带 confirmId 重新调用：` +
+                (result.pending ?? []).map((p) => `${p.rationale}（${p.confirmId}）`).join("；"),
+              pending: result.pending,
+            };
+          }
           if (!result.ok) return { ok: false, error: result.error ?? "没有待确认的行动计划" };
           return {
             ok: true,

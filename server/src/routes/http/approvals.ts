@@ -6,8 +6,8 @@
 // POST /api/approvals/resolve             解析一项 {userId, sessionId?, source, id, decision}
 //
 // 口径：习惯自动化不进收件箱（Agent 自己的习惯无需确认）；task 来源（awaiting_approval）
-// 亦不接入——其 approve 仅翻状态、不恢复编排主循环，会造成"批了不跑"的假确认
-// （见 approval-inbox-service 文件头）。
+// 已接入（2026-09-19）：编排器 approveTask 审批后用暂存 options 真续跑，
+// 「批了不跑」的假确认已消除（见 approval-inbox-service 文件头）。
 // 校验为手动白名单（与 catalog.ts 一致，本仓库 HTTP 层未统一挂 schema 校验）。
 import type { FastifyInstance } from "fastify";
 
@@ -15,6 +15,7 @@ import { resolveActorId } from "../../agent/actor-id.js";
 import type { ApprovalInboxService, ApprovalSource } from "../../services/approval-inbox-service.js";
 
 const APPROVAL_DECISIONS: ReadonlySet<string> = new Set(["approve", "decline"]);
+const APPROVAL_SOURCES: ReadonlySet<string> = new Set(["proactivity", "task"]);
 
 export interface ApprovalRouteDeps {
   approvalInboxService: ApprovalInboxService;
@@ -45,8 +46,8 @@ export function registerApprovalRoutes(app: FastifyInstance, deps: ApprovalRoute
     const source = typeof body.source === "string" ? body.source.trim() : "";
     const id = typeof body.id === "string" ? body.id.trim() : "";
     const decision = typeof body.decision === "string" ? body.decision.trim() : "";
-    if (source !== "proactivity") {
-      return reply.code(400).send({ ok: false, error: "source 必须是：proactivity" });
+    if (!APPROVAL_SOURCES.has(source)) {
+      return reply.code(400).send({ ok: false, error: "source 必须是：proactivity / task" });
     }
     if (!id) return reply.code(400).send({ ok: false, error: "缺少 id" });
     if (!APPROVAL_DECISIONS.has(decision)) {

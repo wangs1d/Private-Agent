@@ -1,0 +1,384 @@
+{
+  "summary": {
+    "label": "after",
+    "guidanceMode": "new",
+    "repeats": 3,
+    "toolNeededTurns": 18,
+    "toolDecisionRate": 1,
+    "toolGroundedRate": 1,
+    "pureChatTurns": 9,
+    "pureChatPurityRate": 1,
+    "fabricatedClaims": 0,
+    "avgLatencyMs": 5984,
+    "at": "2026-09-22T17:12:24.192Z"
+  },
+  "rows": [
+    {
+      "text": "刘浩存最近有什么新动态？",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1159,
+      "ms": 7170
+    },
+    {
+      "text": "刘浩存最近有什么新动态？",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "search_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 3,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1334,
+      "ms": 7604
+    },
+    {
+      "text": "刘浩存最近有什么新动态？",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "search_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 3,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1297,
+      "ms": 10883
+    },
+    {
+      "text": "今天上海天气怎么样？",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "weather.get_local",
+        "weather.get_local",
+        "clock.get_current_time",
+        "search_web"
+      ],
+      "networkCalls": 3,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 125,
+      "ms": 9280
+    },
+    {
+      "text": "今天上海天气怎么样？",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "weather.get_local",
+        "clock.get_current_time",
+        "task.dispatch"
+      ],
+      "networkCalls": 1,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 308,
+      "ms": 5393
+    },
+    {
+      "text": "今天上海天气怎么样？",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "weather.get_local"
+      ],
+      "networkCalls": 1,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 425,
+      "ms": 4072
+    },
+    {
+      "text": "比特币现在多少钱一个？",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 179,
+      "ms": 3762
+    },
+    {
+      "text": "比特币现在多少钱一个？",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 214,
+      "ms": 4599
+    },
+    {
+      "text": "比特币现在多少钱一个？",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 180,
+      "ms": 6709
+    },
+    {
+      "text": "最近有什么值得看的新电影上映？",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "search_web",
+        "search_web",
+        "search_web",
+        "clock.get_current_time",
+        "clock.get_user_location",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 5,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1094,
+      "ms": 15257
+    },
+    {
+      "text": "最近有什么值得看的新电影上映？",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "clock.get_current_time",
+        "search_web",
+        "search_web",
+        "search_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 5,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1150,
+      "ms": 14833
+    },
+    {
+      "text": "最近有什么值得看的新电影上映？",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "clock.get_current_time",
+        "search_web",
+        "search_web",
+        "search_web",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 5,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1232,
+      "ms": 16423
+    },
+    {
+      "text": "人民币兑美元现在汇率多少？",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 2,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 276,
+      "ms": 4987
+    },
+    {
+      "text": "人民币兑美元现在汇率多少？",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "search_web"
+      ],
+      "networkCalls": 1,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 217,
+      "ms": 4231
+    },
+    {
+      "text": "人民币兑美元现在汇率多少？",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "search_web"
+      ],
+      "networkCalls": 1,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 292,
+      "ms": 4211
+    },
+    {
+      "text": "帮我看看今天热搜上有什么大事",
+      "needsTool": true,
+      "repeat": 0,
+      "tools": [
+        "clock.get_current_time",
+        "hot_rankings",
+        "search_web",
+        "search_web"
+      ],
+      "networkCalls": 3,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1135,
+      "ms": 10129
+    },
+    {
+      "text": "帮我看看今天热搜上有什么大事",
+      "needsTool": true,
+      "repeat": 1,
+      "tools": [
+        "hot_rankings"
+      ],
+      "networkCalls": 1,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 759,
+      "ms": 7084
+    },
+    {
+      "text": "帮我看看今天热搜上有什么大事",
+      "needsTool": true,
+      "repeat": 2,
+      "tools": [
+        "clock.get_current_time",
+        "hot_rankings"
+      ],
+      "networkCalls": 1,
+      "anyOk": true,
+      "fabricatedClaim": false,
+      "textChars": 1030,
+      "ms": 8449
+    },
+    {
+      "text": "今天有点累，不想干活",
+      "needsTool": false,
+      "repeat": 0,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 150,
+      "ms": 1254
+    },
+    {
+      "text": "今天有点累，不想干活",
+      "needsTool": false,
+      "repeat": 1,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 402,
+      "ms": 1640
+    },
+    {
+      "text": "今天有点累，不想干活",
+      "needsTool": false,
+      "repeat": 2,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 324,
+      "ms": 1821
+    },
+    {
+      "text": "哈哈你说得对",
+      "needsTool": false,
+      "repeat": 0,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 15,
+      "ms": 891
+    },
+    {
+      "text": "哈哈你说得对",
+      "needsTool": false,
+      "repeat": 1,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 230,
+      "ms": 2067
+    },
+    {
+      "text": "哈哈你说得对",
+      "needsTool": false,
+      "repeat": 2,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 26,
+      "ms": 746
+    },
+    {
+      "text": "你觉得周末是宅家好还是出去走走好？",
+      "needsTool": false,
+      "repeat": 0,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 434,
+      "ms": 2314
+    },
+    {
+      "text": "你觉得周末是宅家好还是出去走走好？",
+      "needsTool": false,
+      "repeat": 1,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 512,
+      "ms": 2538
+    },
+    {
+      "text": "你觉得周末是宅家好还是出去走走好？",
+      "needsTool": false,
+      "repeat": 2,
+      "tools": [],
+      "networkCalls": 0,
+      "anyOk": false,
+      "fabricatedClaim": false,
+      "textChars": 677,
+      "ms": 3216
+    }
+  ]
+}

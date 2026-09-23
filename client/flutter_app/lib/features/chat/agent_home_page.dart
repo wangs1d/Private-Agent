@@ -7,20 +7,25 @@ import "package:http/http.dart" as http;
 import "../../core/config/api_config.dart";
 import "../../core/presentation/agent_avatar_catalog.dart";
 
-/// Agent 主页（一级路由页）。
+/// Agent 主页。
 ///
 /// 定位：主页是 Agent「自己打理的住处」——
 ///  - Header：纯文字（名字/@handle/状态徽章/签名），无头像光球（呼吸语义只在聊天页）
-///  - 此刻：承诺板进行时（盯着）+ 代办台账完成时（最近）+ Agent 手写一行字
 ///  - 动态：站内社交里 Agent 自己发的帖子（置顶帖排最前）
 ///  - 自我介绍：Agent 自写（SOUL 摘要）
-/// 入口：聊天页光球头像单击。名字/签名支持编辑，改名走统一管道
+/// （原「此刻」承载已随右上角足迹卡一并下线，主页不展示盯/足迹。）
+/// 入口：与日程/消息等一致，以右侧 Dock 双面板形式打开（聊天在左、主页在右）；
+/// 窄窗口退化为全屏路由页。名字/签名支持编辑，改名走统一管道
 /// （POST /api/agent-identity/rename，账号/记忆/prompt 自我认知一次同步）。
 class AgentHomePage extends StatefulWidget {
-  const AgentHomePage({super.key, this.actorId});
+  const AgentHomePage({super.key, this.actorId, this.embedded = false});
 
   /// 登录主体 id；缺省用 [ApiConfig.effectiveActorId]。
   final String? actorId;
+
+  /// 嵌入模式：渲染在右侧 Dock 面板内容区，不再自带 Scaffold/AppBar
+  /// （顶栏标题与关闭按钮由面板 chrome 提供，与 GalleryPage.embedded 同约定）。
+  final bool embedded;
 
   static Future<void> show(BuildContext context, {String? actorId}) {
     return Navigator.of(context).push<void>(
@@ -37,7 +42,6 @@ class _AgentHomePageState extends State<AgentHomePage> {
   bool _failed = false;
   Map<String, dynamic> _profile = <String, dynamic>{};
   Map<String, dynamic> _identity = <String, dynamic>{};
-  Map<String, dynamic> _now = <String, dynamic>{};
   List<Map<String, dynamic>> _posts = <Map<String, dynamic>>[];
 
   String get _actorId => widget.actorId ?? ApiConfig.effectiveActorId;
@@ -55,7 +59,6 @@ class _AgentHomePageState extends State<AgentHomePage> {
       _failed = !result.ok;
       _profile = result.profile;
       _identity = result.identity;
-      _now = result.now;
       _posts = result.posts;
       _loading = false;
     });
@@ -69,7 +72,6 @@ class _AgentHomePageState extends State<AgentHomePage> {
   String get _statusText => _profile["statusText"]?.toString() ?? "";
   String get _moodStyle => _profile["moodStyle"]?.toString() ?? "gentle";
   String get _avatarPreset => _profile["avatarPreset"]?.toString() ?? "dawn";
-  String get _nowLine => _now["nowLine"]?.toString() ?? "";
   String get _intro => _profile["intro"]?.toString() ?? "";
 
   @override
@@ -78,6 +80,27 @@ class _AgentHomePageState extends State<AgentHomePage> {
     final ColorScheme cs = theme.colorScheme;
     final AgentAvatarPalette palette = AgentAvatarPalette.fromPreset(_avatarPreset);
 
+    final Widget body = _loading
+        ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
+        : _failed
+            ? _ErrorState(onRetry: _reload)
+            : RefreshIndicator(
+                onRefresh: _reload,
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                  children: <Widget>[
+                    _buildHeaderCard(cs, palette),
+                    const SizedBox(height: 14),
+                    _buildPostsSection(cs),
+                    const SizedBox(height: 14),
+                    _buildIntroSection(cs),
+                  ],
+                ),
+              );
+
+    if (widget.embedded) {
+      return body;
+    }
     return Scaffold(
       appBar: AppBar(
         title: const Text("主页"),
@@ -89,25 +112,7 @@ class _AgentHomePageState extends State<AgentHomePage> {
           ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
-          : _failed
-              ? _ErrorState(onRetry: _reload)
-              : RefreshIndicator(
-                  onRefresh: _reload,
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-                    children: <Widget>[
-                      _buildHeaderCard(cs, palette),
-                      const SizedBox(height: 14),
-                      _buildNowSection(cs),
-                      const SizedBox(height: 14),
-                      _buildPostsSection(cs),
-                      const SizedBox(height: 14),
-                      _buildIntroSection(cs),
-                    ],
-                  ),
-                ),
+      body: body,
     );
   }
 
@@ -195,133 +200,6 @@ class _AgentHomePageState extends State<AgentHomePage> {
         ],
       ),
     );
-  }
-
-  // ─── 此刻：盯着（进行时） + 最近（完成时） ───
-
-  Widget _buildNowSection(ColorScheme cs) {
-    final List<dynamic> watching =
-        (_now["watching"] as List<dynamic>?) ?? const <dynamic>[];
-    final List<dynamic> recent =
-        (_now["recent"] as List<dynamic>?) ?? const <dynamic>[];
-
-    return _SectionCard(
-      title: "此刻",
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          if (_nowLine.trim().isNotEmpty) ...<Widget>[
-            Text(
-              _nowLine,
-              style: TextStyle(
-                fontSize: 12.5,
-                height: 1.5,
-                fontStyle: FontStyle.italic,
-                color: cs.onSurface.withValues(alpha: 0.85),
-              ),
-            ),
-            const SizedBox(height: 10),
-          ],
-          if (watching.isNotEmpty) ...<Widget>[
-            _SubLabel(
-              icon: Icons.visibility_outlined,
-              label: "盯着",
-              color: _kNowAccent,
-            ),
-            for (final dynamic item in watching)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Container(
-                        width: 5,
-                        height: 5,
-                        decoration:
-                            const BoxDecoration(shape: BoxShape.circle, color: _kNowAccent),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _watchingLine(item),
-                        style: TextStyle(
-                            fontSize: 12, height: 1.45, color: cs.onSurface),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 10),
-          ],
-          if (recent.isNotEmpty) ...<Widget>[
-            _SubLabel(
-              icon: Icons.check_circle_outline,
-              label: "最近",
-              color: _kDoneAccent,
-            ),
-            for (final dynamic item in recent.take(5))
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Padding(
-                      padding: const EdgeInsets.only(top: 5),
-                      child: Icon(Icons.check,
-                          size: 13, color: _kDoneAccent.withValues(alpha: 0.9)),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _recentLine(item),
-                        style: TextStyle(
-                            fontSize: 12, height: 1.45, color: cs.onSurface),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
-          if (watching.isEmpty && recent.isEmpty && _nowLine.trim().isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              child: Text(
-                "现在没有在盯的事，也没有新足迹。",
-                style: TextStyle(
-                    fontSize: 12, color: cs.onSurfaceVariant.withValues(alpha: 0.8)),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  String _watchingLine(dynamic item) {
-    final Map<String, dynamic> map = (item as Map).cast<String, dynamic>();
-    final String text = map["text"]?.toString() ?? "";
-    final String deadline = map["deadline"]?.toString() ?? "";
-    final String deadlineLabel = _deadlineLabel(deadline);
-    return deadlineLabel.isEmpty ? text : "$text · $deadlineLabel";
-  }
-
-  String _deadlineLabel(String iso) {
-    final DateTime? time = DateTime.tryParse(iso);
-    if (time == null) return "";
-    final Duration diff = time.difference(DateTime.now());
-    if (diff.isNegative) return "已过期";
-    if (diff.inDays >= 1) return "${diff.inDays} 天后";
-    if (diff.inHours >= 1) return "还剩 ${diff.inHours} 小时";
-    return "还剩 ${diff.inMinutes} 分钟";
-  }
-
-  String _recentLine(dynamic item) {
-    final Map<String, dynamic> map = (item as Map).cast<String, dynamic>();
-    final String title = map["title"]?.toString() ?? "";
-    final String statusLabel = map["statusLabel"]?.toString() ?? "";
-    return statusLabel.isEmpty ? title : "$title（$statusLabel）";
   }
 
   // ─── 动态：站内社交里 Agent 自己的帖子 ───
@@ -594,9 +472,6 @@ class _AgentHomePageState extends State<AgentHomePage> {
   }
 }
 
-const Color _kNowAccent = Color(0xFF18D6F3);
-const Color _kDoneAccent = Color(0xFF1ED7A6);
-
 // ═══════════════════════════════════════════════════════════
 // 区块容器与小部件
 // ═══════════════════════════════════════════════════════════
@@ -641,34 +516,6 @@ class _SectionCard extends StatelessWidget {
           child,
         ],
       ),
-    );
-  }
-}
-
-class _SubLabel extends StatelessWidget {
-  const _SubLabel({required this.icon, required this.label, required this.color});
-
-  final IconData icon;
-  final String label;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        Icon(icon, size: 12, color: color),
-        const SizedBox(width: 4),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            color: color,
-            letterSpacing: 0.3,
-          ),
-        ),
-      ],
     );
   }
 }
@@ -744,14 +591,12 @@ class AgentHomepageResult {
     required this.ok,
     required this.profile,
     required this.identity,
-    required this.now,
     required this.posts,
   });
 
   final bool ok;
   final Map<String, dynamic> profile;
   final Map<String, dynamic> identity;
-  final Map<String, dynamic> now;
   final List<Map<String, dynamic>> posts;
 }
 
@@ -779,7 +624,6 @@ class AgentHomepageApi {
         ok: true,
         profile: _mapOf(body["profile"]),
         identity: _mapOf(body["identity"]),
-        now: _mapOf(body["now"]),
         posts: <Map<String, dynamic>>[
           for (final dynamic p in (body["posts"] as List<dynamic>? ?? const <dynamic>[]))
             (p as Map).cast<String, dynamic>(),
@@ -794,7 +638,6 @@ class AgentHomepageApi {
         ok: false,
         profile: <String, dynamic>{},
         identity: <String, dynamic>{},
-        now: <String, dynamic>{},
         posts: <Map<String, dynamic>>[],
       );
 
@@ -826,7 +669,7 @@ class AgentHomepageApi {
     }
   }
 
-  /// 主页文案编辑（签名/状态/此刻/自我介绍/置顶）
+  /// 主页文案编辑（签名/状态/自我介绍/置顶）
   static Future<bool> patchHomepage(String actorId, Map<String, dynamic> patch) async {
     try {
       final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/agent-homepage/patch");

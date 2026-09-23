@@ -8,9 +8,7 @@ export type ProactiveIntentKind =
   | "task_celebration" // 任务完成恭喜（复杂任务完成 / 用户待办闭环）
   | "interest_share"   // 兴趣分享（用户喜欢的话题 / agent 自己的视角）
   | "interest_alert"   // 兴趣话题热议推送（后台盯用户关注话题，热搜命中→主动告知）
-  | "greeting"         // 时段问候（早安 / 久别重逢）
   | "overwork_care"    // 过劳关怀干预（连续加班 → 调日程 + 放音乐 + 说话）
-  | "care"             // 对话内情绪关怀（迁移自 agent-core 对话钩子）
   | "followup"         // 对话内待办跟进（迁移自 agent-core 对话钩子）
   // ── C 端生活管家场景（Task 20 统一频控注册）──
   | "weather_alert"    // 恶劣天气预警联动（暴雨/高温/寒潮等 + 当日有日程 → 合并提醒）
@@ -68,7 +66,8 @@ export type ProactiveIntent = {
     | "email"         // 邮箱盯梢（IMAP 轮询新邮件 → VIP/关键词分级 → 主动提醒）
     | "relationship"  // 人情关系（重要日子扫描/祝福草稿）
     | "health"        // 健康关怀（节律提醒等）
-    | "location";     // 位置场景（围栏事件 / 到达常去地点）
+    | "location"      // 位置场景（围栏事件 / 到达常去地点）
+    | "confirmation_expiry"; // ask_first 确认超时未回复的作废告知
 };
 
 // ─── 通用主动性层（Jarvis 式：感知 → LLM 自主决策 → 通用执行） ───

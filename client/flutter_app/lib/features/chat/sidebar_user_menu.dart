@@ -4,6 +4,7 @@ import "package:flutter/material.dart";
 
 import "../../core/services/device_api_client.dart";
 import "../../core/theme/app_theme.dart";
+import "../mailbox/inbox_message_box.dart";
 
 /// 用户菜单里的「主题」3 选 1 状态。
 ///
@@ -20,7 +21,7 @@ enum ThemeChoice { light, dark, system }
 /// - 点击后:在头像右侧弹出列表面板,模仿"设置菜单"
 /// - 列表面板内容(根据当前需求裁剪):
 ///   - 主题           亮色 / 暗色 / 跟随系统   (hover 浮出 3 选 1 子菜单)
-///   - 帮助与反馈
+///   - 反馈
 ///   - 我的设备
 ///   - 站内信          (带未读小红点)
 ///   - 退出登录
@@ -32,13 +33,13 @@ class SidebarUserMenu extends StatefulWidget {
   const SidebarUserMenu({
     super.key,
     required this.userName,
-    this.totalUnread = 0,
+    this.inboxUnread = 0,
     required this.currentTheme,
     required this.onSetLightTheme,
     required this.onSetDarkTheme,
     required this.onSetSystemTheme,
-    required this.onOpenMessages,
-    required this.onOpenHelp,
+    required this.onInboxUnreadChanged,
+    required this.onOpenFeedback,
     required this.onOpenDevices,
     required this.onLogout,
   });
@@ -46,8 +47,8 @@ class SidebarUserMenu extends StatefulWidget {
   /// 顶部头像右侧显示的用户名(暂用 "king" 占位,后续接账号系统)
   final String userName;
 
-  /// 站内信未读总数;>0 时在「站内信」行右侧显示红底白字小徽标
-  final int totalUnread;
+  /// 站内信未读数;>0 时在「站内信」行右侧显示红底白字小徽标
+  final int inboxUnread;
 
   /// 当前主题选择(用于在子菜单里高亮当前项)
   final ThemeChoice currentTheme;
@@ -61,11 +62,11 @@ class SidebarUserMenu extends StatefulWidget {
   /// 点击「主题」子菜单「跟随系统」
   final VoidCallback onSetSystemTheme;
 
-  /// 点击「站内信」:滑出右侧消息聚合面板
-  final VoidCallback onOpenMessages;
+  /// 站内信已读状态变化:回传最新未读数,宿主同步侧栏徽标
+  final ValueChanged<int> onInboxUnreadChanged;
 
-  /// 点击「帮助与反馈」:后续接帮助页
-  final VoidCallback onOpenHelp;
+  /// 点击「反馈」:弹出反馈弹窗(吐槽/报障/建议 + 我的反馈记录)
+  final VoidCallback onOpenFeedback;
 
   /// 点击「我的设备」:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
@@ -99,7 +100,7 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
         return _UserMenuOverlay(
           anchor: anchor,
           userName: widget.userName,
-          totalUnread: widget.totalUnread,
+          inboxUnread: widget.inboxUnread,
           currentTheme: widget.currentTheme,
           onSetLightTheme: () {
             Navigator.of(context, rootNavigator: true).pop();
@@ -113,13 +114,13 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onSetSystemTheme();
           },
-          onOpenMessages: () {
+          onOpenInbox: () {
             Navigator.of(context, rootNavigator: true).pop();
-            widget.onOpenMessages();
+            _openInboxBox();
           },
-          onOpenHelp: () {
+          onOpenFeedback: () {
             Navigator.of(context, rootNavigator: true).pop();
-            widget.onOpenHelp();
+            widget.onOpenFeedback();
           },
           onOpenDevices: () {
             Navigator.of(context, rootNavigator: true).pop();
@@ -132,6 +133,21 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
         );
       },
     );
+  }
+
+  /// 「站内信」直达消息框：菜单关闭后在头像按钮右侧弹出,
+  /// 列表/已读就地完成,不再跳右侧消息聚合面板(微信等会话在那边)。
+  void _openInboxBox() {
+    final RenderBox? box =
+        _buttonKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final Offset origin = box.localToGlobal(Offset.zero);
+    final Rect anchor = origin & Size(box.size.width, box.size.height);
+    unawaited(InboxMessageBox.show(
+      context,
+      anchor: anchor,
+      onUnreadChanged: widget.onInboxUnreadChanged,
+    ));
   }
 
   @override
@@ -231,26 +247,26 @@ class _UserMenuOverlay extends StatefulWidget {
   const _UserMenuOverlay({
     required this.anchor,
     required this.userName,
-    required this.totalUnread,
+    required this.inboxUnread,
     required this.currentTheme,
     required this.onSetLightTheme,
     required this.onSetDarkTheme,
     required this.onSetSystemTheme,
-    required this.onOpenMessages,
-    required this.onOpenHelp,
+    required this.onOpenInbox,
+    required this.onOpenFeedback,
     required this.onOpenDevices,
     required this.onLogout,
   });
 
   final Rect anchor;
   final String userName;
-  final int totalUnread;
+  final int inboxUnread;
   final ThemeChoice currentTheme;
   final VoidCallback onSetLightTheme;
   final VoidCallback onSetDarkTheme;
   final VoidCallback onSetSystemTheme;
-  final VoidCallback onOpenMessages;
-  final VoidCallback onOpenHelp;
+  final VoidCallback onOpenInbox;
+  final VoidCallback onOpenFeedback;
   final VoidCallback onOpenDevices;
   final VoidCallback onLogout;
 
@@ -419,10 +435,10 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                       height: 1, thickness: 1,
                       color: cs.outline.withValues(alpha: 0.2)),
                   _Row(
-                    leading: const Icon(Icons.help_outline, size: 18),
-                    title: "帮助与反馈",
+                    leading: const Icon(Icons.feedback_outlined, size: 18),
+                    title: "反馈",
                     trailing: const _TrailingValue(showChevron: true),
-                    onTap: widget.onOpenHelp,
+                    onTap: widget.onOpenFeedback,
                   ),
                   _DeviceHoverRow(
                     rowKey: _deviceRowKey,
@@ -431,12 +447,12 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                     onTap: widget.onOpenDevices,
                   ),
                   _Row(
-                    leading: const Icon(Icons.notifications_outlined, size: 18),
+                    leading: const Icon(Icons.mark_email_unread_outlined, size: 18),
                     title: "站内信",
-                    trailing: widget.totalUnread > 0
-                        ? _UnreadBadge(count: widget.totalUnread)
+                    trailing: widget.inboxUnread > 0
+                        ? _UnreadBadge(count: widget.inboxUnread)
                         : const _TrailingValue(showChevron: true),
-                    onTap: widget.onOpenMessages,
+                    onTap: widget.onOpenInbox,
                   ),
                   Divider(
                       height: 1, thickness: 1,

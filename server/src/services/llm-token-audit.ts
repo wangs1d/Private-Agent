@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { recordBudgetUsage } from "./llm-budget-guard.js";
 
 /**
  * LLM token 用量审计。
@@ -146,6 +147,13 @@ export const CHARS_TO_TOKENS_RATIO = 0.75;
 export function recordLlmUsage(rec: Omit<LlmUsageRecord, "t" | "inputTokens" | "outputTokens">): void {
   const inputTokens = Math.max(1, Math.round(rec.inputChars * CHARS_TO_TOKENS_RATIO));
   const outputTokens = Math.round(rec.outputChars * CHARS_TO_TOKENS_RATIO);
+  // 预算闸门记账（2026-09-19 P1-2）：单一审计入口顺带累计，80% 告警 / 100% 降级
+  recordBudgetUsage({
+    sessionId: rec.sessionId,
+    actorId: rec.actorId,
+    tokens:
+      (rec.apiPromptTokens ?? 0) + (rec.apiCompletionTokens ?? 0) || inputTokens + outputTokens,
+  });
   const aggregate: LlmUsageAggregate = {
     calls: 1,
     inputChars: rec.inputChars,

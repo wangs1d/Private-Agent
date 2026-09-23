@@ -13,6 +13,7 @@ class EmotionBallView extends StatelessWidget {
     this.eyeColor,
     this.showEffects = false,
     this.eyeScale,
+    this.fitBounce = false,
   });
 
   /// 当前表情 ID(emotion-ball 的 emotionId,如 "02" 待机放空 / "30" 思考中)。
@@ -30,6 +31,9 @@ class EmotionBallView extends StatelessWidget {
 
   /// 眼睛占比放大系数(占位实现忽略)。
   final double? eyeScale;
+
+  /// 弹跳头顶余量(占位实现忽略,仅 Windows 真实实现使用)。
+  final bool fitBounce;
 
   @override
   Widget build(BuildContext context) {

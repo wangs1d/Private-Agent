@@ -28,6 +28,10 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 const BENCH_DATA_DIR = mkdtempSync(join(tmpdir(), "tool-loop-gate-"));
 process.env.PA_DATA_DIR = BENCH_DATA_DIR;
+// 本文件验证的是 2026-09-05 TurnOutcomeGate（legacy 三闸）的行为基线。
+// 2026-09-19 静态架构（AGENT_TOOL_ARCH=static，默认）将其合并为单一出口检查——
+// 道歉式风格判定被有意移除，行为差异由 scripts/e2e-tool-arch.ts 场景 C/D 验收。
+process.env.AGENT_TOOL_ARCH = "legacy";
 process.env.AGENT_TOKENJUICE_ENABLED = "0";
 
 const { streamCompletionWithTools } = await import(
@@ -263,11 +267,12 @@ test("C. 失败换路预算保留：失败后追加 1 波，重试轮带 schema"
     },
   );
 
-  // 换路重试真实执行：search_images 失败×2 波（各含重试）→ search_web 成功 1 次
+  // 换路重试真实执行：search_images 失败×2 波（各含首次+2 次确定性重试，2026-09-19 退避增强）
+  // → search_web 成功 1 次 = 3 + 3 + 1 = 7
   assert.equal(
     executed.length,
-    5,
-    `应真实执行 5 次，实际: ${JSON.stringify(executed.map((e) => [e.name, e.args.query, e.ok]))}`,
+    7,
+    `应真实执行 7 次，实际: ${JSON.stringify(executed.map((e) => [e.name, e.args.query, e.ok]))}`,
   );
   assert.equal(executed.filter((e) => e.name === "search_web").length, 1, "search_web 应真实执行 1 次");
   assert.ok(!out.includes("__ESCALATE_TO_COMPLEX__"), "不得返回升级哨兵");

@@ -14,8 +14,14 @@
 // 便于测试 mock；解析失败/LLM 不可用时返回 null（静默降级为 none）。
 import type { InitiativeDecision, Observation } from "./proactivity-types.js";
 
-/** LLM 完成函数（(prompt) => 全文），由装配层包装 externalChat.streamCompletion */
-export type LlmCompleteFn = (prompt: string, sessionId: string) => Promise<string>;
+/** LLM 完成函数（(prompt) => 全文），由装配层包装 externalChat.streamCompletion。
+ * opts.auditStage：token 审计打点归因（评估=proactive_intent / act 循环步=proactive_act_loop），
+ * 经装配层透传给 streamCompletion 的 auditStage，API 真实 usage 落到正确 stage。 */
+export type LlmCompleteFn = (
+  prompt: string,
+  sessionId: string,
+  opts?: { auditStage?: "proactive_intent" | "proactive_act_loop" },
+) => Promise<string>;
 
 export type InitiativeEvaluateInput = {
   actorId: string;
@@ -52,13 +58,16 @@ export class InitiativeEngine {
     const prompt = this.buildPrompt(input);
     let raw: string;
     try {
-      raw = await this.llmComplete(prompt, input.actorId);
-      // Token 审计：主动意图决策是低频旁路，量级不大但可查
+      raw = await this.llmComplete(prompt, input.actorId, { auditStage: "proactive_intent" });
+      // Token 审计（估算口径）：API 真实 usage 由 provider 侧按 auditStage 记录，
+      // 本条只补无 usage 时的量级观测（actorId/sessionId 用于按用户归因）。
       const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
       recordLlmUsageByChars({
         stage: "proactive_intent",
         inputChars: prompt.length,
         outputChars: raw.length,
+        actorId: input.actorId,
+        sessionId: `proactivity:${input.actorId}`,
       });
     } catch (err) {
       console.log(`[InitiativeEngine] LLM 调用失败（静默跳过）: ${err}`);

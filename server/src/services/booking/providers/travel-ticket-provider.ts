@@ -198,6 +198,9 @@ export class TravelTicketProvider implements BookingProvider {
         quoteSourceLabel: q.sourceLabel,
         priceSource: q.priceSource,
         priceNote: q.note,
+        bookingUrl: q.bookingUrl,
+        mainPicUrl: q.mainPicUrl,
+        rating: q.rating,
       },
     };
   }

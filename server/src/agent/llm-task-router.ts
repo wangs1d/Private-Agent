@@ -24,6 +24,7 @@
  */
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { isHighPrecisionChatText, type RouteDecision } from "./task-router.js";
+import { TASK_PLANE_FALLBACK_BUDGET } from "./intent-router.js";
 import { composeRealtimeSearchQuery } from "./realtime-search-query.js";
 import {
   isIntentLabel,
@@ -54,7 +55,8 @@ function buildRoutePrompt(
       "intent 必须且只能取以下封闭集之一：",
       "- chat：纯对话。寒暄、情绪、观点交流、评价、闲聊追问，凭常识或已有上下文就能答的内容。问你的近况/想法/感受也是 chat。",
       "- knowledge_qa：常识/知识问答（不依赖实时信息，如原理、历史、解释）。",
-      "- realtime_lookup：需要外部实时信息——新闻、某人近况、最新消息、价格行情、热搜、比分、排片、天气等，答准了必须现查的。",
+      "- realtime_lookup：需要外部**公开网络**实时信息——新闻、某人（公众人物/他人）近况、最新消息、价格行情、热搜、比分、排片、天气等，答准了必须现查的。",
+      "- personal_data_query：查**用户自己的**数据——我的/我自己的日程、提醒、订单、快递、钱包余额、账单、消息、通话、相册照片、设备状态等。这类走系统内工具直查，绝不联网搜索。",
       "- media_retrieval：找图片/照片/视频/壁纸/表情包。",
       "- action_write：写数据/有副作用的操作——创建或修改日程提醒、发消息、下单、支付等。",
       "- multi_step_task：多步操作、操作软件/电脑/设备、或以上都没贴切的办事请求。",
@@ -62,7 +64,9 @@ function buildRoutePrompt(
       "",
       "判定要点：",
       "- 实时信息类哪怕没有「查/搜」字样（如「刘浩存最近的消息」「今天A股怎么样」「比特币现在什么价」）也是 realtime_lookup。",
+      "- 「我的订单/我的日程/我钱包」这类**用户本人数据**是 personal_data_query，不是 realtime_lookup——哪怕它也「需要现查」，查的地方是系统内数据不是公开网络。",
       "- 天气查询是 realtime_lookup（需要实时数据）；感叹天气（「今天天气真好」）是 chat。",
+      "- 用户明确说「不要联网/别搜索/不用上网」时：按消息本来的知识属性判（能凭常识答→chat 或 knowledge_qa），绝不判 realtime_lookup。",
       "- confidence 表达你对标签判断的把握；判不准就给低分（<0.5），系统会自动走保守平面，不会出错。",
       "- intent=realtime_lookup 时 search_query 必填：结合最近对话解决指代（如「我老婆」指代哪个具体人名、「那家店」是哪家），生成一句完整、具体、可直接搜索的中文查询词；其他 intent 一律给空字符串。",
       "- 短追问（如「娱乐圈的」「新鲜的」）按它继承的话题判——语境见最近对话与后台任务。",
@@ -152,7 +156,7 @@ function conservativeFallback(text: string, reason: string): RouteDecision {
     segmentable: false,
     plane: "task",
     capabilities: ["full"],
-    budget: 2,
+    budget: TASK_PLANE_FALLBACK_BUDGET,
     tier: "flash",
   };
 }

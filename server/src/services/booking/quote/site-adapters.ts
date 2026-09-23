@@ -1,66 +1,13 @@
 /**
- * 报价源站点适配器：把具体平台（MCP / 商家站点）接成 QuoteSource。
+ * 报价源站点适配器：把具体平台（CLI / 商家站点）接成 QuoteSource。
  *
  * 新增平台 = 在这里加一个工厂函数，bootstrap 注册；聚合器与 provider 不动。
  * 诚实降级：站点解析失败/未启用一律返回空报价或 ok:false，聚合器如实汇总。
+ * （飞猪 FlyAI 在 flyai-quote-source.ts，携程机票代查在这里。）
  */
 
-import { McpQuoteSource, type McpCaller } from "./mcp-quote-source.js";
 import { BrowserQuoteSource, type BrowserRunner } from "./browser-quote-source.js";
 import type { QuoteRequest, QuoteSource, TravelQuote } from "./quote-source.js";
-
-// ── RollingGo 酒店 MCP（data/mcp-servers.json alias=rollinggo，需填 url+key 启用） ──
-
-export function createRollingGoHotelSource(caller: McpCaller): QuoteSource {
-  return new McpQuoteSource(caller, {
-    id: "mcp.rollinggo",
-    label: "RollingGo 酒店（实时API）",
-    serverAlias: "rollinggo",
-    toolName: "searchHotels",
-    supports: (t) => t === "hotel",
-    mapRequest: (req) => {
-      if (!req.city) return null;
-      const args: Record<string, unknown> = { city: req.city };
-      if (req.checkInDate) args.checkIn = req.checkInDate;
-      if (req.checkOutDate) args.checkOut = req.checkOutDate;
-      if (req.hotelName) args.keyword = req.hotelName;
-      return args;
-    },
-    parseResult: (raw, req) => {
-      // 宽容解析：酒店列表可能挂在 hotels / hotelList / data / results 任一键下
-      const list =
-        (Array.isArray(raw.hotels) && raw.hotels) ||
-        (Array.isArray(raw.hotelList) && raw.hotelList) ||
-        (Array.isArray(raw.results) && raw.results) ||
-        (Array.isArray(raw.data) && raw.data) ||
-        [];
-      const quotes: TravelQuote[] = [];
-      for (const item of list as Array<Record<string, unknown>>) {
-        const name = typeof item.name === "string" ? item.name : typeof item.hotelName === "string" ? item.hotelName : "";
-        const price =
-          (typeof item.minPrice === "number" && item.minPrice) ||
-          (typeof item.price === "number" && item.price) ||
-          (typeof item.amount === "number" ? (item.amount as number) : NaN);
-        if (!name || !Number.isFinite(price) || price <= 0) continue;
-        quotes.push({
-          source: "mcp.rollinggo",
-          sourceLabel: "RollingGo 酒店（实时API）",
-          type: "hotel",
-          name,
-          to: req.city,
-          checkInDate: req.checkInDate,
-          amountCny: Math.round(price),
-          nights: 1,
-          currency: "CNY",
-          priceSource: "api",
-          note: "RollingGo 实时报价，最终以下单页为准",
-          fetchedAt: Date.now(),
-        });
-      }
-      return quotes;
-    },
-  });
-}
 
 // ── 浏览器代查：携程机票列表页 ──
 

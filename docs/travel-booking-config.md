@@ -24,7 +24,7 @@ travel_booking.search（多源报价比价）
 | 源 | priceSource | 依赖 | 开启方式 |
 |---|---|---|---|
 | 本地价格库（保底） | database / list / estimated | 无 | 默认启用 |
-| RollingGo 酒店 MCP | api | `data/mcp-servers.json` 配 `alias=rollinggo` 的 http server（填 url + key） | 配置后自动挂载 |
+| 飞猪 FlyAI CLI（酒店+机票） | api | 官方 CLI：`npm install -g @fly-ai/flyai-cli`（无需 key；`FLYAI_BIN` 可指定路径） | 安装后自动挂载 |
 | 浏览器代查·携程机票 | scraped | Playwright（`cd server && npm install playwright && npx playwright install chromium`） | 安装后自动挂载 |
 
 诚实边界：scraped/estimated 价必须向用户转述「以平台实价为准」；解析失败返回空，绝不编造。
@@ -32,6 +32,8 @@ travel_booking.search（多源报价比价）
 ## 商家真实下单（收银台链接）
 
 `travel_booking.book` 的 `cashierUrl` 参数（或经 `agent_browser` 在商家站点走完下单流程后从支付页提取）随两阶段确认落库为订单 `paymentUrl`，`booking.travel-pay` 直接取用发起支付宝 AI 支付。携程/飞猪等站点已在 `browser-session-sites` 白名单内，用户授权导入 Cookie 后可带登录态代操作。
+
+飞猪 FlyAI 的报价选项自带 `extra.bookingUrl`（酒店 detailUrl / 机票 jumpUrl），就是现成的商家预订链接，Agent 可直接作 `cashierUrl` 传入 `travel_booking.book`，跳过浏览器代走下单流程这一步。
 
 ## 环境变量
 

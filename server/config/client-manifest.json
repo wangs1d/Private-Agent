@@ -1,0 +1,7 @@
+{
+  "latest": "0.2.0",
+  "minVersion": "0.1.0",
+  "url": "http://47.98.122.29:3000/downloads/Nextbot-Setup-0.2.0.exe",
+  "notes": "新增版本更新机制与本地 runtime 装机形态",
+  "channel": "byok"
+}

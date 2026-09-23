@@ -8,7 +8,7 @@
 // 本模块管「要不要现在打扰」这个更前置的问题；两个都过才真正发出去。
 // ReachRouter（通道升级）与 AttentionStore（台账/ack 归一）保持不变。
 import { ALERT_COST_BASE } from "./cost-calibrator.js";
-import { isQuietHourNow, nextQuietEnd } from "./arbiter.js";
+import { isQuietHourNow, nextQuietEnd, isQuietHour } from "./quiet-hours.js";
 import type { PresenceService } from "./presence-service.js";
 import type { ScreenFocusKind } from "./sensors/types.js";
 
@@ -196,7 +196,8 @@ export class ArbiterV2 {
         now.getTime() - lastConv <= 90_000,
       screenFocus: this.deps.screenFocus(),
       nextEventMin: this.deps.nextEventMin(),
-      quietHours: hour >= 23 || hour < 7,
+      // 静默时段统一走 quiet-hours.ts（env 可配，原 23-7 硬编码已收敛）
+      quietHours: isQuietHour(hour),
       receptivity: this.deps.receptivity?.(actorId) ?? 0.5,
       recentBurst: this.recentBurstCount(),
     };

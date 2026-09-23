@@ -20,12 +20,17 @@ class SchedulePage extends StatefulWidget {
     this.scheduleApi,
     this.sessionId,
     this.reloadListenable,
+    required this.onCreateViaChat,
   });
 
   final IsarLocalHistoryStore store;
   final ScheduleApiClient? scheduleApi;
   final String? sessionId;
   final ValueListenable<int>? reloadListenable;
+
+  /// 「创建日程」点击后跳转对话界面并聚焦输入框，
+  /// 由用户自然语言说出需求、Agent 在对话中完成创建（不走表单）。
+  final VoidCallback onCreateViaChat;
 
   @override
   State<SchedulePage> createState() => _SchedulePageState();
@@ -227,111 +232,6 @@ class _SchedulePageState extends State<SchedulePage> {
     _reloadAll();
   }
 
-  Future<void> _pickTimeAndAddForDay(DateTime day) async {
-    final TimeOfDay initial = TimeOfDay.fromDateTime(DateTime.now());
-    final TimeOfDay? picked = await showTimePicker(
-      context: context,
-      initialTime: initial,
-    );
-    if (picked == null || !mounted) {
-      return;
-    }
-    final TextEditingController titleCtrl = TextEditingController();
-    final TextEditingController notesCtrl = TextEditingController();
-    final bool? ok = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) {
-        return AlertDialog(
-          title: const Text("新建日程"),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                Text(
-                  "时间：${_formatClock(DateTime(
-                    day.year,
-                    day.month,
-                    day.day,
-                    picked.hour,
-                    picked.minute,
-                  ))}",
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: titleCtrl,
-                  decoration: const InputDecoration(
-                    labelText: "标题",
-                    border: OutlineInputBorder(),
-                  ),
-                  textInputAction: TextInputAction.next,
-                  onSubmitted: (String value) {
-                    // 按 Enter 键时，如果标题不为空，则聚焦到备注字段
-                    if (value.trim().isNotEmpty) {
-                      FocusScope.of(ctx).nextFocus();
-                    }
-                  },
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: notesCtrl,
-                  decoration: const InputDecoration(
-                    labelText: "备注（可选）",
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 3,
-                  onSubmitted: (String value) {
-                    // 按 Enter 键时保存日程
-                    Navigator.pop(ctx, true);
-                  },
-                ),
-              ],
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text("取消"),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text("保存"),
-            ),
-          ],
-        );
-      },
-    );
-    if (ok != true || !mounted) {
-      titleCtrl.dispose();
-      notesCtrl.dispose();
-      return;
-    }
-    final String title = titleCtrl.text.trim();
-    titleCtrl.dispose();
-    final String notesRaw = notesCtrl.text.trim();
-    notesCtrl.dispose();
-    if (title.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("请填写标题")),
-      );
-      return;
-    }
-    final ScheduleEvent ev = ScheduleEvent(
-      id: "se-${DateTime.now().microsecondsSinceEpoch}",
-      startAt: DateTime(
-        day.year,
-        day.month,
-        day.day,
-        picked.hour,
-        picked.minute,
-      ),
-      title: title,
-      notes: notesRaw.isEmpty ? null : notesRaw,
-    );
-    await widget.store.saveScheduleEvent(ev);
-    await _reloadAll();
-  }
-
   Future<void> _confirmDelete(ScheduleEvent e) async {
     final bool? del = await showDialog<bool>(
       context: context,
@@ -464,13 +364,7 @@ class _SchedulePageState extends State<SchedulePage> {
                 borderRadius: BorderRadius.circular(10),
               ),
             ),
-            onPressed: () {
-              if (_subTab == 0) {
-                _pickTimeAndAddForDay(_focusedDay);
-              } else {
-                _pickTimeAndAddForDay(_stripTime(DateTime.now()));
-              }
-            },
+            onPressed: widget.onCreateViaChat,
             child: const Text("创建日程"),
           ),
         ],

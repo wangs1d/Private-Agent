@@ -61,7 +61,11 @@ import {
 import { buildVisionPhotoCards, attachImageResultPhotos } from "../../services/vision-photo-cards.js";
 import { captionMediaCards, isImageCaptionEnabled } from "../../services/image-caption-service.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
-import { buildReplyBlocks, normalizeReplyCardLayout } from "../../services/reply-envelope.js";
+import {
+  buildReplyBlocks,
+  extractNextUpSuggestions,
+  normalizeReplyCardLayout,
+} from "../../services/reply-envelope.js";
 import {
   isOnlyTimestampFrames,
   stripAllTimestampFrameLines,
@@ -132,6 +136,17 @@ function abortActiveTurn(actorId: string): void {
     activeTurnAborters.delete(actorId);
   }
 }
+
+/**
+ * 搜索类媒体工具：其产出照片/视频是「搜索证据」，有真实产出时本轮主形态为
+ * 媒体卡，search_result 文字搜索卡整卡让位（意图仲裁，见 done 阶段附卡链）。
+ * image.generate 生图不算搜索证据，不在集合内（生图 + 搜资讯的轮文字卡保留）。
+ */
+const SEARCH_MEDIA_TOOL_NAMES = new Set([
+  "search_images",
+  "search_images_batch",
+  "search_videos",
+]);
 
 /**
  * 工具调用成功 + LLM 末轮没出正文时，把工具结果格式化成用户可读的回复文本。
@@ -987,12 +1002,16 @@ async function processBatchedMessage(
         if (info.ok && info.result && info.toolName === "travel.plan-itinerary") {
           executedTravelPlanResult = info.result as Record<string, unknown>;
         }
+        // 捕获媒体搜索/图像生成工具的真实结果，供 done 阶段构建 mediaCards。
+        // image.generate 与搜索同链路：执行完即早推卡片（边说边出图），
+        // done 时聚合成结构化卡 + renderBlocks，生成图不再依赖 LLM 转述 URL。
         if (
           info.ok &&
           info.result &&
           (info.toolName === "search_images" ||
             info.toolName === "search_images_batch" ||
-            info.toolName === "search_videos")
+            info.toolName === "search_videos" ||
+            info.toolName === "image.generate")
         ) {
           executedMediaToolResults.push({
             toolName: info.toolName,
@@ -1295,12 +1314,29 @@ async function processBatchedMessage(
         : reply.toolName === "video.grab" && toolResult?.result
           ? [{ toolName: reply.toolName, result: toolResult.result as Record<string, unknown> }]
           : [];
+    // 搜索卡让位仲裁：本轮搜索类媒体有真实产出（照片/视频卡已组装得出）→
+    // search_result 文字卡整卡不附，照片是唯一主形态；媒体 0 产出（搜图全挂）
+    // 时不让位，文字卡兜底保证本轮仍有结构化结果。直跑路径（loop 捕获为空、
+    // reply.toolName 命中媒体工具）与 loop 捕获同权裁决。
+    let searchMediaHasItems = executedMediaToolResults.some(
+      (mt) =>
+        SEARCH_MEDIA_TOOL_NAMES.has(mt.toolName) &&
+        extractMediaCards(mt.toolName, mt.result).length > 0,
+    );
+    if (
+      !searchMediaHasItems &&
+      reply.toolName &&
+      SEARCH_MEDIA_TOOL_NAMES.has(reply.toolName)
+    ) {
+      searchMediaHasItems = extractMediaCards(reply.toolName, toolResult?.result).length > 0;
+    }
     finalText = attachDeterministicCards({
       text: finalText,
       travelToolName: travelReceiptResolution.toolName,
       travelResult: travelReceiptResolution.result,
       weatherResults: executedWeatherToolResults,
       searchResults: executedSearchToolResults,
+      searchMediaHasItems,
       registryResults: executedRegistryToolResults,
       videoResults: videoReceipts,
     });
@@ -1438,6 +1474,13 @@ async function processBatchedMessage(
     // 见 normalizeReplyCardLayout。
     finalText = normalizeReplyCardLayout(finalText);
 
+    // 「接下来你可以」接续建议（NEXT_UP 协议）：从正文提取成独立 followups
+    // 字段并从文本剥离——done 载荷与落库文本都不再含标记块（时机性内容不落
+    // 历史；流式阶段已由 stream-marker-guard 扣下，用户全程看不到原始标记）。
+    const nextUp = extractNextUpSuggestions(finalText);
+    finalText = nextUp.text;
+    const followups = nextUp.followups;
+
     // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，
     // 前端按块顺序渲染 → 「一段文字介绍后放一组照片，再一段文字，再一组照片」，
     // 替代旧行为「全部照片一次性铺在最前面」。由代码层位置锚定完成，不依赖 prompt。
@@ -1484,6 +1527,8 @@ async function processBatchedMessage(
           ...(renderBlocks.length > 0 ? { renderBlocks } : {}),
           // 回复信封块：text+card 的结构化序列，前端优先按 blocks 渲染
           ...(replyBlocks && replyBlocks.length > 0 ? { blocks: replyBlocks } : {}),
+          // 「接下来你可以」接续建议：模型生成的下一步任务（可点击发送）
+          ...(followups.length > 0 ? { followups } : {}),
         },
       }),
     );

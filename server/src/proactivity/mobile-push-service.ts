@@ -182,6 +182,9 @@ export class MobilePushService {
     while (list.length > MAX_ENTRIES_PER_ACTOR) list.shift();
     this.tokens.set(actorId, list);
     this.dirty = true;
+    // 写穿：注册即落盘。此前只在内存置 dirty、flush 无调用方，重启丢 token
+    // → 离线必达升级推送静默失效
+    this.flush();
     return list;
   }
 
@@ -190,6 +193,7 @@ export class MobilePushService {
     if (list.length === 0) this.tokens.delete(actorId);
     else this.tokens.set(actorId, list);
     this.dirty = true;
+    this.flush();
     return list;
   }
 

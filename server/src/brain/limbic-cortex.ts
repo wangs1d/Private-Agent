@@ -202,6 +202,13 @@ const OUTPUT_REDACT_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> 
   { pattern: /[A-Za-z0-9+/]{40,}={0,2}/g, label: "long_base64" },
   // 内部系统路径：/etc|/var|/opt|/usr|/root|/home/...
   { pattern: /\/(?:etc|var|opt|usr|root|home)\/[^\s]+/g, label: "internal_path" },
+  // ── 个人身份信息补全（2026-09-19 P1-1：原类别只有密钥/路径，漏 PII）──
+  // 中国大陆手机号（1 开头 11 位，容忍分隔符）
+  { pattern: /(?<!\d)1[3-9]\d[- ]?\d{4}[- ]?\d{4}(?!\d)/g, label: "phone" },
+  // 身份证号（18 位，末位可为 X；含出生日期段校验降误报）
+  { pattern: /(?<!\d)\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:[0-2]\d|3[01])\d{3}[\dXx](?!\d)/g, label: "id_card" },
+  // 银行卡号（16-19 位连续数字；不校验 Luhn——宁误报不漏报；13 位起会误伤订单号）
+  { pattern: /(?<!\d)\d{16,19}(?!\d)/g, label: "bank_card" },
 ];
 
 /** 检查 URL 是否指向内网/特殊地址（SSRF 防护） */

@@ -14,11 +14,8 @@ test("钩子检测：无人称相关强线索时保持静默（返回 null）", 
   assert.equal(detectConversationProactiveHook("1+1=2"), null);
 });
 
-test("钩子检测：情绪/疲惫类线索 → care，importance=high", () => {
-  const hook = detectConversationProactiveHook("今天加班到好累，真的睡不着");
-  assert.ok(hook);
-  assert.equal(hook.kind, "care");
-  assert.equal(hook.importance, "high");
+test("钩子检测：情绪/疲惫类线索不再触发（care 关怀已下线）", () => {
+  assert.equal(detectConversationProactiveHook("今天加班到好累，真的睡不着"), null);
 });
 
 test("钩子检测：等待/待办类线索 → followup，importance=medium", () => {

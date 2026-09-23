@@ -18,7 +18,7 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_web",
       description:
-        "联网搜索公开网页信息（按发布时间从新到旧）。query 由你按用户意图组织成完整、具体、语义清晰的搜索词（可含主体+特征+限定词），不要机械截成 2-6 字短词；时效话题请加当前年月或「最新」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息，或任何人物的近况、行程、所在城市/地区、公开活动时，必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。动态/新闻/盘点/对比类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用 Markdown 小标题/加粗/表格组织成结构清晰的充分回答；只有真正的单一事实判断（是/否、单个数据点）才用「结论 + 1句依据」收尾。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。搜索结果与问题无关或为空时，如实说没查到，禁止编造。",
+        "联网搜索公开网页信息（按发布时间从新到旧）。query 由你按用户意图组织成完整、具体、语义清晰的搜索词（可含主体+特征+限定词），不要机械截成 2-6 字短词；时效话题请加当前年月或「最新」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息，或任何人物的近况、行程、所在城市/地区、公开活动时，必须先调用本工具，禁止仅凭训练数据作答——本轮 prompt 里没有【实时检索结果】块时也不例外，没有块 ≠ 不用查，更要主动调用本工具自己查证；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。动态/新闻/盘点/对比类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用 Markdown 小标题/加粗/表格组织成结构清晰的充分回答；只有真正的单一事实判断（是/否、单个数据点）才用「结论 + 1句依据」收尾。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。搜索结果与问题无关或为空时，如实说没查到，禁止编造。",
       parameters: {
         type: "object",
         properties: {
@@ -255,12 +255,25 @@ export const LIFE_ASSISTANT_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "shopping.suggest",
-      description: "根据商品与预算给出购物建议（比价决策辅助，不执行购买）。",
+      description:
+        "在自有商品库中检索并给出结构化购物建议（含商品图/试色图对比、参数对比表、" +
+        "评测视频入口，前端会渲染二分化对比卡）。适用于用户表达选品/买决策诉求：" +
+        "「A 和 B 怎么选」「预算 X 想买 Y」「有没有适合 Z 的推荐」等。" +
+        "只读不购买；商品库未命中时如实说明并给泛选购建议。" +
+        "item 支持多关键词（如「XM5 Bose」）以触发对比。",
       parameters: {
         type: "object",
         properties: {
-          item: { type: "string", description: "商品名称或品类" },
+          item: {
+            type: "string",
+            description: "商品名/品类，可含多个候选关键词触发对比（如「Chili Dior 720」）",
+          },
           budget: { type: "number", description: "预算上限（元）" },
+          userRequest: {
+            type: "string",
+            description:
+              "用户本轮原话或意图摘要（尽量原文照录），供推荐话术结合用户画像做个性化组织",
+          },
         },
         required: ["item"],
         additionalProperties: false,
@@ -742,11 +755,16 @@ export const VISION_SANDBOX_RESTRICTED_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "vision.periodic_start",
       description:
-        "【服务端定时视觉】按固定间隔从给定 HTTP(S) 快照 URL 拉帧并向模型推送一轮「配图」巡检推理。**客户端 WebSocket 需在线**才能收到助手的 chunk/done。与单次 vision.http_pull 不同：此为服务端调度无需用户每次手动发送图像。",
+        "【服务端定时视觉】按固定间隔取一帧图像并向模型推送一轮「配图」巡检推理。source=http 从 HTTP(S) 快照 URL 拉帧（需 url）；source=desktop 对本机屏幕截图（桌面感知巡检，如「每分钟看一眼我在干嘛」）。**客户端 WebSocket 需在线**才能收到助手的 chunk/done。",
       parameters: {
         type: "object",
         properties: {
-          url: { type: "string", description: "快照 URL（同上约束）" },
+          source: {
+            type: "string",
+            enum: ["http", "desktop"],
+            description: "视觉源：http=URL 拉帧（缺省），desktop=本机屏幕截图",
+          },
+          url: { type: "string", description: "快照 URL（source=http 时必填）" },
           intervalSeconds: {
             type: "integer",
             description: "间隔秒数（下限约 30s，可由环境变量收紧）",
@@ -756,7 +774,7 @@ export const VISION_SANDBOX_RESTRICTED_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "每轮发给模型的巡检文案（可选）",
           },
         },
-        required: ["url", "intervalSeconds"],
+        required: ["intervalSeconds"],
         additionalProperties: false,
       },
     },

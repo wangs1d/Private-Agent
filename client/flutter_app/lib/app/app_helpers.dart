@@ -1,7 +1,7 @@
 /// 右侧抽屉要展示的内容种类。
 /// （行程规划不在此列：它以独立全屏界面打开，见 TravelPlanFullscreenPage。
 ///   设置同样不在此列：它以独立全屏界面打开，见 SettingsPage。）
-enum RightPanelKind { friends, messages, devices, schedule, imagePreview, gallery, browser, catalog, approvals, contentSummary }
+enum RightPanelKind { friends, messages, devices, schedule, imagePreview, gallery, browser, catalog, approvals, contentSummary, agentHome }
 
 /// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
 const double kWideLayoutBreakpoint = 820;
@@ -34,6 +34,8 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.6; // 待确认收件箱：卡片流，右面板较窄
       case RightPanelKind.contentSummary:
         return 0.42; // 内容详情：长文阅读（书签栏 + 正文），需要较大空间
+      case RightPanelKind.agentHome:
+        return 0.55; // Agent 主页：卡片流（动态/自我介绍），右面板中等宽度
     }
   }
 }
@@ -106,6 +108,8 @@ String rightPanelTitle(RightPanelKind kind) {
       // 内容详情面板自带完整顶栏（图标+标题+板块副标题），
       // 面板 chrome 对本类型隐藏默认标题，此处仅作兜底。
       return "内容详情";
+    case RightPanelKind.agentHome:
+      return "主页";
   }
 }
 

@@ -633,6 +633,9 @@ window.EMOTION_SEED = [
     opts = opts || {};
     var id = 'eb' + (uid++);
     var lite = !!opts.lite;
+    /* fitBounce:向上扩高 viewBox,给弹跳顶点(最高 48 单位)留出完整头顶余量,
+     * 避免待机小动作跳起时球体上半截被 SVG 视口裁掉。透明 letterbox,不产生杂色。 */
+    var fitBounce = !!opts.fitBounce;
     var shape = RD.SHAPES[opts.shape] || RD.SHAPES.blob;
     var face = shape.face;
     var headRing = shape.ring;
@@ -672,7 +675,7 @@ window.EMOTION_SEED = [
 
     /* ---- SVG 骨架 ---- */
     var svg = el('svg', {
-      viewBox: '-15 -15 259 259',
+      viewBox: fitBounce ? '-15 -72 259 316' : '-15 -15 259 259',
       width: '100%',
       height: '100%',
       role: 'img',
@@ -2002,6 +2005,7 @@ window.EMOTION_SEED = [
     eyeColor: boot.eyeColor,
     /* 默认 lite:关闭彩带/撒花/zzz 特效层,只保留表情与眼神动画 */
     lite: boot.effects !== true,
+    fitBounce: boot.fitBounce === true,
     eyeScale: boot.eyeScale || 1
   });
 })();

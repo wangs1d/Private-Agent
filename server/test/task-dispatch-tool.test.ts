@@ -57,7 +57,8 @@ test("dispatch：缺 goal / launch 未注入 → 拒绝且不抛异常", async (
 
   const notReady = await handler({ goal: "订机票" }, CTX);
   assert.equal(notReady.ok, false);
-  assert.match(String(notReady.error), /launch/);
+  // 2026-09-19 文案更新：未就绪与预算超限统一为「通道不可用」并要求如实告知
+  assert.match(String(notReady.error), /通道不可用/);
 });
 
 test("dispatch：工具 schema 必须是白名单可见形态（name + goal 必填）", () => {

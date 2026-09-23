@@ -129,6 +129,9 @@ option(PRIVATE_AI_AGENT_SKIP_WINDOWS_DIST "Do not copy build output to windows_d
 if(WIN32 AND NOT PRIVATE_AI_AGENT_SKIP_WINDOWS_DIST)
   set(_private_ai_agent_env_dist "$ENV{PRIVATE_AI_AGENT_WINDOWS_DIST}")
   string(STRIP "${_private_ai_agent_env_dist}" _private_ai_agent_env_dist)
+  # 反斜杠路径（Windows 惯用写法）经 configure_file 原样写进 set() 会变成非法转义
+  # （如 \w），INSTALL 阶段才报语法错误——统一换成正斜杠
+  string(REPLACE "\\" "/" _private_ai_agent_env_dist "${_private_ai_agent_env_dist}")
   if(_private_ai_agent_env_dist)
     set(PRIVATE_AI_AGENT_DEPLOY_ROOT "${_private_ai_agent_env_dist}")
   else()

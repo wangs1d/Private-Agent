@@ -12,7 +12,8 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *
  * 报价来源（QuoteAggregator 多源聚合，价格如实标注 priceSource）：
  *   - 本地价格库（保底，estimated/database/list）
- *   - RollingGo 酒店 MCP（启用后 api）
+ *   - 飞猪 FlyAI CLI（酒店+机票实时 api 价；安装 flyai CLI 后自动挂载，
+ *     报价选项 extra.bookingUrl 为飞猪预订链接，可直接作 book 的 cashierUrl）
  *   - 浏览器代查·携程机票（Playwright 可用时 scraped）
  *
  * 下单后闭环（不在本模块，由内置 skill 接力）：
@@ -32,7 +33,7 @@ export const TRAVEL_BOOKING_CHAT_TOOLS: ChatCompletionTool[] = [
       description:
         "搜索机票/火车票/酒店的实时报价并比价（多来源聚合，价格按来源如实标注）。\n" +
         "适用场景：「查明天北京到上海的机票」「对比一下成都春熙路附近的酒店价格」「G1027 高铁还有票吗多少钱」。\n" +
-        "返回选项列表（optionId 供 travel_booking.book 使用），每条带 priceSource：\n" +
+        "返回选项列表（optionId 供 travel_booking.book 使用；实时来源选项的 extra.bookingUrl 为商家预订链接，可直接作 book 的 cashierUrl；飞猪酒店选项另带 extra.mainPicUrl 平台真实主图与 extra.rating 平台评分，可在回复中自然引用，未带就是不造假的留空），每条带 priceSource：\n" +
         "  api=实时接口 / scraped=页面代查 / database|list=本地价格库 / estimated=估算。\n" +
         "必须向用户如实转述价格来源与「以平台实价为准」提示；估算价不得当作实价汇报。\n" +
         "酒店必填 city（或 hotelName+city）；机票/火车票必填 from/to（城市），有 departTime 更准。",
@@ -83,7 +84,7 @@ export const TRAVEL_BOOKING_CHAT_TOOLS: ChatCompletionTool[] = [
           tier: { type: "string", description: "酒店档次（酒店）。" },
           seat: { type: "string", description: "舱位/席别（flight/train）。" },
           basePriceCny: { type: "number", description: "基准价（估算兜底用，与 search 保持一致）。" },
-          cashierUrl: { type: "string", description: "商家收银台链接/订单串（可选；用户提供，或用 agent_browser 在商家站点走完下单流程后从支付页提取；两阶段确认的 params 会随订单保存，booking.travel-pay 直接取用）。" },
+          cashierUrl: { type: "string", description: "商家收银台链接/订单串（可选；用户提供，或用 agent_browser 在商家站点走完下单流程后从支付页提取；飞猪 FlyAI 报价选项的 extra.bookingUrl 也是现成预订链接可直接传入；两阶段确认的 params 会随订单保存，booking.travel-pay 直接取用）。" },
           confirm: { type: "boolean", description: "阶段二确认（默认 false=出摘要与 token）。" },
           confirmationToken: { type: "string", description: "阶段一返回的确认 token（confirm=true 时必填）。" },
         },

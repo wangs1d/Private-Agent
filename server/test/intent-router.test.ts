@@ -40,13 +40,13 @@ test("路由表：对话面三标签零工具；实时/媒体轻预算任务面�
   const realtime = routePlanForIntent("realtime_lookup");
   assert.equal(realtime.plane, "task");
   assert.deepEqual(realtime.capabilities, ["search"]);
-  assert.equal(realtime.budget, 2);
+  assert.equal(realtime.budget, 3, "router-first 下最低 3 波：discover→call→作答");
   assert.equal(realtime.tier, "flash", "单点查询用 Flash 档，省 token");
 
   const media = routePlanForIntent("media_retrieval");
   assert.equal(media.plane, "task");
   assert.deepEqual(media.capabilities, ["media", "search"]);
-  assert.equal(media.budget, 2);
+  assert.equal(media.budget, 3, "router-first 下最低 3 波");
 
   // 2026-09-08：action_write 归位对话面——提醒/日程是单工具秒级动作，前台
   // 直调 reminder.plan/calendar 当场办成，不派后台、不出任务回执；重写动作
@@ -60,7 +60,7 @@ test("路由表：对话面三标签零工具；实时/媒体轻预算任务面�
   const multi = routePlanForIntent("multi_step_task");
   assert.equal(multi.plane, "task");
   assert.deepEqual(multi.capabilities, ["full"]);
-  assert.equal(multi.budget, 3);
+  assert.equal(multi.budget, 4, "router-first 下 pro 档 4 波");
 });
 
 test("parseIntentJson：规范 JSON 输出", () => {

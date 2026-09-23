@@ -16,6 +16,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { TASK_PLANE_FALLBACK_BUDGET } from "../src/agent/intent-router.js";
+
 // 前置路由门：AGENT_FOREGROUND_DISPATCH 不再影响 routeTurnByLlm 是否分类
 // （旧「整体跳过」语义已退役），本文件在默认模式下验证每轮必跑的独立路由行为。
 delete process.env.AGENT_FOREGROUND_DISPATCH;
@@ -85,7 +87,7 @@ test("L1+L2：realtime_lookup 按路由表映射任务面（轻预算 Flash 档�
   assert.equal(decision.plane, "task");
   assert.equal(decision.plane, "task");
   assert.deepEqual(decision.capabilities, ["search"]);
-  assert.equal(decision.budget, 2);
+  assert.equal(decision.budget, TASK_PLANE_FALLBACK_BUDGET, "router-first 下最低 3 波");
   assert.equal(decision.tier, "flash");
   assert.ok(decision.reasons.some((r) => r.includes("route_table:task/search")));
 });

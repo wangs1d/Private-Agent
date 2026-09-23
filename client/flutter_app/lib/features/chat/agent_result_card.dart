@@ -81,6 +81,8 @@ class AgentResultCard extends StatelessWidget {
           return _MediaCard(data: data, cs: cs);
         case "travel_itinerary":
           return _TravelItineraryCard(data: data, cs: cs);
+        case "product_compare":
+          return _ProductCompareCard(data: data, cs: cs);
         default:
           return _SpecializedCard(data: data, cs: cs);
       }
@@ -287,7 +289,9 @@ class _SpecializedCard extends StatelessWidget {
   (IconData, Color) get _style {
     switch (data.cardType) {
       case "weather":
-        return (Icons.wb_sunny_outlined, const Color(0xFFF59E0B));
+        // 天气卡不引入工具色：图标/描边跟随主题中性强调（黑白灰），
+        // 晴雨雪等所有天气状况共用此路径，无按天气分支的配色。
+        return (Icons.wb_sunny_outlined, cs.primary);
       case "schedule":
         return (Icons.event_note_outlined, cs.primary);
       case "wallet":
@@ -2050,5 +2054,416 @@ class _SearchResultCard extends StatelessWidget {
     try {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     } catch (_) {}
+  }
+}
+
+/// 购物建议「二分化对比卡」（shopping.suggest → cardType=product_compare）。
+///
+/// 版式：分侧大图头部（商品图/试色图左右并排，底部渐变浮层放品名+参考价）
+/// → 每侧依据(check)/注意点(warn) → 转置参数对比表（维度为行）→ 试色/评测视频
+/// 入口 → footer。全部数据来自商品库工具回执，由服务端 tool-card-registry
+/// 确定性构建，LLM 口头回复只作前导正文。
+class _ProductCompareCard extends StatelessWidget {
+  const _ProductCompareCard({required this.data, required this.cs});
+
+  final AgentResultData data;
+  final ColorScheme cs;
+
+  static const Color _accent = Color(0xFF7FD4A0);
+  static const Color _warn = Color(0xFFE5B567);
+
+  String _resolve(String url) {
+    if (url.startsWith("http://") || url.startsWith("https://")) return url;
+    if (url.startsWith("/")) return "${ApiConfig.httpBase}$url";
+    return url;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<AgentResultCardSide> sides = data.sides.isEmpty
+        ? const <AgentResultCardSide>[]
+        : data.sides;
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 390),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(13, 11, 13, 10),
+            child: Row(
+              children: <Widget>[
+                const Icon(Icons.compare_rounded,
+                    size: 15, color: _accent),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    data.title,
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                      color: cs.onSurface,
+                    ),
+                  ),
+                ),
+                Text(
+                  "数据来自商品库",
+                  style: TextStyle(
+                      fontSize: 10, color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+          if (sides.isNotEmpty)
+            sides.length == 2
+                ? IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        Expanded(child: _sidePane(sides.first)),
+                        Container(width: 1, color: cs.outline.withValues(alpha: 0.16)),
+                        Expanded(child: _sidePane(sides.last)),
+                      ],
+                    ),
+                  )
+                : SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: <Widget>[
+                        for (final AgentResultCardSide s in sides)
+                          SizedBox(width: 150, child: _sidePane(s)),
+                      ],
+                    ),
+                  ),
+          if (data.compare != null) _compareSection(),
+          if (data.videos.isNotEmpty) _videoSection(),
+          if (data.footer.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(13, 8, 13, 10),
+              child: Text(
+                data.footer,
+                style: TextStyle(
+                    fontSize: 10.5, color: cs.onSurfaceVariant),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 分侧面板：大图（上色效果/产品图）+ 浮层品名价格 + 该侧依据/注意点
+  Widget _sidePane(AgentResultCardSide side) {
+    final List<AgentResultItem> sideItems = data.items
+        .where((AgentResultItem it) => it.side == side.side)
+        .toList(growable: false);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          if (side.image != null)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Stack(
+                children: <Widget>[
+                  AspectRatio(
+                    aspectRatio: 0.74,
+                    child: Image.network(
+                      _resolve(side.image!),
+                      fit: BoxFit.cover,
+                      filterQuality: FilterQuality.low,
+                      errorBuilder: (_, __, ___) => _imageFallback(),
+                      loadingBuilder: (BuildContext context, Widget child,
+                          ImageChunkEvent? progress) {
+                        if (progress == null) return child;
+                        return Container(
+                          color: cs.surfaceContainerHighest,
+                          alignment: Alignment.center,
+                          child: const CircularProgressIndicator(
+                              strokeWidth: 1.6),
+                        );
+                      },
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(8, 16, 8, 7),
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [Colors.transparent, Color(0xE6000000)],
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(
+                            side.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white),
+                          ),
+                          if (side.priceLabel != null &&
+                              side.priceLabel!.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(
+                                side.priceLabel!,
+                                style: const TextStyle(
+                                    fontSize: 10.5, color: _accent),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            _SideHeader(label: side.label),
+          const SizedBox(height: 7),
+          for (final AgentResultItem it in sideItems)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Icon(
+                    it.type == "warn"
+                        ? Icons.priority_high_rounded
+                        : Icons.check_rounded,
+                    size: 11,
+                    color: it.type == "warn" ? _warn : _accent,
+                  ),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      it.text,
+                      style: TextStyle(
+                          fontSize: 11.5,
+                          height: 1.5,
+                          color: cs.onSurface.withValues(alpha: 0.82)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _imageFallback() => Container(
+        color: cs.surfaceContainerHighest,
+        alignment: Alignment.center,
+        child: Icon(Icons.image_outlined,
+            size: 20, color: cs.onSurfaceVariant),
+      );
+
+  Widget _compareSection() {
+    final AgentResultCompareTable cmp = data.compare!;
+    if (cmp.rows.isEmpty) return const SizedBox.shrink();
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(
+          top: BorderSide(color: cs.outline.withValues(alpha: 0.16)),
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              "参 数 对 比",
+              style: TextStyle(
+                  fontSize: 9.5,
+                  letterSpacing: 2.2,
+                  color: cs.onSurfaceVariant),
+            ),
+          ),
+          Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    _cell("维度", header: true, fixed: 62),
+                    for (final AgentResultCardSide s in data.sides)
+                      Expanded(
+                        child: _cell(shortName(s.label), header: true),
+                      ),
+                  ],
+                ),
+                for (final MapEntry<String, List<String>> row in cmp.rows)
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border(
+                        top: BorderSide(
+                            color: cs.outline.withValues(alpha: 0.14)),
+                      ),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        _cell(row.key, header: true, fixed: 62),
+                        for (final String v in row.value)
+                          Expanded(child: _cell(v, maxLines: 4)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String shortName(String label) {
+    // 长名截短：截去「（…）」注释部分
+    final int paren = label.indexOf("（");
+    return paren > 0 ? label.substring(0, paren) : label;
+  }
+
+  Widget _cell(String text,
+      {bool header = false, int maxLines = 1, double? fixed}) {
+    final Widget content = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+      child: Text(
+        text,
+        maxLines: maxLines,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 10.5,
+          height: 1.4,
+          color: header
+              ? cs.onSurfaceVariant
+              : cs.onSurface.withValues(alpha: 0.88),
+        ),
+      ),
+    );
+    final Widget cell = header
+        ? Container(color: cs.surfaceContainerHighest, child: content)
+        : content;
+    return fixed != null
+        ? SizedBox(width: fixed, child: cell)
+        : Expanded(child: cell);
+  }
+
+  Widget _videoSection() {
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(
+          top: BorderSide(color: cs.outline.withValues(alpha: 0.16)),
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              "视 频 介 绍（真 实 体 验）",
+              style: TextStyle(
+                  fontSize: 9.5,
+                  letterSpacing: 2.2,
+                  color: cs.onSurfaceVariant),
+            ),
+          ),
+          for (final AgentResultCardVideo v in data.videos)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Material(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(9),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(9),
+                  onTap: v.url == null
+                      ? null
+                      : () => launchUrl(
+                            Uri.parse(_resolve(v.url!)),
+                            mode: LaunchMode.externalApplication,
+                          ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(7),
+                    child: Row(
+                      children: <Widget>[
+                        Container(
+                          width: 26,
+                          height: 26,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF131D17),
+                            shape: BoxShape.circle,
+                            border: Border.all(color: const Color(0xFF2C3A31)),
+                          ),
+                          child: const Icon(Icons.play_arrow_rounded,
+                              size: 16, color: _accent),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            v.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 11.5,
+                                height: 1.4,
+                                color: cs.onSurface.withValues(alpha: 0.88)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 无图分侧的兜底表头（图片缺载时仍保留品名行）
+class _SideHeader extends StatelessWidget {
+  const _SideHeader({required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+      ),
+    );
   }
 }

@@ -187,6 +187,9 @@ function summarizeItinerary(result: unknown): Record<string, unknown> {
     ...(Number.isFinite(totalFinal) && totalFinal > 0 ? { totalCost: Math.round(totalFinal) } : {}),
     ...(highlights.length > 0 ? { highlights } : {}),
     dataQuality: quality,
+    bookingHint:
+      "用户想订行程中的酒店或机票时，直接用 travel_booking.search 实时比价（飞猪实时价，酒店/机票选项自带预订链接）" +
+      "→ travel_booking.book 两阶段确认下单，无需让用户自己去平台下单。",
     displayNote:
       qualityNote +
       "完整行程会以独立的行程卡附在回复最末尾，卡面直接逐日展示安排，" +
@@ -209,7 +212,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         "根据用户的目的地、天数与偏好生成完整结构化行程：按天拆分景点/酒店/餐厅，含时间安排、交通衔接、建议游览时长、小贴士、预订提示与价格汇总。" +
         "当用户提出「帮我规划去X的行程」「去X玩几天怎么安排」「X旅游攻略」「X自由行」等出行需求时调用。" +
         "参数：input 为自然语言需求（如「去成都玩5天，喜欢美食和古迹，预算中等」）；destination 可显式指定目的地；days 指定天数；preferences 为偏好标签数组。" +
-        "若 input 已含目的地/天数/偏好则无需重复传参。生成后可配合 travel.destination-info 补充签证/货币等实用信息。",
+        "若 input 已含目的地/天数/偏好则无需重复传参。生成后可配合 travel.destination-info 补充签证/货币等实用信息。" +
+        "用户想订行程中的酒店/机票时，接 travel_booking.search 实时比价（飞猪实时价，选项自带预订链接）→ travel_booking.book 两阶段确认下单。",
       kind: "builtin",
       tags: ["travel", "行程规划", "旅游", "攻略", "itinerary", "自由行", "出行"],
       icon: "🗺️",
@@ -342,7 +346,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       displayName: "搜索目的地景点/酒店/餐厅",
       description:
         "搜索指定目的地的景点、酒店、餐厅三类 POI（含名称/评分/地址/坐标，命中缓存直接返回，未命中自动实时搜索并缓存）。" +
-        "当用户想了解「X 有什么好玩的/好吃的/住的」或在规划前查看目的地的 POI 候选时调用。可与 travel.plan-itinerary 配合使用。",
+        "当用户想了解「X 有什么好玩的/好吃的/住的」或在规划前查看目的地的 POI 候选时调用。可与 travel.plan-itinerary 配合使用。" +
+        "用户要订其中某家酒店时，用 travel_booking.search 实时比价（飞猪实时价）→ travel_booking.book 两阶段确认下单。",
       kind: "builtin",
       tags: ["travel", "POI", "景点", "酒店", "餐厅", "目的地", "搜索"],
       icon: "📍",

@@ -7,8 +7,9 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { resolveActorId } from "../../agent/actor-id.js";
+import { ANONYMOUS_ACTOR_ID, resolveActorId } from "../../agent/actor-id.js";
 import { adminAudit, isAdminRequest } from "./admin-auth.js";
+import type { InboxService } from "../../services/inbox-service.js";
 
 /**
  * 帮助与反馈：客户端反馈的唯一落点。
@@ -21,10 +22,18 @@ import { adminAudit, isAdminRequest } from "./admin-auth.js";
  * （GET /api/feedback?actorId=…，客户端「我的反馈」）保持开放；
  * 全量列表与状态流转是管理操作，须携带 x-admin-token
  * （之前无鉴权，任何人可看全部反馈并改状态）。
+ *
+ * 闭环：状态流转/回复保存后自动给提交者发一条站内信（复用 InboxService，
+ * 在线设备经 WS 实时提醒），用户不用自己刷「我的反馈」才知道被处理了。
  */
 
 const FEEDBACK_TYPES = new Set(["bug", "suggestion", "other"]);
 const FEEDBACK_STATUSES = new Set(["open", "processing", "resolved"]);
+const FEEDBACK_STATUS_LABELS: Record<string, string> = {
+  open: "重新打开",
+  processing: "处理中",
+  resolved: "已解决",
+};
 const MAX_DIAGNOSTIC_ENTRIES = 30;
 
 type FeedbackType = "bug" | "suggestion" | "other";
@@ -314,7 +323,10 @@ function safeParseDiagnostics(raw: string): Record<string, string | number | boo
 
 const storeManager = new FeedbackStoreManager();
 
-export function registerFeedbackRoutes(app: FastifyInstance): void {
+export function registerFeedbackRoutes(
+  app: FastifyInstance,
+  deps: { inboxService?: InboxService | null } = {},
+): void {
   app.post("/api/feedback", async (request, reply) => {
     const parsed = submitBodySchema.safeParse(request.body);
     if (!parsed.success) {
@@ -383,6 +395,28 @@ export function registerFeedbackRoutes(app: FastifyInstance): void {
     const record = await storeManager.updateStatus(id, parsed.data.status, parsed.data.replyNote);
     if (!record) return reply.code(404).send({ ok: false, message: "feedback not found" });
     await adminAudit("feedback.update_status", { id, status: record.status }, request);
+    // 闭环通知：状态流转/回复保存后给提交者发站内信（必达落盘 + 在线 WS 直推）。
+    // 匿名/空身份无处投递；通知失败不影响流转本身。
+    const actorId = record.actorId?.trim();
+    if (deps.inboxService && actorId && actorId !== ANONYMOUS_ACTOR_ID) {
+      const statusLabel = FEEDBACK_STATUS_LABELS[record.status] ?? record.status;
+      const body = record.replyNote
+        ? `「${record.title}」${statusLabel}。管理员回复：${record.replyNote}`
+        : `「${record.title}」状态更新为：${statusLabel}。`;
+      try {
+        await deps.inboxService.send({
+          actorId,
+          title: "你的反馈有新回复",
+          body,
+          kind: "feedback",
+          importance: record.replyNote ? "normal" : "low",
+          fromActorId: "admin",
+          messageId: `fb_reply_${id}_${record.updatedAt}`,
+        });
+      } catch (err) {
+        console.warn("[feedback] reply inbox notify failed:", err);
+      }
+    }
     return { ok: true, feedback: record };
   });
 }

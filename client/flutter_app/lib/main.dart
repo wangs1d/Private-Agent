@@ -1,5 +1,6 @@
 import "dart:async";
 import "dart:convert";
+import "dart:developer" as developer;
 import "dart:io";
 
 import "package:flutter/foundation.dart";
@@ -11,6 +12,9 @@ import "package:window_manager/window_manager.dart";
 import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
+import "core/presentation/client_update_dialog.dart";
+import "core/presentation/glass_notify.dart";
+import "core/presentation/update_result_card.dart";
 import "core/presentation/voice_call_ui_labels.dart";
 import "core/presentation/boot_animation.dart";
 import "core/db/isar_local_history_store.dart";
@@ -22,6 +26,10 @@ import "core/models/turn_state.dart";
 import "core/utils/agent_result_parser.dart";
 import "core/utils/assistant_text_sanitizer.dart";
 import "core/utils/content_summary_parser.dart";
+import "core/services/client_update_checker.dart";
+import "core/services/local_runtime_config.dart";
+import "core/services/local_runtime_manager.dart";
+import "core/presentation/api_key_setup_dialog.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
@@ -42,16 +50,17 @@ import "core/services/window_bounds_preference.dart";
 import "core/services/shared_browser_host.dart";
 import "core/services/ws_chat_service.dart";
 import "core/services/inbox_api.dart";
+import "core/services/control_plane_account.dart";
 import "core/services/schedule_floating_launcher.dart";
 import "core/utils/play_url_utils.dart";
 import "features/catalog/catalog_page.dart";
-import "features/help/feedback_page.dart";
+import "features/help/feedback_dialog.dart";
 import "features/browser/browser_page.dart";
 import "features/gallery/gallery_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
 import "features/chat/agent_profile_page.dart";
-import "features/chat/agent_activity_section.dart" show AgentActivityBus;
+import "features/chat/agent_home_page.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/content_summary_detail_modal.dart";
@@ -65,8 +74,6 @@ import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
 import "features/chat/floating_agent_sphere.dart";
 import "features/chat/morning_briefing_card.dart";
-// 语音对话模式已迁移到独立的 PySide6 声纹波形进程（client/voice-orb-py）：
-// 无常驻悬浮球，待机隐身只跑唤醒监听，唤醒/对话时浮现声纹波形。
 import "features/chat/voiceprint_registration_page.dart";
 import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/connected_call_launcher.dart";
@@ -87,7 +94,6 @@ import "core/services/windows_titlebar_theme.dart";
 import "features/devices/devices_page.dart";
 import "features/settings/settings_page.dart";
 import "features/approvals/approvals_panel.dart";
-import "features/chat/voice_duplex_sheet.dart";
 import "core/services/access_auth_api.dart";
 import "core/services/attention_api.dart";
 import "core/vision/pick_gallery_vision.dart";
@@ -235,7 +241,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       IsarLocalHistoryStore(userPin: ApiConfig.localPin);
   final WsChatService _ws = WsChatService(url: ApiConfig.wsUrl);
   final WorldApiClient _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
-  // 站内信：拉取/已读（列表 UI 在邮箱页，这里负责收到 inbox.message 的提醒与已读回执）
+  // 站内信：拉取/已读（快捷查看 UI 在用户菜单「站内信」消息框，列表 UI
+  // 也在邮箱页；这里负责收到 inbox.message 的提醒与已读回执）
   final InboxApi _inboxApi = InboxApi();
   final ScheduleApiClient _scheduleApi =
       ScheduleApiClient(baseUrl: ApiConfig.httpBase);
@@ -337,6 +344,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Timer? _messagePollTimer;
   bool _messageBadgeHovering = false;
 
+  /// 站内信（平台→用户收件箱）未读数：随消息轮询刷新 + WS 推送即时 +1，
+  /// 与消息聚合未读合并进侧栏「站内信」红点角标。
+  int _inboxUnread = 0;
+
   /// 关闭右侧面板
   void _closeRightPanel() {
     if (_rightPanel == null) return;
@@ -347,6 +358,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 恢复打开面板前的 side 模式右面板总占位（含 8px 拖拽条），
       // 避免工具面板打开期间被 split 模式把宽度改写后回不去。
       _rightPanelWidth = _previousRightPanelWidth;
+    });
+  }
+
+  /// 「创建日程」等面板内的创建入口收敛到对话：
+  /// 关闭面板回到聊天页，并聚焦输入框让用户直接自然语言输入。
+  void _focusChatInput() {
+    _closeRightPanel();
+    if (_tabIndex != 0) {
+      setState(() => _tabIndex = 0);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _inputFocusNode.requestFocus();
     });
   }
 
@@ -486,6 +509,28 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // debug 构建注册 VM service 扩展：远程直调决策弹窗链路做真机验收
+    // （WS 事件无法从脚本侧注入，须走 VM service websocket call extension）
+    if (kDebugMode) {
+      GlassNotify.debugSelfCapture = true;
+      developer.registerExtension("ext.pai.debug.triggerProactiveGlass", (
+        String method,
+        Map<String, String> parameters,
+      ) async {
+        final String title = parameters["title"] ?? "玻璃通知验收";
+        final String message = parameters["message"] ?? "主动性消息玻璃卡 E2E";
+        // 不等待卡片关闭（关闭在倒计时后），立即返回便于脚本连续触发
+        unawaited(_showProactiveNativeNotification(
+          title,
+          message,
+          "debug-${DateTime.now().microsecondsSinceEpoch}",
+        ));
+        return developer.ServiceExtensionResponse.result(jsonEncode(<String, dynamic>{
+          "ok": true,
+        }));
+      });
+      debugPrint("[glass-notify] debug extension registered");
+    }
     // 共用浏览器桥：浏览器宿主经本 ws 回传 browser.bridge.result（jobId 配对）
     SharedBrowserHost.instance.bindSend(_ws.sendEvent);
     // 桌面端独立来电悬浮窗事件绑定
@@ -581,7 +626,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _stopMessagePolling();
     _surfaceAutoHideTimer?.cancel();
     _stopContinuousLocationTracking();
-    _voiceOrbProcess?.kill();
     super.dispose();
   }
 
@@ -781,8 +825,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       read: _store.getPreference,
       write: _store.savePreference,
     );
+    // byok 捆绑形态：先确保本地 runtime 就绪再连 WS（非捆绑/开发形态此调用
+    // 立即返回）。WS 自带退避重连，runtime 稍慢也无碍。
+    if (!kIsWeb && Platform.isWindows) {
+      await LocalRuntimeManager.ensureRunning();
+    }
     _ws.connect();
     _startMessagePolling();
+    // 控制面账号自注册：把安装身份补进管理后台的收件人列表，
+    // 否则后台「全体用户」群发站内信时不会包含本机（fire-and-forget）。
+    unawaited(ControlPlaneAccount.ensureRegistered());
     unawaited(_consumePendingMobileBriefingLaunch());
     unawaited(_ensureAndroidNotificationPermission());
     unawaited(_tryShowMobileLaunchBriefing());
@@ -834,6 +886,22 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
+      // 版本检查先于定位询问：强制升级锁（minVersion 之下的旧客户端）必须
+      // 先于一切启动弹窗生效，锁死时后续询问不再执行。
+      await _checkClientUpdateAtStartup();
+      // byok 首启：config.env 无模型 key 时引导填写（不可跳过），保存后重启
+      // runtime 使 key 生效。
+      if (!kIsWeb && Platform.isWindows && LocalRuntimeManager.isBundled) {
+        if (!LocalRuntimeConfig.hasApiKey) {
+          final BuildContext? keyCtx = _rootNavigatorKey.currentContext;
+          if (keyCtx != null && keyCtx.mounted) {
+            final bool? saved = await showApiKeySetupDialog(context: keyCtx);
+            if (saved == true) {
+              await LocalRuntimeManager.restart();
+            }
+          }
+        }
+      }
       await _promptLocationConsentIfNeeded();
       // 启动时静默拉一次定位并上报（无 jobId 纯上报，填充服务端位置缓存供 Agent 复用）。
       // 原由右侧面板天气 Header 触发，组件移除后改由应用启动兜底；
@@ -1145,19 +1213,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                     ? payload["message"]!.toString().trim()
                     : (payload["reminderMessage"]?.toString().trim() ?? "到点了");
 
-            final BuildContext? navCtx = _rootNavigatorKey.currentContext;
             // 手机后台（类微信常在线）：到点提醒走系统通知，点开回前台
             if (_isMobile && _appBackgrounded) {
               unawaited(LocalNotificationService.show(title: title, body: message));
-            } else if (navCtx != null && navCtx.mounted) {
-              _showReminderPopupDialog(
-                navCtx,
-                title,
-                message,
-                "high",
-                true,
-                "我知道了",
-              );
+            } else {
+              // 决策类触达恒走桌面弹窗（右下角原生窗口），不依赖主窗可见性
+              unawaited(_showScheduleReminderPopup(title, message));
             }
 
             await _syncScheduleFromServer();
@@ -1433,6 +1494,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                       .whereType<Map<String, dynamic>>()
                       .toList()
                   : null;
+          // 「接下来你可以」接续建议（NEXT_UP 协议）：模型生成的下一步任务句，
+          // 服务端已从正文剥离标记块。时机性内容不持久化，仅实时渲染。
+          final List<String>? followUpsFromPayload = payload["followups"] is List
+              ? (payload["followups"] as List)
+                  .map((e) => e.toString().trim())
+                  .where((e) => e.isNotEmpty)
+                  .toList()
+              : null;
           final int? idx = _messageIndexById(messageId);
           if (idx != null) {
             // 默认保留流式阶段已经显示出来的正文，避免 done 到来时整段闪烁替换；
@@ -1466,6 +1535,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 mediaCards: resolvedMediaCards,
                 renderBlocks: renderBlocksFromPayload,
                 replyBlocks: replyBlocksFromPayload,
+                followUpPrompts: followUpsFromPayload,
               );
             });
             await _store.saveMessage(_messages[idx]);
@@ -1481,6 +1551,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               mediaCards: mediaCardsFromPayload,
               renderBlocks: renderBlocksFromPayload,
               replyBlocks: replyBlocksFromPayload,
+              followUpPrompts: followUpsFromPayload,
             );
             setState(() {
               _messages.add(finalMessage);
@@ -1598,8 +1669,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "agent.proactive_message") {
           final String title = payload["title"]?.toString() ?? "Agent 主动联系";
           final String text = payload["text"]?.toString() ?? "";
-          // 统一主动性管道：高重要度主动消息走原生弹窗触达（与日程提醒同级），
-          // 确认/关闭/超时经 _handleDesktopNotification* 回传 outcome 反馈
+          // 统一主动性管道：高重要度主动消息恒走桌面原生弹窗触达，
+          // 确认/关闭/超时按卡片 id 回传 outcome 反馈
           final String importance = payload["importance"]?.toString() ?? "";
           final String deliveryId = payload["deliveryId"]?.toString() ?? "";
           final bool important = importance == "high" || importance == "critical";
@@ -1608,12 +1679,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             unawaited(LocalNotificationService.show(
               title: title, body: text, deliveryId: deliveryId,
             ));
-          } else if (mounted &&
-              important &&
-              deliveryId.isNotEmpty &&
-              !DesktopNotificationLauncher.isVisible.value) {
+          } else if (mounted && important && deliveryId.isNotEmpty) {
+            // 决策类触达恒走桌面原生弹窗（右下角，单卡接管式），
+            // 原生不可用（非 Windows/移动端）自动降级应用内玻璃卡
             unawaited(_showProactiveNativeNotification(title, text, deliveryId));
           } else if (mounted) {
+            // 应用内展示即 impression：上报 viewed（服务端记为"已展示"，不算忽略，
+            // 也不进接受率分母——此前应用内阅读与忽略无法区分，学习信号有偏）
+            if (deliveryId.isNotEmpty) {
+              _sendProactiveOutcome(deliveryId, "viewed");
+            }
             final controller = ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(
                 content: Text("$title\n$text"),
@@ -1662,10 +1737,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             });
           }
         }
-        // ====== 代办足迹实时刷新：服务端落一条新足迹即推送，右侧面板立即重拉 ======
-        if (type == "agent.activity_new") {
-          AgentActivityBus.notify();
-        }
         // ====== 站内信：平台/运营侧推送（服务端已落盘必达，此处只做即时提醒） ======
         if (type == "inbox.message") {
           final String inboxTitle = payload["title"]?.toString() ?? "新消息";
@@ -1675,6 +1746,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               payload["importance"]?.toString() ?? "normal";
           final bool inboxImportant =
               inboxImportance == "high" || inboxImportance == "critical";
+          // 角标即时 +1（轮询会在下个周期校准）
+          if (mounted) setState(() => _inboxUnread += 1);
           // 手机后台（类微信常在线）：系统通知触达，点开回前台后到邮箱-消息 Tab 查看
           if (_isMobile && _appBackgrounded && inboxImportant) {
             unawaited(LocalNotificationService.show(
@@ -1690,7 +1763,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                     : SnackBarAction(
                         label: "知道了",
                         onPressed: () {
-                          unawaited(_inboxApi.markRead(ids: [inboxId]));
+                          unawaited(
+                            _inboxApi
+                                .markRead(ids: [inboxId])
+                                .then((_) => _pollUnreadMessages()),
+                          );
                         },
                       ),
               ),
@@ -1949,22 +2026,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             ));
           }
 
-          final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-          if (navCtx != null && navCtx.mounted) {
-            // 分级触达 ack 归一：用户点掉弹窗 = 已知晓，服务端升级链即停
-            unawaited(() async {
-              try {
-                await _showReminderPopupDialog(
-                  navCtx, title, message, priority, showConfirm, confirmText,
-                );
-                if (attentionId.isNotEmpty) {
-                  await AttentionApi().ack(attentionId, via: "popup");
-                }
-              } catch (_) {
-                // ack 失败不影响本地弹窗（升级链会随截止时间自然收敛）
+          // 分级触达 ack 归一：用户点掉弹窗 = 已知晓，服务端升级链即停。
+          // 决策类触达恒走桌面弹窗（右下角原生窗），不依赖主窗可见性
+          unawaited(() async {
+            try {
+              await _showAttentionPopup(title, message, priority, showConfirm, confirmText);
+              if (attentionId.isNotEmpty) {
+                await AttentionApi().ack(attentionId, via: "popup");
               }
-            }());
-          }
+            } catch (_) {
+              // ack 失败不影响本地弹窗（升级链会随截止时间自然收敛）
+            }
+          }());
         }
 
         // ====== TTS 闹钟升级链事件（tts_alarm_start / tts_alarm_play）======
@@ -1983,12 +2056,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               body: text,
             ));
           } else if (mounted) {
-            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-              SnackBar(
-                content: Text(
-                    important ? "【$priority】$title\n$text" : "$title\n$text"),
-                duration: const Duration(seconds: 10),
-              ),
+            // 应用内提醒卡：玻璃态通知（窗口可见时）
+            GlassNotify.show(
+              title: important ? "【$priority】$title" : title,
+              message: text,
+              variant: important
+                  ? GlassNotifyVariant.warning
+                  : GlassNotifyVariant.info,
+              duration: const Duration(milliseconds: 8000),
             );
             if (important && !kIsWeb && !_isMobile) {
               unawaited(DesktopNotificationLauncher.show(
@@ -2401,6 +2476,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (resolved.isEmpty) return false;
     if (current.isEmpty) return true;
     if (current == resolved) return false;
+    if (current.startsWith(resolved)) {
+      // 服务端权威剥除兜底：流式文本比 finalText 多出尾部内容，说明服务端在
+      // done 前剥掉了流式阶段漏出的内容（NEXT_UP 建议块、残留标记等）——以
+      // finalText 为准，不让泄漏文本留在气泡里（2026-09-22 睡前提醒泄漏）。
+      return true;
+    }
     if (_containsStructuredAssistantMarkers(resolved)) return true;
     if (_looksLikeRawToolJson(current) && !_looksLikeRawToolJson(resolved)) {
       return true;
@@ -2894,11 +2975,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     return "desktop";
   }
 
-  /// 设置页绑定/解绑设备后重连会话，让新凭据随 session.init 生效。
-  void _onAccessCredentialsChanged() {
-    _ws.retryConnect();
-  }
-
   Future<void> _sendMessage({String? text, bool isRetry = false}) async {
     if (!_ws.isConnected) {
       _ws.retryConnect();
@@ -3167,6 +3243,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }
       }
     } catch (_) {}
+    // 站内信未读数（服务端 InboxService 记账，离线消息补齐也走这里）
+    final inboxResult = await _inboxApi.unreadCount();
+    if (inboxResult.ok && mounted) {
+      setState(() => _inboxUnread = inboxResult.value ?? 0);
+    }
   }
 
   void _startMessagePolling() {
@@ -3279,6 +3360,28 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 保存 side 模式下的原右面板宽度，关闭时恢复
       _previousRightPanelWidth = _rightPanelWidth;
       _splitRatio = RightPanelKind.browser.defaultSplitRatio;
+    });
+  }
+
+  /// Agent 主页入口：光球头像单击 / 右侧面板动态区 → 与日程/消息一致，
+  /// 从右侧滑出主页 split 双栏面板（聊天在左、主页在右，可拖拽调宽）。
+  /// 窄窗口（< kWideLayoutBreakpoint）无双栏布局，退化为全屏路由页保证可达。
+  void _openAgentHomePanel() {
+    if (MediaQuery.sizeOf(context).width < kWideLayoutBreakpoint) {
+      final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+      if (navCtx != null && navCtx.mounted) {
+        unawaited(AgentHomePage.show(navCtx));
+      }
+      return;
+    }
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.agentHome;
+      // 保存当前 splitRatio，关闭时恢复
+      _previousSplitRatio = _splitRatio;
+      // 保存 side 模式下的原右面板宽度，关闭时恢复
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.agentHome.defaultSplitRatio;
     });
   }
 
@@ -3610,6 +3713,35 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // 待回传 outcome 的主动消息 deliveryId（原生弹窗生命周期内有效）
   String? _pendingProactiveDeliveryId;
 
+  // ====== 决策弹窗闭合事件 → ack/outcome 完成器 ======
+  // 右下角共享原生窗（DesktopNotificationWindow）的 confirm/dismiss/timeout
+  // 是全局回调、不带 id：展示方按自造 id 挂完成器等待，全局回调据
+  // _pendingDesktopAckCardId 给当前等待者补发闭合事件。
+  final Map<String, Completer<String>> _pendingPopupCloseEvents =
+      <String, Completer<String>>{};
+
+  // 注意力弹窗（reminder_popup）当前在等待闭合的卡 id
+  String? _pendingDesktopAckCardId;
+
+  void _completeDesktopAck(String event) {
+    final String? cardId = _pendingDesktopAckCardId;
+    _pendingDesktopAckCardId = null;
+    if (cardId == null) return;
+    final Completer<String>? completer =
+        _pendingPopupCloseEvents.remove(cardId);
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(event);
+    }
+  }
+
+  /// 等待桌面原生弹窗闭合（confirm/dismiss/timeout）。show 返回 true 后才
+  /// 注册完成器，事件只会晚于展示到达（用户点击/倒计时），不存在先到丢失。
+  Future<String> _waitForPopupClose(String id) {
+    final Completer<String> completer = Completer<String>();
+    _pendingPopupCloseEvents[id] = completer;
+    return completer.future;
+  }
+
   /// App 生命周期（手机后台时主动消息走系统通知，类微信常在线提醒）
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   bool get _isMobile => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
@@ -3651,35 +3783,59 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 高重要度主动消息 → 原生弹窗（与日程提醒同级触达）；原生窗口不可用（如移动端）
-  /// 时降级为应用内弹窗卡片——保证弹窗形式展示，outcome 照常回传
+  /// 高重要度主动消息 → 桌面原生弹窗（右下角 DesktopNotificationWindow，
+  /// 决策类统一承载面，不依赖主窗可见性）；原生不可用（非 Windows/移动端）
+  /// 降级应用内玻璃卡。outcome 三态由全局回调映射：
+  /// 确认 accepted / 点 × dismissed / 倒计时 ignored
   Future<void> _showProactiveNativeNotification(String title, String text, String deliveryId) async {
-    _pendingProactiveDeliveryId = deliveryId;
     _desktopNotificationNeedsFeedback = false;
     _desktopNotificationFeedbackChannel = "websocket";
-    final bool shown = await DesktopNotificationLauncher.show(
+
+    if (!kIsWeb && !_isMobile) {
+      // outcome 走全局回调（按 _pendingProactiveDeliveryId 配对）；窗口为
+      // 接管式单卡，被后到决策弹窗顶掉时未决 outcome 按既有语义放弃
+      _pendingProactiveDeliveryId = deliveryId;
+      final bool ok = await DesktopNotificationLauncher.show(
+        title: title,
+        message: text,
+        priority: "high",
+        showConfirmButton: true,
+        confirmText: "我知道了",
+        autoCloseMs: 45000,
+      );
+      if (ok) return;
+      _pendingProactiveDeliveryId = null;
+    }
+
+    if (!mounted) return;
+    final Completer<void> closed = Completer<void>();
+    bool confirmed = false;
+    GlassNotify.show(
       title: title,
       message: text,
-      priority: "high",
-      showConfirmButton: true,
-      confirmText: "我知道了",
-      autoCloseMs: 45000,
+      variant: GlassNotifyVariant.info,
+      duration: const Duration(milliseconds: 10000),
+      actions: <GlassNotifyAction>[
+        GlassNotifyAction(
+          label: "我知道了",
+          emphasized: true,
+          onPressed: () {
+            confirmed = true;
+            _sendProactiveOutcome(deliveryId, "accepted");
+          },
+        ),
+      ],
+      onClose: (GlassNotifyCloseReason reason) {
+        if (!confirmed) {
+          _sendProactiveOutcome(
+            deliveryId,
+            reason == GlassNotifyCloseReason.dismissed ? "dismissed" : "ignored",
+          );
+        }
+        if (!closed.isCompleted) closed.complete();
+      },
     );
-    if (!shown) {
-      _pendingProactiveDeliveryId = null;
-      if (mounted) {
-        await _showReminderPopupDialog(
-          context,
-          title,
-          text,
-          "high",
-          true,
-          "我知道了",
-          onUserConfirm: () => _sendProactiveOutcome(deliveryId, "accepted"),
-          onUserDismiss: () => _sendProactiveOutcome(deliveryId, "dismissed"),
-        );
-      }
-    }
+    await closed.future;
   }
 
   // ====== 桌面端独立来电悬浮窗回调 ======
@@ -3834,6 +3990,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   void _handleDesktopNotificationConfirm() {
+    _completeDesktopAck("confirm");
     final Map<String, dynamic>? pendingBriefing =
         _pendingDesktopBriefingPayload;
     _pendingDesktopBriefingPayload = null;
@@ -3858,6 +4015,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   void _handleDesktopNotificationDismiss() {
+    _completeDesktopAck("dismiss");
     if (_pendingProactiveDeliveryId != null) {
       _sendProactiveOutcome(_pendingProactiveDeliveryId!, "dismissed");
       _pendingProactiveDeliveryId = null;
@@ -3867,6 +4025,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   void _handleDesktopNotificationTimeout() {
+    _completeDesktopAck("timeout");
     if (_pendingProactiveDeliveryId != null) {
       _sendProactiveOutcome(_pendingProactiveDeliveryId!, "ignored");
       _pendingProactiveDeliveryId = null;
@@ -3890,170 +4049,113 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 显示服务端推送的提醒弹窗（reminder_popup 事件）
-  /// 用于智能提醒系统的 popup 级别——在屏幕右下角弹出通知卡片
-  Future<void> _showReminderPopupDialog(
-    BuildContext? navCtx,
+  /// 日程提醒（schedule.reminder_fired）：需要用户知悉的决策类触达，恒走
+  /// 桌面原生弹窗（右下角 DesktopNotificationWindow 专属，不依赖主窗可见
+  /// 性）；原生不可用（非 Windows/移动端）降级应用内玻璃卡。
+  Future<void> _showScheduleReminderPopup(String title, String message) async {
+    // 日程提醒接管共享右下角窗口：未决的主动消息 outcome 不再有效
+    _pendingProactiveDeliveryId = null;
+    _desktopNotificationNeedsFeedback = true;
+    _desktopNotificationFeedbackChannel = "websocket";
+
+    if (!kIsWeb && !_isMobile) {
+      final bool shown = await DesktopNotificationLauncher.show(
+        title: title,
+        message: message,
+        priority: "high",
+        showConfirmButton: true,
+        confirmText: "我知道了",
+      );
+      if (shown) return;
+    }
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    _showInAppReminderCard(title, message, "high", true, "我知道了");
+  }
+
+  /// 主动性决策弹窗（reminder_popup）：恒走桌面原生弹窗（右下角
+  /// DesktopNotificationWindow，决策类统一承载面，不依赖主窗可见性）；
+  /// 原生不可用（非 Windows/移动端）降级应用内玻璃卡。
+  /// Future 在 confirm/dismiss/超时后完成（调用方据此回 attentionId ack）。
+  Future<void> _showAttentionPopup(
     String title,
     String message,
     String priority,
     bool showConfirm,
-    String confirmText, {
-    VoidCallback? onUserConfirm,
-    VoidCallback? onUserDismiss,
-  }) async {
-    // 提醒弹窗接管共享原生通知窗口：未决的主动消息 outcome 不再有效
-    _pendingProactiveDeliveryId = null;
-    _desktopNotificationNeedsFeedback = showConfirm;
+    String confirmText,
+  ) async {
+    _desktopNotificationNeedsFeedback = false;
     _desktopNotificationFeedbackChannel = "websocket";
-    final bool shown = await DesktopNotificationLauncher.show(
+
+    if (!kIsWeb && !_isMobile) {
+      final String cardId = "att_${DateTime.now().microsecondsSinceEpoch}";
+      final bool ok = await DesktopNotificationLauncher.show(
+        title: title,
+        message: message,
+        priority: priority,
+        showConfirmButton: showConfirm,
+        confirmText: showConfirm ? confirmText : "",
+        // 必须 >0：原生侧 0 = 永不超时，ack Future 会挂死
+        autoCloseMs: 30000,
+      );
+      if (ok) {
+        // 共享窗只有全局闭合回调，把等待 id 交给回调补发闭合事件
+        _pendingDesktopAckCardId = cardId;
+        await _waitForPopupClose(cardId);
+        return;
+      }
+    }
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    _showInAppReminderCard(title, message, priority, showConfirm, confirmText);
+  }
+
+  /// 应用内玻璃卡兜底（桌面原生弹窗不可用时）：黑白毛玻璃，右上角层叠。
+  /// Future 在卡片完全关闭后完成。
+  Future<void> _showInAppReminderCard(
+    String title,
+    String message,
+    String priority,
+    bool showConfirm,
+    String confirmText,
+  ) async {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+
+    final Completer<void> closed = Completer<void>();
+    final bool important = priority == "urgent" || priority == "high";
+
+    GlassNotify.show(
       title: title,
       message: message,
-      priority: priority,
-      showConfirmButton: showConfirm,
-      confirmText: confirmText,
-    );
-    if (shown || navCtx == null || !navCtx.mounted) {
-      return;
-    }
-
-    final Color accentColor = switch (priority) {
-      "urgent" => Colors.red,
-      "high" => Colors.orange,
-      _ => const Color(0xFF4B5563),
-    };
-
-    final IconData iconData = switch (priority) {
-      "urgent" => Icons.warning_amber_rounded,
-      "high" => Icons.notifications_active_rounded,
-      _ => Icons.info_outline_rounded,
-    };
-
-    // 右下角通知卡片 —— 类似微信/QQ 的系统通知
-    showGeneralDialog<void>(
-      context: navCtx,
-      barrierDismissible: true,
-      barrierLabel: "",
-      barrierColor: Colors.transparent,
-      transitionDuration: const Duration(milliseconds: 300),
-      pageBuilder: (ctx, anim1, anim2) => const SizedBox.shrink(),
-      transitionBuilder: (ctx, anim1, anim2, child) {
-        return FadeTransition(
-          opacity: anim1,
-          child: SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(0.3, 0.5), // 从右下角滑入
-              end: Offset.zero,
-            ).animate(
-                CurvedAnimation(parent: anim1, curve: Curves.easeOutCubic)),
-            child: Align(
-              alignment: Alignment.bottomRight,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(0, 0, 24, 40),
-                child: Material(
-                  elevation: 12,
-                  borderRadius: BorderRadius.circular(16),
-                  color: Theme.of(ctx).colorScheme.surface,
-                  clipBehavior: Clip.antiAlias,
-                  child: Container(
-                    constraints: const BoxConstraints(maxWidth: 380),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: accentColor.withValues(alpha: 0.2),
-                        width: 1,
-                      ),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // 标题行：图标 + 标题 + 关闭按钮
-                        Row(
-                          children: [
-                            Icon(iconData, size: 20, color: accentColor),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                title,
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w600,
-                                  color: accentColor,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            // 关闭按钮
-                            GestureDetector(
-                              onTap: () {
-                                onUserDismiss?.call();
-                                Navigator.of(ctx).pop();
-                              },
-                              child: Icon(
-                                Icons.close,
-                                size: 18,
-                                color: Theme.of(ctx)
-                                    .colorScheme
-                                    .onSurfaceVariant
-                                    .withValues(alpha: 0.6),
-                              ),
-                            ),
-                          ],
-                        ),
-
-                        const SizedBox(height: 10),
-
-                        // 正文内容
-                        Text(
-                          message,
-                          style: TextStyle(
-                            fontSize: 14,
-                            height: 1.5,
-                            color: Theme.of(ctx).colorScheme.onSurface,
-                          ),
-                          maxLines: 4,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-
-                        const SizedBox(height: 14),
-
-                        // 底部操作栏
-                        if (showConfirm)
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: TextButton(
-                              onPressed: () {
-                                onUserConfirm?.call();
-                                _sendContactFeedback(
-                                  channel: "websocket",
-                                  responded: true,
-                                  feedback: "positive",
-                                  quietHours: _isQuietHoursNow(),
-                                );
-                                Navigator.of(ctx).pop();
-                              },
-                              style: TextButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 6,
-                                ),
-                              ),
-                              child: Text(confirmText),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
+      variant: switch (priority) {
+        "urgent" => GlassNotifyVariant.error,
+        "high" => GlassNotifyVariant.warning,
+        _ => GlassNotifyVariant.info,
+      },
+      // 重要提醒停留更久，普通提醒按演示页节奏短驻
+      duration: Duration(milliseconds: important ? 8000 : 4500),
+      actions: showConfirm
+          ? <GlassNotifyAction>[
+              GlassNotifyAction(
+                label: confirmText,
+                emphasized: true,
+                onPressed: () {
+                  _sendContactFeedback(
+                    channel: "websocket",
+                    responded: true,
+                    feedback: "positive",
+                    quietHours: _isQuietHoursNow(),
+                  );
+                },
               ),
-            ),
-          ),
-        );
+            ]
+          : const <GlassNotifyAction>[],
+      onClose: (GlassNotifyCloseReason reason) {
+        if (!closed.isCompleted) closed.complete();
       },
     );
+    await closed.future;
   }
 
   void _presentPeerAgentIncoming(Map<String, dynamic> payload) {
@@ -4112,6 +4214,36 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       ),
     );
     return;
+  }
+
+  /// 启动版本检查（Windows 桌面安装形态）：拉服务端 client manifest 与本地版本
+  /// 比对。强制锁/软提醒均只在明确拿到清单时触发，接口失败静默放行（fail-open，
+  /// 服务器不可达不能把用户锁在门外）。顺带把 channel 持久化到本地偏好，为后期
+  /// 收回 runtime（byok → platform 统一 API 服务）留好状态位。
+  Future<void> _checkClientUpdateAtStartup() async {
+    if (kIsWeb || !Platform.isWindows) return;
+    final ClientUpdateCheckResult? result = await checkClientUpdate();
+    if (result == null || !mounted) return;
+    unawaited(
+      _store.savePreference("client.channel", result.manifest.channel),
+    );
+    if (result.status == ClientUpdateStatus.upToDate) return;
+    final BuildContext? ctx = _rootNavigatorKey.currentContext;
+    if (ctx == null || !ctx.mounted) return;
+    await showClientUpdateDialog(
+      context: ctx,
+      manifest: result.manifest,
+      localVersion: result.localVersion,
+      forced: result.status == ClientUpdateStatus.forcedUpdate,
+    );
+  }
+
+  /// 侧栏「检查更新」按钮：见 UpdateResultCard.runManualUpdateCheck
+  /// 的结果分流说明（已是最新→右上角玻璃卡；其余→按钮上方浮卡；强锁→居中弹窗）。
+  Future<void> _checkForUpdateManually() async {
+    final BuildContext? ctx = _rootNavigatorKey.currentContext;
+    if (ctx == null || !ctx.mounted) return;
+    await UpdateResultCard.runManualUpdateCheck(ctx);
   }
 
   /// 弹窗询问 GPS 定位权限：仅询问一次，未显式拒绝则默认同意并立即拉一次 GPS。
@@ -4232,225 +4364,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     return Text(title);
   }
 
-  /// 启动独立的 PySide6 语音波形进程，并隐藏当前 Flutter 窗口，
-  /// 进入纯语音模式（桌面无常驻 UI，仅唤醒/对话时浮现声纹）。
-  /// 由 ChatPage 输入框中的语音按钮通过 onEnterVoiceMode 回调触发。
-  ///
-  /// 环境变量 PAI_WS_URL / PAI_HTTP_BASE / PAI_SESSION_ID / PAI_ACTOR_ID
-  /// 会传递给 voice-orb-py，使其复用当前 session 与后端通信。
-  /// 打开 App 内实时语音（全双工 duplex）会话页。
-  ///
-  /// 与 [_invokeVoiceOrb]（外挂 PySide6 悬浮球）互补：本入口完全在
-  /// Flutter 进程内工作，依赖服务端 voice-duplex 管线，不依赖外部进程。
-  Future<void> _openVoiceDuplex() async {
-    await VoiceDuplexSheet.show(context);
-  }
-
-  Future<void> _invokeVoiceOrb() async {
-    if (!Platform.isWindows) {
-      // 非桌面平台：保留原入口但不执行（后续可扩展 macOS/Linux）
-      debugPrint(
-          "[VoiceOrb] external PySide6 orb is only supported on Windows");
-      return;
-    }
-    if (_voiceOrbProcess != null && _voiceOrbReady) {
-      // 已有进程在跑且波形已就绪：直接隐藏主窗口，交互交给语音模式
-      await windowManager.hide();
-      _ws.sendEvent("mode.changed", <String, dynamic>{
-        "active": true,
-        "source": "voice_orb",
-      });
-      return;
-    }
-    if (_voiceOrbProcess != null && !_voiceOrbReady) {
-      // 进程启动中，忽略重复点击
-      return;
-    }
-
-    final Directory? orbDir = _findVoiceOrbDir();
-    if (orbDir == null) {
-      debugPrint(
-          "[VoiceOrb] voice-orb-py not found (cwd: ${Directory.current.path})");
-      return;
-    }
-    final String script = "${orbDir.path}${Platform.pathSeparator}main.py";
-
-    final Map<String, String> env =
-        Map<String, String>.from(Platform.environment);
-    env["PAI_WS_URL"] = ApiConfig.wsUrl;
-    env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
-    env["PAI_SESSION_ID"] = ApiConfig.sessionId;
-    env["PAI_ACTOR_ID"] = ApiConfig.effectiveActorId;
-    env["PAI_USER_ID"] = ApiConfig.localPin;
-    // 告知悬浮球父进程（本 Flutter 应用）的 PID：
-    // 应用退出/重启后，悬浮球检测到父进程消失会自动结束，避免残留悬浮窗。
-    env["PAI_ORB_PARENT_PID"] = "$pid";
-
-    try {
-      final List<String>? pyCommand = await _resolveVoiceOrbPython();
-      if (pyCommand == null) {
-        debugPrint(
-            "[VoiceOrb] no usable python interpreter found, aborting launch");
-        return;
-      }
-      _voiceOrbProcess = await Process.start(
-        pyCommand.first,
-        <String>[...pyCommand.skip(1), script],
-        workingDirectory: orbDir.path,
-        environment: env,
-      );
-      _voiceOrbProcess!.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(_onVoiceOrbStdout);
-      _voiceOrbProcess!.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((String line) => debugPrint("[VoiceOrb][err] $line"));
-      _voiceOrbProcess!.exitCode.then((int code) {
-        debugPrint("[VoiceOrb] process exited with code $code");
-        _voiceOrbProcess = null;
-        _voiceOrbReadyTimer?.cancel();
-        _voiceOrbReadyTimer = null;
-        if (_voiceOrbReady) {
-          // 悬浮球进程退出（崩溃/被关闭）且主窗口已被隐藏时，立即恢复页面，
-          // 避免应用"卡退"式地消失后无法找回。
-          _voiceOrbReady = false;
-          _restorePageMode();
-        } else {
-          _voiceOrbReady = false;
-        }
-      });
-      // 就绪看门狗：10s 内未收到 ORB_READY（python 启动失败/挂起），
-      // 终止子进程并恢复主窗口，防止主窗口被无限期隐藏。
-      _voiceOrbReadyTimer?.cancel();
-      _voiceOrbReadyTimer = Timer(const Duration(seconds: 10), () {
-        if (_voiceOrbProcess != null && !_voiceOrbReady) {
-          debugPrint("[VoiceOrb] ready timeout, restoring page mode");
-          _voiceOrbProcess?.kill();
-          _voiceOrbProcess = null;
-          _restorePageMode();
-        }
-      });
-    } on Exception catch (e) {
-      debugPrint("[VoiceOrb] failed to start: $e");
-    }
-  }
-
-  /// 恢复 Flutter 主窗口（从语音模式回到页面模式）。
-  /// 所有退出路径（语音指令"打开界面" / 波形右键菜单 / 进程退出 / 看门狗）
-  /// 都汇到这里，并顺带向服务端上报 mode.changed=false。
-  Future<void> _restorePageMode() async {
-    _ws.sendEvent("mode.changed", <String, dynamic>{
-      "active": false,
-      "source": "voice_orb",
-    });
-    await windowManager.show();
-    await windowManager.focus();
-  }
-
-  Process? _voiceOrbProcess;
-  bool _voiceOrbReady = false;
-  Timer? _voiceOrbReadyTimer;
-
   /// 今日安排悬浮卡自动淡出计时器（surface.show 召唤时启动）
   Timer? _surfaceAutoHideTimer;
-
-  /// 从进程工作目录 / 可执行文件目录向上逐级查找 client/voice-orb-py。
-  /// 兼容 flutter run（cwd = client/flutter_app）与从仓库根目录启动两种形态。
-  static Directory? _findVoiceOrbDir() {
-    final List<String> seeds = <String>[
-      Directory.current.path,
-      File(Platform.resolvedExecutable).parent.path,
-    ];
-
-    for (final String seed in seeds) {
-      Directory dir = Directory(seed);
-      for (int i = 0; i < 15; i++) {
-        final Directory candidate = Directory(
-          "${dir.path}${Platform.pathSeparator}client"
-          "${Platform.pathSeparator}voice-orb-py",
-        );
-        if (candidate.existsSync()) {
-          return candidate;
-        }
-        final Directory parent = dir.parent;
-        if (parent.path == dir.path) break;
-        dir = parent;
-      }
-    }
-    return null;
-  }
-
-  /// 探测可用的 Python 解释器启动命令（结果缓存）。
-  /// Windows 上 PATH 里的 `python` 可能是 Microsoft Store 的占位 stub
-  /// （启动即报 "Python was not found" 并退出），因此优先走 py 启动器。
-  List<String>? _voiceOrbPythonCommand;
-
-  Future<List<String>?> _resolveVoiceOrbPython() async {
-    if (_voiceOrbPythonCommand != null) return _voiceOrbPythonCommand;
-    const List<List<String>> candidates = <List<String>>[
-      <String>["py", "-3"],
-      <String>["python"],
-    ];
-    for (final List<String> candidate in candidates) {
-      try {
-        final ProcessResult probe = await Process.run(
-          candidate.first,
-          <String>[...candidate.skip(1), "-c", "import sys"],
-        );
-        if (probe.exitCode == 0) {
-          debugPrint(
-              "[VoiceOrb] using python interpreter: ${candidate.join(" ")}");
-          _voiceOrbPythonCommand = candidate;
-          return candidate;
-        }
-        debugPrint("[VoiceOrb] python candidate "
-            "`${candidate.join(" ")}` rejected (exit ${probe.exitCode})");
-      } on Exception catch (e) {
-        debugPrint(
-            "[VoiceOrb] python candidate `${candidate.join(" ")}` failed: $e");
-      }
-    }
-    return null;
-  }
-
-  void _onVoiceOrbStdout(String line) {
-    debugPrint("[VoiceOrb][out] $line");
-    if (line.contains("__VOICE_ORB_EVENT__:ORB_READY")) {
-      _voiceOrbReadyTimer?.cancel();
-      _voiceOrbReadyTimer = null;
-      _voiceOrbReady = true;
-      // 波形就绪（orb 隐身待命），隐藏 Flutter 主窗口进入纯语音模式
-      windowManager.hide();
-      _ws.sendEvent("mode.changed", <String, dynamic>{
-        "active": true,
-        "source": "voice_orb",
-      });
-    } else if (line.contains("__VOICE_ORB_EVENT__:PAGE_MODE_REQUESTED")) {
-      // 语音指令（"打开界面"）或波形右键菜单请求恢复页面模式
-      _restorePageMode();
-    } else if (line.contains("__VOICE_ORB_EVENT__:MIC_UNAVAILABLE")) {
-      // 麦克风不可用：orb 会自行退出。立即恢复主窗口，避免"窗口消失且无法找回"。
-      debugPrint("[VoiceOrb] mic unavailable, restoring page mode");
-      _voiceOrbProcess?.kill();
-      _restorePageMode();
-    }
-  }
 
   /// 处理服务端 surface.show：按 surface 名召唤对应悬浮卡（Surface-on-Demand）。
   /// 目前支持 today_schedule（今日安排悬浮窗）；未知 surface 静默忽略。
   /// 数据由客户端自取（_loadTodayScheduleFuture），服务端只下发指令不搬日程数据。
-  ///
-  /// 语音模式（voice-orb 常驻）下让位：悬浮卡改由 orb 在竖波悬浮件旁渲染
-  /// （orb 自己收 surface.show 并拉 /api/schedule/today），这里不再召唤
-  /// 原生日程悬浮窗，避免双份呈现。
   Future<void> _handleSurfaceShow(Map<String, dynamic> payload) async {
     if (kIsWeb || !Platform.isWindows) return;
-    if (_voiceOrbReady) {
-      debugPrint("[surface.show] voice mode active, delegated to voice orb");
-      return;
-    }
     final String surface = payload["surface"]?.toString().trim() ?? "";
     if (surface != "today_schedule") return;
     final int ttlSeconds =
@@ -4756,6 +4677,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           navigatorKey: _rootNavigatorKey,
           title: "",
           theme: AppTheme.of(variant),
+          // 玻璃态通知卡挂在 navigator 之上：任意路由上方均可弹出，
+          // 关闭后及时移除 BackdropFilter 层避免常驻模糊开销。
+          // 「检查更新」结果浮卡同层锚定在侧栏更新按钮正上方。
+          builder: (BuildContext context, Widget? child) =>
+              GlassNotifyHost(child: UpdateResultCardHost(child: child)),
           home: Builder(
             builder: (BuildContext context) {
               return Scaffold(
@@ -4778,13 +4704,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                           onSetLightTheme: _setLightTheme,
                           onSetDarkTheme: _setDarkTheme,
                           onSetSystemTheme: _setSystemTheme,
-                          onOpenMessages: _openMessagesPanel,
+                          inboxUnread: _inboxUnread,
+                          onInboxUnreadChanged: (int unread) {
+                            if (mounted) {
+                              setState(() => _inboxUnread = unread);
+                            }
+                          },
                           onOpenSettings: _openSettings,
-                          onOpenUserMenuHelp: _openUserMenuHelp,
+                          onCheckUpdate: _checkForUpdateManually,
+                          onOpenUserMenuFeedback: _openUserMenuFeedback,
                           onOpenDevices: _openDevicesPage,
                           onLogout: _logout,
-                          totalUnread: _unreadByPlatform.values
-                              .fold(0, (int a, int b) => a + b),
                         ),
                         VerticalDivider(
                           width: 1,
@@ -4934,20 +4864,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (navCtx == null || !navCtx.mounted) return;
     Navigator.of(navCtx).push<void>(
       MaterialPageRoute<void>(
-        builder: (BuildContext ctx) => SettingsPage(
-          onCredentialsChanged: _onAccessCredentialsChanged,
-        ),
+        builder: (BuildContext ctx) => const SettingsPage(),
       ),
     );
   }
 
-  /// 用户菜单「帮助与反馈」:打开反馈页(提交反馈 + 我的反馈记录)
-  void _openUserMenuHelp() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (BuildContext ctx) => const FeedbackPage(),
-      ),
-    );
+  /// 用户菜单「反馈」:弹出反馈弹窗(吐槽/报障/建议 + 我的反馈记录)
+  ///
+  /// 本 State 的 context 在 MaterialApp(即 Navigator)之上,直接传给 showDialog
+  /// 会抛 "does not include a Navigator" 且 release 下静默——表现为点了反馈
+  /// 什么都不弹。必须经 [_rootNavigatorKey] 取 Navigator 内部的 context。
+  void _openUserMenuFeedback() {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    FeedbackDialog.show(navCtx);
   }
 
   /// 用户菜单「我的设备」:与对话框构成双面板分栏
@@ -4964,9 +4894,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 用户菜单「退出登录」:先弹确认,确认后弹 SnackBar 占位
+  ///
+  /// 同 [_openUserMenuFeedback]:确认框必须用 Navigator 内部的 context。
   Future<void> _logout() async {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
     final bool? confirmed = await showDialog<bool>(
-      context: context,
+      context: navCtx,
       builder: (BuildContext ctx) {
         return AlertDialog(
           title: const Text("退出登录"),
@@ -4985,12 +4919,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       },
     );
     if (confirmed != true || !mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("退出登录:暂未开放"),
-        duration: Duration(seconds: 2),
-      ),
-    );
+    if (navCtx.mounted) {
+      ScaffoldMessenger.of(navCtx).showSnackBar(
+        const SnackBar(
+          content: Text("退出登录:暂未开放"),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Future<void> _handleMorningBriefingEvent(
@@ -5541,6 +5477,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           scheduleApi: _scheduleApi,
           sessionId: ApiConfig.effectiveActorId,
           reloadListenable: _calendarReloadSignal,
+          onCreateViaChat: _focusChatInput,
         );
       case RightPanelKind.imagePreview:
         final ImagePreviewSnapshot? item = _imagePreview;
@@ -5570,6 +5507,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         return CatalogPage(apiClient: _catalogApi);
       case RightPanelKind.approvals:
         return const ApprovalsPanel();
+      case RightPanelKind.agentHome:
+        // Agent 主页：嵌入模式，面板顶栏已有"主页"标题，
+        // 主页页体不再渲染自带 AppBar（与 GalleryPage.embedded 同约定）
+        return AgentHomePage(embedded: true);
       case RightPanelKind.contentSummary:
         // 内容详情面板：标题栏显示主体标签（见 _rightPanelTitleText），
         // 正文区与弹窗共用视图；按摘要 id 建 Key，切换详情时重置滚动/书签状态
@@ -5633,9 +5574,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // v2：把结构化状态机注入到 ChatPage；v1 链路下传 null 不影响
       turnState: _turnState ?? _pendingLocalTurn,
       isActive: _tabIndex == 0,
-      // 语音对话模式入口（输入框右下 mic 按钮）—— 召唤屏幕右下角 VoiceOrb 悬浮球
-      onEnterVoiceMode: _invokeVoiceOrb,
-      onOpenVoiceDuplex: _openVoiceDuplex,
       onOpenPhoneDialer: () {
         _callMyAgentViaPhone(null);
       },
@@ -5643,11 +5581,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       onDeleteFromMessage: _deleteMessagesFrom,
       onStopAgent: _cancelCurrentTurn,
       onUserAction: _handleCardAction,
+      // 光球头像单击 → 右侧双栏面板打开 Agent 主页（窄窗口退化为全屏路由页）
+      onOpenAgentHome: _openAgentHomePanel,
       // 任务面回执聚合（状态带「N 个任务后台进行中」）+ 逐任务取消入口
       backgroundTaskCount: _taskPlaneActiveTaskIds.length,
       onCancelBackgroundTask: _cancelBackgroundTask,
       // 豆包式列队发送：排队中的用户消息气泡显示「排队中」徽标
       queuedMessageIds: _queuedUserMessageIds,
+      // 「为你推荐」：父级聚合空闲态 + 本地存储（出现时机治理持久化）
+      agentIdle: !_isAgentProcessing &&
+          (_currentToolName?.trim().isEmpty ?? true) &&
+          _taskPlaneActiveTaskIds.isEmpty,
+      localStore: _store,
     );
   }
 

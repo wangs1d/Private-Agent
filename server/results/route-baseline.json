@@ -1,0 +1,205 @@
+{
+  "summary": {
+    "label": "baseline",
+    "total": 20,
+    "planeAccuracy": 0.9,
+    "noWebViolations": 1,
+    "passRate": 0.9,
+    "avgLatencyMs": 973,
+    "at": "2026-09-22T16:50:08.857Z"
+  },
+  "rows": [
+    {
+      "text": "在吗",
+      "expectPlane": "chat",
+      "intent": "chat",
+      "confidence": 0.97,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 800
+    },
+    {
+      "text": "今天有点烦，不想干活",
+      "expectPlane": "chat",
+      "intent": "chat",
+      "confidence": 0.95,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 981
+    },
+    {
+      "text": "你觉得周末宅家好还是出去走走好",
+      "expectPlane": "chat",
+      "intent": "chat",
+      "confidence": 0.95,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 972
+    },
+    {
+      "text": "你是谁",
+      "expectPlane": "chat",
+      "intent": "chat",
+      "confidence": 0.5,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 1270
+    },
+    {
+      "text": "刘浩存最近有什么新动态",
+      "expectPlane": "task",
+      "intent": "realtime_lookup",
+      "confidence": 0.95,
+      "searchQuery": "刘浩存 最新动态 近况",
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 943
+    },
+    {
+      "text": "贵州兴义明天天气怎么样",
+      "expectPlane": "task",
+      "intent": "realtime_lookup",
+      "confidence": 0.98,
+      "searchQuery": "贵州兴义明天天气预报",
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 737
+    },
+    {
+      "text": "比特币现在什么价",
+      "expectPlane": "task",
+      "intent": "realtime_lookup",
+      "confidence": 0.97,
+      "searchQuery": "比特币现在价格 实时行情 美元",
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 685
+    },
+    {
+      "text": "人民币兑美元最近汇率走势如何",
+      "expectPlane": "task",
+      "intent": "realtime_lookup",
+      "confidence": 0.95,
+      "searchQuery": "人民币兑美元最近汇率走势",
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 576
+    },
+    {
+      "text": "给我找几张刘浩存的高清照片",
+      "expectPlane": "task",
+      "intent": "media_retrieval",
+      "confidence": 0.93,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 779
+    },
+    {
+      "text": "最近有什么值得看的新电影上映",
+      "expectPlane": "task",
+      "intent": "realtime_lookup",
+      "confidence": 0.95,
+      "searchQuery": "最近上映的值得看的新电影推荐",
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 851
+    },
+    {
+      "text": "看看我最近的购物订单到哪了",
+      "expectPlane": "chat",
+      "expectNoWeb": true,
+      "intent": "chat",
+      "confidence": 0.5,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 1209
+    },
+    {
+      "text": "我明天有什么日程",
+      "expectPlane": "chat",
+      "expectNoWeb": true,
+      "intent": "chat",
+      "confidence": 0.5,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 1235
+    },
+    {
+      "text": "我钱包余额还有多少",
+      "expectPlane": "chat",
+      "expectNoWeb": true,
+      "intent": "realtime_lookup",
+      "confidence": 0.5,
+      "searchQuery": "我钱包余额还有多少",
+      "planeOk": false,
+      "noWebOk": false,
+      "ms": 1488
+    },
+    {
+      "text": "把我微信里小王发的最后一条消息念给我听",
+      "expectPlane": "chat",
+      "expectNoWeb": true,
+      "intent": "multi_step_task",
+      "confidence": 0.86,
+      "planeOk": false,
+      "noWebOk": true,
+      "ms": 1128
+    },
+    {
+      "text": "帮我设个明天早上8点的提醒",
+      "expectPlane": "chat",
+      "expectNoWeb": true,
+      "intent": "action_write",
+      "confidence": 0.97,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 882
+    },
+    {
+      "text": "不要联网。列出搬家要带的8样物品，每样一行",
+      "expectPlane": "chat",
+      "expectNoWeb": true,
+      "intent": "knowledge_qa",
+      "confidence": 0.5,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 1305
+    },
+    {
+      "text": "为什么天空是蓝色的",
+      "expectPlane": "chat",
+      "intent": "knowledge_qa",
+      "confidence": 0.97,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 539
+    },
+    {
+      "text": "帮我总结一下刚才说的搬家清单的重点",
+      "expectPlane": "chat",
+      "intent": "chat",
+      "confidence": 0.5,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 1497
+    },
+    {
+      "text": "你会做什么",
+      "expectPlane": "chat",
+      "intent": "meta_capability",
+      "confidence": 0.95,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 607
+    },
+    {
+      "text": "帮我把电脑上的Chrome打开然后截图",
+      "expectPlane": "task",
+      "intent": "multi_step_task",
+      "confidence": 0.95,
+      "planeOk": true,
+      "noWebOk": true,
+      "ms": 974
+    }
+  ]
+}

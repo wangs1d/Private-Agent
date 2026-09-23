@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 
 import {
   buildReplyBlocks,
+  extractNextUpSuggestions,
   normalizeReplyCardLayout,
   stripRenderHintDeclarations,
 } from "../src/services/reply-envelope.js";
@@ -349,4 +350,52 @@ test("envelope v2: 多文字段各自析卡，媒体段保持锚定位置", () =
     blocks.map((b) => b.type),
     ["text", "card", "media", "text", "card", "media"],
   );
+});
+
+test("nextup: 事故回归——块提取成 followups 且正文剥离干净", () => {
+  const text =
+    "说好了，01:00 准时喊你——还有八分钟，够你把手头这点事收个尾。到点我会直接叫你『该睡觉啦』，别装没听见。[NEXT_UP_START]\n" +
+    "提前五分钟再提醒一次\n" +
+    "明早八点叫我起床\n" +
+    "[NEXT_UP_END]";
+  const { text: out, followups } = extractNextUpSuggestions(text);
+  assert.deepEqual(followups, ["提前五分钟再提醒一次", "明早八点叫我起床"]);
+  assert.ok(out.startsWith("说好了，01:00 准时喊你"));
+  assert.ok(!out.includes("NEXT_UP"));
+  assert.ok(!out.includes("提前五分钟再提醒一次"), `正文残留建议：${out}`);
+});
+
+test("nextup: 块外复读兜底——正文末尾的建议拼接串被剥掉", () => {
+  const text =
+    "正文说完了。\n" +
+    "提前五分钟再提醒一次明早八点叫我起床\n" +
+    "[NEXT_UP_START]\n" +
+    "提前五分钟再提醒一次\n" +
+    "明早八点叫我起床\n" +
+    "[NEXT_UP_END]";
+  const { text: out, followups } = extractNextUpSuggestions(text);
+  assert.deepEqual(followups, ["提前五分钟再提醒一次", "明早八点叫我起床"]);
+  assert.equal(out, "正文说完了。");
+});
+
+test("nextup: 块外复读带协议标题行与列表符一并剥掉", () => {
+  const text =
+    "正文说完了。\n" +
+    "接下来你可以：\n" +
+    "- 提前五分钟再提醒一次\n" +
+    "- 明早八点叫我起床\n" +
+    "[NEXT_UP_START]\n" +
+    "提前五分钟再提醒一次\n" +
+    "明早八点叫我起床\n" +
+    "[NEXT_UP_END]";
+  const { text: out } = extractNextUpSuggestions(text);
+  assert.equal(out, "正文说完了。");
+});
+
+test("nextup: 正文中间含建议字样的普通句子不受影响", () => {
+  const text =
+    "正文。\n明早八点叫我起床这件事我记下了。\n[NEXT_UP_START]\n明早八点叫我起床\n[NEXT_UP_END]";
+  const { text: out, followups } = extractNextUpSuggestions(text);
+  assert.deepEqual(followups, ["明早八点叫我起床"]);
+  assert.ok(out.includes("明早八点叫我起床这件事我记下了。"));
 });

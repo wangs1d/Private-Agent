@@ -4,21 +4,22 @@
  * 通道阶梯（打扰强度递增）：
  *   L2 chat   对话气泡（agent.proactive_message，WS 直推 + 离线推送兜底）
  *   L3 popup  弹窗卡（reminder_popup，需用户点掉）
- *   L4 voice  语音播报（voiceCapabilityService.pushProactiveVoice）
- *   L5 phone  虚拟来电（virtualPhoneService.callUserWithRinging）
+ *   L4 phone  虚拟来电（virtualPhoneService.callUserWithRinging）
  *   L0 ledger 注意力台账（不打扰，只记「今天我做了什么」）
  *
- * 路由矩阵（初始通道 = 阶梯第 0 级，随未响应时长/截止临近升级）：
- *   decision=confirm（花钱确认）   → chat → popup → voice → phone*
- *   urgency=interrupt（紧急）      → popup → voice → phone*
- *   urgency=alert + fyi（临期告知）→ chat → popup → voice
- *   urgency=normal                → chat（专注态延后投递）
+ * 路由矩阵（用户决策 2026-09-22：要不要用户拍板决定走不走弹窗——
+ *   需要决策的走桌面弹窗，不需要决策的只落右上角足迹，不打扰）：
+ *   decision=confirm（花钱确认）   → chat → popup → phone*
+ *   urgency=interrupt（紧急）      → popup → phone*
+ *   urgency=alert + fyi（临期告知）→ chat + 足迹（不升 popup/voice）
+ *   urgency=normal                → chat + 足迹（专注态延后投递）
  *   decision=none / log           → 台账 only（静默执行，晚间汇报兜底）
  *   *phone 仅 urgency=interrupt 触发（白名单克制：滥用即骚扰）
  *
- * 升级规则（双轨，且相邻两次投递至少间隔 MIN_ESCALATION_GAP_MS 防连发）：
- *   - 截临近轨：距 deadline <30min 升 popup、<10min 升 voice、<3min 升 phone
- *   - 步进轨：无deadline压力时按阶梯固定步进（2min/4min/4min）升级
+ * 升级规则（双轨，且相邻两次投递至少间隔 MIN_ESCALATION_GAP_MS 防连发；
+ * 仅 confirm/interrupt 记录适用——告知类阶梯止于 chat，无升级）：
+ *   - 截临近轨：距 deadline <30min 升 popup、<3min 升 phone
+ *   - 步进轨：无deadline压力时按阶梯固定步进（2min/4min）升级
  *   - deadline 已过仍 open → expired（确认类由 hub TTL 自行作废，这里同步状态）
  * ack 归一：对话回话、弹窗按钮、收件箱处理、通知点击都落到 AttentionStore 的
  * 同一条记录，升级计时看到 ack 即停。
@@ -58,7 +59,6 @@ export type ReachInput = {
 export type ReachChannelDeps = {
   sendChat?: (actorId: string, payload: Record<string, unknown>) => Promise<boolean>;
   sendPopup?: (actorId: string, payload: Record<string, unknown>) => Promise<boolean>;
-  sendVoice?: (actorId: string, text: string) => Promise<boolean>;
   placeCall?: (actorId: string, text: string) => Promise<boolean>;
   sendPush?: (input: {
     actorId: string;
@@ -73,27 +73,28 @@ export type ReachChannelDeps = {
   isUserFocused?: (actorId: string) => boolean;
 };
 
-/** 升级阈值：距截止时间低于该值时允许升到对应通道 */
+/** 升级阈值：距截止时间低于该值时允许升到对应通道。
+ *  voice 语音播报级已删（2026-09-22 用户决策：本质与来电重叠）。 */
 const ESCALATE_BEFORE_MS: Partial<Record<AttentionChannel, number>> = {
   popup: 30 * 60_000,
-  voice: 10 * 60_000,
   phone: 3 * 60_000,
 };
 
 /** 步进轨：在当前级别等待多久未响应后允许升到下一级（index = 当前 level） */
-const STEP_WAIT_MS = [2 * 60_000, 4 * 60_000, 4 * 60_000];
+const STEP_WAIT_MS = [2 * 60_000, 4 * 60_000];
 /** 相邻两次投递的最小间隔（无论哪条轨触发，防连发骚扰） */
 const MIN_ESCALATION_GAP_MS = 90_000;
 /** 专注态下 normal 级最多延后 30min，之后照发 */
 const FOCUS_DEFER_MAX_MS = 30 * 60_000;
 const TICK_MS = 30_000;
 
-/** 阶梯矩阵（见文件头）；phone 级仅 interrupt 到达 */
+/** 阶梯矩阵（见文件头）；phone 级仅 interrupt 到达。
+ *  告知类（alert/normal，无需拍板）阶梯止于 chat——不升弹窗/语音（用户决策
+ *  2026-09-22：需要用户决策的才走桌面弹窗，其余进右上角足迹）。 */
 export function ladderFor(urgency: AttentionUrgency, decision: AttentionDecision): AttentionChannel[] {
-  if (decision === "confirm") return ["chat", "popup", "voice", "phone"];
-  if (urgency === "interrupt") return ["popup", "voice", "phone"];
-  if (urgency === "alert") return ["chat", "popup", "voice"];
-  if (urgency === "normal") return ["chat"];
+  if (decision === "confirm") return ["chat", "popup", "phone"];
+  if (urgency === "interrupt") return ["popup", "phone"];
+  if (urgency === "alert" || urgency === "normal") return ["chat"];
   return [];
 }
 
@@ -144,6 +145,17 @@ export class ReachRouter {
       });
       this.store.ack(record.id, "ledger");
       return this.store.get(record.id) ?? record;
+    }
+
+    // 不需要拍板的告知类（alert/normal）：chat 之外落右上角足迹兜底——
+    // 对话气泡易错过，足迹恒可见（用户决策 2026-09-22）
+    if (input.decision !== "confirm" && input.urgency !== "interrupt") {
+      this.channels.recordActivity?.({
+        actorId: input.actorId,
+        kind: input.kind,
+        title: input.title,
+        summary: input.summary,
+      });
     }
 
     // 已由其他链路投递的通道记为虚拟投递（升级从下一级开始）
@@ -239,11 +251,6 @@ export class ReachRouter {
             return "offline_pushed";
           }
           return "delivered";
-        }
-        case "voice": {
-          const sent =
-            (await this.channels.sendVoice?.(actorId, record.title)) ?? false;
-          return sent ? "delivered" : "failed:not_online";
         }
         case "phone": {
           const sent = (await this.channels.placeCall?.(actorId, `${record.title}。${shortSummary}`)) ?? false;

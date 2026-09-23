@@ -1,4 +1,5 @@
 import { resolveActorId } from "../../../agent/actor-id.js";
+import { isSensitiveTypedText } from "../../../services/agent-task-safety.js";
 import type { ToolHandler, ToolRegistry } from "../../tool-registry.js";
 import type { SharedBrowserCoordinator } from "../../../services/shared-browser-coordinator.js";
 import type { SharedBrowserCdpGateway } from "../../../services/shared-browser/cdp-gateway.js";
@@ -159,6 +160,17 @@ export function registerSharedBrowserTools(
       }
       if (action === "type" && !String(input.text ?? "").trim()) {
         return { ok: false, error: "可信输入须提供 text" };
+      }
+      // 敏感输入门（2026-09-19 P1-1）：与 desktop.run_input type 同口径——
+      // 可信输入是 isTrusted=true 的真实键盘事件，金融/个人敏感信息一律不代打。
+      if (action === "type") {
+        const sens = isSensitiveTypedText(String(input.text ?? ""));
+        if (sens.sensitive) {
+          return {
+            ok: false,
+            error: `可信输入被安全门拦截：${sens.reason}。`,
+          };
+        }
       }
       const actorId = resolveActorId(context);
       if (!coordinator.hasExecutor(actorId)) return offlineResult();

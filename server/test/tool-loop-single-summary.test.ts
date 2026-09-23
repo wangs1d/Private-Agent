@@ -20,6 +20,10 @@ import { join } from "node:path";
 const BENCH_DATA_DIR = mkdtempSync(join(tmpdir(), "tool-loop-bench-"));
 process.env.PA_DATA_DIR = BENCH_DATA_DIR;
 process.env.AGENT_TOKENJUICE_ENABLED = "0";
+// 本文件验证的是 replan/汇总/去重等波次机制基线（AGENT_TOOL_ARCH=legacy 行为）。
+// 静态架构下「尝试全败」会触发单一出口检查多续一波（有意的行为差异），
+// 该行为的验收在 scripts/e2e-tool-arch.ts 台架里做。
+process.env.AGENT_TOOL_ARCH = "legacy";
 
 const { streamCompletionWithTools, safeTruncateDigest, trimHistoryForSummary, selectRelevantTools } = await import(
   "../src/external-model/openai-compatible-tool-loop.js"
@@ -392,7 +396,9 @@ test("D. 持续失败 → replan 波次：带 schema 重规划，模型基于知
   );
 
   assert.ok(out.includes("46.6"), `失败后模型应基于知识回答，实际: ${out.slice(0, 80)}`);
-  assert.equal(executed.length, 2, "失败重试 1 次仍失败（共 2 次执行，replan 不重复执行同参数工具）");
+  // 2026-09-19 重试增强：非超时失败确定性重试至多 2 次（第二次 500ms 退避），
+  // 持续失败 = 首次 + 2 次重试 = 3 次真实执行
+  assert.equal(executed.length, 3, "失败重试 2 次仍失败（共 3 次执行，replan 不重复执行同参数工具）");
   const recs = readAudit("bench-fail");
   assert.equal(recs.length, 2, "失败路径 = 规划 + replan，共 2 次调用");
   // replan 是带 schema 的循环轮（历史增长 + schema 仍在）
@@ -493,7 +499,7 @@ test("G. fast 单波失败：波次耗尽 → 兜底无 schema 汇总（不劣�
   );
 
   assert.ok(out.includes("46.6"), `失败兜底后仍应给出答案，实际: ${out.slice(0, 80)}`);
-  assert.equal(executed.length, 2, "失败重试 1 次（共 2 次执行）");
+  assert.equal(executed.length, 3, "失败重试 2 次（共 3 次执行，含 500ms 退避重试）");
   const recs = readAudit("bench-fast-fail");
   assert.equal(recs.length, 2, "fast 失败路径 = 规划 + 兜底汇总，共 2 次调用");
   assert.equal(requests[1].tools, undefined, "兜底汇总请求不带 schema");

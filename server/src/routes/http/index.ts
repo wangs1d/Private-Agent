@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
 import { registerAccountRoutes } from "./accounts.js";
@@ -7,6 +8,7 @@ import { registerBodyRoutes } from "./body.js";
 import { registerBrainRoutes } from "./brain.js";
 import { registerCatalogRoutes } from "./catalog.js";
 import { registerChatRoutes } from "./chat.js";
+import { registerClientManifestRoutes } from "./client-manifest.js";
 import { registerFriendRoutes } from "./friends.js";
 import { registerInfoRoutes } from "./info.js";
 import { registerUnifiedProtocolRoutes } from "./protocol-unified.js";
@@ -41,15 +43,18 @@ import { registerMorningBriefingRoutes } from "./morning-briefing.js";
 import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
 import { registerPresenceDetectRoutes } from "./presence-detect.js";
 import { registerProactivitySuppressionRoutes } from "./proactivity-suppression.js";
-import { registerProactivityPipelineRoutes } from "./proactivity.js";
+import { registerProactivityPipelineRoutes, registerAutonomyRoutes } from "./proactivity.js";
 import { registerCapabilityReadinessRoutes } from "./capability-readiness.js";
+import { registerChatSuggestionRoutes } from "./chat-suggestions.js";
 import { registerMemoryCrudRoutes } from "./memory-crud.js";
 import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerFeedbackRoutes } from "./feedback.js";
+import { registerAdminAuthRoutes } from "./admin-session-auth.js";
 import { registerAdminConsoleRoutes } from "./admin-console.js";
+import { registerAdminInboxRoutes } from "./admin-inbox.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerGatewayAdminRoutes } from "./gateway-admin.js";
 import { registerToolRegistryRoutes } from "./tool-registry-routes.js";
@@ -70,6 +75,7 @@ import { registerAgentActivityRoutes } from "./agent-activities.js";
 import { registerAgentHomepageRoutes } from "./agent-homepage.js";
 import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
+import { registerRecommendationRoutes } from "../../recommendation/http.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -82,6 +88,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   const worldRouteDeps = deps as unknown as Parameters<typeof registerWorldRoutes>[1];
 
   registerSystemRoutes(app, deps);
+  // 客户端版本清单（自包含，无 deps）：桌面客户端启动检查 + 后期 runtime 收回总开关
+  registerClientManifestRoutes(app);
   registerUnifiedProtocolRoutes(app, deps);
   registerInfoRoutes(app, deps);
   registerScheduleRoutes(app, deps);
@@ -218,8 +226,13 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     fabric: deps.proactivityFabric ?? null,
     suppressionStore: deps.proactivitySuppressionStore ?? null,
   });
+  registerAutonomyRoutes(app, {
+    autonomySettings: deps.autonomySettings ?? null,
+  });
   // 能力就绪状态（渐进式解锁卡片）+ 记忆管理 + 支付护栏/回执（自包含，无 deps）
   registerCapabilityReadinessRoutes(app);
+  // 聊天推荐项（「为你推荐」，联查能力就绪状态后抽样）
+  registerChatSuggestionRoutes(app);
   registerMemoryCrudRoutes(app);
   registerPaymentGuardrailRoutes(app);
   registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore });
@@ -244,8 +257,12 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     agentAccountService: deps.agentAccountService,
     commitmentBoard: deps.commitmentBoard ?? null,
   });
-  registerFeedbackRoutes(app);
+  registerFeedbackRoutes(app, { inboxService: deps.inboxService ?? null });
+  // 管理后台账号密码登录 + 可吊销会话（status/setup/login/logout；requireAdmin 已升级双通道）
+  registerAdminAuthRoutes(app);
   registerAdminConsoleRoutes(app, deps);
+  // 管理后台「消息发送」：收件人解析（全体/指定/分组）+ 发送台账（requireAdmin）
+  registerAdminInboxRoutes(app, deps);
   if (deps.devicePairingService && deps.deviceRegistry) {
     registerDeviceRoutes(app, {
       devicePairingService: deps.devicePairingService,
@@ -276,6 +293,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerBrainRoutes(app, deps);
   // Body Center 路由（bodyCenter 为 null 时端点返回 503 not enabled）
   registerBodyRoutes(app, deps);
+  // 购物建议能力（runtime 内置；商品图/商品库只读端点，推荐卡走 shopping.suggest 工具卡）
+  registerRecommendationRoutes(app, {
+    catalog: deps.recommendationCatalog ?? null,
+    mediaDir: join(process.cwd(), "data", "recommendation", "media"),
+  });
   // Feature Catalog 能力分类路由（featureCatalog 为 null 时端点返回 503）
   registerCatalogRoutes(app, deps);
 }

@@ -1,4 +1,4 @@
-import { createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readdir, stat, unlink, rename } from "node:fs/promises";
 import { join, basename, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -26,6 +26,34 @@ function safeName(raw: string): string {
 
 export function registerDownloadRoutes(app: FastifyInstance): void {
   const dir = downloadsDir();
+
+  /**
+   * GET /downloads/:file — 公开下载（安装包等分发文件，无需鉴权）。
+   * 文件名经 safeName 清洗（去路径分隔符）防目录穿越；只允许普通文件。
+   * 你上传接口返回的 /downloads/xxx 一直缺这个对应端点（404），此处补齐。
+   */
+  app.get("/downloads/:file", async (req, reply) => {
+    const raw = String((req.params as Record<string, string>).file ?? "");
+    const file = safeName(raw);
+    if (!file || file !== raw) {
+      return reply.code(400).send({ ok: false, message: "invalid file name" });
+    }
+    const target = join(dir, file);
+    try {
+      const s = await stat(target);
+      if (!s.isFile()) throw new Error("not a file");
+      return reply
+        .header("content-type", "application/octet-stream")
+        .header("content-length", s.size)
+        .header(
+          "content-disposition",
+          `attachment; filename*=UTF-8''${encodeURIComponent(file)}`,
+        )
+        .send(createReadStream(target));
+    } catch {
+      return reply.code(404).send({ ok: false, message: "file not found" });
+    }
+  });
 
   /** GET /api/admin/downloads/list — 列出可下载文件 */
   app.get("/api/admin/downloads/list", { preHandler: requireAdmin }, async (_req, reply) => {

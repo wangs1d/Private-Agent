@@ -14,6 +14,7 @@
 #include "sphere_overlay_window.h"
 #include "agent_profile_overlay_window.h"
 #include "desktop_notification_window.h"
+#include "glass_notify_window.h"
 #include "incoming_call_window.h"
 #include "connected_call_window.h"
 #include "outgoing_call_window.h"
@@ -47,6 +48,9 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<IncomingCallWindow> incoming_call_window_;
   std::unique_ptr<DesktopNotificationWindow> desktop_notification_window_;
 
+  // 桌面右上角玻璃通知栈（主动性消息专属，脱离主窗口存在）
+  std::unique_ptr<GlassNotifyWindow> glass_notify_window_;
+
   // 今日安排独立悬浮窗（同进程 HWND + GDI 自绘，不依赖 Electron）
   std::unique_ptr<ScheduleFloatingWindow> schedule_floating_window_;
 
@@ -78,6 +82,10 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       desktop_notification_channel_;
 
+  // pai/glass_notify MethodChannel —— 控制桌面右上角玻璃通知栈
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      glass_notify_channel_;
+
   // pai/schedule_floating MethodChannel —— 控制今日安排悬浮窗
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       schedule_floating_channel_;
@@ -96,6 +104,11 @@ class FlutterWindow : public Win32Window {
   void HandleDesktopNotificationMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void HandleGlassNotifyMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void ReportGlassNotifyEvent(const std::string& id,
+                              const std::string& event);
   void HandleScheduleFloatingMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);

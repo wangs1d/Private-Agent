@@ -21,13 +21,15 @@
 
 /** 完整标记 token（无论是否独占一行）。注意：仅用于 replace，勿用于 test（/g 状态）。 */
 const MARKER_TOKEN_RE =
-  /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|CHAT_MEDIA_START|CHAT_MEDIA_END|IMAGE_RESULT_START|IMAGE_RESULT_END)\]/g;
+  /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|CHAT_MEDIA_START|CHAT_MEDIA_END|IMAGE_RESULT_START|IMAGE_RESULT_END|NEXT_UP_START|NEXT_UP_END)\]/g;
 
 /** 独占一行的全大写方括号标记（防御未来新增的服务端标记类型） */
 const MARKER_LINE_RE = /^[ \t]*\[[A-Z_]+(?::[A-Za-z_]+)?\][ \t]*$/;
 
 const CARD_START_LINE = "[AGENT_RESULT_CARD_START]";
 const CARD_END_LINE = "[AGENT_RESULT_CARD_END]";
+const NEXT_UP_START_LINE = "[NEXT_UP_START]";
+const NEXT_UP_END_LINE = "[NEXT_UP_END]";
 
 /** 已知标记起始段：残段命中其前缀才继续扣留（普通方括号文本不受影响） */
 const MARKER_HEADS = [
@@ -39,7 +41,8 @@ const MARKER_HEADS = [
   "[CONTENT_SUMMARY_V2_",
   "[CHAT_MEDIA_",
   "[IMAGE_RESULT_",
-  "[RENDER_", "[AGENT_", "[DATA_", "[VIDEO_", "[CONTENT_", "[CHAT_", "[IMAGE_",
+  "[NEXT_UP_",
+  "[RENDER_", "[AGENT_", "[DATA_", "[VIDEO_", "[CONTENT_", "[CHAT_", "[IMAGE_", "[NEXT_",
 ];
 
 /** 尾部残段是否"可能正在变成标记"：只有最后一个 [ 尚未闭合、且前缀命中已知标记时才扣留。
@@ -62,6 +65,7 @@ export interface StreamMarkerGuard {
 export function createStreamMarkerGuard(): StreamMarkerGuard {
   let pending = ""; // 尚未裁决的尾部残段（未断行，或疑似半截标记）
   let inCardBlock = false; // 已见 CARD_START，丢弃直到 CARD_END
+  let inNextUpBlock = false; // 已见 NEXT_UP_START，丢弃直到 NEXT_UP_END（接续建议由 done 载荷承载）
 
   /** 裁决一行完整文本；返回 null 表示整行丢弃，否则返回可发文本（无换行符） */
   const judgeLine = (line: string): string | null => {
@@ -72,6 +76,35 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
     if (line.trim() === CARD_START_LINE) {
       inCardBlock = true;
       return null;
+    }
+    // NEXT_UP 标记不再要求独占一行：模型实测会把 [NEXT_UP_START] 直接跟在正文
+    // 句号后（违反「单独一行」协议），旧逻辑整行匹配不上 → 不进丢弃态，块内
+    // 建议行原样流给用户，而 done 的 finalText 已被服务端正则剥干净——屏幕上
+    // 留下「正文 + 建议拼接」的泄漏文本（2026-09-22 睡前提醒泄漏事故）。
+    // 现按 token 在行内的实际位置裁决：丢弃态中整行扣下直到行内嵌 END（END 后
+    // 的正文照发，与 extraction 的 replace 语义一致）；非丢弃态遇行内嵌 START，
+    // START 前的正文照发并进入丢弃态；单行完整块（START…END 同行）取块外两段。
+    const startIdx = line.indexOf(NEXT_UP_START_LINE);
+    const endIdx = line.indexOf(NEXT_UP_END_LINE);
+    if (inNextUpBlock) {
+      if (endIdx === -1) return null;
+      inNextUpBlock = false;
+      const after = line
+        .slice(endIdx + NEXT_UP_END_LINE.length)
+        .replace(MARKER_TOKEN_RE, "");
+      return after.trim() ? after : null;
+    }
+    if (startIdx !== -1) {
+      const before = line.slice(0, startIdx).replace(MARKER_TOKEN_RE, "");
+      if (endIdx > startIdx) {
+        const after = line
+          .slice(endIdx + NEXT_UP_END_LINE.length)
+          .replace(MARKER_TOKEN_RE, "");
+        const merged = `${before}${after}`;
+        return merged.trim() ? merged : null;
+      }
+      inNextUpBlock = true;
+      return before.trim() ? before : null;
     }
     const stripped = line.replace(MARKER_TOKEN_RE, "");
     if (stripped !== line) {
@@ -120,6 +153,7 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
         inCardBlock = false;
         return "";
       }
+      inNextUpBlock = false; // 未闭合的接续建议块同样到流尾为止，内容不透出
       if (!pending) return "";
       const rest = pending;
       pending = "";

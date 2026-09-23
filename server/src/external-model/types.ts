@@ -7,7 +7,11 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 export type StreamDeltaHandler = (delta: string) => void;
 
 /** 视觉帧来源：设备摄像头、外部视频流、Agent 侧附件（预留，便于后续自接入摄像头）。 */
-export type VisionSourceKind = "device_camera" | "external_stream" | "agent_attachment";
+export type VisionSourceKind =
+  | "device_camera"
+  | "external_stream"
+  | "agent_attachment"
+  | "desktop_screen";
 
 /** 已通过 MIME 裁定的单帧图像（Base64 无 `data:` 前缀）。 */
 export type VisionFrame = {
@@ -166,13 +170,6 @@ export type AgentPromptMemoryContext = {
    */
   semanticIntent?: string;
   /**
-   * 本模式职责人格（fast / complex 差异化 persona 注入）。
-   * - fast：偏对话流畅、活人感、口语化，自然衔接，不做重活。
-   * - complex：偏逻辑推理与工具调用，多步收敛，输出可直接复述的事实结论。
-   * 由 agent-core 依据路由 mode 注入，让同一套基座人格在不同"脑"上各有侧重。
-   */
-  proactiveAdvice?: string;
-  /**
    * 用户兴趣关注列表（InterestWatcher 接线）：agent 在 system 中看到用户
    * 长期关注的人/事/物（【用户兴趣关注列表】块），话题接得住，且提示用
    * interest.manage 工具维护。无列表时不注入（零开销）。
@@ -191,15 +188,21 @@ export type AgentPromptMemoryContext = {
   conversationTimeline?: string;
   modeRoleGuidance?: string;
   /**
-   * 回复风格模式（2026-09-06，2026-09-11 分层化）：决定【说话方式·伙伴面】
-   * （调子菜单 few-shot + 收放开关 + 禁句表）是否注入。
-   * - chat：对话面（fast/foreground），注入伙伴面；
-   * - task：任务面（complex/后台派发），不注入——交付内容充分展开不受闲聊调子约束，
-   *   风格由 modeRoleGuidance（TASK_PLANE_ROLE_GUIDANCE）自行承担。
-   * 【说话方式·管家底色】（定位/坦诚/称呼礼仪）与模式无关，两层都注入。
-   * 未设置时按 chat 处理。由 agent-core 与 modeRoleGuidance 同点注入。
+   * 回复风格模式（2026-09-06）：chat/task 车道标记，供审计与车道相关逻辑使用。
+   * 2026-09-22 人格·终极版重塑后，风格由 personaStatic（稳定层）/ personaMood
+   * （动态层）承担，本字段不再控制任何块注入。
    */
   replyStyleMode?: "chat" | "task";
+  /**
+   * 人格·终极版·静态块（2026-09-22，agent/persona-core 产出）：身份/关系档位/
+   * 反谄媚/情绪诚实/硬边界/简短。常驻 system 稳定层。
+   */
+  personaStatic?: string;
+  /**
+   * 人格·终极版·动态块：每轮按 resolvePersonaMood 只注入一个 mood 段
+   * （base/casual_wit/roasting/playful/empathy/serious）。沉到动态层。
+   */
+  personaMood?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */
@@ -269,6 +272,19 @@ export type AgentStreamOptions = {
    * 其余工具进 BM25 延迟目录按需召回；含 "full" 或未传时不裁剪（全量注入）。
    */
   toolCapabilities?: string[];
+  /**
+   * 路由意图标签（2026-09-19）：路由层对本轮消息的语义判定（如 action_write /
+   * realtime_lookup / multi_step_task）。工具循环的单一出口检查用它确定性判定
+   * "路由声明需要动手、模型却零工具尝试"的续波——不用文本风格正则。
+   */
+  turnIntent?: string;
+  /**
+   * 本轮是否已注入前置检索证据块（2026-09-23）：工具循环出口检查用于豁免
+   * "realtime 意图 + 证据已在 prompt 里 + 模型零工具直答"的正确行为轮。
+   */
+  turnEvidenceInjected?: boolean;
+  /** 路由置信度（透传 turn-trace 观测用，2026-09-23）。 */
+  turnRouteConfidence?: number;
   toolRankingHint?: ToolRankingHint;
   /** 强制保留的工具名列表(绕过 contextual 筛选)。状态机模式用此字段确保白名单工具始终可见。 */
   pinnedToolNames?: string[];
@@ -326,6 +342,12 @@ export type ChatToolExecutionContext = {
   executeTool: (
     name: string,
     args: Record<string, unknown>,
+    /**
+     * 执行附加信息（可省略）。signal = 单次工具调用的取消信号：工具循环的
+     * 超时竞速落定即 abort，子进程/HTTP 类 handler 可据此提前退出，
+     * 不再"超时只是不等待、执行体继续占着真实设备"。
+     */
+    extras?: { signal?: AbortSignal },
   ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
   /** 查询工具缓存（命中则跳过 executeTool 的安全检查/BodyGateway 等中间层） */
   getCachedToolResult?: (

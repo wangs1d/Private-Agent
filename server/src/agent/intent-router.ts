@@ -12,6 +12,7 @@ export type IntentLabel =
   | "chat" // 寒暄/情绪/观点/闲聊，凭上下文即可答
   | "knowledge_qa" // 常识/知识问答，不依赖实时信息
   | "realtime_lookup" // 需外部实时信息：新闻/某人近况/最新消息/价格/热搜/比分
+  | "personal_data_query" // 查用户自己的数据：日程/订单/快递/钱包/消息/相册——走本地只读工具，绝不联网搜索
   | "media_retrieval" // 找图/照片/视频/壁纸
   | "action_write" // 写数据/有副作用：日程/提醒/发消息/下单
   | "multi_step_task" // 多步操作/软件设备操控/其他办事
@@ -21,6 +22,7 @@ export const INTENT_LABELS: readonly IntentLabel[] = [
   "chat",
   "knowledge_qa",
   "realtime_lookup",
+  "personal_data_query",
   "media_retrieval",
   "action_write",
   "multi_step_task",
@@ -62,10 +64,18 @@ export type IntentRoutePlan = {
 export const INTENT_ROUTING_TABLE: Record<IntentLabel, IntentRoutePlan> = {
   chat: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
   knowledge_qa: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
-  realtime_lookup: { plane: "task", capabilities: ["search"], budget: 2, tier: "flash" },
-  media_retrieval: { plane: "task", capabilities: ["media", "search"], budget: 2, tier: "flash" },
+  // 任务面波预算（2026-09-23 router-first 后 +1）：可见集只剩桥工具，标准流程
+  // = discover 召回 → tool_call 执行 → 收尾作答，最低 3 波（原 2 波会卡在
+  // 「结果已拿到但没波次作答」）。意图预召回命中时可省掉 discover 轮。
+  realtime_lookup: { plane: "task", capabilities: ["search"], budget: 3, tier: "flash" },
+  // personal_data_query（2026-09-23）：查自己的数据落对话面前台直办（chat Core
+  // 恒挂 wallet/messages/calendar 等只读工具）。此前无此标签，这类轮被吸进
+  // realtime_lookup 拿原话当搜索词烧 web 搜索（真实事故：「看看我最近的购物
+  // 订单到哪了」→ 整句进了 AnySearch）。
+  personal_data_query: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
+  media_retrieval: { plane: "task", capabilities: ["media", "search"], budget: 3, tier: "flash" },
   action_write: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
-  multi_step_task: { plane: "task", capabilities: ["full"], budget: 3, tier: "pro" },
+  multi_step_task: { plane: "task", capabilities: ["full"], budget: 4, tier: "pro" },
   meta_capability: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
 };
 
@@ -76,6 +86,13 @@ export function isIntentLabel(value: unknown): value is IntentLabel {
 export function routePlanForIntent(intent: IntentLabel): IntentRoutePlan {
   return INTENT_ROUTING_TABLE[intent];
 }
+
+/**
+ * 任务面兜底波预算（router-first 下的最低可用值）。
+ * 各兜底入口（意图升级/误判转任务/搜索宣称/保守任务面）统一引用，
+ * 保证 discover→call→作答 三波流程完整。
+ */
+export const TASK_PLANE_FALLBACK_BUDGET = 3;
 
 /** 解析容错：宽松变体 → 规范标签（近似词兼容；旧二值输出已随双脑架构删除）。 */
 const INTENT_ALIASES: Record<string, IntentLabel> = {
@@ -91,6 +108,12 @@ const INTENT_ALIASES: Record<string, IntentLabel> = {
   realtime_lookup: "realtime_lookup",
   search: "realtime_lookup",
   news: "realtime_lookup",
+  personal: "personal_data_query",
+  personal_data: "personal_data_query",
+  personal_data_query: "personal_data_query",
+  self_query: "personal_data_query",
+  my_data: "personal_data_query",
+  account_query: "personal_data_query",
   media: "media_retrieval",
   media_retrieval: "media_retrieval",
   image: "media_retrieval",

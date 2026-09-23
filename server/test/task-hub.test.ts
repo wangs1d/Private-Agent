@@ -9,6 +9,9 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const { TaskHub } = await import("../src/task-plane/task-hub.js");
 
@@ -63,4 +66,74 @@ test("失败/取消状态正确流转", () => {
   assert.equal(hub.activeRecords("s5").length, 0);
   assert.equal(hub.get("f1")?.state, "failed");
   assert.equal(hub.get("f2")?.state, "cancelled");
+});
+
+test("submit：restartCount 透传入账（>0 才记）", () => {
+  const hub = new TaskHub();
+  hub.submit({ taskId: "r1", sessionId: "s9", goal: "重跑任务", restartCount: 2 });
+  assert.equal(hub.get("r1")?.restartCount, 2);
+  hub.submit({ taskId: "r2", sessionId: "s9", goal: "首跑任务" });
+  assert.equal(hub.get("r2")?.restartCount, undefined, "首跑任务不带重跑代数");
+});
+
+test("启动恢复：非终态标 failed 并进入打断名单，终态不受影响，drain 取走即清空", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "task-hub-test-"));
+  const path = join(dir, "task-hub.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      seq: 3,
+      records: [
+        {
+          taskId: "t-run",
+          sessionId: "s1",
+          replyAnchorId: "m-run",
+          goal: "跑一半的任务",
+          state: "running",
+          startedAt: 1,
+          updatedAt: 2,
+          startedSeq: 1,
+        },
+        {
+          taskId: "t-quiet",
+          sessionId: "s1",
+          goal: "静默轻任务",
+          state: "awaiting_input",
+          startedAt: 1,
+          updatedAt: 2,
+          startedSeq: 2,
+          quiet: true,
+          restartCount: 1,
+        },
+        {
+          taskId: "t-done",
+          sessionId: "s1",
+          goal: "已完成",
+          state: "done",
+          startedAt: 1,
+          updatedAt: 2,
+          startedSeq: 3,
+        },
+      ],
+    }),
+  );
+  const hub = new TaskHub();
+  hub.enablePersistence(path);
+
+  assert.equal(hub.get("t-run")?.state, "failed");
+  assert.equal(hub.get("t-run")?.progressLine, "服务器重启，任务被中断");
+  assert.equal(hub.get("t-done")?.state, "done", "终态记录照常保留");
+
+  const drained = hub.drainInterruptedOnRestore();
+  assert.deepEqual(
+    drained.map((r) => r.taskId).sort(),
+    ["t-quiet", "t-run"],
+    "running/awaiting_input 都应进入打断名单",
+  );
+  assert.equal(
+    drained.find((r) => r.taskId === "t-quiet")?.restartCount,
+    1,
+    "重跑代数随台账保留",
+  );
+  assert.equal(hub.drainInterruptedOnRestore().length, 0, "取走即清空（幂等）");
 });

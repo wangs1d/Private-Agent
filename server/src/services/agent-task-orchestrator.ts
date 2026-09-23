@@ -114,6 +114,13 @@ export class AgentTaskOrchestrator {
   private readonly audit?: AuditService;
   /** 正在运行的任务 taskId 集合(防并发) */
   private readonly runningTasks = new Set<string>();
+  /**
+   * 运行期 options 暂存（2026-09-19 P1-1 审批续跑）：createAndRun 时登记，
+   * runLoop 退出时按状态取舍——终态清除，awaiting_approval/paused 保留。
+   * approveTask 依据它重新拉起 runLoop，消除「批了只翻状态不续跑」的假确认；
+   * 进程重启后 stash 丢失，approveTask 诚实返回 false（不再静默假确认）。
+   */
+  private readonly taskOptions = new Map<string, RunTaskOptions>();
   /** 主动性模块（可选注入）：任务完成时触发主动恭喜 */
   private proactivityHub: import("../proactivity/proactivity-hub.js").ProactivityHub | null = null;
 
@@ -135,6 +142,7 @@ export class AgentTaskOrchestrator {
   createAndRun(input: CreateAgentTaskInput, options: RunTaskOptions): string {
     const store = getAgentTaskStore();
     const task = store.create(input);
+    this.taskOptions.set(task.id, options);
 
     // 异步启动主循环,不阻塞调用方
     void this.runLoop(task.id, options).catch((err) => {
@@ -256,6 +264,12 @@ export class AgentTaskOrchestrator {
       }
     } finally {
       this.runningTasks.delete(taskId);
+      // options 暂存按状态取舍（2026-09-19 P1-1）：终态清除；等待审批/暂停
+      // 保留——approveTask/resume 依赖它续跑。
+      const finalStatus = getAgentTaskStore().get(taskId)?.status;
+      if (finalStatus && finalStatus !== "awaiting_approval" && finalStatus !== "paused") {
+        this.taskOptions.delete(taskId);
+      }
     }
   }
 
@@ -717,7 +731,10 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
   }
 
   /**
-   * 人工审批:批准任务继续执行
+   * 人工审批:批准任务继续执行。
+   * 2026-09-19 P1-1 修复「假确认」：此前只翻状态、不恢复已退出的主循环，
+   * 批准后任务永远停在 executing。现在依据 createAndRun 暂存的 options
+   * 重新拉起 runLoop 真续跑；stash 丢失（进程重启）时诚实返回 false。
    */
   approveTask(taskId: string, approvedBy: string): boolean {
     const store = getAgentTaskStore();
@@ -729,6 +746,27 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
       t.requiresApproval = false;
       t.approvedBy = approvedBy;
       t.approvedAt = new Date().toISOString();
+    });
+
+    const resumeOptions = this.taskOptions.get(taskId);
+    if (!resumeOptions) {
+      // 续跑上下文缺失（进程重启/内存任务被清）：按拒绝处理，不假确认
+      console.warn(`[agent-task-orchestrator] 任务 ${taskId} 批准但缺少续跑上下文，标记失败`);
+      store.update(taskId, (t) => {
+        t.status = "failed";
+        t.error = "任务已批准但执行上下文丢失（可能因服务重启），请重新发起";
+        t.completedAt = new Date().toISOString();
+      });
+      this.taskOptions.delete(taskId);
+      return false;
+    }
+    void this.runLoop(taskId, resumeOptions).catch((err) => {
+      console.error(`[agent-task-orchestrator] 任务 ${taskId} 审批后续跑异常:`, err);
+      store.update(taskId, (t) => {
+        t.status = "failed";
+        t.error = err instanceof Error ? err.message : String(err);
+        t.completedAt = new Date().toISOString();
+      });
     });
     return true;
   }
@@ -746,6 +784,7 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
       t.error = `被 ${rejectedBy} 拒绝`;
       t.completedAt = new Date().toISOString();
     });
+    this.taskOptions.delete(taskId);
     return true;
   }
 

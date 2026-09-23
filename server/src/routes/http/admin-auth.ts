@@ -4,13 +4,22 @@ import { join } from "node:path";
 
 import type { FastifyReply, FastifyRequest } from "fastify";
 
+import {
+  hasAdminCredential,
+  hasCsrfHeader,
+  resolveAdminSession,
+} from "./admin-session-auth.js";
+
 /**
  * 管理后台共享鉴权与操作审计。
  *
- * 管理令牌只来自环境变量 ADMIN_UPLOAD_TOKEN，不再提供任何默认值：
- * 未配置时管理接口一律 503（宁可拒绝服务也不留默认口令）。
- * 之前 4 个路由文件各自实现了同一份 checkAdmin（默认 token "admin-upload-secret"
- * 兜底），统一收敛到这里；比较用 sha256 + timingSafeEqual 防时序侧信道。
+ * 双通道鉴权（按序）：
+ *  1. 账号密码会话（admin-session-auth.ts，HttpOnly Cookie）——控制台主通道；
+ *     cookie 通道的写请求额外要求 X-Requested-With 头（SameSite 之外的 CSRF 保险）。
+ *  2. 遗留静态口令 ADMIN_UPLOAD_TOKEN（x-admin-token 头）——curl/脚本过渡期保留。
+ *
+ * 失败语义：两通道都不可用且没有任何凭证可配置时 503（宁可拒绝服务也不留默认口令），
+ * 有凭证但不匹配一律 401。比较用 sha256 + timingSafeEqual 防时序侧信道。
  *
  * 审计日志追加写 data/admin-audit.jsonl（每行一个 JSON 事件），超过 5MB
  * 轮转为 .1 只保留一代 —— 管理操作量级不需要更多。
@@ -34,10 +43,10 @@ function tokenMatches(presented: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-/** 请求是否携带有效管理令牌（无 preHandler 场景的条件分支用）。 */
+/** 请求是否携带有效管理凭证（会话或遗留口令；无 preHandler 场景的条件分支用）。 */
 export function isAdminRequest(req: FastifyRequest): boolean {
-  if (!adminTokenConfigured()) return false;
-  return tokenMatches(String(req.headers["x-admin-token"] ?? ""));
+  if (resolveAdminSession(req)) return true;
+  return adminTokenConfigured() && tokenMatches(String(req.headers["x-admin-token"] ?? ""));
 }
 
 /**
@@ -45,13 +54,24 @@ export function isAdminRequest(req: FastifyRequest): boolean {
  * 用法：app.get("/api/admin/x", { preHandler: requireAdmin }, handler)
  */
 export async function requireAdmin(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-  if (!adminTokenConfigured()) {
-    await reply.code(503).send({ ok: false, message: "ADMIN_UPLOAD_TOKEN 未配置，管理接口已锁定" });
+  // 通道一：账号密码会话
+  if (resolveAdminSession(req)) {
+    const isWrite = req.method !== "GET" && req.method !== "HEAD";
+    if (isWrite && !hasCsrfHeader(req)) {
+      await reply.code(403).send({ ok: false, message: "CSRF check failed: missing X-Requested-With" });
+    }
     return;
   }
-  if (!tokenMatches(String(req.headers["x-admin-token"] ?? ""))) {
-    await reply.code(401).send({ ok: false, message: "Unauthorized: invalid admin token" });
+  // 通道二：遗留脚本口令
+  if (adminTokenConfigured() && tokenMatches(String(req.headers["x-admin-token"] ?? ""))) return;
+  // 都没过：完全没有任何凭证可配置 → 503 锁定；否则 401
+  if (!adminTokenConfigured() && !hasAdminCredential()) {
+    await reply
+      .code(503)
+      .send({ ok: false, message: "管理后台尚未初始化：请在 /admin 页面设置管理员账号，或配置 ADMIN_UPLOAD_TOKEN" });
+    return;
   }
+  await reply.code(401).send({ ok: false, message: "Unauthorized: 请先登录管理后台" });
 }
 
 export type AdminAuditEntry = {

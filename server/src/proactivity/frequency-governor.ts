@@ -8,6 +8,7 @@
 // 与 ProactionCortex 的 disturb/repeat_suppress 是双层防线：本模块前置粗筛
 // （触发源层），ProactionCortex 保留细筛（决策层），二者不冲突。
 import type { FrequencyVerdict } from "./proactivity-types.js";
+import * as quietHours from "./quiet-hours.js";
 
 /** 分 kind 冷却毫秒表（env PROACTIVITY_COOLDOWN_<KIND> 可覆盖单值） */
 const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
@@ -45,9 +46,7 @@ const DEFAULT_UNKNOWN_KIND_COOLDOWN_MS = 2 * 60 * 60 * 1000;
  */
 const DAILY_ONCE_KINDS = new Set(["greeting", "interest_share", "monthly_report", "digest"]);
 
-/** 静默时段（对齐 ProactiveContactPolicy quietHours 语义）：23:00-7:00 */
-const QUIET_HOUR_START = 23;
-const QUIET_HOUR_END = 7;
+// 静默时段统一收敛至 quiet-hours.ts（env PROACTIVITY_QUIET_START/END 可配；默认 23:00-7:00）
 
 function readEnvInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -65,8 +64,7 @@ function localDateKey(now: Date): string {
 }
 
 function isQuietHour(hour: number): boolean {
-  // 23 < 7（跨午夜区间）：恒走下半分支
-  return hour >= QUIET_HOUR_START || hour < QUIET_HOUR_END;
+  return quietHours.isQuietHour(hour);
 }
 
 type ActorFrequencyState = {
@@ -94,6 +92,13 @@ export class FrequencyGovernor {
   private readonly disableQuietHours: boolean;
   /** env 显式覆盖过的 kind（restore 时不落盘值覆盖 env 意图） */
   private readonly envOverriddenKinds = new Set<string>();
+  /** 勿扰检查（AutonomySettingsStore.isDnd 的薄依赖；bootstrap 注入，缺省不启用） */
+  private dndCheck?: (actorId: string) => boolean;
+
+  /** 注入勿扰检查（每用户 DND 开关；传 null 清除） */
+  setDndCheck(fn: ((actorId: string) => boolean) | null): void {
+    this.dndCheck = fn ?? undefined;
+  }
 
   constructor(opts?: {
     dailyBudget?: number;
@@ -208,6 +213,12 @@ export class FrequencyGovernor {
     opts?: { awake?: boolean },
   ): FrequencyVerdict {
     const state = this.stateOf(actorId, now);
+
+    // 规则 0：用户勿扰（AutonomySettingsStore DND）——medium/low 一律沉默，
+    // high 及以上放行（与静默时段的 high 豁免口径一致；紧急事不被勿扰吞掉）
+    if (this.dndCheck?.(actorId) === true && importance !== "high") {
+      return { allowed: false, reason: "dnd_active" };
+    }
 
     // 规则 3：静默时段仅 high 放行（awake 时的低打扰档豁免）
     const lowKeyQuietOk = opts?.awake === true && importance !== "high";

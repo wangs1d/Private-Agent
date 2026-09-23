@@ -7,11 +7,12 @@
 //  - 仅缓存 none 决策与「判主动但被抑制/频控拦截」（主动决策的防重复由
 //    FrequencyGovernor 分 kind 冷却负责）
 //  - 当前窗口含 high 显著性观察时永不跳过（重要事件必须真评估）
-//  - TTL 过期自动失效（默认 6h）；条数上限滚动淘汰
+//   - TTL 过期自动失效（默认 24h，2026-09-23 从 6h 上调：L0 分诊后能到评估的
+//    窗口都更值钱，同指纹场景 24h 内重复判 none 的概率极高）；条数上限滚动淘汰
 import type { Observation } from "./proactivity-types.js";
 import { fingerprintText } from "./semantic-trigger-matcher.js";
 
-const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 50;
 
 type CacheEntry = { fingerprint: string; decidedAt: number };

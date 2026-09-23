@@ -1,4 +1,4 @@
-// Agent 主页单测：聚合数据渲染（header 无头像 / 此刻盯着+最近 / 自我介绍）
+// Agent 主页单测：聚合数据渲染（header 无头像 / 动态 / 自我介绍）
 // 与改名面板的建议名池加载。改名/文案编辑的写路径由服务端统一管道测试锁定。
 import "dart:convert" show jsonEncode;
 
@@ -16,8 +16,6 @@ void main() {
   });
 
   http.Client homepageMock({
-    List<Map<String, dynamic>> watching = const [],
-    List<Map<String, dynamic>> recent = const [],
     List<Map<String, dynamic>> posts = const [],
   }) {
     return MockClient((request) async {
@@ -34,7 +32,6 @@ void main() {
               "moodStyle": "gentle",
               "avatarPreset": "dawn",
               "intro": "我是晨昏线，替你值守昼夜交界。",
-              "nowLine": "在帮你盯周六的天气",
               "pinnedPostId": null,
               "nameOrigin": "self",
             },
@@ -43,7 +40,6 @@ void main() {
               "handle": "terminator_line",
               "origin": "self",
             },
-            "now": {"watching": watching, "recent": recent, "nowLine": "在帮你盯周六的天气"},
             "posts": posts,
           }),
           200,
@@ -67,19 +63,8 @@ void main() {
     });
   }
 
-  testWidgets("主页渲染：无头像 header + 此刻 + 自我介绍", (WidgetTester tester) async {
+  testWidgets("主页渲染：无头像 header + 动态 + 自我介绍", (WidgetTester tester) async {
     AgentHomepageApi.clientOverride = homepageMock(
-      watching: [
-        {"id": "c1", "text": "阿里账单", "deadline": null, "category": null},
-      ],
-      recent: [
-        {
-          "id": "act_1",
-          "title": "已为你订购牛奶",
-          "status": "pending",
-          "statusLabel": "配送中",
-        },
-      ],
       posts: [
         {
           "id": "p1",
@@ -100,12 +85,9 @@ void main() {
     expect(find.text("@terminator_line"), findsOneWidget);
     expect(find.text("昼与夜的边界，替你值守。"), findsOneWidget);
     expect(find.byIcon(Icons.person_outline), findsNothing);
-    // 此刻块：Agent 手写一行字 + 盯着 + 最近
-    expect(find.text("此刻"), findsOneWidget);
-    expect(find.text("在帮你盯周六的天气"), findsOneWidget);
-    expect(find.text("盯着"), findsOneWidget);
-    expect(find.textContaining("阿里账单"), findsOneWidget);
-    expect(find.text("已为你订购牛奶（配送中）"), findsOneWidget);
+    // 此刻块已下线（盯着/最近足迹只在右上角足迹卡展示）
+    expect(find.text("此刻"), findsNothing);
+    expect(find.text("盯着"), findsNothing);
     // 动态与自我介绍
     expect(find.text("动态"), findsOneWidget);
     expect(find.textContaining("今天的云像没写完的草稿"), findsOneWidget);

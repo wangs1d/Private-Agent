@@ -49,11 +49,9 @@ const SIGNAL_PRIORITY_MAP: Record<string, number> = {
   // ProactivityHub 多元触发 kind（proactivity-types.ts ProactiveIntentKind）
   overwork_care: 7,
   task_celebration: 6,
-  care: 5,
   followup: 4,
   interest_share: 3,
   interest_alert: 5,
-  greeting: 3,
 };
 
 const DEFAULT_THRESHOLD = 2.0;

@@ -193,6 +193,40 @@ function isHighRiskFinancialTool(toolName: string): boolean {
 }
 
 /**
+ * 工具名级高危判定（2026-09-19 P1-1 危害把握：请求卡拦截用）。
+ * 与 isHighRiskFinancialTool 同口径（静态名单 + FeatureCatalog risk 分类），
+ * 导出供 tool-loop 在「请求卡转正加载」时做前置拦截——高危工具不因模型一句
+ * <tool_request> 就自动进入 chat 车道可见集，资金/外发动作必须走 task.dispatch
+ * 派发后台 + 人工审批，或既有两阶段确认。
+ */
+export function isHighRiskToolName(toolName: string): boolean {
+  return isHighRiskFinancialTool(toolName);
+}
+
+/**
+ * 敏感输入文本判定（2026-09-19 P1-1：CDP 可信输入门用）。
+ * desktop.run_input 的 type 通道已有同口径 DENY/HIGH_RISK 规则；浏览器可信输入
+ * （shared_browser.trusted type）此前没有同款门——真实键盘事件直接打进受控
+ * 表单，反而更该拦。与 desktop 同口径：金融敏感词一律拒绝，个人信息词要求
+ * 用户自行输入。
+ */
+export function isSensitiveTypedText(text: string): { sensitive: boolean; reason?: string } {
+  if (INPUT_DENY_REGEX.test(text)) {
+    return {
+      sensitive: true,
+      reason: "文本包含敏感金融信息（转账/汇款/支付/密码/验证码），禁止自动输入",
+    };
+  }
+  if (INPUT_HIGH_RISK_REGEX.test(text)) {
+    return {
+      sensitive: true,
+      reason: "文本包含敏感个人信息（账号/账户/金额/身份证/银行卡），请让用户自行输入",
+    };
+  }
+  return { sensitive: false };
+}
+
+/**
  * 内置两阶段确认（ask_first）工具：阶段一 confirm=false 只生成摘要+确认 token、
  * 不执行任何不可逆动作；阶段二 confirm=true+token 的 token 即用户确认凭证。
  *

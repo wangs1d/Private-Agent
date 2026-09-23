@@ -46,8 +46,6 @@ type AgentProfile = {
   nameOrigin: AgentProfileNameOrigin;
   /** 自我介绍（SOUL 人设摘要，仅 Agent 经 agent.update_homepage 写） */
   intro: string;
-  /** 「此刻」一行字（Agent 手写的当下状态；承诺板/足迹列表之外的自由叙述） */
-  nowLine: string;
   /** 主页置顶的站内动态 post id */
   pinnedPostId: string | null;
   updatedAt: string | null;
@@ -149,7 +147,6 @@ const DEFAULT_PREFS: UserPreferences = {
     lastProfileEvent: "这是 Agent 当前默认的主页状态。",
     nameOrigin: "default",
     intro: "",
-    nowLine: "",
     pinnedPostId: null,
     updatedAt: null,
   },
@@ -206,9 +203,6 @@ function applyAgentProfilePatch(
   }
   if (typeof patch.intro === "string") {
     target.intro = patch.intro.trim().slice(0, 800);
-  }
-  if (typeof patch.nowLine === "string") {
-    target.nowLine = patch.nowLine.trim().slice(0, 120);
   }
   if (patch.pinnedPostId === null || typeof patch.pinnedPostId === "string") {
     const pinned =

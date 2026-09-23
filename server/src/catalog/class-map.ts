@@ -161,7 +161,6 @@ const RULES: ClassRule[] = [
 /** MCP server alias → 生活域（MCP 工具名形如 mcp.<alias>.<tool>）。 */
 const MCP_ALIAS_DOMAINS: Record<string, LifeDomain> = {
   didi: "travel",
-  rollinggo: "travel",
   yby6: "media",
 };
 

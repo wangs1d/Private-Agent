@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "desktop_screen_capture.h"
+#include "glass_notify_window.h"
 #include "window_position_store.h"
 #include "flutter/generated_plugin_registrant.h"
 
@@ -101,6 +102,16 @@ bool FlutterWindow::OnCreate() {
   desktop_notification_channel_->SetMethodCallHandler(
       [this](const auto& call, auto result) {
         HandleDesktopNotificationMethodCall(call, std::move(result));
+      });
+
+  // pai/glass_notify —— 桌面右上角玻璃通知栈（主动性消息专属）
+  glass_notify_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/glass_notify",
+      &flutter::StandardMethodCodec::GetInstance());
+  glass_notify_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleGlassNotifyMethodCall(call, std::move(result));
       });
 
   // 独立"通话中"窗口 MethodChannel —— pai/connected_call
@@ -294,6 +305,8 @@ void FlutterWindow::OnDestroy() {
   incoming_call_channel_.reset();
   desktop_notification_window_.reset();
   desktop_notification_channel_.reset();
+  glass_notify_window_.reset();
+  glass_notify_channel_.reset();
   connected_call_window_.reset();
   connected_call_channel_.reset();
   outgoing_call_window_.reset();
@@ -722,6 +735,82 @@ void FlutterWindow::ReportDesktopNotificationEvent(const std::string& event) {
       static_cast<int64_t>(GetTickCount64()));
   desktop_notification_channel_->InvokeMethod(
       "onNativeEvent", std::make_unique<flutter::EncodableValue>(payload));
+}
+
+void FlutterWindow::HandleGlassNotifyMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "show") {
+    std::string id;
+    std::string title;
+    std::string message;
+    std::string priority = "normal";
+    std::string confirm_text;
+    int duration_ms = 0;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      id = GetEncodableString(args, "id");
+      title = GetEncodableString(args, "title");
+      message = GetEncodableString(args, "message");
+      priority = GetEncodableString(args, "priority", priority);
+      confirm_text = GetEncodableString(args, "confirmText", confirm_text);
+      duration_ms = GetEncodableInt(args, "durationMs", duration_ms);
+    }
+    if (id.empty()) {
+      result->Error("args", "id is required");
+      return;
+    }
+
+    if (!glass_notify_window_) {
+      glass_notify_window_ = std::make_unique<GlassNotifyWindow>();
+      glass_notify_window_->SetEventCallback(
+          [this](const std::string& ev_id, const std::string& ev) {
+            ReportGlassNotifyEvent(ev_id, ev);
+          });
+    }
+    glass_notify_window_->Show(id, title, message, priority, confirm_text,
+                               duration_ms);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "hide") {
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      const std::string id = GetEncodableString(args, "id");
+      if (glass_notify_window_ && !id.empty()) {
+        glass_notify_window_->Hide(id);
+      }
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "hideAll") {
+    if (glass_notify_window_) glass_notify_window_->HideAll();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "isVisible") {
+    const bool visible = glass_notify_window_ && glass_notify_window_->IsVisible();
+    result->Success(flutter::EncodableValue(visible));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+void FlutterWindow::ReportGlassNotifyEvent(const std::string& id,
+                                           const std::string& event) {
+  if (!glass_notify_channel_) return;
+  flutter::EncodableMap payload;
+  payload[flutter::EncodableValue("id")] = flutter::EncodableValue(id);
+  payload[flutter::EncodableValue("event")] = flutter::EncodableValue(event);
+  payload[flutter::EncodableValue("timestampMs")] = flutter::EncodableValue(
+      static_cast<int64_t>(GetTickCount64()));
+  glass_notify_channel_->InvokeMethod(
+      "onEvent", std::make_unique<flutter::EncodableValue>(payload));
 }
 
 void FlutterWindow::HandleScheduleFloatingMethodCall(
