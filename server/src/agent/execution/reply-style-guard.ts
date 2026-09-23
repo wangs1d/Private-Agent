@@ -14,6 +14,8 @@
  * - 永不变差：整形结果为空时回退原文；只删句、不改写、不重排；
  * - 车道差异：overlong 只管 chat 面（task 交付天然长、由结构豁免）；
  *   人格检查（道歉/找补/连环让步）双车道同规。
+ * - 确认轮（2026-09-24）：日历/提醒创建成功后的办妥确认不吃结构豁免——
+ *   把废话预告排成列表也算 chat 超长（opts.confirmationRound，agent-core 传参）。
  *
  * 与 assistant-humanizer 的分工：humanizer（去重/口头禅清理）挂在认知快路径
  * 与工具结果处理器；本闸挂在主管道唯一收口 TurnFinalizer，主管在此前没有任何
@@ -28,6 +30,18 @@ export type ReplyStyleViolation =
   | "offer_pileup" // 连环让步式收尾（"截图丢给我""或者你想让我""我帮你存"）
   | "self_explain" // 能力自诉句（"我的问题在于：我看不到…"——结论已给，这就是废话）
   | "overlong"; // chat 面纯文本超长（无结构却超过句数/字数上限）
+
+/**
+ * 闸的可选上下文（2026-09-24）：
+ * - confirmationRound（确认轮）：本轮日历/提醒类创建工具刚成功（reminder.plan /
+ *   calendar.create_*）。办妥确认天然是聊天不是交付——模型把"废话预告"排成
+ *   bullet 列表就能吃结构豁免绕过 overlong（真机：订阅科技早报的确认轮写成了
+ *   五段导购原样放行），所以确认轮不吃结构豁免，照走 chat 长度上限。
+ *   结构化确认的确定性整形仍只做最小手术（保多条目信息），压缩交给隔离重写臂。
+ */
+export type ReplyStyleGateOptions = {
+  confirmationRound?: boolean;
+};
 
 export type ReplyStyleGateResult = {
   text: string;
@@ -154,16 +168,17 @@ const CHAT_KEEP_PLAIN_CHARS = 120;
 export function enforceReplyStyle(
   rawText: string,
   lane: ReplyStyleLane = "chat",
+  opts?: ReplyStyleGateOptions,
 ): ReplyStyleGateResult {
   if (!rawText || isGateDisabled()) return { text: rawText, changed: false, violations: [] };
 
   const { body, blocks } = extractProtocolBlocks(rawText);
   if (!body) return { text: rawText, changed: false, violations: [] };
 
-  const violations = detectViolations(body, lane);
+  const violations = detectViolations(body, lane, opts?.confirmationRound ?? false);
   if (violations.length === 0) return { text: rawText, changed: false, violations: [] };
 
-  const trimmedBody = trimBody(body, violations, lane);
+  const trimmedBody = trimBody(body, violations, lane, opts);
   if (!trimmedBody || trimmedBody === body) {
     return { text: rawText, changed: trimmedBody !== body, violations };
   }
@@ -171,7 +186,11 @@ export function enforceReplyStyle(
   return { text: `${trimmedBody}${suffix}`, changed: true, violations };
 }
 
-function detectViolations(body: string, lane: ReplyStyleLane): ReplyStyleViolation[] {
+function detectViolations(
+  body: string,
+  lane: ReplyStyleLane,
+  confirmationRound: boolean,
+): ReplyStyleViolation[] {
   const out: ReplyStyleViolation[] = [];
   const sentences = splitSentences(body);
   const apologyCount = countMatches(body, APOLOGY_WORD_RE);
@@ -190,7 +209,8 @@ function detectViolations(body: string, lane: ReplyStyleLane): ReplyStyleViolati
   }
   if (
     lane === "chat" &&
-    !hasStructure(body) &&
+    // 确认轮不吃结构豁免（见 ReplyStyleGateOptions 注释）
+    (confirmationRound || !hasStructure(body)) &&
     (sentences.length > CHAT_MAX_SENTENCES ||
       body.replace(/[\s*#>`~|]/g, "").length > CHAT_MAX_PLAIN_CHARS)
   ) {
@@ -203,23 +223,29 @@ function detectViolations(body: string, lane: ReplyStyleLane): ReplyStyleViolati
 export function detectReplyStyleViolations(
   text: string,
   lane: ReplyStyleLane = "chat",
+  opts?: ReplyStyleGateOptions,
 ): ReplyStyleViolation[] {
   const { body } = extractProtocolBlocks(text);
   if (!body) return [];
-  return detectViolations(body, lane);
+  return detectViolations(body, lane, opts?.confirmationRound ?? false);
 }
 
 function trimBody(
   body: string,
   violations: ReplyStyleViolation[],
   lane: ReplyStyleLane,
+  opts?: { confirmationRound?: boolean },
 ): string {
   const sentences = splitSentences(body);
   const structured = hasStructure(body);
 
   // 结构化正文（交付/表格/链接）：人格词只做最小手术（删道歉句），不做长度/找补大手术，
   // 避免破坏交付结构。
+  // 确认轮的结构化正文（废话确认排成列表）连道歉句手术都不做：句级 join 会丢掉
+  // 换行排版，而确认轮的压缩本来就该交给隔离重写臂（保事实压缩）——这里原地
+  // 放行，靠 violations 触发重写臂；重写不可用时原文出门（宁长勿残）。
   if (structured) {
+    if (opts?.confirmationRound) return body;
     const kept = sentences.filter((s) => !isDroppableApology(s));
     return kept.length > 0 ? kept.join("") : body;
   }

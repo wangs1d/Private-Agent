@@ -5,7 +5,8 @@
     "outDir": "dist",
     "rootDir": ".",
     "declaration": true,
-    "declarationMap": true
+    "declarationMap": true,
+    "removeComments": true
   },
   "include": ["./**/*.ts"],
   "exclude": ["node_modules", "dist", "standalone", "**/*.test.ts", "tests"]

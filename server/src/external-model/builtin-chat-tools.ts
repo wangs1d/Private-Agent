@@ -677,7 +677,7 @@ export const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "phone.ensure_my_number",
       description:
-        "仅当用户明确要求办理虚拟电话时调用：分配或查询用户与 Agent 共用的 6 位虚拟号码（登记在 Agent 名下）。禁止未要求时主动占号。Agent 互拨前须已申领；对用户可说「您的虚拟号码」。App 内用户呼叫 Agent 不必再输 6 位号。跨 Agent 配对规则同中继。",
+        "仅当用户明确要求办理虚拟电话时调用：分配或查询用户与 Agent 共用的 6 位站内虚拟号码（登记在 Agent 名下，即用户的站内电话号）。禁止未要求时主动占号。申领后方可使用虚拟电话服务（呼出电话）。对用户可说「您的虚拟号码」。",
       parameters: {
         type: "object",
         properties: {},
@@ -688,31 +688,9 @@ export const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "phone.virtual_call",
-      description:
-        "Agent 互拨：拨打另一 Agent 的 6 位虚拟号码（被叫须已申领）。主叫 Agent 须已申领号码（用户明确要求时用 phone.ensure_my_number 办理）。向目标 Agent 推送虚拟来电并朗读 spokenMessage。ringStyle：reminder=自提醒；peer=联络其他 Agent（默认）。与用户通话请用 phone.call_user，勿用本工具。",
-      parameters: {
-        type: "object",
-        properties: {
-          toPhone: { type: "string", description: "6 位数字虚拟号码" },
-          spokenMessage: { type: "string", description: "对方将听到的播报正文（尽量简短清晰）" },
-          ringStyle: {
-            type: "string",
-            enum: ["peer", "reminder"],
-            description: "peer=联络其他 Agent；reminder=提醒风格",
-          },
-        },
-        required: ["toPhone", "spokenMessage"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "phone.call_user",
       description:
-        "Agent 呼叫当前用户：通过 WebSocket 向用户客户端推送语音来电（含 TTS），用户可接听并文字/语音回复。用户不需要虚拟号码。spokenMessage 为播报正文。ringStyle：reminder=提醒；peer=联络（默认）。\n【绝对禁止】\n- 一轮只许调用一次，多次调用系统只认第一次。\n- 禁止回复「马上给你打过去」「好的我给您打个电话」「现在给你打确认」「再打一次」「马上去设」等任何提前告知或重复承诺——用户不需要知道你要打，直接打就是。\n- 别一上来就甩「我是 AI 打不了电话」「没法拨号」这种话。\n- 打电话是后台事儿，跟用户说话时别提倒计时、别说「到时候接一下」、别提「准时喊你」这种内部细节。",
+        "Agent 呼叫当前用户：通过 WebSocket 向用户客户端推送语音来电（含 TTS），用户可接听并回复。主叫须已申领站内号码（未申领会被拒绝）；被叫用户不需要号码。spokenMessage 为播报正文。ringStyle：reminder=提醒；peer=联络（默认）。\n【绝对禁止】\n- 一轮只许调用一次，多次调用系统只认第一次。\n- 禁止回复「马上给你打过去」「好的我给您打个电话」「现在给你打确认」「再打一次」「马上去设」等任何提前告知或重复承诺——用户不需要知道你要打，直接打就是。\n- 别一上来就甩「我是 AI 打不了电话」「没法拨号」这种话。\n- 打电话是后台事儿，跟用户说话时别提倒计时、别说「到时候接一下」、别提「准时喊你」这种内部细节。",
       parameters: {
         type: "object",
         properties: {

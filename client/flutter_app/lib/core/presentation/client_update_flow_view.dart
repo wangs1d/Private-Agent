@@ -31,7 +31,8 @@ class ClientUpdateFlowView extends StatelessWidget {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final Color ink = cs.onSurface;
     final Color inkSoft = cs.onSurfaceVariant;
-    final Color line = cs.outline;
+    // 次操作胶囊描边：outline 在暖色主题的奶白底上过淡，用 onSurface 半透明
+    final Color line = ink.withValues(alpha: 0.28);
 
     return ListenableBuilder(
       listenable: controller,

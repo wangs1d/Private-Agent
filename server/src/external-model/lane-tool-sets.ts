@@ -49,7 +49,6 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   "calendar.list_tasks",
   // 通讯（轻动作）
   "phone.ensure_my_number",
-  "phone.virtual_call",
   "messages.overview",
   "messages.reply",
   "agent.send_to_peer",

@@ -70,12 +70,18 @@ $stagePosix = ($StageRuntime -replace '\\', '/')
 & cmd /c "tar -chf - -C $repoPosix --exclude=./node_modules/@private-ai-agent --exclude=./node_modules/private-ai-agent-server ./node_modules | tar -xf - -C $stagePosix"
 if ($LASTEXITCODE -ne 0) { throw 'node_modules tar copy failed' }
 
-# 3.4 workspace 包（运行时只读 package.json+dist；agent-world 的 config/deps/data 很小一并带上）
+# 3.4 workspace 包：只带运行时必需的 dist+package.json。dist 自包含（包内相对
+# import 全部落在 dist 内，数据文件走 cwd\data），包根的 .ts 源码/config/deps/data
+# 均为开发态产物——整目录拷贝等于把源码随安装包公开。.d.ts/.d.ts.map 运行时
+# 不加载且描述 API 面，一并剥掉。
 $paDir = Join-Path $StageRuntime 'node_modules\@private-ai-agent'
 New-Item -ItemType Directory -Force -Path $paDir | Out-Null
-Copy-Item (Join-Path $Repo 'agent-world') (Join-Path $paDir 'agent-world') -Recurse -Force
-Copy-Item (Join-Path $Repo 'packages\agent-protocol') (Join-Path $paDir 'agent-protocol') -Recurse -Force
-Copy-Item (Join-Path $Repo 'packages\picture') (Join-Path $paDir 'picture') -Recurse -Force
+foreach ($pkg in 'agent-world', 'packages\agent-protocol', 'packages\picture') {
+  $pkgDst = Join-Path $paDir (Split-Path $pkg -Leaf)
+  Copy-Item (Join-Path $Repo "$pkg\dist") (Join-Path $pkgDst 'dist') -Recurse -Force
+  Copy-Item (Join-Path $Repo "$pkg\package.json") (Join-Path $pkgDst 'package.json') -Force
+  Get-ChildItem $pkgDst -Recurse -Include '*.d.ts', '*.d.ts.map' -File | Remove-Item -Force
+}
 
 # 3.5 server 产物（dist + package.json[type:module] + config 默认清单）
 Copy-Item (Join-Path $Repo 'server\dist') (Join-Path $StageRuntime 'dist') -Recurse -Force

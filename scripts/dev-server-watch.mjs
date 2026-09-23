@@ -100,19 +100,8 @@ function stopGateway() {
   }
 }
 
-function stopToolRouter() {
-  if (toolRouterChild && !toolRouterChild.killed) {
-    try {
-      toolRouterChild.kill("SIGTERM");
-    } catch {
-      /* ignore */
-    }
-  }
-}
-
 function stopAll() {
   stopGateway();
-  stopToolRouter();
   if (gatewayWatchChild && !gatewayWatchChild.killed) {
     try {
       gatewayWatchChild.kill("SIGTERM");

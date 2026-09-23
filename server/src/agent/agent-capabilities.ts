@@ -109,7 +109,7 @@ const GLOBAL_RULES_LINES = [
   "【全局状态连续性 · 最高优先级】",
   "任何操作前（落子、发帖、交易、出牌等）必须先调用对应 get_snapshot/get_status 检查当前真实状态。",
   "禁止凭记忆或用户文字判断状态。只有工具返回的数据才是真实状态。",
-  "适用场景：社交(post/comment/like)、市场(purchase/contract)、钱包(transfer/recharge)、日程(calendar/reminder)、电话(virtual_call)、笔记(notes.create/update/delete)。",
+  "适用场景：社交(post/comment/like)、市场(purchase/contract)、钱包(transfer/recharge)、日程(calendar/reminder)、电话(call_user)、笔记(notes.create/update/delete)。",
   "",
   "【访问权限 · 始终完全访问】",
   "Agent 始终以最高权限运行：desktop.visual.run_task、vision.periodic_* / vision.http_pull、self.* 等高权限工具默认可用。",
@@ -500,8 +500,8 @@ const PHONE_MODEL_LINES = [
   "【语音触达 · 静默触达】通过 phone.call_user 工具实现，调用时直接执行，不在回复中提及。",
   "【模式一 · 语音提醒（闹钟式）】适用「提醒我xxx」「语音告诉我」—— 单向 TTS 播报，无来电 UI。spokenMessage 填内容，ringStyle=\"reminder\"。",
   "【模式二 · 电话通话（来电式）】适用「给我打个电话」—— 振铃8秒 → 自动接通 → TTS 播放。spokenMessage 填对用户说的话。当前为 TTS-only 单向模式；未来将升级为 ASR→LLM→TTS 全双工交互。",
-  "【号码归属】6 位虚拟号登记在本 Agent 名下，即用户在本系统的联络号码。用户无需单独再办一张号。",
-  "【Agent↔Agent 互拨】双方均须已申领号码 → phone.virtual_call。",
+  "【号码归属】6 位站内号登记在本 Agent 名下，即用户的站内电话号，申领后方可呼出虚拟电话；接收来电不要求对方有号。",
+  "【Agent↔Agent 联络】Agent 之间不打电话，用 agent.send_to_peer 文本通道联系。",
   "【禁止】禁止回复「马上给你打过去」「好的我给您打电话」「现在打确认」—— 直接调工具即可，不要废话。同一条消息禁止多次调用 phone.call_user。",
 ];
 
@@ -510,8 +510,8 @@ function buildPhoneCapabilityLines(hasVirtualPhone: boolean, virtualPhone?: stri
     ? `📞 语音触达（您的联络号码：${virtualPhone}，登记在 Agent 名下）`
     : "📞 语音触达（尚未申领 6 位联络号码）";
   const tools = hasVirtualPhone
-    ? "★ phone.call_user（核心工具：语音提醒/电话通话，spokenMessage 填内容）| phone.ensure_my_number（查询号码）| phone.virtual_call（Agent 互拨）"
-    : "★ phone.call_user（核心工具：直接语音提醒或打电话给用户，无需先申领号码）| phone.ensure_my_number（用户明确要求时申领）| phone.virtual_call（Agent 互拨须先申领）";
+    ? "★ phone.call_user（核心工具：语音提醒/电话通话，spokenMessage 填内容）| phone.ensure_my_number（查询号码）"
+    : "★ phone.call_user（尚未申领号码：呼出会被拒绝，可引导用户说「帮我申请虚拟号码」后由 phone.ensure_my_number 办理）| phone.ensure_my_number（用户明确要求时申领）";
   return [header, ...PHONE_MODEL_LINES, tools];
 }
 

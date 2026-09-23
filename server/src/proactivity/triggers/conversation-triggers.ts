@@ -1,13 +1,9 @@
 // ProactivityHub —— 对话内触发器（从 agent-core 迁移，新旧替换）
 //
-// 双层检测（零 LLM、零 token）：
-//  1. 关键词种子层（正则）：高精度强线索直判
-//  2. 语义泛化层（SemanticTriggerMatcher）：范例覆盖率评分，捕捉正则写不完的说法；
-//     范例库由 InitiativeEngine 决策蒸馏在线扩充（learnExemplar），越用越准
-//  - followup：等待结果/待办约定 → 主动承接跟进
-//  （care 情绪关怀已下线：实测只有后台成本、无用户可见产出）
+// 关键词种子层（零 LLM、零 token）：高精度强线索直判。
+// - followup：等待结果/待办约定 → 主动承接跟进
+// （语义泛化层与 care 关怀已随 2026-09-24 架构定稿拆除）
 import type { ProactiveIntent } from "../proactivity-types.js";
-import { detectSemanticHook } from "../semantic-trigger-matcher.js";
 
 /** 对话主动类型 */
 export type ConversationProactiveHookKind = "followup";
@@ -30,11 +26,6 @@ export function detectConversationProactiveHook(
   if (!text) return null;
   if (CONV_HOOK_FOLLOWUP_RE.test(text)) {
     return { kind: "followup", importance: "medium", title: "用户有等待跟进或待办事项，值得主动承接" };
-  }
-  // 语义泛化层：正则未命中但范例覆盖达标（换一种说法的强线索）
-  const semantic = detectSemanticHook(text);
-  if (semantic) {
-    return { kind: "followup", importance: "medium", title: "用户话里有待跟进的事（语义识别）" };
   }
   return null;
 }

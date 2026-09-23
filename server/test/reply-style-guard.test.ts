@@ -158,6 +158,53 @@ test("RENDER_HINT 内联标记不参与检测，整形后保真", () => {
   assert.ok(result.text.includes("[RENDER_HINT:structured]"));
 });
 
+// ── 确认轮（2026-09-24）：日历/提醒创建成功后的办妥确认 ──
+
+// 真机反面教材（2026-09-24 订阅科技早报确认轮）：一句确认写成了五段导购，
+// 靠 bullet 列表吃结构豁免绕过 overlong。作为确认轮校准夹具。
+const REAL_VERBOSE_CONFIRM = [
+  "早报定好了——明早 08:00 准时送到，标题「科技早报」，到点我会把当天的科技资讯给你端上来。",
+  "一件事说清楚：这份早报的内容是明早现查现给的，不是现在提前写好的。科技新闻这东西一天一个样，现在写了明早就馊了，所以我没提前攒稿子，到点现场抓最新的给你。",
+  "明早你收到的时候，大概是这么几块：",
+  "- 大厂动态——苹果、华为、小米这些当天有什么动作",
+  "- AI 前沿——模型发布、产品更新、行业风向",
+  "- 硬件新品——手机、芯片、数码圈的新东西",
+  "- 值得一看——我会挑几条真有意思的，不给你堆流水账",
+  "要是有特别想打的方向（比如只关心 AI，或者只关心手机），现在说一声，明早我就往那个方向使劲。",
+].join("\n");
+
+test("普通 chat 轮：列表化废话确认吃结构豁免（旧行为基线，豁免只该保护交付）", () => {
+  const result = enforceReplyStyle(REAL_VERBOSE_CONFIRM, "chat");
+  assert.equal(result.violations.includes("overlong"), false);
+});
+
+test("确认轮：列表化废话确认不吃结构豁免，overlong 定罪", () => {
+  const result = enforceReplyStyle(REAL_VERBOSE_CONFIRM, "chat", { confirmationRound: true });
+  assert.ok(result.violations.includes("overlong"));
+  // 结构化确认的确定性整形只做最小手术（保多条目信息），压缩交给隔离重写臂
+  assert.equal(result.changed, false);
+});
+
+test("确认轮：简短办妥确认零接触", () => {
+  const text = "订好了，明早 8 点准时给你送到。";
+  const result = enforceReplyStyle(text, "chat", { confirmationRound: true });
+  assert.equal(result.changed, false);
+  assert.equal(result.violations.length, 0);
+});
+
+test("确认轮：多条目列表确认原文放行（确定性整形不砍，交给重写臂保事实）", () => {
+  const multi = [
+    "三件事都订好了：",
+    "- 明早 08:00 科技早报",
+    "- 明天 09:00 提醒吃药",
+    "- 明晚 22:00 提醒睡觉",
+  ].join("\n");
+  const result = enforceReplyStyle(multi, "chat", { confirmationRound: true });
+  assert.ok(result.violations.includes("overlong"));
+  assert.equal(result.changed, false);
+  assert.ok(result.text.includes("22:00 提醒睡觉"));
+});
+
 // ── 隔离重写臂（TurnFinalizer 层）──
 
 function makeFinalizer(provider: ExternalChatProvider | null): TurnFinalizer {
@@ -236,6 +283,30 @@ test("无 provider 时越形回复仍走确定性整形", async () => {
   });
   assert.equal(reply.text.includes("糟心"), false);
   assert.ok(reply.text.includes("没查到"));
+});
+
+test("确认轮隔离重写臂：废话确认被压成两句短话", async () => {
+  const finalizer = makeFinalizer(
+    stubProvider("订好了，明早 8 点科技早报准时送到。"),
+  );
+  const reply = await finalizer.finish(
+    "style-gate-test",
+    "每天早上八点给我一份科技早报",
+    REAL_VERBOSE_CONFIRM,
+    {
+      streamedChunks: true,
+      modelCallsConsumed: 1,
+      planExecuteUsed: false,
+      pePlan: null,
+      peExhausted: false,
+      trajCap: undefined,
+      lane: "chat",
+      confirmationRound: true,
+    },
+  );
+  assert.ok(reply.text.startsWith("订好了"));
+  assert.equal(reply.text.includes("现查现给"), false);
+  assert.equal(reply.text.includes("大厂动态"), false);
 });
 
 test("合格回复不触发重写臂（零调用、零改动）", async () => {

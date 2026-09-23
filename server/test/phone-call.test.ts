@@ -393,14 +393,14 @@ test("启用态 schema↔执行器对齐 + 与既有电话命名空间零冲突�
     "执行器有、schema 无",
   );
 
-  // 命名即语义：phone_call.* 不得与虚拟电话（agent.phone.* / phone.virtual_call /
-  // phone.call_user）或设备桥工具（phone.*）共享任何名字
+  // 命名即语义：phone_call.* 不得与虚拟电话（agent.phone.* / phone.call_user /
+  // phone.ensure_my_number）或设备桥工具（phone.*）共享任何名字
   const names = mod.chatTools.map((t) => (t.type === "function" ? t.function?.name : "")).filter(Boolean) as string[];
   for (const name of names) {
     assert.ok(name.startsWith("phone_call."), `工具名必须落在 phone_call.* 命名空间: ${name}`);
     assert.ok(!PHONE_BRIDGE_TOOL_NAMES.has(name), `与设备桥工具重名: ${name}`);
     assert.ok(!name.startsWith("agent.phone."), `与虚拟电话事件族重名: ${name}`);
-    assert.ok(!["phone.virtual_call", "phone.call_user", "phone.ensure_my_number", "phone.dial"].includes(name));
+    assert.ok(!["phone.call_user", "phone.ensure_my_number", "phone.dial"].includes(name));
   }
   assert.equal(names.length, new Set(names).size, "无内部重名");
 
@@ -408,7 +408,7 @@ test("启用态 schema↔执行器对齐 + 与既有电话命名空间零冲突�
   const descriptions = mod.chatTools.map((t) => (t.type === "function" ? t.function?.description ?? "" : "")).join("\n");
   assert.match(descriptions, /虚拟电话/);
   assert.match(descriptions, /phone\.dial/);
-  assert.match(descriptions, /phone\.virtual_call/);
+  assert.match(descriptions, /phone\.call_user/);
 });
 
 test("maskPhoneNumber：常规 11 位 / 带区号 / 短号", () => {

@@ -1,14 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "fs/promises";
+import { mkdtemp, readdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 
 // ---- 环境准备（须在动态 import 服务模块前完成：超时常量为模块加载期 IIFE 读取）----
 process.env.VIRTUAL_PHONE_USER_CALL_AGENT_TIMEOUT_MS = "400";
 const tmpDir = await mkdtemp(join(tmpdir(), "vp-service-test-"));
 process.env.VIRTUAL_PHONES_FILE = join(tmpDir, "virtual-phones.json");
+process.env.VIRTUAL_PHONE_CALLS_FILE = join(tmpDir, "virtual-phone-calls.json");
+process.env.VIRTUAL_PHONE_HISTORY_DIR = join(tmpDir, "virtual-phone-history");
 
 const { VirtualPhoneService } = await import("../src/services/virtual-phone-service.js");
 const { WsConnectionRegistry } = await import("../src/services/ws-connection-registry.js");
@@ -23,7 +26,7 @@ class FakeSocket {
   }
 }
 
-function makeService(opts?: { paired?: boolean }) {
+function makeService() {
   const registry = new WsConnectionRegistry();
   const sockets = new Map<string, FakeSocket>();
   const connect = (id: string): FakeSocket => {
@@ -39,11 +42,9 @@ function makeService(opts?: { paired?: boolean }) {
       base64: Buffer.from(text).toString("base64"),
     }),
   };
-  const pairing = { arePaired: () => opts?.paired ?? true };
   const service = new VirtualPhoneService(
     tts as never,
     registry,
-    pairing as never,
   );
   return { service, connect, sockets };
 }
@@ -71,7 +72,6 @@ test("ensureNumber 分配 6 位号码且幂等", async () => {
   const first = service.ensureNumber("actor-a");
   assert.match(first, /^\d{6}$/);
   assert.equal(service.ensureNumber("actor-a"), first);
-  assert.equal(service.resolveActorByPhone(first), "actor-a");
 });
 
 test("ensureNumber 持久化到 VIRTUAL_PHONES_FILE", async () => {
@@ -82,88 +82,6 @@ test("ensureNumber 持久化到 VIRTUAL_PHONES_FILE", async () => {
     byActor: Record<string, string>;
   };
   assert.equal(raw.byActor["actor-persist"], num);
-});
-
-// ============================================================
-// placeCall（Agent → Agent）
-// ============================================================
-
-test("placeCall：主叫未申领号码时报错", async () => {
-  const { service } = makeService();
-  const targetNum = service.ensureNumber("actor-target");
-  const result = await service.placeCall({
-    fromActorId: "actor-caller",
-    toPhone: targetNum,
-    transcript: "你好",
-    ringStyle: "peer",
-    initiatedBy: "user",
-  });
-  assert.equal(result.ok, false);
-  assert.match(result.error!, /申领/);
-});
-
-test("placeCall：被叫号码未注册时报错", async () => {
-  const { service } = makeService();
-  service.ensureNumber("actor-caller");
-  const result = await service.placeCall({
-    fromActorId: "actor-caller",
-    toPhone: "999999",
-    transcript: "你好",
-    ringStyle: "peer",
-    initiatedBy: "user",
-  });
-  assert.equal(result.ok, false);
-  assert.match(result.error!, /未注册/);
-});
-
-test("placeCall：成功向被叫 Agent 推送来电（含 TTS）", async () => {
-  const { service, connect } = makeService();
-  const fromPhone = service.ensureNumber("actor-caller");
-  const toPhone = service.ensureNumber("actor-target");
-  const sock = connect("actor-target");
-
-  const result = await service.placeCall({
-    fromActorId: "actor-caller",
-    toPhone,
-    transcript: "我是主叫 Agent",
-    ringStyle: "peer",
-    initiatedBy: "user",
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.pushed, true);
-  assert.equal(result.fromPhone, fromPhone);
-
-  const incoming = eventsOf(sock, "agent.phone.incoming");
-  assert.equal(incoming.length, 1);
-  const payload = incoming[0].payload as Record<string, unknown>;
-  assert.equal(payload.callId, result.callId);
-  assert.equal(payload.direction, "agent_to_agent");
-  assert.equal(payload.transcript, "我是主叫 Agent");
-  const tts = payload.tts as Record<string, unknown>;
-  assert.equal(tts.format, "mp3");
-});
-
-test("placeCall：要求配对且未配对时拒绝", async () => {
-  const { service } = makeService({ paired: false });
-  service.ensureNumber("actor-caller");
-  const toPhone = service.ensureNumber("actor-target");
-  const prev = process.env.AGENT_RELAY_REQUIRE_PAIR;
-  process.env.AGENT_RELAY_REQUIRE_PAIR = "1";
-  try {
-    const result = await service.placeCall({
-      fromActorId: "actor-caller",
-      toPhone,
-      transcript: "你好",
-      ringStyle: "peer",
-      initiatedBy: "user",
-    });
-    assert.equal(result.ok, false);
-    assert.match(result.error!, /配对/);
-  } finally {
-    if (prev === undefined) delete process.env.AGENT_RELAY_REQUIRE_PAIR;
-    else process.env.AGENT_RELAY_REQUIRE_PAIR = prev;
-  }
 });
 
 // ============================================================
@@ -252,6 +170,7 @@ test("callUserWithRinging 两阶段推送（ringing_start → call_connecting）
 test("用户呼叫 Agent：connecting → connected（Agent 回应 + TTS）", async () => {
   const { service, connect } = makeService();
   service.ensureNumber("actor-agent");
+  service.ensureNumber("user-1"); // 门禁：主叫用户须已申领站内号码
   const sock = connect("user-1");
 
   service.setUserCallAgentHandler(async ({ userMessage }) => {
@@ -284,6 +203,7 @@ test("用户呼叫 Agent：connecting → connected（Agent 回应 + TTS）", as
 
 test("用户呼叫 Agent：Agent 处理器抛错时按兜底话术接通", async () => {
   const { service, connect } = makeService();
+  service.ensureNumber("user-1");
   const sock = connect("user-1");
   service.setUserCallAgentHandler(async () => {
     throw new Error("llm down");
@@ -309,6 +229,7 @@ test("用户呼叫 Agent：Agent 处理器抛错时按兜底话术接通", async
 
 test("用户呼叫 Agent：Agent 回应超时按兜底话术接通", async () => {
   const { service, connect } = makeService();
+  service.ensureNumber("user-1");
   const sock = connect("user-1");
   service.setUserCallAgentHandler(() => new Promise(() => {})); // 永不返回
 
@@ -328,6 +249,138 @@ test("用户呼叫 Agent：Agent 回应超时按兜底话术接通", async () =>
     .map((e) => e.payload as Record<string, unknown>)
     .find((p) => p.status === "connected")!;
   assert.match(String(connected.transcript), /接通/);
+});
+
+test("门禁：未申领号码的用户发起呼叫被拒绝", async () => {
+  const { service } = makeService();
+  service.ensureNumber("actor-agent");
+  const result = await service.handleUserCallAgent({
+    fromUserId: "user-no-number",
+    toActorId: "actor-agent",
+    ringPhase: { enableRingingPhase: false },
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error!, /申领/);
+});
+
+test("releaseNumber：释放后可重新申领、重复释放报错", () => {
+  const { service } = makeService();
+  service.ensureNumber("user-1");
+  assert.equal(service.releaseNumber("user-1").ok, true);
+  assert.equal(service.getPhoneForActor("user-1"), undefined);
+  const again = service.releaseNumber("user-1");
+  assert.equal(again.ok, false);
+  assert.match(again.error!, /尚未申领/);
+  // 释放后可再次申领到新号
+  assert.match(service.ensureNumber("user-1"), /^\d{6}$/);
+});
+
+test("忙线护栏：同用户第二通 Agent 来电被拒且不覆盖第一通", async () => {
+  const { service, connect } = makeService();
+  const sock = connect("user-1");
+  const first = await service.callUser({
+    fromActorId: "actor-a",
+    toUserId: "user-1",
+    transcript: "第一通",
+    ringStyle: "peer",
+  });
+  assert.equal(first.ok, true);
+  const second = await service.callUser({
+    fromActorId: "actor-b",
+    toUserId: "user-1",
+    transcript: "第二通",
+    ringStyle: "peer",
+  });
+  assert.equal(second.ok, false);
+  assert.equal(second.busy, true);
+  // 用户只收到一条真来电 + 一条 busy 状态，不存在第二条 incoming
+  assert.equal(eventsOf(sock, "agent.phone.incoming").length, 1);
+  assert.ok(
+    eventsOf(sock, "agent.phone.call_status").some(
+      (e) => (e.payload as Record<string, unknown>).status === "busy",
+    ),
+  );
+});
+
+test("忙线护栏：用户通话中再次发起呼叫被拒", async () => {
+  const { service } = makeService();
+  service.ensureNumber("user-1");
+  const first = await service.handleUserCallAgent({
+    fromUserId: "user-1",
+    toActorId: "actor-a",
+    ringPhase: { enableRingingPhase: false },
+  });
+  assert.equal(first.ok, true);
+  const second = await service.handleUserCallAgent({
+    fromUserId: "user-1",
+    toActorId: "actor-b",
+    ringPhase: { enableRingingPhase: false },
+  });
+  assert.equal(second.ok, false);
+  assert.equal(second.busy, true);
+  service.endCall(first.callId!, "user_hangup");
+  const third = await service.handleUserCallAgent({
+    fromUserId: "user-1",
+    toActorId: "actor-b",
+    ringPhase: { enableRingingPhase: false },
+  });
+  assert.equal(third.ok, true); // 挂断后可再次发起
+});
+
+test("重启恢复：遗留会话补推 ended(server_restart) 并清理落盘", async () => {
+  const { service, connect } = makeService();
+  const sock = connect("user-9");
+  // 独立会话文件路径：避开全局写队列中早前测试排队持久化的竞态覆盖
+  const recoverFile = join(tmpDir, `calls-recover-${Date.now()}.json`);
+  const prev = process.env.VIRTUAL_PHONE_CALLS_FILE;
+  process.env.VIRTUAL_PHONE_CALLS_FILE = recoverFile;
+  try {
+    await writeFile(
+      recoverFile,
+      JSON.stringify({
+        sessions: [
+          {
+            callId: "stale-1",
+            fromActorId: "actor-a",
+            toUserId: "user-9",
+            direction: "agent_to_user",
+            createdAt: Date.now() - 1000,
+          },
+        ],
+      }),
+      "utf8",
+    );
+    await service.load();
+    const ended = eventsOf(sock, "agent.phone.call_status").find(
+      (e) => (e.payload as Record<string, unknown>).status === "ended",
+    );
+    assert.ok(ended, "应收到 ended");
+    assert.equal((ended!.payload as Record<string, unknown>).reason, "server_restart");
+    assert.equal(existsSync(recoverFile), false, "会话文件应被清空");
+  } finally {
+    process.env.VIRTUAL_PHONE_CALLS_FILE = prev;
+  }
+});
+
+test("通话记录落盘：endCall 后写入 history 目录（含语音稿与结束原因）", async () => {
+  const { service, connect } = makeService();
+  connect("user-h");
+  const r = await service.callUser({
+    fromActorId: "actor-a",
+    toUserId: "user-h",
+    transcript: "记录测试",
+    ringStyle: "peer",
+  });
+  service.endCall(r.callId!, "user_hangup");
+  await new Promise((r) => setTimeout(r, 80));
+  const files = await readdir(process.env.VIRTUAL_PHONE_HISTORY_DIR!);
+  const target = files.find((f) => f.includes(r.callId!));
+  assert.ok(target, "应存在该通话的记录文件");
+  const raw = JSON.parse(
+    await readFile(join(process.env.VIRTUAL_PHONE_HISTORY_DIR!, target!), "utf8"),
+  ) as Record<string, unknown>;
+  assert.equal(raw.endReason, "user_hangup");
+  assert.equal(raw.initialTranscript, "记录测试");
 });
 
 // ============================================================
@@ -382,6 +435,7 @@ test("cancelCallReplyWaiters 使等待方以 null 收尾", async () => {
 
 test("endCall 推送 ended 并清理：后续回复与二次挂断报错", async () => {
   const { service, connect } = makeService();
+  service.ensureNumber("user-1");
   const sock = connect("user-1");
   const result = await service.handleUserCallAgent({
     fromUserId: "user-1",

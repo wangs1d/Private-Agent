@@ -117,6 +117,7 @@ import {
   VariflightFlightProvider,
 } from "../services/arrival-concierge/index.js";
 import { HabitLoopService } from "../services/habit-loop/index.js";
+import { configureChatSuggestionUsageSource } from "../services/chat-suggestions-service.js";
 import { VoiceDuplexService } from "../services/voice-duplex/index.js";
 import { registerVoiceDuplexWsRoute } from "../ws/voice-duplex-route.js";
 import type { TravelTicketProvider } from "../services/booking/providers/travel-ticket-provider.js";
@@ -142,7 +143,6 @@ import { ScheduleBookingBridge } from "../services/schedule-booking-bridge.js";
 import { SessionService } from "../services/session-service.js";
 import { TtsService } from "../services/tts-service.js";
 import { VirtualPhoneService } from "../services/virtual-phone-service.js";
-import { VirtualPhoneIncomingCoordinator } from "../services/virtual-phone-incoming-coordinator.js";
 import { VoiceCapabilityService } from "../services/voice-capability-service.js";
 import { VoiceMessageService } from "../services/voice-message-service.js";
 import { ImageGenerationService } from "../services/image-generation-service.js";
@@ -459,12 +459,12 @@ import { registerPerceptionOverviewTool } from "../tools/perception-tools.js";
 import { ScheduleSensor } from "../proactivity/sensors/schedule-sensor.js";
 import { ArbiterV2 } from "../proactivity/arbiter-v2.js";
 import {
-  EvaluatorChain,
   appendEventAudit,
-  bridgeSensorKernelToChain,
+  MappingExecutor,
   type EventAuditRecord,
-} from "../proactivity/evaluators/evaluator-chain.js";
-import { buildBuiltinEvaluators } from "../proactivity/evaluators/builtin-evaluators.js";
+} from "../proactivity/mapping-executor.js";
+import { buildBoardRules } from "../proactivity/mapping-rules.js";
+import { WorldBoard, bridgeSensorKernelToBoard } from "../proactivity/world-board.js";
 import { GoalBoard } from "../proactivity/goal-board.js";
 import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
 import { fabricSelftest } from "../proactivity/selftest.js";
@@ -655,7 +655,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
   const agentPairingService = new AgentPairingService();
   const ttsService = new TtsService();
-  const virtualPhoneService = new VirtualPhoneService(ttsService, wsConnectionRegistry, agentPairingService);
+  const virtualPhoneService = new VirtualPhoneService(ttsService, wsConnectionRegistry);
 
   // 初始化语音对话服务（ASR + LLM + TTS 抽象层）
   const voiceDialogueService = new VoiceDialogueService();
@@ -2020,12 +2020,6 @@ export async function createAppServices(): Promise<AppServices> {
   // 拆进程后此处的实现可替换为 WsRuntimeClient（RUNTIME_MODE=remote）。
   const runtime: RuntimeFacade = new DirectRuntimeAdapter(agentCore);
 
-  const virtualPhoneIncomingCoordinator = new VirtualPhoneIncomingCoordinator(
-    runtime,
-    wsConnectionRegistry,
-  );
-  virtualPhoneService.setIncomingCoordinator(virtualPhoneIncomingCoordinator);
-
   // 用户→Agent 通话接通后：走 AgentCore 主对话管线生成回应（转 TTS 随 connected 下发）
   virtualPhoneService.setUserCallAgentHandler(async ({ fromUserId, toActorId, userMessage }) => {
     const prompt = [
@@ -2638,6 +2632,8 @@ export async function createAppServices(): Promise<AppServices> {
   });
   habitLoopService.start();
   registerHabitLoopBuiltinSkills((skill) => skillManager.register(skill), { habitLoop: habitLoopService });
+  // 「为你推荐」按使用习惯个性化：注入同一份工具执行观察（只读快照）
+  configureChatSuggestionUsageSource(() => habitLoopService.getToolUsageObservations());
 
   // ── 图片能力套件 skill 化（PictureKit 在上方 data/pictures 根目录创建）──
   // picture.gallery 与 capability-module 工具同名接管执行；
@@ -3943,12 +3939,17 @@ export async function createAppServices(): Promise<AppServices> {
   const reachRouter = new ReachRouter(attentionStore, reachChannels);
   reachRouter.start();
 
+  // 世界状态板前向引用：hub 的对话轮回调入板（板在传感装配段构造）
+  const worldBoardRef: { current: WorldBoard | null } = { current: null };
   const proactivityHub = new ProactivityHub({
     frequencyGovernor: proactivityGovernor,
     silenceLog: proactivitySilenceLog,
     pendingConfirmations: proactivityConfirmations,
     // 每用户自主性等级：0=只建议 1=标准 2=高效（客户端设置页可调）
     autonomyLevel: (actorId) => autonomySettings.getLevel(actorId),
+    // 对话轮整理进状态板会话层（决策层只看板，不翻聊天原文）
+    onConversationTurn: (actorId, text) =>
+      worldBoardRef.current?.append(actorId, "session", "recentTurns", { at: Date.now(), text }, 20),
     // 防重记忆持久化：跨栈去重重启不失效
     dataPath: join(process.cwd(), "data", "proactivity"),
     // 分级触达：ask_first 挂起确认 → Router 投递+升级（hub 的 speak 信号已投
@@ -4002,80 +4003,11 @@ export async function createAppServices(): Promise<AppServices> {
       rhythmCore?.noteActivity(actorId, source);
       proactivityPresence.noteActivity(actorId);
     },
-    // ── 通用主动性路径（Jarvis 式：感知 → LLM 自主决策 → speak/act/advise） ──
-    // LLM 完成函数：InitiativeEngine 决策用（ephemeralTurn 不污染会话线程）。
-    // PROACTIVITY_MODEL 可路由到快/便宜模型——主动性决策不需要主力模型的质量。
-    // sessionId 用稳定 id（proactivity:actorId）：评估频率高，若每次拼 Date.now()
-    // 会把 BudgetGuard 的会话桶刷爆（500 上限滚动淘汰，挤掉真实会话的记账）。
-    llmComplete: externalChat?.isEnabled()
-      ? async (prompt, sessionId, opts) => {
-          let full = "";
-          await externalChat!.streamCompletion(
-            `proactivity:${sessionId}`,
-            { text: prompt },
-            (delta: string) => {
-              full += delta;
-            },
-            undefined,
-            {
-              systemPromptOverride: prompt,
-              ephemeralTurn: true,
-              disableThinking: true,
-              maxThreadMessages: 0,
-              // usage 归因（2026-09-23）：API 真实 usage 此前默认记进 main_chat，
-              // 主动性侧优化效果无法度量。auditStage 由调用方声明（评估/act 步）。
-              ...(opts?.auditStage ? { auditStage: opts.auditStage } : {}),
-              ...(process.env.PROACTIVITY_MODEL
-                ? { modelOverride: process.env.PROACTIVITY_MODEL }
-                : {}),
-            },
-          );
-          return full;
-        }
-      : undefined,
-    // 可用工具清单（act 行动计划的选择范围；ToolMetadata 无长描述，
-    // 用 name + category/toolset 拼简述——工具名自解释，LLM 主要按名选）
-    listTools: () =>
-      toolRegistry
-        .listMetadata()
-        .map((m) => ({
-          name: m.name,
-          description: `分类: ${m.category}${m.toolset ? ` / ${m.toolset}` : ""}`,
-        })),
-    // 按观察选相关工具（复用对话链路的 selectRelevantTools：类别关键词匹配，
-    // 中文描述完整）。hub 只喂 top-K 相关工具 + 核心执行面保底，act 质量不降
-    // 而 prompt token 大幅下降（全量 60+ → ≤18）
-    searchTools: (query, limit) =>
-      selectRelevantTools(query, getBuiltinAgentChatTools(), {
-        minTools: 4,
-        maxTools: limit,
-        includeAlwaysIncluded: true,
-      })
-        .filter((t) => t.type === "function" && t.function?.name)
-        .map((t) => ({
-          name: (t as { function: { name: string } }).function.name,
-          description:
-            (t as { function: { description?: string } }).function.description ?? "",
-        })),
-    // 用户画像 markdown（LLM 决策的画像输入）
-    getProfileText: async (actorId) => {
-      try {
-        const text = await new UserProfileStore().read(actorId);
-        return text.trim() || null;
-      } catch {
-        return null;
-      }
-    },
-    // 今日日程快照（日程感知源：有变化才推观察给 LLM）
-    getScheduleSnapshot: (actorId) => {
-      try {
-        const snapshot = buildSchedulePromptSnapshot(scheduleTaskService, actorId, "");
-        // count=0 表示无日程，返回 null 不推观察
-        return snapshot.includes("count=0") ? null : snapshot;
-      } catch {
-        return null;
-      }
-    },
+    // （LLM 通用路径已随 2026-09-24 架构定稿拆除：决策=状态板映射规则，零 LLM）
+
+
+
+
     // 负反馈抑制表：用户「别再提醒」意愿优先于时间冷却，发送前检查
     suppressionStore: proactivitySuppressionStore,
   });
@@ -4391,7 +4323,7 @@ export async function createAppServices(): Promise<AppServices> {
   // outcome 喂入走 POST /outcome 路由的 observeOutcome 实时回灌（单一来源，
   // 不做 OutcomeStore 定时轮询——否则同一条 outcome 计数两次，EWMA 失真）。
 
-  // 主动呼叫器（L5）：遇到事情真实打电话汇报 + 通话内多轮对话（贾维斯式）。
+  // 主动呼叫器（L5）：遇到事情真实打电话汇报 + 通话内多轮对话。
   // 触发是确定性策略（kind 白名单 + critical 豁免静默 + 分 kind 呼叫冷却），
   // LLM 只花在接通后的每轮口语回复；无应答自动降级文本补达。
   const proactiveCaller = new ProactiveCaller({
@@ -4536,19 +4468,19 @@ export async function createAppServices(): Promise<AppServices> {
       return (result?.items ?? []).map((item) => item.content);
     },
   };
-  const evaluatorChain = new EvaluatorChain({
+  // 世界状态板：传感信号分层整理成"专属给规则看的现在"（程序采集+整理，零判断零 LLM）
+  const worldBoard = new WorldBoard({ dataPath: proactivityFabricPath });
+  worldBoardRef.current = worldBoard;
+  bridgeSensorKernelToBoard(sensorKernel, worldBoard, primaryActor);
+  // 映射执行器（L2）：规则表读状态板 → AttentionEvent（正文模板直出，零 LLM）
+  const mappingExecutor = new MappingExecutor({
+    board: worldBoard,
+    rules: buildBoardRules(builtinServices),
     defaultActorId: primaryActor,
-    services: builtinServices,
-    // 评估器私有状态 + 事件去重指纹落盘：重启不重发、马拉松计时不清零
+    // 规则私有状态 + 事件去重指纹落盘：重启不重发、马拉松计时不清零
     dataPath: proactivityFabricPath,
   });
-  for (const evaluator of buildBuiltinEvaluators(builtinServices)) {
-    evaluatorChain.register(evaluator);
-  }
-  // L1→L2 桥接：传感信号进评估器链（此前生产装配缺这行，away_return/meeting_soon/
-  // work_marathon/unread_burst/sleep_boundary/goal_ready 从未产出过事件）
-  bridgeSensorKernelToChain(sensorKernel, evaluatorChain);
-  console.log("[Bootstrap] 主动性五层架构已装配（传感/评估/仲裁/目标，零 LLM）");
+  console.log("[Bootstrap] 主动性已装配（传感→状态板→映射规则→仲裁→目标，零 LLM）");
 
   // ─── 购物降价监控装配（复用 InterestWatcher 轮询模式，tick=PRICE_WATCH_TICK_MS 默认 60min）───
   // shopping.compare.watch 工具入库 → 后台定时复查价格 → 到价且为新低价 →
@@ -5080,10 +5012,9 @@ export async function createAppServices(): Promise<AppServices> {
   });
   // 管道已就绪：女性关怀（周期提醒/SOS 告警）的懒引用自此可用
   wellnessPipelineRef.current = proactivePipeline;
-  // 评估器事件 → 观察流（喂 LLM 通用路径）+ 仲裁裁决 → 管道投递
-  evaluatorChain.onEvent((event) => {
+  // 映射规则事件 → 仲裁裁决 → 管道投递（决策零 LLM；状态板不再喂任何 LLM 观察流）
+  mappingExecutor.onEvent((event) => {
     const actorId = event.actorId ?? "local_user";
-    proactivityHub.getFeed().pushObservation(actorId, event.kind, event.title, event.salience);
     // 事件审计：每一次主动事件的仲裁动作与管道 verdict 全链留痕（events.ndjson）
     const audit: EventAuditRecord = {
       at: Date.now(),
@@ -5187,7 +5118,7 @@ export async function createAppServices(): Promise<AppServices> {
     });
   }, 60_000);
   if (typeof meetingPrepTimer.unref === "function") meetingPrepTimer.unref();
-  evaluatorChain.start();
+  mappingExecutor.start();
   arbiterV2.start();
 
   // 方案 E 回填：统一管道就绪后，偏好变更触发的提案开始进入仲裁链
@@ -5397,7 +5328,7 @@ export async function createAppServices(): Promise<AppServices> {
       },
       goalStats: () => goalBoard.stats(),
       calibration: () => costCalibrator.snapshot(),
-      evaluatorProbes: () => evaluatorChain.probes(),
+      evaluatorProbes: () => mappingExecutor.probes(),
       observeOutcome: (outcome) => costCalibrator.observe(outcome),
       phraseStats: () => speechPolisher.stats(),
       callStats: () => proactiveCaller.stats(),
@@ -5435,7 +5366,7 @@ export async function createAppServices(): Promise<AppServices> {
           primaryActor,
           arbiterV2,
           sensorKernel,
-          evaluatorProbes: () => evaluatorChain.probes(),
+          evaluatorProbes: () => mappingExecutor.probes(),
           calibration: () => costCalibrator.snapshot(),
           phraseStats: () => speechPolisher.stats(),
           callStats: () => proactiveCaller.stats(),
@@ -5523,7 +5454,6 @@ export async function createAppServices(): Promise<AppServices> {
     locationIngest,
     virtualPhoneService,
     devicePairingService,
-    virtualPhoneIncomingCoordinator,
     userPersonalizationService,
     deviceRegistry,
     voiceCapabilityService,
@@ -5552,8 +5482,9 @@ export async function createAppServices(): Promise<AppServices> {
     proactivePushService.flush();
     // 任务面台账强制落盘（1s 防抖窗口内的变更不丢）
     getTaskHub().flushPersistence();
-    // 五层架构：评估器状态强制落盘（马拉松计时/事件去重指纹）
-    evaluatorChain.stop();
+    // 主动性：规则状态与去重指纹强制落盘（马拉松计时/去重指纹）+ 状态板落盘
+    mappingExecutor.stop();
+    worldBoard.flush();
     sensorKernel.stop();
     // 女性关怀：停经期提醒调度 + 加密数据落盘
     periodCareService.stop();

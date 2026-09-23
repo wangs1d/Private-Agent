@@ -191,3 +191,31 @@ export function limitLinesByChars(
   }
   return { kept, evicted };
 }
+
+/**
+ * 承诺/未闭环槽位的保鲜期（2026-09-24 僵尸承诺治理）：
+ * memory_commitments / memory_open_loops 承接的是"将要去做"的任务型话术（提醒/日程/
+ * 汇报类口头应承），闭环靠 doReconcile 的完成词命中，但大量承诺（"我会在00:50睡觉"
+ * "16:40参加会议"）此后永远不被提及 → 僵尸承诺长期占行数预算并被相关性闸放行进
+ * prompt（实测 9/7 的"00:50睡觉"17 天后仍在场）。超 TTL 未闭环即按僵尸过滤；
+ * 无时间戳或解析失败的行保留（证据不足不冤枉）。任务型事实的权威数据源是任务库，
+ * 这里只保对话层的新鲜度。
+ */
+export const COMMITMENT_TTL_MS = 72 * 60 * 60 * 1000;
+
+const LEADING_ISO_TS_RE = /^\[(\d{4}-\d{2}-\d{2}T[^\]]+)\]/;
+
+export function dropExpiredCommitmentLines(
+  lines: string[],
+  now = Date.now(),
+  ttlMs = COMMITMENT_TTL_MS,
+): string[] {
+  const cutoff = now - ttlMs;
+  return lines.filter((line) => {
+    const m = LEADING_ISO_TS_RE.exec(line);
+    if (!m) return true;
+    const ts = Date.parse(m[1]);
+    if (!Number.isFinite(ts)) return true;
+    return ts >= cutoff;
+  });
+}

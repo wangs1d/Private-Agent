@@ -1218,9 +1218,9 @@ class _ChatPageState extends State<ChatPage>
     return ids;
   }
 
-  /// 「为你推荐」主路径：点击胶囊只把示例文案追加进输入框（不发送），
-  /// 光标移到末尾并聚焦，由用户自己编辑后手动发送。输入框已有草稿时
-  /// 追加在草稿后面（以空格衔接），不覆盖用户正在写的内容。
+  /// 「为你推荐」悬停「填入输入框」小按钮路径：只把示例文案追加进输入框
+  /// （不发送），光标移到末尾并聚焦，由用户自己编辑后手动发送。输入框
+  /// 已有草稿时追加在草稿后面（以空格衔接），不覆盖用户正在写的内容。
   void _insertSuggestion(String prompt) {
     final String draft = widget.controller.text;
     if (draft.trim().isEmpty) {
@@ -1237,10 +1237,10 @@ class _ChatPageState extends State<ChatPage>
     widget.inputFocusNode?.requestFocus();
   }
 
-  /// 「为你推荐」一键直达路径（胶囊悬停浮现的「直接发送」小按钮）：
-  /// 把示例文案灌入输入框后走与手打一致的发送链路（onSend 无参调用，
-  /// 同步段内读取并清空输入框）。若输入框里有未发送的草稿，发送后恢复，
-  /// 避免推荐文案覆盖用户正在写的内容。
+  /// 「为你推荐」点击胶囊主体的一键路径：把示例文案灌入输入框后走与
+  /// 手打一致的发送链路（onSend 无参调用，同步段内读取并清空输入框）。
+  /// 若输入框里有未发送的草稿，发送后恢复，避免推荐文案覆盖用户正在写的
+  /// 内容。
   void _sendSuggestion(String prompt) {
     final String draft = widget.controller.text;
     widget.controller.text = prompt;
@@ -1272,8 +1272,8 @@ class _ChatPageState extends State<ChatPage>
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
                         EmptyStateSuggestions(
-                          onSuggestionTap: _insertSuggestion,
-                          onSuggestionSend: _sendSuggestion,
+                          onSuggestionTap: _sendSuggestion,
+                          onSuggestionInsert: _insertSuggestion,
                           localStore: widget.localStore,
                         ),
                       ],
@@ -1433,8 +1433,8 @@ class _ChatPageState extends State<ChatPage>
                       ChatSuggestionBar(
                         agentIdle: widget.agentIdle,
                         messageCount: widget.messages.length,
-                        onSuggestionTap: _insertSuggestion,
-                        onSuggestionSend: _sendSuggestion,
+                        onSuggestionTap: _sendSuggestion,
+                        onSuggestionInsert: _insertSuggestion,
                         localStore: widget.localStore,
                       ),
                     // Agent 状态条：处理状态统一收拢在这一条（工具名 / 口语化进度 /
@@ -2553,7 +2553,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                     (!widget.isUser && _typewriter.isPartial)
                         ? _typewriter.revealed
                         : null,
-                typewriterCursor: _typewriter.isRevealing,
+                typewriterCursor:
+                    _typewriter.isRevealing && _typewriter.cursorOn,
               ),
               // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
               // 插在正在打字的正文下方实时展示；`chat.assistant_done` 到达后

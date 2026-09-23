@@ -9,25 +9,26 @@ import "../../core/theme/app_typography.dart";
 
 /// 「为你推荐」共用胶囊：能力标签 + 示例任务文案，黑白细描边极简样式。
 ///
-/// 交互分两路：点胶囊主体 = 只把文案放进输入框（不发送，[onTap]）；
-/// 鼠标悬停胶囊时右端淡入「直接发送」小按钮（[onSend]），保留一键直达。
+/// 交互分两路：点胶囊主体 = 直接发送（[onTap]，原有一键路径不变）；
+/// 鼠标悬停胶囊时右端淡入「填入输入框」小按钮（[onInsert]），只填不发。
 class ChatSuggestionPill extends StatefulWidget {
   const ChatSuggestionPill({
     super.key,
     required this.suggestion,
     required this.onTap,
-    this.onSend,
+    this.onInsert,
     this.isNew = false,
     this.compact = false,
   });
 
   final ChatSuggestion suggestion;
 
-  /// 点击胶囊主体：文案只放进输入框，由用户自己编辑后手动发送。
+  /// 点击胶囊主体：直接发送（与手打一致的发送链路）。
   final VoidCallback onTap;
 
-  /// 悬停浮现的「直接发送」小按钮；为 null 时不渲染该按钮（无一键路径）。
-  final VoidCallback? onSend;
+  /// 悬停浮现的「填入输入框」小按钮：只把文案放进输入框不发送；
+  /// 为 null 时不渲染该按钮。
+  final VoidCallback? onInsert;
 
   /// 「能力上新」角标：由横滑条的上新检测置位（空态列表不标新）。
   final bool isNew;
@@ -104,9 +105,9 @@ class _ChatSuggestionPillState extends State<ChatSuggestionPill> {
                 ],
                 const SizedBox(width: AppTypography.space2),
                 flexiblePrompt(promptStyle),
-                if (widget.onSend != null) ...<Widget>[
+                if (widget.onInsert != null) ...<Widget>[
                   const SizedBox(width: AppTypography.space1),
-                  _buildSendButton(cs),
+                  _buildInsertButton(cs),
                 ],
               ],
             ),
@@ -116,17 +117,17 @@ class _ChatSuggestionPillState extends State<ChatSuggestionPill> {
     );
   }
 
-  /// 悬停淡入的「直接发送」：按钮占位常驻（未悬停时只降透明度不收宽度），
+  /// 悬停淡入的「填入输入框」：按钮占位常驻（未悬停时只降透明度不收宽度），
   /// 避免悬停瞬间胶囊宽度跳变；未悬停时用 IgnorePointer 吞掉命中，
-  /// 保证点击落在胶囊主体上仍走填入路径。
-  Widget _buildSendButton(ColorScheme cs) {
+  /// 保证点击落在胶囊主体上仍走直接发送路径。箭头向下指向输入框方位。
+  Widget _buildInsertButton(ColorScheme cs) {
     return AnimatedOpacity(
       opacity: _hovering ? 1 : 0,
       duration: const Duration(milliseconds: 120),
       child: IgnorePointer(
         ignoring: !_hovering,
         child: Tooltip(
-          message: "直接发送",
+          message: "填入输入框（不发送）",
           triggerMode: TooltipTriggerMode.manual,
           child: IconButton(
             padding: EdgeInsets.zero,
@@ -134,9 +135,9 @@ class _ChatSuggestionPillState extends State<ChatSuggestionPill> {
             iconSize: 13,
             splashRadius: 12,
             tooltip: null,
-            onPressed: widget.onSend,
+            onPressed: widget.onInsert,
             icon: Icon(
-              Icons.arrow_upward,
+              Icons.arrow_downward,
               color: cs.onSurface.withValues(alpha: 0.75),
             ),
           ),
@@ -168,15 +169,15 @@ class EmptyStateSuggestions extends StatefulWidget {
   const EmptyStateSuggestions({
     super.key,
     required this.onSuggestionTap,
-    required this.onSuggestionSend,
+    required this.onSuggestionInsert,
     this.localStore,
   });
 
-  /// 点击胶囊主体：文案只填入输入框，不发送。
+  /// 点击胶囊主体：直接发送。
   final void Function(String prompt) onSuggestionTap;
 
-  /// 悬停胶囊浮现的「直接发送」小按钮。
-  final void Function(String prompt) onSuggestionSend;
+  /// 悬停胶囊浮现的「填入输入框」小按钮：只填不发。
+  final void Function(String prompt) onSuggestionInsert;
 
   final LocalHistoryStore? localStore;
 
@@ -237,7 +238,7 @@ class _EmptyStateSuggestionsState extends State<EmptyStateSuggestions> {
             child: ChatSuggestionPill(
               suggestion: items[i],
               onTap: () => widget.onSuggestionTap(items[i].prompt),
-              onSend: () => widget.onSuggestionSend(items[i].prompt),
+              onInsert: () => widget.onSuggestionInsert(items[i].prompt),
             ),
           ),
           if (i < items.length - 1) const SizedBox(height: AppTypography.space3),
@@ -341,7 +342,7 @@ class ChatSuggestionBar extends StatefulWidget {
     required this.agentIdle,
     required this.messageCount,
     required this.onSuggestionTap,
-    required this.onSuggestionSend,
+    required this.onSuggestionInsert,
     this.localStore,
   });
 
@@ -349,11 +350,12 @@ class ChatSuggestionBar extends StatefulWidget {
   final bool agentIdle;
   final int messageCount;
 
-  /// 点击胶囊主体：文案只填入输入框，不发送（条保持可见，等用户手动发）。
+  /// 点击胶囊主体：直接发送，条随即收起。
   final void Function(String prompt) onSuggestionTap;
 
-  /// 悬停胶囊浮现的「直接发送」小按钮：走一键发送，条随即收起。
-  final void Function(String prompt) onSuggestionSend;
+  /// 悬停胶囊浮现的「填入输入框」小按钮：只填不发（条保持可见，
+  /// 等用户编辑后手动发送时随消息数变化自然收起）。
+  final void Function(String prompt) onSuggestionInsert;
 
   final LocalHistoryStore? localStore;
 
@@ -472,12 +474,12 @@ class _ChatSuggestionBarState extends State<ChatSuggestionBar> {
     });
   }
 
-  /// 悬停「直接发送」小按钮的一键路径：立即发送并收条，
-  /// 重新进入空闲计时，条目还有机会在下一轮空闲时再出现。
+  /// 点击胶囊主体的一键路径：立即发送并收条，重新进入空闲计时，
+  /// 条目还有机会在下一轮空闲时再出现。
   void _sendSuggestion(ChatSuggestion suggestion) {
     _hide();
     _newKeys = const <String>{};
-    widget.onSuggestionSend(suggestion.prompt);
+    widget.onSuggestionTap(suggestion.prompt);
     _scheduleIdleShow();
   }
 
@@ -583,10 +585,11 @@ class _ChatSuggestionBarState extends State<ChatSuggestionBar> {
                                     compact: true,
                                     isNew: _newKeys
                                         .contains(_suggestions[i].capabilityKey),
-                                    onTap: () => widget
-                                        .onSuggestionTap(_suggestions[i].prompt),
-                                    onSend: () =>
+                                    onTap: () =>
                                         _sendSuggestion(_suggestions[i]),
+                                    onInsert: () => widget
+                                        .onSuggestionInsert(
+                                            _suggestions[i].prompt),
                                   ),
                                 ),
                               ],

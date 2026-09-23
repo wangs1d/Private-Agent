@@ -213,8 +213,9 @@ export class PhoneCallHandler {
     } finally {
       callState.isActive = false;
       this.activeCalls.delete(instance.config.id);
-      // 兜底清空本通话的回复等待方，避免客户端迟到回复挂进新通话
-      this.deps.virtualPhoneService.cancelCallReplyWaiters(callId);
+      // 会话收尾（清理会话+落通话记录，不推 ended——本循环随后自带带语义 reason 的 ended 推送）。
+      // 必须把会话从服务端会话表移除，否则并发忙线护栏会把该用户锁到 TTL 超时。
+      this.deps.virtualPhoneService.closeCall(callId, userAcknowledged ? "acknowledged" : "timeout");
     }
 
     if (userAcknowledged) {

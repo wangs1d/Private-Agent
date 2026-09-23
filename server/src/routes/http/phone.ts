@@ -32,6 +32,21 @@ export function registerPhoneRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
     };
   });
 
+  // 释放站内号码（号码回池；账号注销/用户主动解绑走这里）
+  app.delete("/phone/me", async (request, reply) => {
+    const parsed = phoneMeQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const { sessionId, userId } = parsed.data;
+    const actorId = resolveActorId({ sessionId, userId });
+    const result = virtualPhoneService.releaseNumber(actorId);
+    if (!result.ok) {
+      return reply.code(404).send({ ok: false, error: result.error });
+    }
+    return { ok: true, actorId, released: result.released };
+  });
+
   app.post("/phone/call-agent", async (request, reply) => {
     const body = request.body as Record<string, unknown>;
     const sessionId = String(body.sessionId ?? "").trim();

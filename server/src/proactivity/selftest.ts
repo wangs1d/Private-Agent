@@ -15,8 +15,8 @@ export type FabricSelftestDeps = {
   primaryActor: () => string | null;
   arbiterV2: ArbiterV2;
   sensorKernel: SensorKernel;
-  /** L2 评估器探针（id/订阅流/状态键数） */
-  evaluatorProbes?: () => Array<{ id: string; streams: string[]; stateKeys: number; tickEveryMs?: number }>;
+  /** L2 映射规则探针（id/消费层/状态键数/周期） */
+  evaluatorProbes?: () => Array<{ id: string; layers: string[]; stateKeys: number; tickEveryMs: number }>;
   /** 成本校准快照（接受率 → alert 阈值） */
   calibration?: () => CostCalibrationSnapshot;
   /** 主动话术生成器状态（内容型场景 LLM 用量/熔断） */

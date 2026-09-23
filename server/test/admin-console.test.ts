@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 
 /**
  * 管理后台域测试：共享鉴权门 / 反馈 SQLite 存储与权限边界 /
- * 支付订单台账（mock 模式落库）/ 用户禁用 API 与对话禁用门。
+ * 支付订单台账（只记真实订单，模拟单不落库）/ 用户禁用 API 与对话禁用门。
  *
  * 用真实 fastify 实例 + inject（不起监听端口）。
  * 运行：npx tsx --test test/admin-console.test.ts
@@ -26,6 +26,9 @@ const { registerFeedbackRoutes, feedbackStatusCounts } = await import(
 const { registerAdminConsoleRoutes } = await import("../src/routes/http/admin-console.js");
 const { AgentAccountService } = await import("../src/services/agent-account-service.js");
 const { PaymentService } = await import("../src/services/payment-service.js");
+const { getPaymentOrderLedger, PaymentOrderLedger } = await import(
+  "../src/services/payment-order-ledger.js"
+);
 const { isActorDisabled } = await import("../src/services/user-disable-gate.js");
 const { default: Fastify } = await import("fastify");
 type HttpRouteDeps = import("../src/routes/http/types.js").HttpRouteDeps;
@@ -116,10 +119,11 @@ test("反馈：提交开放；全量列表与状态流转须管理员；按身�
   await app.close();
 });
 
-test("支付：mock 下单落台账，管理接口可见且统计按模式拆分", async () => {
+test("支付：台账只记真实订单（模拟单不落库、历史 mock 行打开时清理）", async () => {
   process.env.ADMIN_UPLOAD_TOKEN = TEST_TOKEN;
   const app = buildApp();
 
+  // 模拟下单（测试环境无凭证 → mock 模式）：留在进程内 Map，不进台账
   await paymentService.createOrder({
     amount: 9.9,
     description: "台账测试商品",
@@ -127,15 +131,53 @@ test("支付：mock 下单落台账，管理接口可见且统计按模式拆分
     method: "native",
   });
 
+  // 直接落一笔真实（live）订单
+  getPaymentOrderLedger().record({
+    outTradeNo: "LIVE-TEST-0001",
+    provider: "alipay",
+    method: "native",
+    amount: 66,
+    description: "真实通道订单",
+    mode: "live",
+    status: "paid",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    paidAt: new Date().toISOString(),
+  });
+
   const res = await app.inject({ method: "GET", url: "/api/admin/orders", headers: adminHeaders });
   assert.equal(res.statusCode, 200);
   const body = res.json();
   assert.equal(body.enabled, true);
-  assert.ok(body.stats.byMode.mock.total >= 1);
-  const row = body.orders.find((o: { description: string }) => o.description === "台账测试商品");
-  assert.ok(row, "台账中应能查到刚下的订单");
-  assert.equal(row.mode, "mock");
-  assert.equal(row.status, "pending");
+  assert.equal(body.stats.total, 1);
+  assert.equal(body.stats.paid, 1);
+  assert.equal(body.stats.paidAmount, 66);
+  const row = body.orders.find((o: { description: string }) => o.description === "真实通道订单");
+  assert.ok(row, "后台应能查到真实订单");
+  assert.equal(row.status, "paid");
+  assert.ok(row.paidAt, "真实订单应带支付时间");
+  assert.ok(
+    !body.orders.some((o: { description: string }) => o.description === "台账测试商品"),
+    "模拟订单不应出现在后台订单接口",
+  );
+
+  // 历史 mock 行清理：新开台账连接（open 时清一次）后不可再见，真实订单保留
+  new PaymentOrderLedger().record({
+    outTradeNo: "MOCK-LEGACY-1",
+    provider: "wechat",
+    method: "native",
+    amount: 1,
+    description: "历史模拟单",
+    mode: "mock",
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    paidAt: null,
+  });
+  const after = new PaymentOrderLedger().list(100);
+  assert.ok(!after.some((o) => o.mode === "mock"), "打开台账时应清理历史 mock 行");
+  assert.ok(after.some((o) => o.outTradeNo === "LIVE-TEST-0001"), "真实订单保留");
+
   await app.close();
 });
 

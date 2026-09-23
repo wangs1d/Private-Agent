@@ -15,8 +15,7 @@
 //  3. 未注入 EndToEndDecisionMaker 时回退规则决策（speak，message 留空交后续话术流程）。
 //  4. 支持 legacy 模式：BRAIN_PROACTION_LEGACY=1 时拉起旧主动服务，cortex 进入 shadow。
 //
-// 借鉴 Jarvis decision-engine.ts 的 value / disturb 双轨评估思路，
-// 但数值仅作规则粗筛 + LLM 参考输入，非硬性数值闸门。
+// value / disturb 双轨评估：数值仅作规则粗筛 + LLM 参考输入，非硬性数值闸门。
 
 import type {
   BrainDecision,
@@ -153,8 +152,7 @@ function readString(
 // ---- 决策引擎外观接口 ----------------------------------------------------
 
 /**
- * 决策引擎最小外观。JarvisDecisionEngine 结构上满足此接口（方法声明
- * 在接口中为双变检查，故参数 unknown 兼容 JarvisDecisionEngine 的具体参数类型）。
+ * 决策引擎最小外观（外部决策引擎的结构适配接口，参数 unknown 保持宽松兼容）。
  *
  * 当前 ProactionCortex 仅存储引用，不实际调用其 decide（避免触发 LLM 链路）。
  * 未来若需接入更复杂的评分，可在此接口上扩展。
@@ -291,7 +289,7 @@ export class ProactionCortex {
 
   // ---- 注册方法 ----------------------------------------------------------
 
-  /** 注册 JarvisDecisionEngine 为决策入口（当前仅存储引用，供未来扩展） */
+  /** 注册外部决策引擎为决策入口（当前仅存储引用，供未来扩展） */
   registerDecisionEngine(engine: DecisionEngineLike): void {
     this.decisionEngine = engine;
     console.log("[ProactionCortex] 已注册 DecisionEngine");

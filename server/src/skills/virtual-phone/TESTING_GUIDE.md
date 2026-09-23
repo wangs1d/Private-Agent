@@ -1,401 +1,125 @@
-# 虚拟电话Agent感知功能测试指南
+# 虚拟电话功能测试指南（2026-09-24 修订）
 
-## 🧪 测试步骤
+> 本版对应「号码注册制 + 服务门禁」改造：Agent↔Agent 通话已删除（Agent 间联络走
+> `agent.send_to_peer` 文本通道）、本地 ASR 已移除（通话中用户回复为打字，语音输入
+> 待云端端到端语音服务接入）。旧版（2026-08 双向通话版）中的互拨/配对场景作废。
 
-### 1. 启动服务
+## 🧪 服务启动
 
 ```bash
-cd "e:\W-Project\Private AI Agent\server"
+cd server
 npm run dev
 ```
 
-### 2. 测试场景
+数据文件（均原子写、可随时删除重建）：
 
-#### 场景A：新用户 - 未申领号码
-
-**测试步骤**:
-1. 打开Flutter应用或WebSocket客户端
-2. 发送消息："你能做什么？" 或 "你有什么功能？"
-
-**预期结果**:
-Agent的System Prompt中应包含：
-```
-【虚拟电话能力】
-⚠️ 尚未申领虚拟号码
-可用功能：
-- virtual_phone.ensure_my_number: 申领6位虚拟电话号码（用户明确要求时才可调用）
-- 申领后可与其他Agent进行语音通话
-提示：当用户说"帮我申请虚拟号码"时，调用 virtual_phone.ensure_my_number
-```
-
-**Agent应该能够**:
-- ✅ 主动介绍虚拟电话功能
-- ✅ 引导用户申领号码
-- ✅ 解释虚拟电话的用途
-
-**示例对话**:
-```
-用户：你能打电话吗？
-Agent：是的！我有虚拟电话功能。不过您需要先申领一个6位虚拟号码。
-       要说"帮我申请虚拟号码"就可以领取您的专属号码了。
-       申领后您就可以和其他Agent进行语音通话啦！
-```
+| 文件 | 内容 |
+| --- | --- |
+| `data/virtual-phones.json` | 站内号注册表（actorId → 6 位号） |
+| `data/virtual-phone-calls.json` | 活跃通话会话（重启时被消费后清空） |
+| `data/virtual-phone-history/*.json` | 通话记录（TTL 默认 30 天，`VIRTUAL_PHONE_HISTORY_TTL_DAYS` 可调） |
 
 ---
 
-#### 场景B：用户申领号码
+## 测试场景
 
-**测试步骤**:
-1. 发送消息："帮我申请虚拟号码"
+### 场景 A：新用户 —— 未申领号码
 
-**预期结果**:
-- Agent调用 `virtual_phone.ensure_my_number` 工具
-- 返回6位虚拟号码（如：123456）
-- 数据保存到 `data/virtual-phones.json`
+发送：「你能打电话吗？」
 
-**示例对话**:
-```
-用户：帮我申请虚拟号码
-Agent：[调用 virtual_phone.ensure_my_number]
-Agent：好的！您的虚拟号码是 123456。
-       现在您可以：
-       1. 接收其他Agent的来电
-       2. 拨打其他Agent的号码
-       要拨打电话时，告诉我对方的号码和您想说的话即可。
-```
+- System Prompt 的【语音触达】段应显示「尚未申领 6 位联络号码」；
+- Agent 应介绍功能并引导用户说「帮我申请虚拟号码」；
+- 此时 Agent 调 `phone.call_user` 会被**门禁拒绝**（见场景 G）。
 
----
+### 场景 B：申领号码
 
-#### 场景C：已申领号码 - 查询状态
+发送：「帮我申请虚拟号码」
 
-**测试步骤**:
-1. 重启服务（确保从持久化存储加载）
-2. 发送消息："我的虚拟号码是多少？"
+- Agent 调 `phone.ensure_my_number` → 返回 6 位号码，写入 `virtual-phones.json`；
+- 客户端设置页 →「站内号码」分区 → 应显示该号码（HTTP `GET /phone/me`）；
+- 设置页「去申领」按钮：跳回聊天页并**预填**申领话术（不自动发送）。
 
-**预期结果**:
-Agent的System Prompt中应包含：
-```
-【虚拟电话能力】
-✅ 已申领虚拟号码：123456
-可用功能：
-- virtual_phone.ensure_my_number: 查询/确认你的虚拟号码
-- phone.virtual_call: 拨打其他Agent的虚拟号码进行语音通话
-- 可联系其他已配对的Agent，或给自己打电话作为提醒
-```
+### 场景 C：已申领 —— 查询与释放
 
-**Agent应该能够**:
-- ✅ 显示用户的虚拟号码
-- ✅ 提供拨打功能的说明
-- ✅ 知道可以进行语音通话
+- 发送：「我的虚拟号码是多少？」→ Agent 复述号码；
+- 设置页「释放」按钮 → 确认弹窗 → `DELETE /phone/me` → 号码回池，
+  页面回到「尚未申领」；释放后可再次申领（会拿到新号）。
 
-**示例对话**:
-```
-用户：我的号码是多少？
-Agent：[调用 virtual_phone.ensure_my_number 或 virtual_phone.get_status]
-Agent：您的虚拟号码是 123456。
-       您可以使用这个号码：
-       - 接收其他Agent的来电
-       - 拨打其他Agent的号码进行语音通话
-       需要我帮您拨打某个号码吗？
-```
+### 场景 D：Agent 打给用户（呼出）
 
----
+发送：「给我打个电话，说明天下午三点开会」
 
-#### 场景D：拨打电话
+- 主叫已申领 → 前摇振铃 8 秒 → 自动接通 → TTS 播报；
+- 通话中打字回复 → LLM 回应经 `agent.phone.voice_reply` 回播；
+- 挂断 → 双方清理，`data/virtual-phone-history/` 新增一条记录（含语音稿）。
 
-**测试步骤**:
-1. 确保已有虚拟号码
-2. 发送消息："拨打 234567，说'晚上见面'"
+### 场景 E：提醒电话交互轮
 
-**预期结果**:
-- Agent调用 `phone.virtual_call` 工具
-- 向目标号码推送来电事件
-- 如果配置了TTS，会生成语音
+触发一个 phone_call 级提醒（或主动触达 L4）：
 
-**示例对话**:
-```
-用户：拨打 234567，告诉对方晚上7点开会
-Agent：[调用 phone.virtual_call]
-Agent：已成功拨打 234567！
-       对方将听到："晚上7点开会"
-       如果对方在线，会立即收到来电通知。
-```
+- 接通后进入交互循环：回复「收到/退下」→ 告别语 → ended（reason=acknowledged）；
+- 其他回复 → LLM 对话回播；无输入超时 → ended（reason=timeout）；
+- 收尾后服务端会话表必须清空（否则忙线护栏会把该用户锁到 TTL）。
+
+### 场景 F：用户拨打 Agent（拨号盘 / `POST /phone/call-agent`）
+
+- 已申领号码 → ringing → connecting → connected（Agent 问候/回应留言）；
+- 点挂断 → `phone.call_hangup` → ended，会话清理。
+
+### 场景 G：门禁 —— 未申领号码
+
+- 用户侧：未申领时发「拨打 Agent」→ `400`/WS 错误，文案引导「帮我申请虚拟号码」；
+- Agent 侧：未申领时调 `phone.call_user` → 工具返回 `ok:false`（retryable=false），
+  Agent 应向用户说明需要办理，办理后重试成功。
+
+### 场景 H：忙线护栏
+
+第一通通话进行中再触发第二通来电：
+
+- 服务端**不再推第二条 incoming**（旧会话不会被顶掉）；
+- 用户端只收到 `call_status{status:"busy"}`；呼叫方收到 `ok:false, busy:true`；
+- 第一通挂断后可正常发起下一通。
+
+### 场景 I：服务重启韧性
+
+通话进行中重启 server：
+
+- 启动时消费 `virtual-phone-calls.json` → 客户端补推 `ended(reason=server_restart)`；
+- 客户端通话 UI 干净收尾，不留僵尸通话页；会话文件被清空。
 
 ---
 
-#### 场景E：给自己打电话（提醒）
-
-**测试步骤**:
-1. 发送消息：“提醒我喝水”
-
-**预期结果**:
-Agent可以建议给自己打电话作为提醒：
-
-**示例对话**:
-```
-用户：提醒我每小时喝水
-Agent：我可以给您自己打电话作为提醒。
-       您的号码是 123456，要现在拨打吗？
-       您会收到一个来电，提示“该喝水了”。
-       
-       或者您也可以设置定时任务来实现自动提醒。
-```
-
----
-
-#### 场景F：联系其他Agent - 对方未申领号码
-
-**测试步骤**:
-1. 确保自己已有虚拟号码
-2. 发送消息：“我想给Bob打电话”
-
-**预期结果**:
-Agent应该从System Prompt中知道：
-- 对方也需要有虚拟号码才能接听
-- 需要询问用户Bob的号码
-- 如果Bob没有号码，需要引导他申领
-
-**示例对话**:
-```
-用户：我想给Bob打电话
-Agent：好的！请问Bob的虚拟号码是多少？
-
-💡 提示：如果Bob还没有虚拟号码，他需要先申领一个。
-   请告诉他：“说'帮我申请虚拟号码'就可以领取6位号码”
-
-申领后，您就可以拨打他的号码进行语音通话了。
-```
-
----
-
-#### 场景G：拨打不存在的号码
-
-**测试步骤**:
-1. 发送消息：“拨打 999999，说'你好'”
-
-**预期结果**:
-- Agent调用 `phone.virtual_call` 工具
-- 返回错误：“该号码未注册虚拟线路”
-- Agent理解这意味着对方未申领号码
-- Agent提供针对性的解决方案
-
-**示例对话**:
-```
-用户：拨打 999999
-Agent：[调用 phone.virtual_call]
-Agent：抱歉，号码 999999 尚未注册虚拟线路。
-
-这说明对方还没有申领虚拟号码。要与他通话，需要：
-1. 先联系对方（通过其他方式）
-2. 让他说“帮我申请虚拟号码”来领取6位号码
-3. 拿到他的新号码后，您就可以拨打了
-
-需要我帮您设置一个提醒，等对方申领号码后再通知您吗？
-```
-
----
-
-#### 场景H：配对要求的解释
-
-**测试步骤**:
-1. 尝试拨打其他Agent的号码（在未配对的情况下）
-
-**预期结果**:
-- 返回错误：“拨打其他 Agent 需先配对”
-- Agent理解这是跨Agent通信的安全机制
-- Agent解释配对流程
-
-**示例对话**:
-```
-用户：为什么拨打失败？
-Agent：拨打失败是因为需要配对验证。
-
-这是为了保护隐私和安全，不同Agent之间通话需要先配对：
-1. 您和对方需要使用相同的配对码
-2. 双方都执行配对操作：POST /agent/pair
-3. 配对成功后即可互相拨打
-
-如果您是在开发环境，可以联系管理员关闭配对要求。
-需要我帮您生成一个配对码吗？
-```
-
----
-
-### 3. 验证System Prompt
-
-#### 方法1：查看日志
-
-在服务器日志中搜索 `worldCaps` 或 `虚拟电话能力`，应该能看到生成的prompt内容。
-
-#### 方法2：调试模式
-
-在 `agent-core.ts` 中添加临时日志：
-
-```typescript
-console.log("World Caps Prompt:", worldCaps);
-```
-
-#### 方法3：直接询问Agent
-
-```
-用户：你知道你有虚拟电话功能吗？
-Agent：是的，我知道！我有虚拟电话能力...
-       [Agent会根据是否已申领号码给出不同回答]
-```
-
----
-
-## 🔍 调试技巧
-
-### 检查VirtualPhoneService是否正确加载
+## 自动化覆盖
 
 ```bash
-# 查看数据文件
-cat data/virtual-phones.json
+cd server
+npm test
 ```
 
-应该看到类似：
-```json
-{
-  "byActor": {
-    "user_session_123": "123456",
-    "agent_session_456": "234567"
-  }
-}
-```
-
-### 检查AgentCore是否正确接收virtualPhoneService
-
-在 `create-app-services.ts` 中添加日志：
-
-```typescript
-console.log("Creating AgentCore with virtualPhoneService:", !!virtualPhoneService);
-```
-
-### 检查Prompt是否正确生成
-
-在 `world-agent-capabilities.ts` 末尾添加：
-
-```typescript
-console.log("Generated World Caps for", actorId, ":\n", lines.join("\n"));
-```
-
----
-
-## ✅ 验收标准
-
-- [ ] 新用户能看到虚拟电话功能介绍
-- [ ] Agent能正确引导用户申领号码
-- [ ] 申领后Agent知道用户的号码
-- [ ] Agent能正确调用拨打工具
-- [ ] System Prompt中包含【虚拟电话能力】部分
-- [ ] System Prompt中包含【其他Agent的虚拟电话能力】部分
-- [ ] 根据用户状态显示不同的能力说明
-- [ ] Agent不会主动申领号码（需用户明确要求）
-- [ ] 重启服务后号码信息不丢失
-- [ ] Agent理解对方也需要有号码才能通话
-- [ ] Agent能正确处理“号码不存在”错误
-- [ ] Agent能解释配对要求
-- [ ] Agent能提供针对性的解决方案
-
----
+虚拟电话相关：`test/virtual-phone-service.test.ts`（号码/门禁/忙线/重启恢复/记录落盘）、
+`test/phone-call-handler.test.ts`（提醒交互轮）、`test/phone-call-intent.test.ts`（显式来电意图）、
+`test/phone-call.test.ts`（电话代办 `phone_call.*`，默认关闭）、`test/phone-bridge-dial.test.ts`（拨号桥）、
+`test/phone-call-e2e-mock.test.ts` / `test/phone-dial-virtual-e2e.test.ts`（联调）。
 
 ## 🐛 常见问题
 
-### Q1: Agent不知道虚拟电话功能
+### Q1: Agent 不知道虚拟电话功能
 
-**检查**:
-1. `isWorldCapsPromptEnabled()` 是否返回 true
-2. `virtualPhoneService` 是否正确传入 AgentCore
-3. System Prompt 是否包含【虚拟电话能力】部分
+- 检查 `virtualPhoneService` 是否传入 AgentCore（`create-app-services.ts`）；
+- 检查 System Prompt 是否含【语音触达】段（`agent-capabilities.ts` 的 `buildPhoneCapabilityLines`）。
 
-**解决**:
-- 检查环境变量 `AGENT_PROMPT_WORLD_CAPS` 是否被设置为 "0" 或 "off"
-- 确认 `create-app-services.ts` 中传入了 `virtualPhoneService`
+### Q2: 申领后仍显示「未申领」
 
-### Q2: 申领号码后Agent仍显示"未申领"
+- `data/virtual-phones.json` 是否有该 actorId；客户端 `userId` 是否与申领时一致
+  （号码按 actorId 绑定，actorId = userId ?? sessionId，见 `agent/actor-id.ts`）。
 
-**检查**:
-1. `data/virtual-phones.json` 是否有数据
-2. 是否重启了服务
-3. ActorId是否正确匹配
+### Q3: 提醒电话打不出去
 
-**解决**:
-- 确认使用的sessionId/userId与申领时一致
-- 检查 `VirtualPhoneService.load()` 是否成功执行
-
-### Q3: Prompt太长影响性能
-
-**优化**:
-- 设置 `AGENT_PROMPT_WORLD_CAPS=0` 关闭世界能力注入
-- 简化虚拟电话能力的描述文本
-- 只在必要时才注入完整信息
+- 主动触达有频控（proactive-caller 门禁），忙线/离线会走文本兜底，属预期；
+- 查 `virtual-phone-calls.json` 是否有未清理的会话（正常应随通话结束即时清空）。
 
 ---
 
-## 📊 性能测试
-
-### 测试指标
-
-- **Prompt构建时间**: < 10ms
-- **内存占用**: 每个会话约增加 500 bytes
-- **查询延迟**: VirtualPhoneService.getPhoneForActor() < 1ms
-
-### 压力测试
-
-同时100个用户发送消息，观察：
-- 服务器响应时间
-- 内存使用情况
-- CPU占用率
-
----
-
-## 🎯 下一步
-
-测试通过后，可以考虑：
-
-1. **前端优化**: 在聊天界面添加虚拟电话快捷按钮
-2. **智能推荐**: 检测用户意图后主动推荐相关功能
-3. **使用统计**: 记录功能使用情况，优化提示策略
-4. **A/B测试**: 测试不同的提示文案效果
-
----
-
-**测试日期**: 2026-05-17  
-**测试人员**: ___________  
-**测试结果**: ☐ 通过  ☐ 失败  ☐ 部分通过
-
----
-
-## 🔁 双向通话协议事件（2026-08 新增）
-
-通话链路已从「TTS 单向播报」升级为「双向交互」，新增以下协议事件：
-
-| 方向 | 事件 | 说明 |
-|------|------|------|
-| 客户端 → 服务端 | `phone.call_reply` | 通话中用户回复，payload: `{ callId, text }`（打字或客户端本地 ASR 转写） |
-| 客户端 → 服务端 | `phone.call_hangup` | 用户挂断，payload: `{ callId }`；服务端清理会话并推 `ended` |
-| 服务端 → 客户端 | `agent.phone.voice_reply` | 通话中 Agent 的语音回应，payload 含 `callId / transcript / tts` |
-
-服务端行为变化：
-
-1. **提醒电话（phone_call 级提醒）**：接通后进入交互循环——用户回复确认词（默认
-   「退下/知道了/收到/挂断」）即播告别语并推 `reminder_call_completed`；其他回复走
-   LLM 对话并经 `agent.phone.voice_reply` 回播；无输入按 `maxRingDurationSec` 超时退出。
-2. **用户 → Agent 呼叫**：状态序列补全为 `ringing → connecting → connected → ended`；
-   `connected` 携带 Agent 的接通回应（transcript + TTS，经 AgentCore 主对话管线生成，
-   超时 25s 或失败按兜底话术接通）。拨通留言经 `userMessage` 传入 Agent。
-3. **Agent → 用户通话（phone.call_user）**：`replyEnabled` 现在真实生效——通话中的
-   `phone.call_reply` 会路由进 Agent 对话并以 `voice_reply` 回播。
-4. 通话会话保活 10 分钟，挂断/超时后 `call_reply` 报「通话不存在或已结束」。
-
-### 手工验证步骤
-
-1. 创建 phone_call 级提醒并触发（或让 Agent 调 `phone.call_user`）→ 客户端接听；
-2. 在通话 UI 输入（或语音转写）回复「等等，几点开会？」→ 应听到 Agent 的 LLM 回应；
-3. 回复「收到」→ 应听到告别语，通话结束，提醒状态变为已确认；
-4. 让 Agent 拨打用户 → 接听后直接说话发送（`phone.call_reply`）→ 应持续多轮对话；
-5. 用户呼叫 Agent（拨号盘）→ 应听到 Agent 问候/回应留言的语音；点挂断 → 双方状态清理。
-
-自动化覆盖：`server/test/phone-call-handler.test.ts`、`server/test/virtual-phone-service.test.ts`、
-`server/test/phone-call-intent.test.ts`、`server/test/forced-tool.test.ts`（`npm test`）。
+**修订日期**: 2026-09-24
+**待办**: 云端端到端语音服务接入后——桌面端「说话回复」、通话语音输入、删除文字回复过渡态；
+真实 PSTN 号码属 `phone_call.*` P2 云线路（资质先行）。

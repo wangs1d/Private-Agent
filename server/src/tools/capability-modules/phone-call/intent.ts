@@ -2,7 +2,7 @@
  * phone_call.* 工具意图元数据 + 关键词分类映射。
  *
  * 边界区分（negativeAliases / negativeExamples）—— 与虚拟电话 / phone.dial 划清界限：
- *   - 虚拟电话（phone.virtual_call / phone.call_user）：站内应用内互拨，6 位虚拟号，无话费
+ *   - 虚拟电话（phone.call_user）：站内应用内来电（Agent→用户），6 位站内号，无话费
  *   - phone.dial：仅打开拨号盘，无确认门与结果回填闭环
  *   - email_sms（发短信/邮件）、聊天（微信）通道
  */

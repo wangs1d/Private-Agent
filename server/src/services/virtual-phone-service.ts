@@ -1,16 +1,9 @@
 import { randomBytes, randomInt, randomUUID } from "crypto";
-import { mkdir, readFile, rename, writeFile } from "fs/promises";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { ServerEventType } from "../protocol.js";
 import type { TtsService } from "./tts-service.js";
 import type { ClientPushPort } from "../ports/client-push-port.js";
-import { relayRequiresPairEnv } from "./agent-pairing-service.js";
-import type { AgentPairingService } from "./agent-pairing-service.js";
-import type {
-  PeerIncomingCallPayload,
-  VirtualPhoneIncomingCoordinator,
-} from "./virtual-phone-incoming-coordinator.js";
-
 /** 前摇阶段配置 */
 export interface RingPhaseConfig {
   /** 振铃持续时间（毫秒），默认 8000ms（8秒振铃） */
@@ -24,14 +17,6 @@ export type VirtualPhoneInitiator = "user" | "agent";
 
 type PersistedVirtualPhones = {
   byActor: Record<string, string>;
-};
-
-export type PlaceVirtualCallParams = {
-  fromActorId: string;
-  toPhone: string;
-  transcript: string;
-  ringStyle: VirtualPhoneRingStyle;
-  initiatedBy: VirtualPhoneInitiator;
 };
 
 export type CallUserParams = {
@@ -75,6 +60,8 @@ type ActiveCallSession = {
   toUserId: string;
   direction: "user_to_agent" | "agent_to_user";
   createdAt: number;
+  /** 呼出时的语音稿/留言（通话记录落盘用） */
+  initialTranscript?: string;
 };
 
 type ReplyWaiter = {
@@ -89,6 +76,11 @@ const USER_CALL_AGENT_TIMEOUT_MS = (() => {
   const n = Number(process.env.VIRTUAL_PHONE_USER_CALL_AGENT_TIMEOUT_MS ?? 25_000);
   return Number.isFinite(n) && n > 0 ? n : 25_000;
 })();
+/** 通话记录保留天数（TTL 清理），默认 30 天 */
+const CALL_HISTORY_TTL_DAYS = (() => {
+  const n = Number(process.env.VIRTUAL_PHONE_HISTORY_TTL_DAYS ?? 30);
+  return Number.isFinite(n) && n > 0 ? n : 30;
+})();
 
 /**
  * 按持久化路径串行化的全局写队列（同进程所有 VirtualPhoneService 实例共享）。
@@ -100,7 +92,6 @@ const persistQueues = new Map<string, Promise<void>>();
 export class VirtualPhoneService {
   private readonly byActor = new Map<string, string>();
   private readonly byPhone = new Map<string, string>();
-  private incomingCoordinator: VirtualPhoneIncomingCoordinator | null = null;
   /** 通话回复总线：提醒电话等场景等待用户在通话中输入（phone.call_reply 喂入） */
   private readonly replyWaiters = new Map<string, ReplyWaiter[]>();
   /** 活跃通话会话：callId → 双方身份，用于通话中回复路由与挂断清理 */
@@ -111,12 +102,7 @@ export class VirtualPhoneService {
   constructor(
     private readonly tts: TtsService,
     private readonly wsRegistry: ClientPushPort,
-    private readonly pairing: AgentPairingService,
   ) {}
-
-  setIncomingCoordinator(coordinator: VirtualPhoneIncomingCoordinator): void {
-    this.incomingCoordinator = coordinator;
-  }
 
   /** 注入用户→Agent 通话的接通回应生成器（应在启动时由 bootstrap 调用一次） */
   setUserCallAgentHandler(handler: UserCallAgentHandler): void {
@@ -220,23 +206,26 @@ export class VirtualPhoneService {
     // 清理过期会话，防长期运行下映射表无界增长
     const now = Date.now();
     for (const [id, s] of this.callSessions) {
-      if (now - s.createdAt > CALL_SESSION_TTL_MS) this.callSessions.delete(id);
+      if (now - s.createdAt > CALL_SESSION_TTL_MS) {
+        this.callSessions.delete(id);
+        this.recordCallHistory(s, "expired");
+      }
     }
     this.callSessions.set(session.callId, session);
+    this.scheduleSessionsPersist();
   }
 
   /**
-   * 用户挂断/服务端结束通话：清理会话与等待方，并向用户端推 ended 状态。
+   * 用户挂断/服务端结束通话：清理会话与等待方，落通话记录，并向用户端推 ended 状态。
    */
   endCall(callId: string, reason = "hangup"): { ok: boolean; error?: string } {
     const id = callId.trim();
     if (!id) return { ok: false, error: "缺少 callId" };
     const session = this.callSessions.get(id);
-    if (!session && !this.replyWaiters.has(id)) {
+    const closed = this.closeCall(id, reason);
+    if (!closed && !this.replyWaiters.has(id)) {
       return { ok: false, error: "通话不存在或已结束" };
     }
-    this.callSessions.delete(id);
-    this.cancelCallReplyWaiters(id);
     if (session) {
       this.wsRegistry.trySend(
         session.toUserId,
@@ -252,6 +241,147 @@ export class VirtualPhoneService {
       );
     }
     return { ok: true };
+  }
+
+  /**
+   * 仅收尾不推送：清理会话/等待方、落通话记录、持久化会话文件。
+   * 供自带 ended 推送的调用方（如提醒电话交互循环）使用，避免双 ended 事件。
+   */
+  closeCall(callId: string, reason = "hangup"): boolean {
+    const id = callId.trim();
+    if (!id) return false;
+    const session = this.callSessions.get(id);
+    if (!session) return false;
+    this.callSessions.delete(id);
+    this.cancelCallReplyWaiters(id);
+    this.scheduleSessionsPersist();
+    this.recordCallHistory(session, reason);
+    return true;
+  }
+
+  // ============================================================
+  // 并发忙线 / 重启韧性 / 通话记录
+  // ============================================================
+
+  /** 该用户是否已有活跃通话会话（同一用户同一时刻只允许一通） */
+  private findActiveSessionByUser(toUserId: string): ActiveCallSession | undefined {
+    const user = toUserId.trim();
+    if (!user) return undefined;
+    for (const s of this.callSessions.values()) {
+      if (s.toUserId === user) return s;
+    }
+    return undefined;
+  }
+
+  /**
+   * 忙线拒绝：向用户推 busy 状态（客户端不覆盖现有通话），并给调用方可重试的失败。
+   */
+  private rejectBusy(callId: string, toUserId: string, direction: ActiveCallSession["direction"]): void {
+    this.wsRegistry.trySend(
+      toUserId,
+      JSON.stringify({
+        type: ServerEventType.VirtualPhoneCallStatus,
+        payload: {
+          callId,
+          direction,
+          status: "busy",
+          message: "当前已在通话中，新呼叫被拒绝",
+        },
+      }),
+    );
+  }
+
+  /**
+   * 落通话记录（data/virtual-phone-history/{ts}-{callId}.json）。
+   * 只记服务端已知信息：双方、方向、起止与结束原因、呼出语音稿；失败吞掉不影响链路。
+   */
+  private recordCallHistory(session: ActiveCallSession, endReason: string): void {
+    const record = {
+      callId: session.callId,
+      direction: session.direction,
+      fromActorId: session.fromActorId,
+      toUserId: session.toUserId,
+      startedAt: new Date(session.createdAt).toISOString(),
+      endedAt: new Date().toISOString(),
+      endReason,
+      initialTranscript: session.initialTranscript ?? "",
+    };
+    const dir = this.historyDir;
+    const file = join(dir, `${Date.now()}-${session.callId}.json`);
+    void mkdir(dir, { recursive: true })
+      .then(() => writeFile(file, JSON.stringify(record, null, 2), "utf8"))
+      .catch((err) => console.warn("[VirtualPhoneService] 通话记录落盘失败:", err));
+  }
+
+  private get historyDir(): string {
+    return process.env.VIRTUAL_PHONE_HISTORY_DIR ?? join(process.cwd(), "data", "virtual-phone-history");
+  }
+
+  private get sessionsPath(): string {
+    return process.env.VIRTUAL_PHONE_CALLS_FILE ?? join(process.cwd(), "data", "virtual-phone-calls.json");
+  }
+
+  /** 活跃通话会话落盘（原子写 + 全局写队列，同 virtual-phones.json 策略） */
+  private scheduleSessionsPersist(): void {
+    const path = this.sessionsPath;
+    const prev = persistQueues.get(path) ?? Promise.resolve();
+    const next = prev
+      .then(async () => {
+        const dir = dirname(path);
+        await mkdir(dir, { recursive: true });
+        const sessions: ActiveCallSession[] = [...this.callSessions.values()];
+        const tmp = `${path}.${randomBytes(4).toString("hex")}.tmp`;
+        await writeFile(tmp, JSON.stringify({ sessions }, null, 2), "utf8");
+        await rename(tmp, path);
+      })
+      .catch((err: unknown) => {
+        console.warn("[VirtualPhoneService] 通话会话落盘失败:", err);
+      });
+    persistQueues.set(path, next);
+  }
+
+  /**
+   * 启动恢复：上次进程遗留的活跃会话已随重启失效——对每通补推
+   * ended(server_restart) 让客户端干净收尾，然后清空落盘文件。
+   * 顺带做通话记录 TTL 清理。
+   */
+  private async recoverStaleSessions(): Promise<void> {
+    try {
+      const raw = await readFile(this.sessionsPath, "utf8");
+      const data = JSON.parse(raw) as { sessions?: ActiveCallSession[] };
+      for (const s of data.sessions ?? []) {
+        if (!s?.callId || !s?.toUserId) continue;
+        this.wsRegistry.trySend(
+          s.toUserId,
+          JSON.stringify({
+            type: ServerEventType.VirtualPhoneCallStatus,
+            payload: {
+              callId: s.callId,
+              direction: s.direction,
+              status: "ended",
+              reason: "server_restart",
+            },
+          }),
+        );
+      }
+      await unlink(this.sessionsPath).catch(() => undefined);
+    } catch {
+      // 无遗留会话文件（首次启动/已清理）属正常
+    }
+    try {
+      const dir = this.historyDir;
+      const files = await readdir(dir).catch(() => [] as string[]);
+      const cutoff = Date.now() - CALL_HISTORY_TTL_DAYS * 24 * 60 * 60_000;
+      for (const f of files) {
+        if (!f.endsWith(".json")) continue;
+        const ts = Number(f.split("-")[0]);
+        if (Number.isFinite(ts) && ts < cutoff) {
+          await unlink(join(dir, f)).catch(() => undefined);
+        }
+      }
+    } catch (err) {
+      console.warn("[VirtualPhoneService] 通话记录 TTL 清理失败:", err);
+    }
   }
 
   /**
@@ -312,9 +442,11 @@ export class VirtualPhoneService {
       }
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
-      if (err.code === "ENOENT") return;
-      throw e;
+      // 号码文件不存在（首次启动）不算错，继续走重启恢复
+      if (err.code !== "ENOENT") throw e;
     }
+    // 号码装好后做重启恢复与会话记录 TTL 清理（best-effort，失败不断链）
+    await this.recoverStaleSessions();
   }
 
   private schedulePersist(): void {
@@ -348,7 +480,7 @@ export class VirtualPhoneService {
 
   /**
    * 申领或返回该 Actor（Agent 实例）的 6 位虚拟号码。
-   * 号码登记在 Agent 名下，即用户联络号；Agent↔Agent 互拨用此号，用户↔Agent 在 App 内通话不必另输 6 位号。
+   * 号码登记在 Agent 名下，即用户的站内电话号，申领后方可呼出虚拟电话；App 内通话不必另输 6 位号。
    * 仅应在用户明确要求办理时调用（如 `phone.ensure_my_number`），不得在其它路径隐式调用。
    */
   ensureNumber(actorId: string): string {
@@ -374,110 +506,19 @@ export class VirtualPhoneService {
     throw new Error("虚拟号池忙碌，请稍后重试");
   }
 
-  resolveActorByPhone(phoneRaw: string): string | undefined {
-    const p = normalizeVirtualPhone(phoneRaw);
-    if (!p) return undefined;
-    return this.byPhone.get(p);
-  }
-
   /**
-   * 向持有该号码的 Actor 推送 WebSocket「来电」；可拨打本人号码作语音提醒。
+   * 释放该 Actor 的站内号码（账号注销/用户主动解绑）。
+   * 号码回池可被再次随机分给他人；未申领时返回 ok:false。
    */
-  async placeCall(params: PlaceVirtualCallParams): Promise<{
-    ok: boolean;
-    callId?: string;
-    pushed?: boolean;
-    targetActorId?: string;
-    fromPhone?: string;
-    error?: string;
-  }> {
-    const fromActorId = params.fromActorId.trim();
-    const toPhone = normalizeVirtualPhone(params.toPhone);
-    if (!fromActorId) {
-      return { ok: false, error: "主叫方无效" };
-    }
-    if (!toPhone) {
-      return { ok: false, error: "号码须为 6 位数字" };
-    }
-
-    const targetActorId = this.byPhone.get(toPhone);
-    if (!targetActorId) {
-      return { ok: false, error: "该号码未注册虚拟线路（对方可能尚未申领号码）" };
-    }
-
-    if (targetActorId !== fromActorId) {
-      if (relayRequiresPairEnv() && !this.pairing.arePaired(fromActorId, targetActorId)) {
-        return {
-          ok: false,
-          error:
-            "拨打其他 Agent 需先配对：请双方 POST /agent/pair 相同配对码，或开发环境设置 AGENT_RELAY_REQUIRE_PAIR=0",
-        };
-      }
-    }
-
-    const fromPhone = this.byActor.get(fromActorId);
-    if (!fromPhone) {
-      return {
-        ok: false,
-        error:
-          "主叫方尚未申领虚拟号码：请用户明确要求后再由 Agent 调用 phone.ensure_my_number，无法自动分配",
-      };
-    }
-    const ttsResult = await this.tts.synthesizeMp3Base64(params.transcript);
-    const callId = randomUUID();
-
-    const isSelfReminder =
-      targetActorId === fromActorId && params.ringStyle === "reminder";
-    const isPeerAgentCall = targetActorId !== fromActorId;
-
-    const payload: Record<string, unknown> = {
-      callId,
-      fromActorId,
-      fromPhone,
-      toPhone,
-      transcript: params.transcript.trim(),
-      ringStyle: params.ringStyle,
-      initiatedBy: params.initiatedBy,
-      direction: isSelfReminder ? "agent_self_reminder" : "agent_to_agent",
-      userActionRequired: isPeerAgentCall && params.ringStyle === "peer",
-      ringTimeoutSec: isPeerAgentCall && params.ringStyle === "peer"
-        ? Math.round(
-            Number(process.env.VIRTUAL_PHONE_PEER_RING_TIMEOUT_MS ?? 50_000) / 1000,
-          ) || 50
-        : undefined,
-      tts: ttsResult.ok
-        ? { format: ttsResult.format, base64: ttsResult.base64 }
-        : { format: null, skippedReason: ttsResult.reason },
-    };
-
-    const pushed = this.wsRegistry.trySend(
-      targetActorId,
-      JSON.stringify({
-        type: ServerEventType.VirtualPhoneIncoming,
-        payload,
-      }),
-    );
-
-    if (pushed && isPeerAgentCall && params.ringStyle === "peer") {
-      const peerPayload: PeerIncomingCallPayload = {
-        callId,
-        fromActorId,
-        fromPhone,
-        toPhone,
-        transcript: params.transcript.trim(),
-        ringStyle: params.ringStyle,
-        initiatedBy: params.initiatedBy,
-      };
-      this.incomingCoordinator?.registerPeerIncoming(targetActorId, peerPayload);
-    }
-
-    return {
-      ok: true,
-      callId,
-      pushed,
-      targetActorId,
-      fromPhone,
-    };
+  releaseNumber(actorId: string): { ok: boolean; released?: string; error?: string } {
+    const id = actorId.trim();
+    if (!id) return { ok: false, error: "actorId 不能为空" };
+    const phone = this.byActor.get(id);
+    if (!phone) return { ok: false, error: "该 Actor 尚未申领号码" };
+    this.byActor.delete(id);
+    this.byPhone.delete(phone);
+    this.schedulePersist();
+    return { ok: true, released: phone };
   }
 
   /**
@@ -489,6 +530,7 @@ export class VirtualPhoneService {
     ok: boolean;
     callId?: string;
     pushed?: boolean;
+    busy?: boolean;
     toUserId?: string;
     fromPhone?: string;
     error?: string;
@@ -500,6 +542,13 @@ export class VirtualPhoneService {
     }
     if (!toUserId) {
       return { ok: false, error: "被叫用户 ID 无效" };
+    }
+    // 忙线护栏：同一用户同一时刻只允许一通，后来的呼叫推 busy 且不入会话
+    const activeCall = this.findActiveSessionByUser(toUserId);
+    if (activeCall) {
+      const busyCallId = randomUUID();
+      this.rejectBusy(busyCallId, toUserId, "agent_to_user");
+      return { ok: false, busy: true, error: "用户当前已在通话中，请稍后再试", callId: busyCallId };
     }
     const fromPhone = this.byActor.get(fromActorId);
     const ttsResult = await this.tts.synthesizeMp3Base64(params.transcript);
@@ -535,6 +584,7 @@ export class VirtualPhoneService {
         toUserId,
         direction: "agent_to_user",
         createdAt: Date.now(),
+        initialTranscript: params.transcript.trim(),
       });
     }
 
@@ -560,6 +610,7 @@ export class VirtualPhoneService {
     ok: boolean;
     callId?: string;
     pushed?: boolean;
+    busy?: boolean;
     toUserId?: string;
     fromPhone?: string;
     error?: string;
@@ -571,6 +622,13 @@ export class VirtualPhoneService {
     }
     if (!toUserId) {
       return { ok: false, error: "被叫用户 ID 无效" };
+    }
+    // 忙线护栏：同一用户同一时刻只允许一通
+    const activeCall = this.findActiveSessionByUser(toUserId);
+    if (activeCall) {
+      const busyCallId = randomUUID();
+      this.rejectBusy(busyCallId, toUserId, "agent_to_user");
+      return { ok: false, busy: true, error: "用户当前已在通话中，请稍后再试", callId: busyCallId };
     }
 
     const ringCfg = params.ringPhase ?? {};
@@ -648,6 +706,7 @@ export class VirtualPhoneService {
         toUserId,
         direction: "agent_to_user",
         createdAt: Date.now(),
+        initialTranscript: params.transcript.trim(),
       });
     }
 
@@ -669,6 +728,7 @@ export class VirtualPhoneService {
   async handleUserCallAgent(params: UserCallAgentParams): Promise<{
     ok: boolean;
     callId?: string;
+    busy?: boolean;
     error?: string;
   }> {
     const fromUserId = params.fromUserId.trim();
@@ -678,6 +738,18 @@ export class VirtualPhoneService {
     }
     if (!toActorId) {
       return { ok: false, error: "目标 Agent ID 无效" };
+    }
+    // 号码注册制门禁：只有申领了站内号码的用户才能发起虚拟通话
+    if (!this.byActor.get(fromUserId)) {
+      return {
+        ok: false,
+        error:
+          "尚未申领站内号码，无法发起通话。请先申领：对我说「帮我申请虚拟号码」即可领取 6 位号码。",
+      };
+    }
+    // 忙线护栏：用户已在通话中时拒绝再次发起，避免新会话顶掉进行中的通话
+    if (this.findActiveSessionByUser(fromUserId)) {
+      return { ok: false, busy: true, error: "当前已在通话中，请先挂断再发起新呼叫" };
     }
 
     const ringCfg = params.ringPhase ?? {};
@@ -736,6 +808,7 @@ export class VirtualPhoneService {
       toUserId: fromUserId,
       direction: "user_to_agent",
       createdAt: Date.now(),
+      initialTranscript: (params.userMessage ?? "").trim(),
     });
 
     // Agent 回应生成走异步续体：不阻塞本次 WS 事件处理（避免 Agent 回合

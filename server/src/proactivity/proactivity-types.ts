@@ -70,7 +70,7 @@ export type ProactiveIntent = {
     | "confirmation_expiry"; // ask_first 确认超时未回复的作废告知
 };
 
-// ─── 通用主动性层（Jarvis 式：感知 → LLM 自主决策 → 通用执行） ───
+// ─── 通用主动性层（感知 → LLM 自主决策 → 通用执行） ───
 
 /**
  * 通用感知观察 —— 任何源产出的统一格式。

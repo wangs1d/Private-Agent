@@ -1,23 +1,12 @@
-// ProactivityHub（主动性多元化模块）集成单测：
-// 快路径（任务恭喜/待办闭环/过劳干预）、通用 LLM 路径（speak/act/advise 路由）、
-// act 黑名单安全门、media.search → media.play 链式填参、频控拦截、LLM 零开销路径、
-// 负向决策缓存（重复场景免 LLM）、searchTools top-K 工具选择、LLM 决策蒸馏。
+// ProactivityHub（主动性编排器）集成单测：
+// 快路径（任务恭喜/待办闭环/过劳干预/待办跟进）、频控（分 kind 冷却/每日预算）、
+// 对话轮入板回调。LLM 通用路径已整体拆除（2026-09-24 架构定稿：决策=状态板映射规则），
+// 映射规则场景见 mapping-executor.test.ts。
 import assert from "node:assert/strict";
-import { beforeEach, test } from "node:test";
+import { test } from "node:test";
 
 import { ProactivityHub } from "../src/proactivity/proactivity-hub.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
-import type { LlmCompleteFn } from "../src/proactivity/initiative-engine.js";
-import { resetExemplars } from "../src/proactivity/semantic-trigger-matcher.js";
-import { detectConversationProactiveHook } from "../src/proactivity/triggers/conversation-triggers.js";
-
-// 通用 LLM 路径默认开启（PROACTIVITY_LLM_INITIATIVE 默认 1），但需 llmComplete 注入才实际生效。
-// 本文件显式设 1 以不依赖默认值。
-process.env.PROACTIVITY_LLM_INITIATIVE = "1";
-
-// 语义范例是模块级状态（决策蒸馏会在线扩充）——每个用例前重置，
-// 避免早先用例蒸馏的范例污染后续用例的对话钩子判定
-beforeEach(() => resetExemplars());
 
 const ACTOR = "actor-1";
 
@@ -32,17 +21,12 @@ type PublishedSignal = {
 type ToolCall = { tool: string; args: Record<string, unknown> };
 
 function makeDeps(overrides?: {
-  llmComplete?: LlmCompleteFn;
   executeTool?: (
     tool: string,
     args: Record<string, unknown>,
     actorId: string,
   ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
-  getLastInteractionAt?: (actorId: string) => number | null;
-  getScheduleSnapshot?: (actorId: string) => string | null;
-  getProfileText?: (actorId: string) => Promise<string | null>;
-  listTools?: () => Array<{ name: string; description: string }>;
-  searchTools?: (query: string, limit: number) => Array<{ name: string; description: string }>;
+  onConversationTurn?: (actorId: string, text: string) => void;
 }) {
   const signals: PublishedSignal[] = [];
   const toolCalls: ToolCall[] = [];
@@ -56,12 +40,7 @@ function makeDeps(overrides?: {
         toolCalls.push({ tool, args });
         return { ok: true, result: {} };
       }),
-    getLastInteractionAt: overrides?.getLastInteractionAt,
-    getScheduleSnapshot: overrides?.getScheduleSnapshot,
-    getProfileText: overrides?.getProfileText,
-    listTools: overrides?.listTools,
-    searchTools: overrides?.searchTools,
-    llmComplete: overrides?.llmComplete,
+    onConversationTurn: overrides?.onConversationTurn,
     frequencyGovernor: new FrequencyGovernor({
       ignoreEnv: true,
       disableQuietHours: true,
@@ -71,12 +50,6 @@ function makeDeps(overrides?: {
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 20));
-
-function atHour(hour: number, minute = 0): Date {
-  const d = new Date();
-  d.setHours(hour, minute, 0, 0);
-  return d;
-}
 
 // ── 快路径 ─────────────────────────────────────────────
 
@@ -149,294 +122,37 @@ test("快路径：非 overwork 的节律信号被忽略", async () => {
   assert.equal(signals.length, 0);
 });
 
-test("问候已下线：早晨 + 长静默 → tick 静默（不再主动问候）", async () => {
-  const morning = atHour(8);
-  const lastInteraction = new Date(morning.getTime() - 12 * 60 * 60 * 1000); // 昨晚 20:00，静默恒 12h
+test("对话轮：followup 强线索 → 规则判主动承接", async () => {
+  const turns: Array<{ actorId: string; text: string }> = [];
   const { deps, signals } = makeDeps({
-    getLastInteractionAt: () => lastInteraction.getTime(),
+    onConversationTurn: (actorId, text) => turns.push({ actorId, text }),
   });
   const hub = new ProactivityHub(deps);
-  await hub.onTick(ACTOR, morning);
-  assert.equal(signals.length, 0);
-});
-
-test("快路径：从未交互 → tick 静默（不冷启动打扰）", async () => {
-  const { deps, signals } = makeDeps({ getLastInteractionAt: () => null });
-  const hub = new ProactivityHub(deps);
-  await hub.onTick(ACTOR, atHour(8));
-  assert.equal(signals.length, 0);
-});
-
-// ── 通用 LLM 路径 ─────────────────────────────────────
-
-/**
- * L0 分诊（2026-09-23）后，通用路径只评估带 medium/high 观察的窗口
- * （纯 conversation_turn/user_activity 低显著噪声直接跳过）。
- * 测试基座补一条日程变化观察，模拟"值得评估"的窗口。
- */
-function pushEvalWorthyObservation(
-  hub: ProactivityHub,
-  content = "今日日程：15:00 例会",
-  salience: "medium" | "high" = "medium",
-): void {
-  hub.getFeed().pushObservation(ACTOR, "schedule_snapshot", content, salience, Date.now());
-}
-
-/** 观察已入 feed 的通用路径测试基座（对话轮不命中 followup 正则） */
-async function tickWithDecision(
-  reply: string,
-  now: Date = atHour(15),
-): Promise<{ hub: ProactivityHub; signals: PublishedSignal[]; toolCalls: ToolCall[]; llmCalls: number }> {
-  let llmCalls = 0;
-  const llmComplete: LlmCompleteFn = async () => {
-    llmCalls += 1;
-    return reply;
-  };
-  const { deps, signals, toolCalls } = makeDeps({ llmComplete });
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计"); // 命中 feed，不命中规则正则
-  pushEvalWorthyObservation(hub); // L0 分诊要求窗口含 medium+ 观察才调 LLM
-  await flush(); // observe 内部 handleConversation 为 null，无路由
-  await hub.onTick(ACTOR, now);
-  return { hub, signals, toolCalls, llmCalls };
-}
-
-test("通用路径：LLM 判定 speak → 发布 LifeSignal", async () => {
-  const { signals, llmCalls } = await tickWithDecision(
-    JSON.stringify({
-      mode: "speak",
-      kind: "mood_support",
-      importance: "medium",
-      rationale: "用户连续专注两小时了，值得一句关怀",
-      messageHint: "像朋友一样问一句忙得怎么样，别催进度",
-      actions: [],
-    }),
-  );
-  assert.equal(llmCalls, 1);
-  assert.equal(signals.length, 1);
-  assert.equal(signals[0].kind, "mood_support");
-  assert.ok(signals[0].summary.includes("忙得怎么样"));
-});
-
-test("通用路径：LLM 判定 act → 执行循环跑完种子步骤并轻提一句", async () => {
-  // 循环模式下种子步骤执行后向 LLM 要下一步；测试桩只会复读评估 JSON
-  // （无 action 字段 → 循环自然收束），收尾经 LifeSignal 轻提一句
-  const { signals, toolCalls, llmCalls } = await tickWithDecision(
-    JSON.stringify({
-      mode: "act",
-      kind: "schedule_care",
-      importance: "high",
-      rationale: "用户连轴转，提前排好休息日程",
-      messageHint: "做完顺口提一句",
-      actions: [{ tool: "calendar.create_task", args: { kind: "reminder", title: "休息" } }],
-    }),
-  );
-  assert.equal(toolCalls.length, 1);
-  assert.equal(toolCalls[0].tool, "calendar.create_task");
-  assert.equal(signals.length, 1, "做完轻提一句");
-  assert.ok(signals[0].summary.includes("已悄悄办好"), `收尾文案: ${signals[0].summary}`);
-  assert.ok(llmCalls >= 2, "评估 + 至少一次循环步询问");
-});
-
-test("通用路径：循环内危险工具被安全门拦截并反馈 LLM，无害步骤仍执行", async () => {
-  // 评估返回带危险工具的计划；循环 prompt 里桩按阶段应答：
-  // 种子 delete 被拦截反馈 → LLM 改放音乐 → 播完 done
-  let llmCalls = 0;
-  const llmComplete: LlmCompleteFn = async (prompt) => {
-    llmCalls += 1;
-    if (prompt.includes("执行模式（act 循环）")) {
-      if (!prompt.includes("media.play")) {
-        return JSON.stringify({ action: "continue", tool: "media.play", args: { trackId: "t" } });
-      }
-      return JSON.stringify({ action: "done", messageHint: "换个方式完成了" });
-    }
-    return JSON.stringify({
-      mode: "act",
-      kind: "cleanup",
-      importance: "high",
-      rationale: "想帮忙清理文件",
-      messageHint: "打算清理旧文件",
-      actions: [{ tool: "file.delete", args: { path: "/tmp/old" } }],
-    });
-  };
-  const { deps, signals, toolCalls } = makeDeps({ llmComplete });
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  pushEvalWorthyObservation(hub); // L0 分诊：medium 观察让窗口进入评估
+  hub.observeConversationTurn(ACTOR, "那个简历HR说等结果，帮我盯着点");
   await flush();
-  await hub.onTick(ACTOR, atHour(15));
-  // 危险工具永不执行；LLM 收到拦截反馈后改用无害步骤达成目标
-  assert.deepEqual(toolCalls.map((c) => c.tool), ["media.play"]);
-  assert.equal(signals.length, 1, "收尾轻提一句");
-  assert.ok(signals[0].summary.includes("已悄悄办好"));
-  assert.ok(llmCalls >= 3);
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].kind, "followup");
+  // 对话原话同时整理进状态板回调（会话层）
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].text, "那个简历HR说等结果，帮我盯着点");
 });
 
-// （原"含危险工具计划 → ask_first 挂起"的确认后安全门语义已迁至
-//  proactivity-three-branch.test.ts 的快路径用例；循环路径由
-//  "循环内危险工具被安全门拦截并反馈 LLM"覆盖）
-
-test("通用路径：步骤失败 → LLM 看到真实错误换工具达成目标", async () => {
-  // 种子步骤失败（真实错误喂回历史）→ LLM 换一条路执行成功 → 收尾汇报
-  let llmCalls = 0;
-  const llmComplete: LlmCompleteFn = async (prompt) => {
-    llmCalls += 1;
-    if (prompt.includes("执行模式（act 循环）")) {
-      // 换路后的工具已在历史里成功 → 目标达成
-      if (prompt.includes('"tool":"calendar.create_task"')) {
-        return JSON.stringify({ action: "done", messageHint: "休息已排好" });
-      }
-      return JSON.stringify({ action: "continue", tool: "calendar.create_task", args: { kind: "reminder", title: "休息" } });
-    }
-    return JSON.stringify({
-      mode: "act",
-      kind: "schedule_care",
-      importance: "high",
-      rationale: "用户连轴转，提前排好休息日程",
-      messageHint: "",
-      actions: [{ tool: "calendar.create_event", args: { title: "休息" } }],
-    });
-  };
-  const { deps, signals, toolCalls } = makeDeps({
-    llmComplete,
-    executeTool: async (tool) => {
-      toolCalls.push({ tool, args: {} });
-      if (tool === "calendar.create_event") {
-        return { ok: false, result: { error: "日历 API 无该权限（403）" } };
-      }
-      return { ok: true, result: {} };
-    },
-  } as never);
+test("对话轮：无强线索 → 静默，但原话仍入板", async () => {
+  const turns: string[] = [];
+  const { deps, signals } = makeDeps({ onConversationTurn: (_a, text) => turns.push(text) });
   const hub = new ProactivityHub(deps);
   hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  pushEvalWorthyObservation(hub); // L0 分诊：medium 观察让窗口进入评估
   await flush();
-  await hub.onTick(ACTOR, atHour(15));
-  // 失败的方式尝试过一次，随后换路成功
-  assert.deepEqual(toolCalls.map((c) => c.tool), ["calendar.create_event", "calendar.create_task"]);
-  assert.equal(signals.length, 1);
-  assert.ok(signals[0].summary.includes("已悄悄办好"), `收尾文案: ${signals[0].summary}`);
-  assert.ok(signals[0].summary.includes("calendar.create_task"), "汇报含换路后成功的工具");
-});
-
-test("通用路径：连续失败无进展 → 预算内收场并诚实交代没办成", async () => {
-  let llmCalls = 0;
-  const llmComplete: LlmCompleteFn = async (prompt) => {
-    llmCalls += 1;
-    if (prompt.includes("执行模式（act 循环）")) {
-      return JSON.stringify({ action: "continue", tool: "calendar.create_task", args: {} });
-    }
-    return JSON.stringify({
-      mode: "act",
-      kind: "schedule_care",
-      importance: "medium",
-      rationale: "提前排好休息日程",
-      messageHint: "",
-      actions: [{ tool: "calendar.create_event", args: {} }],
-    });
-  };
-  const { deps, signals, toolCalls } = makeDeps({
-    llmComplete,
-    executeTool: async (tool: string) => {
-      toolCalls.push({ tool, args: {} });
-      return { ok: false, result: { error: "服务暂不可用（503）" } };
-    },
-  } as never);
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  pushEvalWorthyObservation(hub); // L0 分诊：medium 观察让窗口进入评估
-  await flush();
-  await hub.onTick(ACTOR, atHour(15));
-  // 种子失败 + 1 次换路尝试仍失败（连续 2 次无进展）→ 收场，不无限烧轮次
-  assert.equal(toolCalls.length, 2, `尝试次数有界: ${toolCalls.length}`);
-  assert.equal(llmCalls, 2, "评估 + 一次换路询问，无原地打转");
-  assert.equal(signals.length, 1);
-  assert.equal(signals[0].importance, "low", "全部失败的交代降为低打扰档");
-  assert.ok(signals[0].title.includes("没办成"), `诚实文案: ${signals[0].title}`);
-  assert.ok(signals[0].summary.includes("503"), "交代真实卡点");
-});
-
-test("通用路径：LLM 判定 advise → speak 主动投递（不入队）", async () => {
-  const { signals } = await tickWithDecision(
-    JSON.stringify({
-      mode: "advise",
-      kind: "info_prep",
-      importance: "low",
-      rationale: "发现用户连续三天查同一个话题",
-      messageHint: "下次聊到时自然带出相关资料",
-      actions: [],
-    }),
-  );
-  // 架构调整后 advise 不再入队注入 prompt（原 AdviceStore 队列已废弃），
-  // 改由与 speak 一致的主动对话投递。
-  assert.equal(signals.length, 1);
-  assert.equal(signals[0].kind, "info_prep");
-  assert.ok(signals[0].summary.includes("资料"));
-});
-
-test("通用路径：LLM 判定 none → 全静默", async () => {
-  const { signals, toolCalls } = await tickWithDecision(
-    JSON.stringify({
-      mode: "none",
-      kind: "general",
-      importance: "low",
-      rationale: "观察平淡",
-      messageHint: "",
-      actions: [],
-    }),
-  );
   assert.equal(signals.length, 0);
-  assert.equal(toolCalls.length, 0);
+  assert.equal(turns.length, 1);
 });
 
-test("零开销：无新观察的 tick 不调 LLM", async () => {
-  let llmCalls = 0;
-  const llmComplete: LlmCompleteFn = async () => {
-    llmCalls += 1;
-    return JSON.stringify({ mode: "none", kind: "general", importance: "low", rationale: "", messageHint: "", actions: [] });
-  };
-  const { deps, signals } = makeDeps({ llmComplete });
+test("对话观察文本截断到 120 字符（入板口径）", async () => {
+  const turns: string[] = [];
+  const { deps } = makeDeps({ onConversationTurn: (_a, text) => turns.push(text) });
   const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  pushEvalWorthyObservation(hub); // L0 分诊：medium 观察让首 tick 进入评估
-  await hub.onTick(ACTOR, atHour(15)); // 第一次：消费观察，调 LLM（返回 none）
-  assert.equal(llmCalls, 1);
-  assert.equal(signals.length, 0);
-
-  await hub.onTick(ACTOR, atHour(15, 30)); // 第二次：无新观察
-  assert.equal(llmCalls, 1); // LLM 未被再次调用
-});
-
-test("L0 分诊：纯低显著噪声窗口不调 LLM（跳过且不消费水位）", async () => {
-  let llmCalls = 0;
-  const llmComplete: LlmCompleteFn = async () => {
-    llmCalls += 1;
-    return NONE_REPLY;
-  };
-  const { deps } = makeDeps({ llmComplete });
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计"); // 只有 low 显著观察
-  await hub.onTick(ACTOR, atHour(15));
-  assert.equal(llmCalls, 0); // L0 分诊跳过，零 LLM
-
-  // 跳过不消费水位：随后 medium 事件到来时一并评估（信号不丢）
-  pushEvalWorthyObservation(hub);
-  await hub.onTick(ACTOR, atHour(15, 30));
-  assert.equal(llmCalls, 1);
-  // 对话轮观察没有被分诊丢弃（仍在新评估的上下文窗口里）
-  const sawConversationTurn = hub
-    .getFeed()
-    .recent(ACTOR, 8)
-    .some((o) => o.type === "conversation_turn");
-  assert.ok(sawConversationTurn);
-});
-
-test("LLM 未注入：通用路径静默禁用（只走快路径）", async () => {
-  const { deps, signals } = makeDeps();
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  await hub.onTick(ACTOR, atHour(15));
-  assert.equal(signals.length, 0); // 问候快路径已下线、无规则命中 → 静默
+  hub.observeConversationTurn(ACTOR, "长".repeat(300));
+  assert.equal(turns[0].length, 120);
 });
 
 // ── 频控 ─────────────────────────────────────────────
@@ -468,162 +184,4 @@ test("频控：每日预算耗尽后全部拦截", async () => {
   hub.onUserLoopCompleted(ACTOR, "待办一"); // 不同 kind，但预算已尽
   await flush();
   assert.equal(signals.length, 1);
-});
-
-// ── 感知流 ─────────────────────────────────────────────
-
-test("感知流：日程快照变化才推观察（去重）", async () => {
-  let llmCalls = 0;
-  const llmComplete: LlmCompleteFn = async () => {
-    llmCalls += 1;
-    return JSON.stringify({ mode: "none", kind: "general", importance: "low", rationale: "", messageHint: "", actions: [] });
-  };
-  let snapshot = "SCH|range=today|count=1\n- 20:00|单次|休息提醒";
-  const { deps } = makeDeps({ llmComplete, getScheduleSnapshot: () => snapshot });
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  await hub.onTick(ACTOR, atHour(15)); // 第一次：日程观察入 feed，连同对话观察一起消费
-  assert.equal(llmCalls, 1);
-
-  // 日程没变：第二次 tick 无新观察（对话无、日程去重）→ 不调 LLM
-  await hub.onTick(ACTOR, atHour(15, 30));
-  assert.equal(llmCalls, 1);
-
-  // 日程变了 → 新观察 → 调 LLM
-  snapshot = "SCH|range=today|count=2\n- 20:00|单次|休息提醒\n- 21:00|单次|喝水";
-  await hub.onTick(ACTOR, atHour(16));
-  assert.equal(llmCalls, 2);
-});
-
-test("对话观察文本截断到 120 字符", async () => {
-  const { deps } = makeDeps();
-  const hub = new ProactivityHub(deps);
-  const longText = "a".repeat(500);
-  hub.observeConversationTurn(ACTOR, longText);
-  // recent 最后一条是 noteUserActivity 推的 user_activity，过滤取 conversation_turn
-  const obs = hub
-    .getFeed()
-    .recent(ACTOR, 5)
-    .filter((o) => o.type === "conversation_turn");
-  assert.equal(obs.length, 1);
-  // content = "用户说：" + 前 120 字符
-  assert.equal(obs[0].content.length, "用户说：".length + 120);
-  assert.equal(obs[0].content, `用户说：${"a".repeat(120)}`);
-});
-
-// ── 省 token 件：决策缓存 / 工具选择 / 决策蒸馏 ─────
-
-const NONE_REPLY = JSON.stringify({
-  mode: "none",
-  kind: "general",
-  importance: "low",
-  rationale: "观察平淡",
-  messageHint: "",
-  actions: [],
-});
-
-test("决策缓存：同观察窗口重复判 none → 第二次跳过 LLM（省 token）", async () => {
-  let llmCalls = 0;
-  const llmComplete: LlmCompleteFn = async () => {
-    llmCalls += 1;
-    return NONE_REPLY;
-  };
-  const { deps } = makeDeps({
-    llmComplete,
-    // 固定交互时刻贴近 tick 时刻：静默 < 10h，问候快路径不介入
-    getLastInteractionAt: () => atHour(14).getTime(),
-  });
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  pushEvalWorthyObservation(hub);
-  await hub.onTick(ACTOR, atHour(15)); // 第一次：调 LLM → none → 记入负向缓存
-  assert.equal(llmCalls, 1);
-
-  // 完全相同的观察再来一轮（对话内容与来源均相同 → 指纹相同）→ 缓存命中跳过
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  pushEvalWorthyObservation(hub); // 同内容 medium 观察 → 指纹不变
-  await hub.onTick(ACTOR, atHour(15, 30));
-  assert.equal(llmCalls, 1);
-
-  // 不同观察（指纹不同）→ 重新调 LLM
-  hub.observeConversationTurn(ACTOR, "换了话题，在整理这周的会议纪要");
-  pushEvalWorthyObservation(hub, "今日日程：16:00 改期");
-  await hub.onTick(ACTOR, atHour(16));
-  assert.equal(llmCalls, 2);
-});
-
-test("searchTools 注入：prompt 只含核心保底 + top-K 相关工具（全量不进 prompt）", async () => {
-  const prompts: string[] = [];
-  const llmComplete: LlmCompleteFn = async (prompt) => {
-    prompts.push(prompt);
-    return NONE_REPLY;
-  };
-  // 10 个核心工具（media./calendar.）+ 20 个杂项；searchTools 只回 3 个相关杂项
-  const all = [
-    ...["media.search", "media.play", "media.pause", "media.next", "media.volume"].map((name) => ({
-      name,
-      description: `${name} 工具`,
-    })),
-    ...["calendar.create_task", "calendar.list", "calendar.update", "calendar.delete_task", "calendar.query"].map(
-      (name) => ({ name, description: `${name} 工具` }),
-    ),
-    ...Array.from({ length: 20 }, (_, i) => ({
-      name: `misc.tool_${i}`,
-      description: `杂项工具 ${i}`,
-    })),
-  ];
-  const { deps } = makeDeps({
-    llmComplete,
-    getLastInteractionAt: () => atHour(14).getTime(),
-    listTools: () => all,
-    searchTools: (query, limit) => {
-      assert.ok(query.length > 0); // 查询由观察内容拼出
-      return all.filter((t) => t.name.startsWith("misc.")).slice(0, Math.min(3, limit));
-    },
-  });
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, "在忙一个新模块的设计");
-  // 工具清单只在 act 价值窗口（high 显著）注入——2026-09-23 起medium 窗口不带工具
-  pushEvalWorthyObservation(hub, "未读消息爆发：3 条新消息", "high");
-  await hub.onTick(ACTOR, atHour(15));
-
-  const prompt = prompts[0];
-  const toolNames = all.map((t) => t.name).filter((n) => prompt.includes(`- ${n}：`));
-  // 核心 10 + 相关 top-K 凑满上限 12（MAX_PROMPT_TOOLS 2026-09-23: 18→12）；
-  // 未相关的 misc.tool_2+ 不进 prompt（token 压缩生效）
-  assert.equal(toolNames.length, 12);
-  assert.ok(prompt.includes("- media.search："));
-  assert.ok(prompt.includes("- misc.tool_0："));
-  assert.ok(!prompt.includes("- misc.tool_2："));
-});
-
-test("决策蒸馏：LLM 对话主动决策（followup 类 kind）→ 原话固化为快路径范例", async () => {
-  resetExemplars();
-  const text = "这个先记着，我下午过来对一下数值"; // 正则无「记着」、种子范例无重叠 → 学习前不命中
-  assert.equal(detectConversationProactiveHook(text), null);
-
-  const llmComplete: LlmCompleteFn = async () =>
-    JSON.stringify({
-      mode: "speak",
-      kind: "task_followup", // 匹配 followup 蒸馏正则
-      importance: "medium",
-      rationale: "用户有个待对数值的事等着跟进",
-      messageHint: "晚点主动问一句结果",
-      actions: [],
-    });
-  const { deps, signals } = makeDeps({
-    llmComplete,
-    getLastInteractionAt: () => atHour(14).getTime(),
-  });
-  const hub = new ProactivityHub(deps);
-  hub.observeConversationTurn(ACTOR, text);
-  pushEvalWorthyObservation(hub);
-  await hub.onTick(ACTOR, atHour(15));
-  assert.equal(signals.length, 1); // LLM speak 决策发布信号
-
-  // 蒸馏生效：同样的话此后走零 LLM 快路径语义层命中
-  const hook = detectConversationProactiveHook(text);
-  assert.ok(hook);
-  assert.equal(hook.kind, "followup");
-  assert.equal(hook.importance, "medium");
 });

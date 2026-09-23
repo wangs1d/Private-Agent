@@ -373,6 +373,25 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 设置页「去申领」站内号码：回到聊天页并预填申领话术，由用户发送后
+  /// Agent 调 phone.ensure_my_number 办理（点=只填入，不自动发送）。
+  void _focusChatInputWithText(String text) {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx != null && navCtx.mounted) {
+      Navigator.of(navCtx).popUntil((Route<dynamic> r) => r.isFirst);
+    }
+    _closeRightPanel();
+    if (_tabIndex != 0) {
+      setState(() => _tabIndex = 0);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _inputController.text = text;
+      _inputController.selection = TextSelection.collapsed(offset: text.length);
+      _inputFocusNode.requestFocus();
+    });
+  }
+
   /// 加载持久化的分栏比例。
   void _loadSplitRatio() {
     SplitRatioPreference.load().then((double r) {
@@ -4864,7 +4883,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (navCtx == null || !navCtx.mounted) return;
     Navigator.of(navCtx).push<void>(
       MaterialPageRoute<void>(
-        builder: (BuildContext ctx) => const SettingsPage(),
+        builder: (BuildContext ctx) => SettingsPage(
+          onClaimNumberViaChat: () =>
+              _focusChatInputWithText("帮我申请虚拟号码"),
+        ),
       ),
     );
   }

@@ -2,7 +2,7 @@
  * 自主性模块加固回归测试（2026-09-19 优化批次）。
  *
  * 覆盖：
- *  1. 五层架构 L1→L2 桥接（bridgeSensorKernelToChain）+ bootstrap 接线守卫
+ *  1. 传感→状态板桥接（bridgeSensorKernelToBoard）+ bootstrap 接线守卫
  *  2. MobilePushService token 写穿持久化
  *  3. TaskHub / TaskOutbox 落盘与重启恢复（非终态如实标记 failed）
  *  4. 定时任务失败重试：指数退避 + 连续失败死信停摆 + 一次性死信通知
@@ -20,12 +20,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { SensorKernel, registerFeeder } from "../src/proactivity/sensors/kernel.js";
-import {
-  EvaluatorChain,
-  bridgeSensorKernelToChain,
-  type AttentionEvent,
-} from "../src/proactivity/evaluators/evaluator-chain.js";
-import { buildBuiltinEvaluators } from "../src/proactivity/evaluators/builtin-evaluators.js";
+import { WorldBoard, bridgeSensorKernelToBoard } from "../src/proactivity/world-board.js";
+import { MappingExecutor, type AttentionEvent } from "../src/proactivity/mapping-executor.js";
+import { buildBoardRules } from "../src/proactivity/mapping-rules.js";
 import { MobilePushService } from "../src/proactivity/mobile-push-service.js";
 import { PendingConfirmationStore } from "../src/proactivity/pending-confirmation-store.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
@@ -46,7 +43,7 @@ function tmpDir(): string {
 // 1. 五层架构 L1→L2 桥接
 // ────────────────────────────────────────────────────────────
 
-function makeFabric(dir: string, wire: boolean): { kernel: SensorKernel; chain: EvaluatorChain; events: AttentionEvent[]; feed: (s: { stream: "schedule" | "goal" | "message" | "presence"; fingerprint: string; payload: Record<string, unknown> }) => void } {
+function makeFabric(dir: string, wire: boolean): { kernel: SensorKernel; board: WorldBoard; executor: MappingExecutor; events: AttentionEvent[]; feed: (s: { stream: "schedule" | "goal" | "message" | "presence"; fingerprint: string; payload: Record<string, unknown> }) => void } {
   const kernel = new SensorKernel({ dataPath: dir, disablePersist: true });
   const scheduleFeeder = registerFeeder(kernel, "schedule_probe", "schedule");
   const goalFeeder = registerFeeder(kernel, "goal_probe", "goal");
@@ -61,21 +58,26 @@ function makeFabric(dir: string, wire: boolean): { kernel: SensorKernel; chain: 
     interestLines: () => [],
     recallMemory: () => [],
   };
-  const chain = new EvaluatorChain({ defaultActorId: () => "u1", services });
-  for (const ev of buildBuiltinEvaluators(services)) chain.register(ev);
+  const board = new WorldBoard({});
+  if (wire) bridgeSensorKernelToBoard(kernel, board, () => "u1");
+  const executor = new MappingExecutor({
+    board,
+    rules: buildBoardRules(services),
+    defaultActorId: () => "u1",
+  });
   const events: AttentionEvent[] = [];
-  chain.onEvent((e) => events.push(e));
-  if (wire) bridgeSensorKernelToChain(kernel, chain);
+  executor.onEvent((e) => events.push(e));
   const feeders = { schedule: scheduleFeeder, goal: goalFeeder, message: messageFeeder, presence: presenceFeeder };
   return {
     kernel,
-    chain,
+    board,
+    executor,
     events,
     feed: (s) => feeders[s.stream]({ at: Date.now(), fingerprint: s.fingerprint, salience: "low", payload: s.payload }),
   };
 }
 
-test("桥接后传感信号产出评估器事件（L1→L2 连通）", async () => {
+test("桥接后传感信号入板并产出规则事件（L1→L2 连通）", async () => {
   const dir = tmpDir();
   try {
     const fabric = makeFabric(dir, true);
@@ -83,7 +85,7 @@ test("桥接后传感信号产出评估器事件（L1→L2 连通）", async () 
     fabric.feed({ stream: "schedule", fingerprint: `s1:${at}`, payload: { nextRunAt: at + 10 * 60_000, nextTitle: "周会" } });
     fabric.feed({ stream: "goal", fingerprint: `g1:${at}`, payload: { goalId: "g1", title: "准备包", body: "好了", status: "ready" } });
     for (let i = 0; i < 3; i++) fabric.feed({ stream: "message", fingerprint: `m${i}:${at}`, payload: { sender: `c${i}` } });
-    await fabric.chain.flush();
+    await fabric.executor.tickActorWithServices("u1", {}, at);
     const kinds = fabric.events.map((e) => e.kind);
     assert.ok(kinds.includes("meeting_soon"), `应有 meeting_soon，实际 ${kinds.join(",")}`);
     assert.ok(kinds.includes("goal_ready"), `应有 goal_ready，实际 ${kinds.join(",")}`);
@@ -93,24 +95,25 @@ test("桥接后传感信号产出评估器事件（L1→L2 连通）", async () 
   }
 });
 
-test("无桥接时流式评估器零事件（复现修复前断线行为）", async () => {
+test("无桥接时信号不入板，规则零事件（复现断线行为）", async () => {
   const dir = tmpDir();
   try {
     const fabric = makeFabric(dir, false);
     const at = Date.now();
     fabric.feed({ stream: "schedule", fingerprint: `s1:${at}`, payload: { nextRunAt: at + 10 * 60_000, nextTitle: "周会" } });
     fabric.feed({ stream: "goal", fingerprint: `g1:${at}`, payload: { goalId: "g1", title: "x", status: "ready" } });
-    await fabric.chain.flush();
-    assert.equal(fabric.events.length, 0, "缺桥接时不应有流式事件");
+    await fabric.executor.tickActorWithServices("u1", {}, at);
+    assert.equal(fabric.events.length, 0, "缺桥接时板是空的，规则不应有事件");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("bootstrap 接线守卫：生产装配必须包含桥接与评估器 dataPath", () => {
+test("bootstrap 接线守卫：生产装配必须包含状态板桥接与执行器 dataPath", () => {
   const src = readFileSync(join(process.cwd(), "src", "bootstrap", "create-app-services.ts"), "utf8");
-  assert.match(src, /bridgeSensorKernelToChain\(sensorKernel,\s*evaluatorChain\)/, "bootstrap 必须调用 L1→L2 桥接（防再次断线）");
-  assert.match(src, /new EvaluatorChain\(\{[\s\S]*?dataPath:/, "EvaluatorChain 构造必须传 dataPath（状态持久化）");
+  assert.match(src, /bridgeSensorKernelToBoard\(sensorKernel,\s*worldBoard/, "bootstrap 必须调用 L1→板 桥接（防再次断线）");
+  assert.match(src, /new MappingExecutor\(\{[\s\S]*?dataPath:/, "MappingExecutor 构造必须传 dataPath（状态持久化）");
+  assert.match(src, /worldBoardRef.current = worldBoard/, "对话轮入板回调必须接线（会话层）");
 });
 
 // ────────────────────────────────────────────────────────────

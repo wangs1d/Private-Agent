@@ -360,6 +360,9 @@ class _UpdateResultCardState extends State<_UpdateResultCard>
     final Color sheen = Colors.white.withValues(alpha: dark ? 0.34 : 0.85);
     final Color ink = cs.onSurface;
     final Color inkSoft = cs.onSurfaceVariant;
+    // 次操作胶囊描边：outline 在暖色主题的奶白玻璃上过淡（近乎隐形），
+    // 改用 onSurface 半透明——深色下≈原白描边观感，暖色下清晰可辨
+    final Color pillLine = ink.withValues(alpha: 0.28);
     final Color shadow = dark
         ? Colors.black.withValues(alpha: 0.55)
         : const Color(0xFF161616).withValues(alpha: 0.22);
@@ -443,7 +446,7 @@ class _UpdateResultCardState extends State<_UpdateResultCard>
                           child: Icon(widget.spec.icon, size: 17, color: ink),
                         ),
                         const SizedBox(width: 10),
-                        Expanded(child: _buildBody(ink, inkSoft, line)),
+                        Expanded(child: _buildBody(ink, inkSoft, pillLine)),
                       ],
                     ),
                   ),

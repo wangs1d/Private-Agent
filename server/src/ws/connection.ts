@@ -24,10 +24,6 @@ import { createExternalChatProviderFromEnv } from "../external-model/resolve-pro
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { setVoiceMode } from "../proactivity/voice-mode-state.js";
-import type {
-  IncomingPhoneUserAction,
-  VirtualPhoneIncomingCoordinator,
-} from "../services/virtual-phone-incoming-coordinator.js";
 import {
   handleAgentEmbodimentInteractEvent,
 } from "./handlers/agent-embodiment-interact.js";
@@ -199,7 +195,6 @@ export type WsRouteDeps = {
   /** 位置上报管线（方案 A-D）：历史落库 / 围栏判定 / 到达触发；null=未装配 */
   locationIngest?: LocationIngestPipeline | null;
   virtualPhoneService: VirtualPhoneService;
-  virtualPhoneIncomingCoordinator: VirtualPhoneIncomingCoordinator;
   userPersonalizationService: UserPersonalizationService;
   deviceRegistry: DeviceRegistry;
   devicePairingService: DevicePairingService;
@@ -242,7 +237,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     locationCoordinator,
     locationIngest,
     virtualPhoneService,
-    virtualPhoneIncomingCoordinator,
     userPersonalizationService,
     deviceRegistry,
     devicePairingService,
@@ -512,55 +506,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
-        if (event.type === ClientEventType.VirtualPhoneIncomingResponse) {
-          if (!boundActorId) {
-            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
-            return;
-          }
-          const callPl = event.payload as Record<string, unknown>;
-          const callId = String(callPl.callId ?? "").trim();
-          const actionRaw = String(callPl.action ?? "").trim().toLowerCase();
-          const allowed: IncomingPhoneUserAction[] = [
-            "accept",
-            "decline",
-            "agent_takeover",
-          ];
-          if (!callId) {
-            sendUnifiedError("BAD_PHONE_CALL", "缺少 callId");
-            return;
-          }
-          if (!allowed.includes(actionRaw as IncomingPhoneUserAction)) {
-            sendUnifiedError(
-              "BAD_PHONE_CALL",
-              "action 须为 accept | decline | agent_takeover",
-            );
-            return;
-          }
-          const action = actionRaw as IncomingPhoneUserAction;
-          const result = await virtualPhoneIncomingCoordinator.handleUserResponse(
-            boundActorId,
-            callId,
-            action,
-          );
-          if (!result.ok) {
-            sendUnifiedError("PHONE_CALL_FAILED", result.error ?? "处理来电失败");
-            return;
-          }
-          socket.send(
-            JSON.stringify({
-              type: ServerEventType.VirtualPhoneCallStatus,
-              payload: {
-                ok: true,
-                callId,
-                status: action === "accept" ? "answered_by_user" : "delegation_started",
-                action,
-              },
-            }),
-          );
-          return;
-        }
-
-        // 通话中用户回复：路由进通话回复总线（提醒电话交互 / Agent 主对话管线）
         if (event.type === ClientEventType.VirtualPhoneCallReply) {
           if (!boundActorId) {
             sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");

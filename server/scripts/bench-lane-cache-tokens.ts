@@ -5,7 +5,7 @@
  *   S1 system prompt 分层体积 + 跨轮稳定前缀占比（缓存命中率代理指标）
  *   S2 task 车道可见工具规模（static arch：Core ∪ 能力束 ∪ 桥，及 router-first 后形态）
  *   S3 chat 车道可见工具规模（对照组）
- *   S4 主动性评估 prompt 体积 + 模拟一天观察流的 LLM 评估次数（L0 规则分诊前后）
+ *   （S4 主动性评估基准已随 LLM 通用路径拆除而移除——决策零 LLM，无可测对象）
  *
  * 对脚本防御性兼容新旧代码：优化后删除/变动的导出走 try-import 降级为 n/a。
  * token 折算与 llm-token-audit 同源（estimateTokensForText）。
@@ -150,127 +150,10 @@ async function benchLanes(): Promise<void> {
   );
 }
 
-// ── S4: 主动性评估 prompt + 模拟一天评估次数 ──
-async function benchS4(): Promise<void> {
-  const { InitiativeEngine } = await import("../src/proactivity/initiative-engine.js");
-  const typeObs: ObservationType = (await import("../src/proactivity/proactivity-types.js")) as never;
-  void typeObs;
-  const captured: string[] = [];
-  const engine = new InitiativeEngine(async (prompt: string) => {
-    captured.push(prompt);
-    return JSON.stringify({ mode: "none", kind: "general", importance: "low", rationale: "x", messageHint: "", actions: [] });
-  });
-
-  // 典型一次评估输入：3 条低显著对话轮 + 1 条 medium 日程 + 1 条 low 活跃
-  const mkObs = (type: string, salience: "high" | "medium" | "low", content: string, at: number) =>
-    ({ actorId: "bench", type, content, salience, observedAt: at });
-  const t0 = Date.now();
-  const observations = [
-    mkObs("conversation_turn", "low", "用户说：帮我看看这个报错", t0),
-    mkObs("conversation_turn", "low", "用户说：好了可以了", t0 + 1),
-    mkObs("user_activity", "low", "用户活跃（来源：conversation）", t0 + 2),
-    mkObs("schedule_snapshot", "medium", "今日日程：14:00 例会", t0 + 3),
-    mkObs("conversation_turn", "low", "用户说：下午提醒我", t0 + 4),
-  ];
-  const evalInput = {
-    actorId: "bench",
-    observations,
-    recentContext: observations.slice(0, 2),
-    profileText: "用户画像：".padEnd(600, "画像条目。"),
-    lastInteractionAt: t0 - 120_000,
-    recentInitiatives: ["greeting: 早安"],
-    budgetNote: "今日已主动发送 0 次",
-    availableTools: Array.from({ length: 18 }, (_, i) => ({ name: `tool_${i}`, description: `工具 ${i} 的描述，用于 act 行动计划选择。`.padEnd(80, "补") })),
-    now: new Date(t0),
-  };
-  await engine.evaluate(evalInput);
-  const promptChars = captured[0]?.length ?? 0;
-
-  // hub 注入砍半后的形态（2026-09-23）：画像 600→240、工具清单仅 high 窗口注入
-  const evalInputSlimMedium = {
-    ...evalInput,
-    profileText: "用户画像：".padEnd(240, "画像条目。"),
-    availableTools: undefined, // medium 窗口不带工具清单
-    observations: observations.slice(0, 4),
-  };
-  await engine.evaluate(evalInputSlimMedium);
-  const promptSlimMediumChars = captured[1]?.length ?? 0;
-  const evalInputSlimHigh = {
-    ...evalInputSlimMedium,
-    availableTools: evalInput.availableTools?.slice(0, 12), // MAX_PROMPT_TOOLS 18→12
-  };
-  await engine.evaluate(evalInputSlimHigh);
-  const promptSlimHighChars = captured[2]?.length ?? 0;
-
-  // 模拟一天观察流：14h 活跃、对话去抖 ~每 8 分钟一个窗口 + tick 每 30min
-  // 每窗口随机含 low 噪声与少量 medium/high 事件（比例参照真实分布：对话轮占绝对多数）
-  type Win = Array<{ type: string; salience: "high" | "medium" | "low"; content: string }>;
-  const windows: Win[] = [];
-  let seed = 42;
-  const rand = () => {
-    seed = (seed * 1103515245 + 12345) % 2147483648;
-    return seed / 2147483648;
-  };
-  for (let w = 0; w < 100; w++) {
-    const win: Win = [];
-    const noise = 1 + Math.floor(rand() * 4);
-    for (let i = 0; i < noise; i++) {
-      win.push(rand() < 0.7
-        ? { type: "conversation_turn", salience: "low" as const, content: "用户说：…" }
-        : { type: "user_activity", salience: "low" as const, content: "用户活跃" });
-    }
-    const r = rand();
-    if (r < 0.12) win.push({ type: "schedule_snapshot", salience: "medium" as const, content: "今日日程有变化" });
-    else if (r < 0.18) win.push({ type: "message_unread_burst", salience: "high" as const, content: "未读消息爆发" });
-    else if (r < 0.24) win.push({ type: "interest_hot", salience: "medium" as const, content: "关注的话题上热榜" });
-    windows.push(win);
-  }
-
-  // 优化前：有新观察就调 LLM（现状）
-  const beforeCalls = windows.filter((w) => w.length > 0).length;
-
-  // 优化后：L0 规则分诊（triageObservations，若存在）
-  let afterCalls = beforeCalls;
-  let triageAvailable = false;
-  try {
-    const triageMod = (await import("../src/proactivity/observation-triage.js")) as {
-      triageObservations?: (win: Win) => { action: "evaluate" | "skip"; reason?: string };
-    };
-    if (typeof triageMod.triageObservations === "function") {
-      triageAvailable = true;
-      afterCalls = windows.filter((w) => triageMod.triageObservations!(w).action === "evaluate").length;
-    }
-  } catch {
-    /* 优化前：模块不存在 */
-  }
-
-  const row = {
-    evalPromptChars: promptChars,
-    evalPromptTokens: estimateTokensForText(captured[0] ?? ""),
-    /** hub 注入砍半后：medium 窗口（画像 240、无工具清单） */
-    evalPromptSlimMediumChars: promptSlimMediumChars,
-    evalPromptSlimMediumTokens: estimateTokensForText(captured[1] ?? ""),
-    /** hub 注入砍半后：high 窗口（画像 240 + 12 条工具） */
-    evalPromptSlimHighChars: promptSlimHighChars,
-    evalPromptSlimHighTokens: estimateTokensForText(captured[2] ?? ""),
-    simulatedWindows: windows.length,
-    llmCallsBefore: beforeCalls,
-    llmCallsAfter: triageAvailable ? afterCalls : null,
-    triageAvailable,
-  };
-  jsonOut.S4_proactive = row;
-  console.log("\n── S4 主动性评估 ──");
-  console.log(`  单次评估 prompt: ${promptChars} 字 / ${row.evalPromptTokens} tok`);
-  console.log(`  模拟 ${windows.length} 个观察窗口 → LLM 评估次数: ${beforeCalls}${triageAvailable ? ` → ${afterCalls}（L0 分诊）` : "（无分诊）"}`);
-}
-
-type ObservationType = unknown;
-
 async function main(): Promise<void> {
   console.log("═══ 车道/缓存/主动性 token 基准 ═══");
   benchS1();
   await benchLanes();
-  await benchS4();
   const outIdx = process.argv.indexOf("--json");
   if (outIdx > 0 && process.argv[outIdx + 1]) {
     writeFileSync(process.argv[outIdx + 1], JSON.stringify(jsonOut, null, 1));

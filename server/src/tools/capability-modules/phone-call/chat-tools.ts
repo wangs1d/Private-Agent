@@ -8,7 +8,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  * 通话本身由用户手机拨出、用户亲自进行；P1 起在同一状态机上叠加实时语音。
  *
  * ── 路由边界（写进每个工具 description，防 LLM 误选，详见 docs/phone-call-architecture.md §〇）──
- *   - 对端是站内 agent / 用户本人（6 位站内号）→ 虚拟电话 `phone.virtual_call` / `phone.call_user`
+ *   - 对端是用户本人（站内 App 内来电）→ 虚拟电话 `phone.call_user`（Agent 之间不打电话，走 agent.send_to_peer 文本）
  *   - 只需打开拨号盘、用户自己讲、无需确认卡与回填 → `phone.dial`
  *   - 对端是外部真实号码、需要拨前确认门 + 拨后结果回填闭环 → `phone_call.*`（本族）
  *
@@ -22,7 +22,7 @@ export const PHONE_CALL_CHAT_TOOLS: ChatCompletionTool[] = [
       description:
         "电话代办第一步：为「拨打第三方真实电话」生成拨号确认卡（校验号码 + 频控 + 静默时段 + 确认门）。\n" +
         "适用：帮用户打电话给商户/机构/真人完成预约、订座、确认订单、咨询等。\n" +
-        "路由边界：对端是站内 agent/用户本人（6 位虚拟号）用虚拟电话 phone.virtual_call；" +
+        "路由边界：对端是用户本人（站内 App 来电）用虚拟电话 phone.call_user，Agent 之间不打电话；" +
         "只是打开拨号盘由用户自己讲用 phone.dial；不要用本工具给用户自己的 agent 打电话。\n" +
         "返回确认卡 cardMarker：必须【原样】放在回复最前面，等待用户点击「确认拨打」。" +
         "用户未确认前严禁调用 phone_call.start。这是真实电话：对方是真人、将产生话费，须向用户如实说明。",

@@ -96,6 +96,8 @@ class IncomingCallWindow {
   bool accept_glow_ = true;   // 接听按钮呼吸高亮
   bool accept_hovered_ = false;  // 接听按钮悬停
   bool decline_hovered_ = false; // 挂断按钮悬停
+  bool title_min_hover_ = false; // 标题栏最小化悬停
+  bool title_close_hover_ = false;  // 标题栏关闭悬停
 
   // 定时器 id
   static constexpr UINT_PTR kTimeoutTimerId = 1001;

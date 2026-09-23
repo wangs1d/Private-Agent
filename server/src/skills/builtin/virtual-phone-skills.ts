@@ -43,7 +43,7 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
           ok: true,
           actorId,
           virtualPhone: number,
-          summary: `您的虚拟号码为 ${number}（登记在 Agent 名下）。其他 Agent 可拨打此号联系您（配对规则同中继）。`,
+          summary: `您的站内号码为 ${number}（登记在 Agent 名下，与您共用）。申领后即可使用虚拟电话服务。`,
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -64,7 +64,7 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
       version: "1.0.0",
       displayName: "查询虚拟号码状态",
       description:
-        "查询本 Agent 是否已申领虚拟号码。Agent 互拨前主叫须已申领；呼叫用户(phone.call_user)或接收用户来电则不需要用户有号码。",
+        "查询本 Agent 是否已申领站内号码。申领后方可呼出虚拟电话；接收来电不要求对方有号码。",
       kind: "builtin",
       tags: ["phone", "query", "status"],
       icon: "🔍",
@@ -87,57 +87,12 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
         virtualPhone: virtualPhone || null,
         message: virtualPhone
           ? `您的虚拟号码为：${virtualPhone}（与 Agent 共用）`
-          : "尚未申领您的虚拟联络号；办理后其他 Agent 可拨打联系您。App 内呼叫 Agent 无需另输号码。",
+          : "尚未申领站内号码；办理后即可使用虚拟电话呼出。App 内呼叫 Agent 无需另输号码。",
       };
     },
   };
 
-  /**
-   * Skill 3: 通过号码查询Actor ID（内部工具，不直接暴露给用户）
-   */
-  const resolve_actor_by_phone: SkillDefinition = {
-    metadata: {
-      name: "virtual-phone.resolve-actor",
-      version: "1.0.0",
-      displayName: "解析号码对应的Actor",
-      description:
-        "根据6位虚拟号码查询对应的Actor ID。用于内部验证和调试，普通用户不应直接使用。",
-      kind: "builtin",
-      tags: ["phone", "internal", "debug"],
-      parameters: [
-        {
-          name: "phone",
-          type: "string",
-          required: true,
-          description: "6位数字虚拟号码",
-        },
-      ],
-      outputSchema: {
-        actorId: "对应的Actor ID",
-        phone: "查询的号码",
-      },
-      permissions: [],
-      timeoutMs: 2000,
-    },
-    handler: async (input, _context) => {
-      const phone = String(input.phone ?? "").trim();
-      if (!phone || phone.length !== 6 || !/^\d{6}$/.test(phone)) {
-        return {
-          ok: false,
-          error: "无效的虚拟号码，必须是6位数字",
-        };
-      }
-      const actorId = virtualPhoneService.resolveActorByPhone(phone);
-      return {
-        ok: true,
-        phone,
-        actorId: actorId || null,
-        exists: actorId !== undefined,
-      };
-    },
-  };
-
-  return [ensure_my_number, get_number_status, resolve_actor_by_phone];
+  return [ensure_my_number, get_number_status];
 }
 
 /**

@@ -6,6 +6,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { PaymentService } from "../src/services/payment-service.js";
 import {
+  getPaymentOrderLedger,
+} from "../src/services/payment-order-ledger.js";
+import {
   getPaymentGuardrailConfig,
 } from "../src/config/payment-config.js";
 import { listCapabilityStatuses } from "../src/services/capability-readiness-service.js";
@@ -66,21 +69,28 @@ test("支付护栏 - 类别未授权被拦截", async () => {
   }
 });
 
-test("支付护栏 - 日预算累计拦截（第二笔触顶）", async () => {
+test("支付护栏 - 日预算累计拦截（台账只累计真实订单，第二笔触顶）", async () => {
   const previous = process.env.PAYMENT_DAILY_BUDGET_CNY;
   process.env.PAYMENT_DAILY_BUDGET_CNY = "100";
   try {
-    const service = new PaymentService();
-    const ok = await service.createOrder({
-      amount: 60,
-      description: "日预算第一笔",
-      provider: "wechat",
+    // 台账只记真实订单（mock 单不落库）：预置一笔 60 元 live 订单代表今日已花费
+    const now = new Date().toISOString();
+    getPaymentOrderLedger().record({
+      outTradeNo: "BUDGET-SEED-1",
+      provider: "alipay",
       method: "native",
+      amount: 60,
+      description: "日预算预置真实订单",
+      mode: "live",
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+      paidAt: null,
     });
-    assert.equal(ok.ok, true);
+    const service = new PaymentService();
     const blocked = await service.createOrder({
       amount: 60,
-      description: "日预算第二笔（累计 120 > 100）",
+      description: "日预算第二笔（预置 60 + 本次 60 > 100）",
       provider: "wechat",
       method: "native",
     });

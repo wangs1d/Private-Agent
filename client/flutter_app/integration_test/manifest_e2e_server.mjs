@@ -35,6 +35,16 @@ function manifestFor(mode) {
       channel: "byok",
     };
   }
+  // F：本地版本低于 minVersion → forcedUpdate → 不可关闭的强锁升级弹窗
+  if (mode === "F") {
+    return {
+      latest: "9.9.9",
+      minVersion: "99.0.0",
+      url: "https://example.com/download/Nextbot-Setup-9.9.9.exe",
+      notes: "",
+      channel: "byok",
+    };
+  }
   // A：与本地版本相同 → upToDate
   return {
     latest: "0.2.0",

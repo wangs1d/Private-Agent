@@ -61,6 +61,15 @@ const FOREGROUND_INLINE_TOOL_NAMES = new Set([
   "reminder.plan",
   "calendar.create_from_text",
 ]);
+/**
+ * 日历/提醒创建类工具（2026-09-24）：本轮任一成功返回 → 该轮按「办妥确认轮」
+ * 执法回复风格闸（不吃结构豁免），堵"订阅确认写成五段导购"的废话出口。
+ */
+const CALENDAR_CONFIRM_TOOLS = new Set([
+  "reminder.plan",
+  "calendar.create_from_text",
+  "calendar.create_task",
+]);
 function getForegroundChatToolWhitelist(userText?: string): ChatCompletionTool[] {
   const base = (() => {
     if (_foregroundToolWhitelist) return _foregroundToolWhitelist;
@@ -2030,6 +2039,11 @@ if (route.plane === "task") {
     /** 本轮是否注入过前置检索证据（搜索宣称一致性闸的「已搜」一侧证据）。 */
     let evidenceInjected = false;
     /**
+     * 本轮是否有日历/提醒创建工具成功返回（办妥确认轮标记，2026-09-24）：
+     * 传给 TurnFinalizer → 回复风格闸对确认轮不吃结构豁免。
+     */
+    let calendarCreateSucceededThisTurn = false;
+    /**
      * 本轮实际发起过的工具调用摘要（A2 升级段轨迹延续）：onToolExecuteStart 在
      * 工具真正执行前触发，含工具名 + 模型填写的参数；截断参数防长输入刷屏。
      */
@@ -2077,6 +2091,9 @@ if (route.plane === "task") {
         // 自我学习/外部回执），而 backgroundOnToolExecuted 是派发方收集
         // media/行程回执的数据源——二者职责不同，不能互相短路。
         onToolExecuted: (info: ToolExecutedInfo) => {
+          if (info.ok && CALENDAR_CONFIRM_TOOLS.has(info.toolName)) {
+            calendarCreateSucceededThisTurn = true;
+          }
           ctx.orchestrateToolCtx?.onToolExecuted?.(info);
           ctx.backgroundOnToolExecuted?.(info);
         },
@@ -2690,6 +2707,7 @@ if (route.plane === "task") {
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
       lane: this.isChatLane(mode) ? "chat" : "task",
+      confirmationRound: this.isChatLane(mode) && calendarCreateSucceededThisTurn,
     }, opts?.onAssistantDelta);
     if (attemptedToolCalls.length > 0) {
       reply.attemptedToolCalls = attemptedToolCalls;

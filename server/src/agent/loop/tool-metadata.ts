@@ -86,7 +86,6 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "wallet.purchase": "wallet",
   // phone
   "phone.ensure_my_number": "phone",
-  "phone.virtual_call": "phone",
   "phone.call_user": "phone",
   // vision
   "vision.http_pull": "vision",

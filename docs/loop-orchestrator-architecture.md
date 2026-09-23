@@ -28,7 +28,7 @@
 | 痛点 | 现状根因 |
 |---|---|
 | 终止时机不智能 | maxRounds 是静态/启发式（[L253](file:///e:/ws-project/Private-Agent/server/src/external-model/openai-compatible-tool-loop.ts#L253)），无"目标达成即停""无进展即停"的结构化信号 |
-| 多 loop 状态不共享 | 三个 loop 各持自己的 messages/history，切换 mode 时 `TaskHistoryEntry`（[agent-task-types.ts#L57](file:///e:/ws-project/Private-Agent/server/src/services/agent-task-types.ts#L57)）不互通，Hermes 画像、Jarvis 反思也不回流 |
+| 多 loop 状态不共享 | 三个 loop 各持自己的 messages/history，切换 mode 时 `TaskHistoryEntry`（[agent-task-types.ts#L57](file:///e:/ws-project/Private-Agent/server/src/services/agent-task-types.ts#L57)）不互通，Hermes 画像、主动消息反思结果也不回流 |
 | 工具失败不换策略 | 失败处理靠 prompt 引导（`buildToolFailureReminder` [L416](file:///e:/ws-project/Private-Agent/server/src/external-model/openai-compatible-tool-loop.ts#L416) 目前只覆盖 `desktop.open`），无确定性 fallback 链 |
 | 跑偏不收敛 | plan-execute 的自检重试在 2026-05 被有意删除（[plan-execute-loop.ts#L5 注释](file:///e:/ws-project/Private-Agent/server/src/agent/plan-execute-loop.ts#L5)），`verifyReflection`/`exhaustedRetries` 成死字段；react 无中途 plan 校准 |
 
@@ -36,7 +36,7 @@
 
 - 工具元数据**分散在 5 处**，无统一结构：分类在 `TOOL_CATEGORY_MAPPINGS`（[L1409](file:///e:/ws-project/Private-Agent/server/src/external-model/openai-compatible-tool-loop.ts#L1409)）、超时在 `resolveToolExecutionTimeoutMs`（[L184](file:///e:/ws-project/Private-Agent/server/src/external-model/openai-compatible-tool-loop.ts#L184)）、状态机白名单在 `STATE_MACHINE_TOOL_ALLOWLIST`（[agent-task-orchestrator.ts#L62](file:///e:/ws-project/Private-Agent/server/src/services/agent-task-orchestrator.ts#L62)）。`ToolRegistry.register(name, handler)`（[tool-registry.ts#L76](file:///e:/ws-project/Private-Agent/server/src/tools/tool-registry.ts#L76)）只存 name→handler，无 category/retry 字段。
 - `HermesEvolutionLoopService` 已有 namespace 级成功率统计 `toolNamespaceOutcomes`（[hermes-evolution-loop-service.ts#L159](file:///e:/ws-project/Private-Agent/server/src/services/hermes-evolution-loop-service.ts#L159)），是 RecoveryPolicy 的现成输入信号。
-- `JarvisReflector` 反思的是主动消息决策，**不接入工具 loop**，但其"规则匹配 + confidence + 提升为 rule"模式（[reflector.ts#L170](file:///e:/ws-project/Private-Agent/server/src/services/jarvis/reflector.ts#L170)）可借鉴。
+- 主动消息反思器（已删除的历史模块）的"规则匹配 + confidence + 提升为 rule"模式可借鉴——它反思的是主动消息决策，**不接入工具 loop**。
 - 项目存在 `server/src/agent/task-context.ts`，新共享上下文需与之区分命名（见 §3.1）。
 
 ---
@@ -136,7 +136,7 @@ export interface ReflectionEntry {
   loop: LlmExecutionMode;
   round: number;
   body: string;
-  confidence: number;                      // 借鉴 JarvisReflector [L170]
+  confidence: number;                      // 借鉴主动消息反思器的 confidence 模式
 }
 
 export interface BudgetTracker {

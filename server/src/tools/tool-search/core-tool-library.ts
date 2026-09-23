@@ -42,7 +42,6 @@ export const CORE_TOOL_LIBRARY = {
       "calendar.delete_task",
       "reminder.plan",
       "phone.ensure_my_number",
-      "phone.virtual_call",
       "phone.call_user",
       "agent.send_to_peer",
       "agent.register_account",

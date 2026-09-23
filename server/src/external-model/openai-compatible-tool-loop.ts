@@ -955,7 +955,7 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'phone',
     keywords: ['电话', 'phone', '拨打', 'call', '虚拟号', 'virtual', '号码', 'number', '通话', 'ring', '来电', 'call'],
-    toolNames: ['phone.ensure_my_number', 'phone.virtual_call', 'phone.call_user']
+    toolNames: ['phone.ensure_my_number', 'phone.call_user']
   },
   {
     category: 'vision',

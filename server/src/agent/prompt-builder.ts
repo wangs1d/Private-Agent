@@ -6,6 +6,7 @@ import {
   parseAgentAccessMode,
 } from "./agent-access-mode.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
+import { dropExpiredCommitmentLines } from "../services/memory-record-utils.js";
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
 import type { PersonalityCore } from "../brain/types.js";
 import {
@@ -33,8 +34,11 @@ const TRUTHFULNESS_SYSTEM_SUFFIX = `
 const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
 
+// 2026-09-24 收窄展开许可：「组织充分/按主题分节」只属于真的调了搜索的轮次。
+// 此前是无条件指令，办事/办妥确认轮把内容预告当交付来分节展开（真机：订阅
+// 科技早报的确认轮被教唆成五段导购），与【人格·静态】的简短基准打架。
 const WEB_SEARCH_SYSTEM_SUFFIX =
-  "\n\n【联网检索】涉及时事/新闻/股价/排片/票价/价格/公告等强时效信息，必须先调 search_web（query 由你按用户意图组织成完整、具体的搜索词，可含当前年月或「最新」，不要机械截成短词），优先用搜索结果作答并注明日期。信息充足时把回答组织充分：按主题分节展开，保留日期、数字、来源等细节，不要为了简短丢掉用户想看的内容。真正的单一事实判断（是/否、一个数据点）才收成「结论 + 1 句依据」，不补第二轮复述。\n\n【搜索失败】search_web 返回 0 条或异常时，可基于训练知识作答，但必须前置一句说明非实时。天气查 weather.* 工具，不走 search_web。";
+  "\n\n【联网检索】涉及时事/新闻/股价/排片/票价/价格/公告等强时效信息，必须先调 search_web（query 由你按用户意图组织成完整、具体的搜索词，可含当前年月或「最新」，不要机械截成短词），优先用搜索结果作答并注明日期。「组织充分、按主题分节展开、不为简短丢细节」只属于搜索轮：本轮真的调了搜索并拿到结果才适用。没调搜索的轮次（办事、办妥确认、闲聊）照旧简短——办妥确认一两句说完（办成了什么、何时生效），不预告到点会交付什么、不解释怎么执行的。真正的单一事实判断（是/否、一个数据点）才收成「结论 + 1 句依据」，不补第二轮复述。\n\n【搜索失败】search_web 返回 0 条或异常时，可基于训练知识作答，但必须前置一句说明非实时。天气查 weather.* 工具，不走 search_web。";
 
 const PHONE_CALL_SYSTEM_SUFFIX =
   "\n\n【语音通知与电话通话 · 静默触达】调用时直接执行，禁止在回复中提前告知或重复承诺。\n\n"
@@ -558,15 +562,17 @@ export function sliceMemoryEntriesToPromptContext(
   );
   // 「待兑现承诺 / 未完成事项」默认仅在 topic 相关时才注入 prompt；
   // 计算得分低于 0.45 的行直接丢弃（与用户当前话题弱相关就别让 LLM 主动提）。
+  // 注入前先滤掉超 TTL 的僵尸承诺（服务端清理只在写路径触发，这里保每轮兜底）。
+  const kvLines = (v: unknown): string[] => (typeof v === "string" ? v.split("\n").filter(Boolean) : []);
   const memoryCommitments = sortAndTruncateMemoryLines(
-    str(entries["memory_commitments"]),
+    dropExpiredCommitmentLines(kvLines(entries["memory_commitments"])).join("\n"),
     400,
     2,
     userQuery,
     { minRelevance: 0.45, fallbackOnEmpty: false },
   );
   const memoryOpenLoops = sortAndTruncateMemoryLines(
-    str(entries["memory_open_loops"]),
+    dropExpiredCommitmentLines(kvLines(entries["memory_open_loops"])).join("\n"),
     400,
     2,
     userQuery,

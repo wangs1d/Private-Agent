@@ -1,13 +1,12 @@
 {
   "sessions": {
-    "actor-2": {
-      "revision": 4,
+    "actor-zombie": {
+      "revision": 2,
       "entries": {
-        "memory_summary": "[2026-09-23T12:38:26.141Z] [topic:general] I will continue following up on the context fix\n[2026-09-23T12:38:26.142Z] [topic:general] todo: verify continuity after 100 messages\n[2026-09-23T12:38:26.142Z] [topic:general] todo: prepare regression notes for memory rollout",
+        "memory_commitments": "[2026-09-23T18:00:14.178Z] [topic:general] I will send the morning briefing at 8am",
+        "memory_summary": "[2026-09-23T18:00:14.176Z] [topic:general] I will send the morning briefing at 8am",
         "memory_summary_forgotten": "",
-        "memory_commitments": "",
-        "session_recap": "[2026-09-23T12:38:26.142Z] [topic:general] todo: prepare regression notes for memory rollout",
-        "memory_open_loops": "[2026-09-23T12:38:26.142Z] [topic:general] todo: prepare regression notes for memory rollout"
+        "session_recap": "[2026-09-23T18:00:14.178Z] [topic:general] I will send the morning briefing at 8am"
       }
     }
   }

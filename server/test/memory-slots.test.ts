@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { buildLayeredSystemPrompt, sliceMemoryEntriesToPromptContext } from "../src/agent/prompt-builder.js";
 import { AgentMemorySyncService } from "../src/services/agent-memory-sync-service.js";
+import { dropExpiredCommitmentLines } from "../src/services/memory-record-utils.js";
 
 test("appendMemorySummaryLine populates structured memory slots", async () => {
   const service = new AgentMemorySyncService("test-agent-memory-sync.json");
@@ -30,8 +31,8 @@ test("sliceMemoryEntriesToPromptContext exposes structured slots to prompt build
   const memory = sliceMemoryEntriesToPromptContext({
     memory_preferences: "[2026-07-14T00:00:00Z] [topic:chat] user prefers concise answers",
     memory_facts: "[2026-07-14T00:00:00Z] [topic:project] user is working on a Flutter project",
-    memory_commitments: "[2026-07-14T00:00:00Z] [topic:project] agent will continue repairing context retention",
-    memory_open_loops: "[2026-07-14T00:00:00Z] [topic:project] need to verify behavior after 100 messages",
+    memory_commitments: `[${new Date().toISOString()}] [topic:project] agent will continue repairing context retention`,
+    memory_open_loops: `[${new Date().toISOString()}] [topic:project] need to verify behavior after 100 messages`,
     session_recap: "[2026-07-14T00:00:00Z] [topic:recap] recently focused on fixing chat memory",
   });
 
@@ -119,4 +120,52 @@ test("current mission can be updated and cleared", async () => {
 
   snapshot = service.getSnapshot("actor-5", ["memory_current_mission"]);
   assert.equal(String(snapshot.entries.memory_current_mission ?? ""), "");
+});
+
+test("dropExpiredCommitmentLines drops only stale-dated lines, keeps undated ones", () => {
+  const now = Date.parse("2026-09-24T12:00:00Z");
+  const lines = [
+    "[2026-09-24T10:00:00Z] [topic:chat] 承诺：明早八点送早报",
+    "[2026-09-07T17:43:38Z] [topic:consolidate] 承诺：我会在00:50睡觉",
+    "无时间戳的行不冤枉",
+    "[not-a-date] [topic:chat] 解析失败也不冤枉",
+  ];
+  const kept = dropExpiredCommitmentLines(lines, now);
+  assert.deepEqual(kept, [
+    "[2026-09-24T10:00:00Z] [topic:chat] 承诺：明早八点送早报",
+    "无时间戳的行不冤枉",
+    "[not-a-date] [topic:chat] 解析失败也不冤枉",
+  ]);
+});
+
+test("sliceMemoryEntriesToPromptContext filters zombie commitments before injection", () => {
+  const now = Date.now();
+  const iso = (agoMs: number) => new Date(now - agoMs).toISOString();
+  const memory = sliceMemoryEntriesToPromptContext({
+    memory_commitments: [
+      `[${iso(1 * 60 * 60 * 1000)}] [topic:chat] 承诺：我会在明早八点送早报`,
+      `[${iso(30 * 24 * 60 * 60 * 1000)}] [topic:chat] 承诺：我会在00:50睡觉`,
+    ].join("\n"),
+  });
+  const prompt = buildLayeredSystemPrompt("base", memory);
+  assert.match(prompt, /明早八点送早报/);
+  assert.doesNotMatch(prompt, /00:50睡觉/);
+});
+
+test("appendMemorySummaryLine sweeps expired commitments from the slot on write", async () => {
+  const service = new AgentMemorySyncService("test-agent-memory-sync.json");
+  const stale = "[2026-09-01T00:00:00Z] [topic:consolidate] 承诺：我会在00:50睡觉";
+  const seed = service.getSnapshot("actor-zombie");
+  await service.applyPatch("actor-zombie", seed.revision, [
+    { key: "memory_commitments", op: "put", value: stale },
+  ]);
+
+  // 新承诺入槽时顺带清扫同槽僵尸
+  service.appendMemorySummaryLine("actor-zombie", "I will send the morning briefing at 8am");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const { entries } = service.getSnapshot("actor-zombie", ["memory_commitments"]);
+  const commitments = String(entries.memory_commitments ?? "");
+  assert.doesNotMatch(commitments, /00:50睡觉/);
+  assert.match(commitments, /morning briefing/);
 });

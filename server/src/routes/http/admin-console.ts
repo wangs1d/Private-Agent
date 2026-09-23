@@ -28,7 +28,7 @@ function localDay(ms: number): string {
  * - GET  /api/admin/overview               业务聚合概览（注册 / 支付 / 站内信 / 反馈）
  * - GET  /api/admin/users                  用户注册数据（列表 + 新增趋势）
  * - POST /api/admin/users/:id/disabled     禁用/恢复用户（审计落 admin-audit.jsonl）
- * - GET  /api/admin/orders                 支付订单（持久台账，mock/live 拆分统计）
+ * - GET  /api/admin/orders                 真实支付订单（持久台账，只记 live 交易）
  * - GET  /api/admin/messages               站内信统计（平台分布 + 最近消息）
  * - GET  /api/admin/system                 系统状态（进程/OS/存储占用/依赖探活/定时任务）
  * - GET  /api/admin/config                 服务配置状态（支付渠道/模型/邮件，不回传密钥）
@@ -244,7 +244,7 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
       series: [...regByDay.entries()].map(([day, count]) => ({ day, count })),
     };
 
-    // —— 支付：台账统计（mock/live 拆分），下单量=付费意愿，已支付金额=收入 ——
+    // —— 支付：真实订单台账统计（模拟订单不落库），已支付金额=收入 ——
     const orders = deps.paymentService ? deps.paymentService.orderStats() : null;
 
     // —— 站内信：总量、收/发、今日、近14日趋势 ——
@@ -350,7 +350,6 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
       method: o.method,
       amount: o.amount,
       description: o.description,
-      mode: o.mode,
       status: o.status,
       createdAt: o.createdAt,
       paidAt: o.paidAt,

@@ -11,7 +11,7 @@ import type { InboxSendInput } from "./inbox-service.js";
 /**
  * 电话代办（phone_call.*）协调器 —— agent 代用户向第三方真人发起真实电话。
  *
- * 与「虚拟电话」（virtual-phone-service.ts，站内应用内互拨）是两个并行体系：
+ * 与「虚拟电话」（virtual-phone-service.ts，站内应用内来电 Agent→用户）是两个并行体系：
  * 仅借鉴其回复总线写法，不共享运行时、号码体系、会话存储与 UI 状态（docs/phone-call-architecture.md §〇）。
  *
  * P0 形态（脚本托管）：agent 不参与通话语音——

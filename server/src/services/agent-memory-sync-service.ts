@@ -6,6 +6,7 @@ import { formatMemoryTopicTag, inferMemoryTopic } from "../agent/memory-topic.js
 import {
   areLinesConflicting,
   dedupeMemoryLines,
+  dropExpiredCommitmentLines,
   extractOverwriteKey,
   limitLinesByChars,
   normalizeMemoryLine,
@@ -297,7 +298,12 @@ export class AgentMemorySyncService {
 
     const summaryAdd = (key: string, value: string, limitLines = 8): void => {
       const prev = typeof entries[key] === "string" ? (entries[key] as string) : "";
-      const merged = this.mergeMemorySlotLines(key, prev.split("\n").filter(Boolean), value);
+      let prevLines = prev.split("\n").filter(Boolean);
+      // 承诺/开环槽位写入时顺带清僵尸：超 TTL 未闭环的旧承诺不许再占行数预算。
+      if (key === "memory_commitments" || key === "memory_open_loops") {
+        prevLines = dropExpiredCommitmentLines(prevLines);
+      }
+      const merged = this.mergeMemorySlotLines(key, prevLines, value);
       const kept = limitLinesByChars(merged, 6000, { preserveTail: true }).kept.slice(-limitLines);
       patches.push({ key, op: "put", value: kept.join("\n") });
     };
@@ -428,11 +434,11 @@ export class AgentMemorySyncService {
       const currentRecap =
         typeof entries.session_recap === "string" ? entries.session_recap.split("\n").filter(Boolean) : [];
 
-      const filteredCommitments = currentCommitments.filter(
-        (line) => !this.isResolvedByTurnContext(line, completionContext),
+      const filteredCommitments = dropExpiredCommitmentLines(
+        currentCommitments.filter((line) => !this.isResolvedByTurnContext(line, completionContext)),
       );
-      const filteredOpenLoops = currentOpenLoops.filter(
-        (line) => !this.isResolvedByTurnContext(line, completionContext),
+      const filteredOpenLoops = dropExpiredCommitmentLines(
+        currentOpenLoops.filter((line) => !this.isResolvedByTurnContext(line, completionContext)),
       );
       const filteredRecap = currentRecap.filter((line) => !this.isResolvedByTurnContext(line, completionContext));
 

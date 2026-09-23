@@ -21,6 +21,12 @@ export type FinishTurnMeta = {
   sessionId?: string;
   /** 本轮执行车道：chat 面启用长度上限，task 面只做人格检查（默认 chat） */
   lane?: ReplyStyleLane;
+  /**
+   * 确认轮（2026-09-24）：本轮日历/提醒类创建工具刚成功（reminder.plan /
+   * calendar.create_*，agent-core 在 onToolExecuted 里跟踪）。办妥确认不吃
+   * 结构豁免，照走 chat 长度上限——废话确认排成列表也逃不过 overlong。
+   */
+  confirmationRound?: boolean;
 };
 
 export type TurnFinalizerDeps = {
@@ -56,7 +62,9 @@ export class TurnFinalizer {
     // 回复风格闸（2026-09-22）：人格/长度越形在此程序层强制整形，
     // 不依赖 prompt（长上下文下模型不守）。正常回复零接触；
     // 完成轨迹、记忆落盘、done 载荷用的都是整形后的文本。
-    const styleGate = enforceReplyStyle(sanitizedOutput, meta.lane ?? "chat");
+    const styleGate = enforceReplyStyle(sanitizedOutput, meta.lane ?? "chat", {
+      confirmationRound: meta.confirmationRound,
+    });
     if (styleGate.changed) {
       console.warn(
         `[ReplyStyleGate] 越形整形（${styleGate.violations.join("+")}）：` +
@@ -78,7 +86,9 @@ export class TurnFinalizer {
       (meta.lane ?? "chat") === "chat" &&
       !isStyleRewriteDisabled()
     ) {
-      sanitizedOutput = await this.rewriteReplyBriefly(actorId, sanitizedOutput);
+      sanitizedOutput = await this.rewriteReplyBriefly(actorId, sanitizedOutput, {
+        confirmationRound: meta.confirmationRound,
+      });
     }
 
     const runtimeKernel = getRuntimeKernel(actorId);
@@ -141,7 +151,11 @@ export class TurnFinalizer {
    * 只给草稿与一句话指令（无会话历史、ephemeral 不落线程），产物回闸复检——
    * 仍越形、为空、或比草稿还长，一律回退确定性整形结果（永不变差）。
    */
-  private async rewriteReplyBriefly(actorId: string, draft: string): Promise<string> {
+  private async rewriteReplyBriefly(
+    actorId: string,
+    draft: string,
+    opts?: { confirmationRound?: boolean },
+  ): Promise<string> {
     const provider = this.deps.provider;
     if (!provider?.isEnabled()) return draft;
     const { body, blocks } = extractProtocolBlocks(draft);
@@ -164,7 +178,9 @@ export class TurnFinalizer {
         )
       ).trim();
       const candidate = rewritten || body;
-      const residual = detectReplyStyleViolations(candidate, "chat");
+      const residual = detectReplyStyleViolations(candidate, "chat", {
+        confirmationRound: opts?.confirmationRound,
+      });
       if (
         residual.length === 0 &&
         candidate.replace(/[\s*#>`~|]/g, "").length <= body.replace(/[\s*#>`~|]/g, "").length

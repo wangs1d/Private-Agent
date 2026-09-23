@@ -71,7 +71,7 @@ export function renderAdminConsolePage(): string {
   }
   .tokenbox input:focus { outline: none; border-color: rgba(47,107,255,.55); }
   .tokenbox .hint { font-size: 10px; color: #5d6880; margin-top: 5px; }
-  main { margin-left: 212px; padding: 28px 32px 80px; max-width: 1180px; }
+  main { margin-left: 212px; padding: 28px 32px 80px; max-width: 1320px; }
   h1 { font-size: 20px; font-weight: 650; letter-spacing: -.01em; margin: 0 0 4px; }
   .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 20px; }
   section.tab { display: none; }
@@ -150,6 +150,90 @@ export function renderAdminConsolePage(): string {
   .chip.info { background: #e0f2fe; color: #0369a1; }
   .chip.online { background: #dcfce7; color: #16a34a; }
   .chip.offline { background: #e9ecf1; color: #6b7280; }
+  /* ---- 反馈工作台：左列表右详情 ---- */
+  .fb-split { display: grid; grid-template-columns: 400px 1fr; gap: 14px; align-items: start; }
+  .fb-pane {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .fb-rows, .fb-detail { max-height: calc(100vh - 320px); overflow-y: auto; }
+  .fb-detail { padding: 18px 22px 20px; }
+  .fb-row {
+    display: flex; gap: 10px; padding: 12px 14px; cursor: pointer;
+    border-bottom: 1px solid var(--line-soft); border-left: 2px solid transparent;
+    transition: background .1s;
+  }
+  .fb-row:hover { background: #f8fafc; }
+  .fb-row.sel { background: var(--accent-weak); border-left-color: var(--accent); }
+  .fb-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 7px; flex: none; }
+  .fb-dot.open { background: var(--warn); }
+  .fb-dot.processing { background: var(--accent); }
+  .fb-dot.resolved { background: var(--ok); }
+  .fb-rowmain { flex: 1; min-width: 0; }
+  .fb-rowtxt { font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fb-rowmeta { font-size: 11.5px; color: var(--faint); margin-top: 1px; display: flex; gap: 6px; align-items: center; }
+  .fb-uid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fb-nbadge {
+    flex: none; font-size: 10.5px; color: var(--accent); background: var(--accent-weak);
+    border-radius: 999px; padding: 0 6px; line-height: 16px;
+  }
+  .fb-time { flex: none; font-size: 11px; color: var(--faint); margin-top: 2px; }
+  .fb-empty { padding: 46px 0; text-align: center; color: var(--faint); }
+  .fb-dhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .fb-type { font-size: 12px; color: var(--muted); background: var(--line-soft); border-radius: 999px; padding: 1px 10px; }
+  .fb-statusseg { margin-left: auto; display: inline-flex; background: var(--line-soft); border-radius: 9px; padding: 2px; }
+  .fb-statusseg button {
+    border: 0; background: transparent; padding: 4px 13px; cursor: pointer;
+    font-size: 12.5px; color: var(--muted); border-radius: 7px; transition: all .12s;
+  }
+  .fb-statusseg button:hover { color: var(--text); }
+  .fb-statusseg button.cur { background: #fff; font-weight: 550; box-shadow: 0 1px 3px rgba(16,24,40,.12); cursor: default; }
+  .fb-statusseg button.cur.open { color: var(--warn); }
+  .fb-statusseg button.cur.processing { color: var(--accent); }
+  .fb-statusseg button.cur.resolved { color: var(--ok); }
+  .fb-body { font-size: 14px; white-space: pre-wrap; padding: 2px 0 12px; }
+  .fb-titleline { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .fb-userbox { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; }
+  .fb-userline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .fb-uid-full { font-family: Consolas, monospace; font-size: 12.5px; }
+  .mini {
+    border: 1px solid var(--line); background: #fff; border-radius: 7px; cursor: pointer;
+    padding: 2px 9px; font-size: 11.5px; color: var(--muted);
+  }
+  .mini:hover { border-color: #c9d2e0; color: var(--text); }
+  .fb-hisrows { display: none; margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 6px; }
+  .fb-userbox.exp .fb-hisrows { display: block; }
+  .fb-hisrow {
+    display: flex; gap: 8px; align-items: center; font-size: 12.5px; padding: 5px 6px;
+    border-radius: 7px; cursor: pointer; color: var(--muted);
+  }
+  .fb-hisrow:hover { background: var(--line-soft); color: var(--text); }
+  .fb-hisrow.cur { color: var(--text); font-weight: 500; }
+  .fb-histxt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fb-replylab { font-size: 12.5px; font-weight: 600; margin-bottom: 6px; }
+  .fb-hinthint { font-weight: 400; color: var(--faint); font-size: 11.5px; margin-left: 6px; }
+  .fb-replied {
+    font-size: 12.5px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px;
+    padding: 7px 11px; margin-bottom: 8px; color: #15803d;
+  }
+  .fb-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .fb-savehint { font-size: 11.5px; color: var(--faint); }
+  .fb-metafoot { font-size: 11.5px; color: var(--faint); margin-top: 14px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .fb-cnt {
+    font-size: 11px; color: var(--faint); background: var(--line-soft);
+    border-radius: 999px; padding: 0 7px; line-height: 17px;
+  }
+  .seg button.on .fb-cnt { color: var(--accent); background: var(--accent-weak); }
+  .iconbtn {
+    border: 1px solid var(--line); background: #fff; border-radius: 8px;
+    width: 34px; height: 34px; cursor: pointer; color: var(--muted); font-size: 15px;
+  }
+  .iconbtn:hover { border-color: #c9d2e0; background: #f8fafc; }
+  .fb-kbdhint { margin-left: auto; font-size: 11.5px; color: var(--faint); display: inline-flex; gap: 4px; align-items: center; }
+  .kbd {
+    font-size: 10.5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px;
+    padding: 0 5px; color: var(--faint); background: #fff;
+  }
   .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
   .desc { white-space: pre-wrap; margin: 10px 0 4px; }
   table { border-collapse: collapse; width: 100%; }
@@ -249,16 +333,15 @@ export function renderAdminConsolePage(): string {
     <div id="messagesBody"><div class="empty">加载中…</div></div>
   </section>
 
-  <section class="tab" id="tab-messages">
-    <h1>站内信</h1>
-    <div class="sub">消息量 · 平台分布 · 最近消息</div>
-    <div id="messagesBody"><div class="empty">加载中…</div></div>
+  <section class="tab" id="tab-payments">
+    <h1>支付</h1>
+    <div class="sub">真实支付订单（微信 / 支付宝 live 通道）· 台账只记真实交易，模拟订单不落库</div>
+    <div id="paymentsBody"><div class="empty">加载中…</div></div>
   </section>
 
   <section class="tab" id="tab-feedback">
     <h1>反馈管理</h1>
-    <div class="sub">用户提交的报障与建议，流转状态并回复（用户端可见）</div>
-    <div class="stats" id="fbStats"></div>
+    <div class="sub">左列选条、右栏处理：状态流转即时生效 · 保存回复自动以站内信送达用户</div>
     <div class="toolbar">
       <div class="seg" id="fbStatusSeg"></div>
       <select id="fbTypeSel">
@@ -267,10 +350,14 @@ export function renderAdminConsolePage(): string {
         <option value="suggestion">功能建议</option>
         <option value="other">其他</option>
       </select>
-      <input type="search" id="fbKw" placeholder="搜索标题 / 描述 / 身份 / 联系方式">
-      <button class="btn primary" id="fbRefresh">刷新</button>
+      <input type="search" id="fbKw" placeholder="搜索正文 / 用户 / 联系方式">
+      <button class="iconbtn" id="fbRefresh" title="刷新">⟳</button>
+      <span class="fb-kbdhint"><span class="kbd">J</span> <span class="kbd">K</span> 切换条目</span>
     </div>
-    <div id="fbList"><div class="empty">加载中…</div></div>
+    <div class="fb-split">
+      <div class="fb-pane"><div class="fb-rows" id="fbList"><div class="fb-empty">加载中…</div></div></div>
+      <div class="fb-pane"><div class="fb-detail" id="fbDetail"><div class="fb-empty">加载中…</div></div></div>
+    </div>
   </section>
 
   <section class="tab" id="tab-downloads">
@@ -304,11 +391,6 @@ export function renderAdminConsolePage(): string {
 <script>
 var STATUS_LABELS = ${statusLabelsJson};
 var TYPE_LABELS = ${typeLabelsJson};
-var STATUS_FLOW = [
-  { status: "processing", label: "标记处理中", cls: "btn primary" },
-  { status: "resolved", label: "标记已解决", cls: "btn" },
-  { status: "open", label: "重新打开", cls: "btn" }
-];
 var allFeedback = [];
 var fbStatusFilter = "";
 var allUsers = [];
@@ -452,9 +534,9 @@ function loadOverview() {
           ? kpiCard(d.messages.messages, "站内信", "今日 " + d.messages.today + " · 发出 " + d.messages.outbound)
           : kpiCard("-", "站内信", "未启用")) +
         (d.orders
-          ? kpiCard(d.orders.total, "支付订单", "已付 " + d.orders.paid + " · 待付 " + d.orders.pending +
-            " · 关闭 " + d.orders.closed + (d.orders.refunded ? " · 退款 " + d.orders.refunded : ""))
-          : kpiCard("-", "支付订单", "未启用")) +
+          ? kpiCard(d.orders.total, "真实订单", "已付 " + d.orders.paid + " · 待付 " + d.orders.pending +
+            (d.orders.closed ? " · 关闭 " + d.orders.closed : "") + (d.orders.refunded ? " · 退款 " + d.orders.refunded : ""))
+          : kpiCard("-", "真实订单", "未启用")) +
         (d.orders
           ? kpiCard("¥" + d.orders.paidAmount, "收入", d.orders.paid + " 笔已支付")
           : "") +
@@ -480,26 +562,33 @@ function loadOverview() {
     });
 }
 
-// ---------- 反馈管理 ----------
+// ---------- 反馈管理（左列表右详情工作台） ----------
+var fbSelId = null;
+
 function loadFeedback() {
   clearErr();
   api("/api/feedback?limit=500").then(function (r) { return r.json(); }).then(function (data) {
     if (data.ok !== true) throw new Error("接口返回异常");
     allFeedback = data.items || [];
-    renderFbStats();
+    // 选中项被删/被筛掉时回落到列表第一条
+    if (fbSelId && !filteredFeedback().some(function (r) { return r.id === fbSelId; })) fbSelId = null;
+    if (!fbSelId) {
+      var first = filteredFeedback()[0];
+      if (first) fbSelId = first.id;
+    }
+    renderFbSeg();
     renderFbList();
+    renderFbDetail();
   }).catch(function (e) {
-    $("fbList").innerHTML = "";
+    $("fbList").innerHTML = '<div class="fb-empty">加载失败</div>';
     showErr("反馈加载失败：" + e.message);
   });
 }
 
-function renderFbStats() {
-  var c = { open: 0, processing: 0, resolved: 0 };
-  allFeedback.forEach(function (r) { if (c[r.status] != null) c[r.status]++; });
-  $("fbStats").innerHTML =
-    statCard(c.open, "待处理") + statCard(c.processing, "处理中") +
-    statCard(c.resolved, "已解决") + statCard(allFeedback.length, "当前加载");
+// 客户端标题=正文首行自动派生，title 是 description 前缀时不重复展示
+function fbTitleDuplicated(r) {
+  var t = (r.title || "").trim(), d = (r.description || "").trim();
+  return !t || d.indexOf(t) === 0;
 }
 
 function filteredFeedback() {
@@ -516,47 +605,134 @@ function filteredFeedback() {
   });
 }
 
-function renderFbList() {
-  var items = filteredFeedback();
-  if (!items.length) {
-    $("fbList").innerHTML = '<div class="empty">没有符合条件的反馈</div>';
-    return;
-  }
-  $("fbList").innerHTML = items.map(function (r) {
-    var h = '<div class="card"><div class="head"><h3>' + esc(r.title) + "</h3>" +
-      chip(r.type, TYPE_LABELS[r.type] || r.type) + chip(r.status, STATUS_LABELS[r.status] || r.status) + "</div>";
-    h += '<div class="meta">#' + esc(r.id) + " · " + esc(r.actorId) + " · " + fmtTime(r.createdAt) +
-      (r.contact ? " · 联系方式：" + esc(r.contact) : "") + "</div>";
-    h += '<div class="desc">' + esc(r.description) + "</div>";
-    var diagKeys = Object.keys(r.diagnostics || {});
-    if (diagKeys.length) {
-      h += '<details class="diag"><summary>诊断信息</summary><table>' + diagKeys.map(function (k) {
-        return "<tr><td>" + esc(k) + '</td><td class="kv-val">' + esc(r.diagnostics[k]) + "</td></tr>";
-      }).join("") + "</table></details>";
-    }
-    h += '<div class="replybox">';
-    if (r.replyNote) h += '<div class="existing">已回复：' + esc(r.replyNote) + "</div>";
-    h += '<textarea id="note-' + esc(r.id) + '" rows="2" placeholder="回复说明（随状态一并保存，用户端可见；保存后会以站内信实时通知该用户）">' +
-      esc(r.replyNote || "") + "</textarea>";
-    h += '<div class="actions">' + STATUS_FLOW.map(function (f) {
-      return '<button class="' + f.cls + '" data-act="fb-status" data-id="' + esc(r.id) +
-        '" data-status="' + f.status + '">' + f.label + "</button>";
-    }).join("") + '<span class="saved" id="saved-' + esc(r.id) + '"></span></div>';
-    h += "</div></div>";
-    return h;
+function fbByUser(actorId) {
+  return allFeedback.filter(function (r) { return r.actorId === actorId; });
+}
+
+function renderFbSeg() {
+  var counts = { "": allFeedback.length, open: 0, processing: 0, resolved: 0 };
+  allFeedback.forEach(function (r) { if (counts[r.status] != null) counts[r.status]++; });
+  $("fbStatusSeg").innerHTML = segOpts.map(function (o) {
+    return '<button data-v="' + o.v + '"' + (o.v === fbStatusFilter ? ' class="on"' : "") + ">" +
+      o.l + ' <span class="fb-cnt">' + counts[o.v] + "</span></button>";
   }).join("");
 }
 
+function shortFbUid(a) { return a && a.length > 16 ? a.slice(0, 9) + "…" + a.slice(-4) : (a || "-"); }
+
+function renderFbList() {
+  var items = filteredFeedback();
+  if (!items.length) {
+    $("fbList").innerHTML = '<div class="fb-empty">没有符合条件的反馈</div>';
+    return;
+  }
+  $("fbList").innerHTML = items.map(function (r) {
+    var n = fbByUser(r.actorId).length;
+    return '<div class="fb-row' + (r.id === fbSelId ? " sel" : "") + '" data-fbid="' + esc(r.id) + '">' +
+      '<span class="fb-dot ' + esc(r.status) + '"></span>' +
+      '<div class="fb-rowmain"><div class="fb-rowtxt">' + esc((r.description || r.title).split("\\n")[0]) + "</div>" +
+      '<div class="fb-rowmeta"><span class="fb-uid">' + esc(shortFbUid(r.actorId)) + "</span>" +
+      (n > 1 ? '<span class="fb-nbadge">×' + n + "</span>" : "") + "</div></div>" +
+      '<span class="fb-time">' + fmtTime(r.createdAt).slice(5, 10) + "</span></div>";
+  }).join("");
+  var rows = $("fbList").querySelectorAll(".fb-row");
+  for (var i = 0; i < rows.length; i++) {
+    rows[i].addEventListener("click", function () {
+      fbSelId = this.getAttribute("data-fbid");
+      renderFbList();
+      renderFbDetail();
+    });
+  }
+}
+
+function renderFbDetail() {
+  var box = $("fbDetail");
+  var r = null;
+  for (var i = 0; i < allFeedback.length; i++) if (allFeedback[i].id === fbSelId) r = allFeedback[i];
+  if (!r) { box.innerHTML = '<div class="fb-empty">左侧选择一条反馈</div>'; return; }
+  var his = fbByUser(r.actorId);
+  var diagKeys = Object.keys(r.diagnostics || {});
+  var h = '<div class="fb-dhead"><span class="fb-type">' + esc(TYPE_LABELS[r.type] || r.type) + '</span><div class="fb-statusseg">';
+  ["open", "processing", "resolved"].forEach(function (st) {
+    h += '<button data-act="fb-status" data-id="' + esc(r.id) + '" data-status="' + st + '"' +
+      (st === r.status ? ' class="cur ' + st + '"' : "") + ">" + (STATUS_LABELS[st] || st) + "</button>";
+  });
+  h += "</div></div>";
+  h += '<div class="fb-body">' + esc(r.description || r.title);
+  if (!fbTitleDuplicated(r)) h += '<div class="fb-titleline">标题：' + esc(r.title) + "</div>";
+  h += "</div>";
+  if (diagKeys.length) {
+    h += '<details class="diag"><summary>诊断信息 · ' + diagKeys.length + " 项</summary><table>" +
+      diagKeys.map(function (k) {
+        return "<tr><td>" + esc(k) + '</td><td class="kv-val">' + esc(r.diagnostics[k]) + "</td></tr>";
+      }).join("") + "</table></details>";
+  }
+  h += '<div class="fb-userbox"><div class="fb-userline">' +
+    '<span class="fb-uid-full">' + esc(r.actorId || "-") + "</span>" +
+    '<button class="mini" data-act="fb-copyid" data-user="' + esc(r.actorId || "") + '">复制 ID</button>' +
+    (his.length > 1 ? '<button class="mini" data-act="fb-togglehis">他的反馈 · ' + his.length + " 条 ▾</button>" : "") +
+    "</div>" +
+    (his.length > 1 ? '<div class="fb-hisrows">' + his.map(function (x) {
+      return '<div class="fb-hisrow' + (x.id === r.id ? " cur" : "") + '" data-fbid="' + esc(x.id) + '">' +
+        '<span class="fb-dot ' + esc(x.status) + '"></span>' +
+        '<span class="fb-histxt">' + esc((x.description || x.title).slice(0, 30)) + "</span>" +
+        "<span>" + (STATUS_LABELS[x.status] || x.status) + "</span>" +
+        '<span class="fb-time">' + fmtTime(x.createdAt).slice(5, 10) + "</span></div>";
+    }).join("") + "</div>" : "") +
+    "</div>";
+  h += '<div class="fb-replylab">回复用户 <span class="fb-hinthint">保存后自动以站内信送达该用户</span></div>';
+  if (r.replyNote) h += '<div class="fb-replied">已回复：' + esc(r.replyNote) + "</div>";
+  h += '<textarea id="fb-note-' + esc(r.id) + '" rows="3" placeholder="' +
+    (r.replyNote ? "补充新回复…" : "回复说明…（留空仅流转状态）") + '"></textarea>';
+  h += '<div class="fb-actions"><button class="btn primary" data-act="fb-save" data-id="' + esc(r.id) + '"' +
+    (r.replyNote ? " disabled" : "") + '>保存回复并通知</button>' +
+    '<span class="fb-savehint">状态流转即时生效，无需另存</span></div>';
+  h += '<div class="fb-metafoot"><span>#' + esc(r.id) + "</span><span>·</span><span>" + fmtTime(r.createdAt) + "</span>" +
+    (r.contact ? "<span>·</span><span>联系方式：" + esc(r.contact) + "</span>" : "") + "</div>";
+  box.innerHTML = h;
+  var hisRows = box.querySelectorAll(".fb-hisrow");
+  for (var j = 0; j < hisRows.length; j++) {
+    hisRows[j].addEventListener("click", function () {
+      fbSelId = this.getAttribute("data-fbid");
+      renderFbList();
+      renderFbDetail();
+    });
+  }
+  var ta = box.querySelector("textarea");
+  var sb = box.querySelector('[data-act="fb-save"]');
+  if (ta && sb) {
+    ta.addEventListener("input", function () { sb.disabled = ta.value.trim() === (r.replyNote || "").trim(); });
+  }
+}
+
+function fbFind(id) {
+  for (var i = 0; i < allFeedback.length; i++) if (allFeedback[i].id === id) return allFeedback[i];
+  return null;
+}
+
 function updateFeedbackStatus(id, status) {
-  var note = $("note-" + id).value.trim();
+  var noteEl = $("fb-note-" + id);
+  var note = noteEl ? noteEl.value.trim() : "";
+  var current = fbFind(id);
+  var body = { status: status };
+  if (note) body.replyNote = note; // 输入中的新回复随状态一并保存
+  else if (current && current.replyNote) body.replyNote = current.replyNote; // 保持已存回复
   api("/api/feedback/" + encodeURIComponent(id) + "/status", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status: status, replyNote: note })
+    body: JSON.stringify(body)
   }).then(function (r) { return r.json(); }).then(function (data) {
     if (data.ok !== true) throw new Error(data.message || "更新失败");
     loadFeedback();
   }).catch(function (e) { showErr("反馈更新失败：" + e.message); });
+}
+
+function saveFeedbackReply(id) {
+  var noteEl = $("fb-note-" + id);
+  var note = noteEl ? noteEl.value.trim() : "";
+  var current = fbFind(id);
+  if (!note || note === ((current && current.replyNote) || "").trim()) return;
+  updateFeedbackStatus(id, current ? current.status : "open");
 }
 
 // ---------- 用户 ----------
@@ -932,22 +1108,13 @@ function sendBroadcast() {
     });
 }
 
-// ---------- 支付 ----------
+// ---------- 支付（只记真实订单：台账不含模拟数据） ----------
 function orderStatusChip(st) {
   if (st === "paid") return chip("ok", "已支付");
   if (st === "pending") return chip("open", "待支付");
   if (st === "closed") return chip("offline", "已关闭");
   if (st === "refunded") return chip("info", "已退款");
   return chip("offline", st || "-");
-}
-
-function modeChip(mode) {
-  return mode === "live" ? chip("online", "真实") : chip("other", "模拟");
-}
-
-function modeStatsLine(m) {
-  if (!m) return "-";
-  return m.total + " 笔 · 已付 " + m.paid + " · ¥" + m.paidAmount;
 }
 
 function loadPayments() {
@@ -961,38 +1128,36 @@ function loadPayments() {
         return;
       }
       var s = res.j.stats || {};
-      var mock = (s.byMode && s.byMode.mock) || null;
-      var live = (s.byMode && s.byMode.live) || null;
       var html = '<div class="stats">' +
-        statCard(s.total, "总订单（付费意愿）") +
+        statCard(s.total, "真实订单") +
         statCard(s.paid, "已支付") +
         statCard("¥" + s.paidAmount, "收入") +
         "</div>";
-      html += '<div class="stats">' +
-        kpiCard(mock ? mock.total : 0, "模拟订单", modeStatsLine(mock)) +
-        kpiCard(live ? live.total : 0, "真实订单（微信/支付宝）", modeStatsLine(live)) +
-        "</div>";
-      if (live && live.total === 0 && mock && mock.total > 0) {
-        html += '<div class="meta" style="margin-bottom:12px">提示：尚无真实订单。渠道侧真实交易的本地状态由客户端轮询回写，' +
-          '历史订单需重新查询一次才会进入台账。</div>';
+      if (s.pending || s.refunded) {
+        html += '<div class="stats">' +
+          statCard(s.pending || 0, "待支付") +
+          (s.refunded ? statCard(s.refunded, "已退款") : "") +
+          "</div>";
       }
       var orders = res.j.orders || [];
       if (!orders.length) {
-        html += '<div class="card"><div class="empty">还没有支付订单。</div></div>';
+        html += '<div class="card"><div class="empty">还没有真实支付订单。</div>' +
+          '<div class="meta" style="text-align:center;padding:0 0 18px">真实通道需在服务端配置微信/支付宝商户凭证（live 模式），' +
+          '渠道配置状态见「系统」标签；模拟测试订单不再展示、不再落库。</div></div>';
       } else {
         var rows = orders.map(function (o) {
           return "<tr>" +
             '<td class="wrap">' + esc(o.outTradeNo) + "</td>" +
             "<td>" + esc(o.provider) + " / " + esc(o.method) + "</td>" +
-            "<td>" + modeChip(o.mode) + "</td>" +
             "<td>¥" + o.amount + "</td>" +
             '<td class="wrap">' + esc(o.description || "-") + "</td>" +
             "<td>" + orderStatusChip(o.status) + "</td>" +
             "<td>" + fmtTime(o.createdAt) + "</td>" +
+            "<td>" + fmtTime(o.paidAt) + "</td>" +
             "</tr>";
         }).join("");
         html += '<div class="card"><table><tr>' +
-          "<th>商户单号</th><th>渠道 / 方式</th><th>模式</th><th>金额</th><th>描述</th><th>状态</th><th>创建时间</th>" +
+          "<th>商户单号</th><th>渠道 / 方式</th><th>金额</th><th>描述</th><th>状态</th><th>创建时间</th><th>支付时间</th>" +
           "</tr>" + rows + "</table></div>";
       }
       body.innerHTML = html;
@@ -1285,6 +1450,20 @@ document.addEventListener("click", function (ev) {
   var act = el.getAttribute("data-act");
   var id = el.getAttribute("data-id") || "";
   if (act === "fb-status") updateFeedbackStatus(id, el.getAttribute("data-status"));
+  else if (act === "fb-save") saveFeedbackReply(id);
+  else if (act === "fb-copyid") {
+    var cu = el.getAttribute("data-user") || "";
+    if (cu && navigator.clipboard) {
+      navigator.clipboard.writeText(cu).then(function () {
+        el.textContent = "已复制";
+        setTimeout(function () { el.textContent = "复制 ID"; }, 1200);
+      });
+    }
+  }
+  else if (act === "fb-togglehis") {
+    var ub = el.closest(".fb-userbox");
+    if (ub) ub.classList.toggle("exp");
+  }
   else if (act === "user-toggle") toggleUser(el.getAttribute("data-user"), el.getAttribute("data-disabled") === "1");
   else if (act === "dl-delete") deleteDownload(el.getAttribute("data-file"));
   else if (act === "sys-reload") loadSystem();
@@ -1403,13 +1582,38 @@ $("fbStatusSeg").addEventListener("click", function (ev) {
   var btn = ev.target.closest ? ev.target.closest("button") : null;
   if (!btn) return;
   fbStatusFilter = btn.getAttribute("data-v");
-  var all = $("fbStatusSeg").querySelectorAll("button");
-  for (var i = 0; i < all.length; i++) all[i].classList.toggle("on", all[i] === btn);
+  renderFbSeg();
   renderFbList();
 });
-$("fbTypeSel").addEventListener("change", renderFbList);
-$("fbKw").addEventListener("input", renderFbList);
+$("fbTypeSel").addEventListener("change", function () {
+  if (fbSelId && !filteredFeedback().some(function (r) { return r.id === fbSelId; })) fbSelId = null;
+  renderFbList();
+  renderFbDetail();
+});
+$("fbKw").addEventListener("input", function () {
+  if (fbSelId && !filteredFeedback().some(function (r) { return r.id === fbSelId; })) fbSelId = null;
+  renderFbList();
+  renderFbDetail();
+});
 $("fbRefresh").addEventListener("click", loadFeedback);
+// J/K 键盘切换条目（输入控件聚焦时忽略）
+document.addEventListener("keydown", function (ev) {
+  if (currentTab !== "feedback" || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  var tag = ((ev.target && ev.target.tagName) || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return;
+  if (ev.key !== "j" && ev.key !== "k") return;
+  var list = filteredFeedback();
+  if (!list.length) return;
+  var idx = -1;
+  for (var i = 0; i < list.length; i++) if (list[i].id === fbSelId) idx = i;
+  var next = ev.key === "j" ? Math.min(list.length - 1, idx + 1) : Math.max(0, idx - 1);
+  if (next === idx) return;
+  fbSelId = list[next].id;
+  renderFbList();
+  renderFbDetail();
+  var selEl = document.querySelector(".fb-row.sel");
+  if (selEl && selEl.scrollIntoView) selEl.scrollIntoView({ block: "nearest" });
+});
 
 $("userKw").addEventListener("input", renderUserTable);
 $("userRefresh").addEventListener("click", loadUsers);
@@ -1427,9 +1631,7 @@ var segOpts = [
   { v: "", l: "全部" }, { v: "open", l: "待处理" },
   { v: "processing", l: "处理中" }, { v: "resolved", l: "已解决" }
 ];
-$("fbStatusSeg").innerHTML = segOpts.map(function (o) {
-  return '<button data-v="' + o.v + '"' + (o.v === "" ? ' class="on"' : "") + ">" + o.l + "</button>";
-}).join("");
+renderFbSeg();
 
 function hashTab() {
   var t = (location.hash || "#overview").slice(1);

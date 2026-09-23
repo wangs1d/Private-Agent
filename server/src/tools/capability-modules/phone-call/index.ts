@@ -10,7 +10,7 @@
  *
  * 域：agent 代用户向第三方真人发起真实电话（预约/确认/咨询），含拨前
  * 确认门、手机端二次确认、频控/静默时段、挂断后结果回填（收件箱必达）。
- * 与虚拟电话（agent.phone.* / phone.virtual_call）是两个并行体系，命名空间
+ * 与虚拟电话（agent.phone.* / phone.call_user）是两个并行体系，命名空间
  * `phone_call.*` 完全隔离（docs/phone-call-architecture.md §〇）。
  */
 import type { CapabilityModule } from "../index.js";

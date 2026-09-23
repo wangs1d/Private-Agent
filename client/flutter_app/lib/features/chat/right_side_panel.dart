@@ -1,5 +1,5 @@
 import "dart:async" show Timer, unawaited;
-import "dart:math" show max, min;
+import "dart:math" show min;
 
 import "package:flutter/material.dart";
 
@@ -27,7 +27,9 @@ const int _kMaxVisibleEvents = 5;
 /// （超出内部滚动），不会再把工具区推上推下。
 /// 取值略大于日程卡满载总高（≈330：头部+日程带+焦点卡+5 行时间轴+尾行），
 /// 绝大多数情况无需内部滚动；原足迹卡删除后由 560 收窄至此。
-const double _kUpperAreaFixedHeight = 340.0;
+/// 工具区起点 Y 钉死在本值 + 工具区顶距（132）= 512，不随窗口高度变化；
+/// 窗口矮到放不下时整列滚动兜底。调工具栏位置改本值或工具区顶距均可。
+const double _kUpperAreaFixedHeight = 380.0;
 
 /// 今日安排标题简洁化：剥离「该X啦」提醒式包装、指令前缀、元描述前缀、
 /// 以及和左侧时间列重复的时间词，再清理冗余代词词头，只保留核心文案
@@ -347,40 +349,35 @@ class _RightSidePanelState extends State<RightSidePanel> {
       child: SafeArea(
         right: false,
         top: false,
-        child: LayoutBuilder(
-          builder: (BuildContext context, BoxConstraints constraints) {
-            // 矮窗口时按可用高度压缩上方固定区（保底 180），
-            // 保证工具区始终可见。340 ≈ 工具区编辑态 + 间距余量。
-            final double upperHeight = max(
-              180.0,
-              min(_kUpperAreaFixedHeight, constraints.maxHeight - 340),
-            );
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                // 上方内容区：恒定高度 + 内部滚动。内容增减在这块区域内消化，
-                // 从而下方工具区的起点 Y 恒定（原位固定）。
-                SizedBox(
-                  height: upperHeight,
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: <Widget>[
-                        if (!_useDesktopFloating) _buildScheduleSection(),
-                      ],
-                    ),
+        child: SingleChildScrollView(
+          // 「常用工具」起点 Y = 上方固定区高度 + 工具区顶距，是恒定值
+          // （当前 380 + 132 = 512），不随窗口高度、日程内容增减变化；
+          // 窗口矮到一屏放不下时靠本层整列滚动兜底，位置依然钉死。
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              // 上方内容区：恒定高度 + 内部滚动。内容增减在这块区域内消化，
+              // 从而下方工具区的起点 Y 恒定（原位固定）。
+              SizedBox(
+                height: _kUpperAreaFixedHeight,
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      if (!_useDesktopFloating) _buildScheduleSection(),
+                    ],
                   ),
                 ),
-                // 「常用工具」：固定在上方恒高区域正下方，位置不随内容变化
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-                  child: _buildToolsSection(cs),
-                ),
-              ],
-            );
-          },
+              ),
+              // 「常用工具」：固定在上方恒高区域正下方，位置不随内容变化
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 132, 14, 0),
+                child: _buildToolsSection(cs),
+              ),
+            ],
+          ),
         ),
       ),
     );

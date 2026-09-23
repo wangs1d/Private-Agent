@@ -6,7 +6,6 @@ import {
 } from "../config/payment-config.js";
 import {
   getPaymentOrderLedger,
-  type LedgerModeStats,
   type LedgerOrderRow,
   type PaymentOrderStatus,
 } from "./payment-order-ledger.js";
@@ -118,8 +117,9 @@ export class PaymentService {
     return this.alipayMode() === "mock" || !this.alipayCredentialsAvailable() ? "mock" : "live";
   }
 
-  /** 下单成功即落台账（mock/live 都记），管理后台才有完整订单视图。 */
+  /** 仅真实（live）下单落台账；模拟订单留在进程内 Map，不产生后台可见的测试数据。 */
   private recordLedger(result: PaymentOrderResult, mode: "mock" | "live"): void {
+    if (mode !== "live") return;
     getPaymentOrderLedger().record({
       outTradeNo: result.outTradeNo,
       provider: result.provider,
@@ -683,7 +683,6 @@ export class PaymentService {
     if (!order) return false;
     order.status = "paid";
     this.mockOrders.set(outTradeNo, order);
-    getPaymentOrderLedger().updateStatus(outTradeNo, "paid", new Date().toISOString());
     return true;
   }
 
@@ -692,7 +691,6 @@ export class PaymentService {
     if (!order) return false;
     order.status = "closed";
     this.mockOrders.set(outTradeNo, order);
-    getPaymentOrderLedger().updateStatus(outTradeNo, "closed");
     return true;
   }
 
@@ -700,15 +698,14 @@ export class PaymentService {
     return Array.from(this.mockOrders.values());
   }
 
-  /** 管理后台订单列表：从持久台账读，mock/live 都在。 */
+  /** 管理后台订单列表：从持久台账读（只含真实订单）。 */
   listOrders(limit = 200): LedgerOrderRow[] {
-    return getPaymentOrderLedger().list(limit);
+    return getPaymentOrderLedger().list(limit).filter((o) => o.mode === "live");
   }
 
   /**
-   * 订单统计（管理概览）：下单量即付费意愿，已支付金额即收入。
-   * 数据来自持久台账；byMode 拆分模拟/真实订单 —— live 订单事实源在渠道侧，
-   * 本地为轮询回写的副本，支付页需按模式区分展示。
+   * 订单统计（管理概览/支付页）：真实订单口径 —— 已支付金额即收入。
+   * 模拟订单不落台账、不计入统计；护栏日预算（sumAmountSince）也只累计真实下单。
    */
   orderStats(): {
     total: number;
@@ -717,17 +714,15 @@ export class PaymentService {
     closed: number;
     refunded: number;
     paidAmount: number;
-    byMode: { mock: LedgerModeStats; live: LedgerModeStats };
   } {
-    const all = getPaymentOrderLedger().stats();
+    const live = getPaymentOrderLedger().stats().live;
     return {
-      total: all.total.total,
-      pending: all.total.pending,
-      paid: all.total.paid,
-      closed: all.total.closed,
-      refunded: all.total.refunded,
-      paidAmount: all.total.paidAmount,
-      byMode: { mock: all.mock, live: all.live },
+      total: live.total,
+      pending: live.pending,
+      paid: live.paid,
+      closed: live.closed,
+      refunded: live.refunded,
+      paidAmount: live.paidAmount,
     };
   }
 }

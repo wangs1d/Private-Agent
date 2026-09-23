@@ -13,7 +13,10 @@
 //   E = latest 9.9.9 且 url 指向本地真下载端点 → 验证应用内下载流程
 //       （点「立即升级」卡内进度 → 「重启完成更新」→ 真实落盘 → 取消还原；
 //        不点「重启完成更新」——exit+静默安装腿需真实安装包，发版时人工闭环）
+//   F = minVersion 99.0.0 → 强锁 → 不可关闭的升级弹窗（主题渲染取证）
 // 每阶段用 RepaintBoundary 出真实渲染 PNG 到 %TEMP%，供人工目检。
+// 主题由 --dart-define=E2E_THEME=warm|dark 选择（默认 warm）：浮卡/弹窗
+// 配色已主题化，两套主题都应出真实渲染证据；截图文件名带主题前缀。
 import "dart:io" show File, Platform;
 import "dart:typed_data" show ByteData;
 import "dart:ui" as ui show FrameTiming, Image, ImageByteFormat;
@@ -26,6 +29,7 @@ import "package:integration_test/integration_test.dart";
 import "package:package_info_plus/package_info_plus.dart";
 import "package:private_ai_agent/core/presentation/glass_notify.dart";
 import "package:private_ai_agent/core/presentation/update_result_card.dart";
+import "package:private_ai_agent/core/theme/app_theme.dart";
 import "package:private_ai_agent/features/chat/sidebar_user_menu.dart"
     show ThemeChoice;
 import "package:private_ai_agent/widgets/app_sidebar.dart";
@@ -33,6 +37,13 @@ import "package:private_ai_agent/widgets/app_sidebar.dart";
 const String _statePath =
     r"C:\Users\Administrator\AppData\Local\Temp\manifest_e2e_state.json";
 const String _shotDir = r"C:\Users\Administrator\AppData\Local\Temp";
+const String _themeMode = String.fromEnvironment(
+  "E2E_THEME",
+  defaultValue: "warm",
+);
+final AppThemeVariant _themeVariant = _themeMode == "dark"
+    ? AppThemeVariant.dark
+    : AppThemeVariant.warm;
 final GlobalKey _shotKey = GlobalKey(debugLabel: "updateE2eShot");
 
 void _setMode(String mode) {
@@ -67,42 +78,49 @@ Future<void> _shot(String name) async {
       await image.toByteData(format: ui.ImageByteFormat.png);
   image.dispose();
   if (bytes == null) return;
-  final String path = "$_shotDir\\update_e2e_$name.png";
+  final String path =
+      "$_shotDir\\update_e2e_${_themeMode}_$name.png";
   await File(path).writeAsBytes(bytes.buffer.asUint8List());
   debugPrint("[update-e2e] shot: $path");
 }
 
 Widget _harness() {
+  // 侧栏配色读 AppThemeController、浮卡/弹窗读 Theme——两处同步到
+  // dart-define 选的主题，整屏渲染才是该主题的真实样子
+  AppThemeController.instance.setVariant(_themeVariant);
   return RepaintBoundary(
     key: _shotKey,
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
+      theme: AppTheme.of(_themeVariant),
       builder: (BuildContext context, Widget? child) =>
           GlassNotifyHost(child: UpdateResultCardHost(child: child)),
-      home: Scaffold(
-        body: Row(
-          children: <Widget>[
-            AppSidebar(
-              tabIndex: 0,
-              onTabSelected: (_) {},
-              currentTheme: ThemeChoice.system,
-              onSetLightTheme: () {},
-              onSetDarkTheme: () {},
-              onSetSystemTheme: () {},
-              inboxUnread: 0,
-              onInboxUnreadChanged: (_) {},
-              onOpenSettings: () {},
-              onCheckUpdate: () async {
-                final BuildContext? ctx = _shotKey.currentContext;
-                if (ctx == null || !ctx.mounted) return;
-                await UpdateResultCard.runManualUpdateCheck(ctx);
-              },
-              onOpenUserMenuFeedback: () {},
-              onOpenDevices: () {},
-              onLogout: () {},
-            ),
-            const Expanded(child: SizedBox.shrink()),
-          ],
+      home: Builder(
+        builder: (BuildContext navCtx) => Scaffold(
+          body: Row(
+            children: <Widget>[
+              AppSidebar(
+                tabIndex: 0,
+                onTabSelected: (_) {},
+                currentTheme: ThemeChoice.system,
+                onSetLightTheme: () {},
+                onSetDarkTheme: () {},
+                onSetSystemTheme: () {},
+                inboxUnread: 0,
+                onInboxUnreadChanged: (_) {},
+                onOpenSettings: () {},
+                onCheckUpdate: () async {
+                  // 强锁路径要 showDialog，必须给 navigator 子树内的
+                  // context；_shotKey 在 MaterialApp 之上，够不着 Navigator
+                  await UpdateResultCard.runManualUpdateCheck(navCtx);
+                },
+                onOpenUserMenuFeedback: () {},
+                onOpenDevices: () {},
+                onLogout: () {},
+              ),
+              const Expanded(child: SizedBox.shrink()),
+            ],
+          ),
         ),
       ),
     ),
@@ -277,5 +295,24 @@ void main() {
     await _settle(tester);
     expect(find.text("发现新版本 v9.9.9"), findsNothing,
         reason: "还原静态卡后暂不更新应关闭浮卡");
+  });
+
+  testWidgets("强锁升级弹窗真机渲染", (WidgetTester tester) async {
+    await binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => binding.setSurfaceSize(null));
+
+    _setMode("F");
+    await tester.pumpWidget(_harness());
+    await tester.pump();
+    await tester.tap(find.byTooltip("检查更新"));
+    await _pumpUntil(
+      tester,
+      () => find.text("版本过旧，需要升级").evaluate().isNotEmpty,
+    );
+    // 先出证再断言：弹窗没起来时截图能直接看出屏幕上是什么
+    await _shot("G_forced_dialog");
+    expect(find.text("立即升级"), findsOneWidget,
+        reason: "强锁弹窗唯一出口是升级，不应有「暂不更新」");
+    expect(find.text("暂不更新"), findsNothing);
   });
 }

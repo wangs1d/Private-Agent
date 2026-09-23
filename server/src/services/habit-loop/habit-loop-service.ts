@@ -127,6 +127,11 @@ export class HabitLoopService {
   // 规则管理（工具面）
   // ------------------------------------------------------------------ //
 
+  /** 只读观察快照（跨功能复用：如「为你推荐」按使用习惯个性化）。返回拷贝，调用方可安全持有。 */
+  getToolUsageObservations(): HabitToolObservation[] {
+    return [...this.toolObservations];
+  }
+
   async createRule(draft: {
     actorId: string;
     name: string;

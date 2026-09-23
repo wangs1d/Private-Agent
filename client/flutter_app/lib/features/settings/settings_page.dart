@@ -1,8 +1,12 @@
 import "dart:async";
+import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
+import "package:http/http.dart" as http;
 
+import "../../core/config/api_config.dart";
+import "../../core/services/access_auth_api.dart";
 import "../../core/services/app_auto_start.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
@@ -10,16 +14,20 @@ import "../../core/theme/app_theme.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
-enum _SettingsSection { general, phoneBridge }
+enum _SettingsSection { general, phoneNumber, phoneBridge }
 
 /// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
 /// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
 ///
 /// 分区：
+///  - 站内号码：虚拟电话号码申领/查看（跳转聊天由 Agent 办理）
 ///  - 通用（仅 Windows）：开机自动启动（本地注册表，不依赖服务器）
 ///  - 手机桥接（仅 Android）：Agent 远程访问本机 / 消息捕捉 / 定位回传
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  const SettingsPage({super.key, this.onClaimNumberViaChat});
+
+  /// 「申领站内号码」点击回调：跳回聊天页并预填申领话术（由 Agent 办理）。
+  final VoidCallback? onClaimNumberViaChat;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -40,6 +48,13 @@ class _SettingsPageState extends State<SettingsPage> {
   int _captureQueueSize = 0;
   bool _captureLoading = true;
 
+  // —— 站内号码（虚拟电话） ——
+  bool _phoneLoading = true;
+  bool _phoneClaimed = false;
+  String _phoneNumber = "";
+  String _phoneError = "";
+  bool _phoneReleasing = false;
+
   @override
   void initState() {
     super.initState();
@@ -48,6 +63,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     _loadLocalDeviceSettings();
     _refreshCaptureState();
+    _loadPhoneStatus();
   }
 
   /// 加载 Windows 本机设置：开机自启（注册表）。
@@ -123,6 +139,7 @@ class _SettingsPageState extends State<SettingsPage> {
       IconData,
       String
     )>[
+      (_SettingsSection.phoneNumber, Icons.call_outlined, "站内号码"),
       if (_isWindows)
         (_SettingsSection.general, Icons.tune_outlined, "通用"),
       if (showPhoneBridge)
@@ -226,10 +243,12 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildSectionContent() {
     final String title = switch (_section) {
       _SettingsSection.general => "通用",
+      _SettingsSection.phoneNumber => "站内号码",
       _SettingsSection.phoneBridge => "手机桥接",
     };
     final Widget card = switch (_section) {
       _SettingsSection.general => _buildGeneralCard(),
+      _SettingsSection.phoneNumber => _buildPhoneNumberCard(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
     };
     return SingleChildScrollView(
@@ -402,6 +421,189 @@ class _SettingsPageState extends State<SettingsPage> {
         _listenerEnabled = false;
       });
     }
+  }
+
+  // ------------------------------------------------------------------ //
+  // 站内号码（虚拟电话）
+  // ------------------------------------------------------------------ //
+
+  static const Duration _phoneHttpTimeout = Duration(seconds: 10);
+
+  /// 查询当前用户是否已申领站内号码（GET /phone/me）。
+  Future<void> _loadPhoneStatus() async {
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/phone/me").replace(
+        queryParameters: <String, String>{
+          "userId": ApiConfig.effectiveActorId,
+        },
+      );
+      final http.Response res = await http
+          .get(
+            uri,
+            headers: <String, String>{
+              "Content-Type": "application/json",
+              ...AccessCredentialStore.instance.authHeaders,
+            },
+          )
+          .timeout(_phoneHttpTimeout);
+      final Map<String, dynamic> data =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      if (!mounted) return;
+      if (res.statusCode != 200 || data["ok"] != true) {
+        setState(() {
+          _phoneLoading = false;
+          _phoneError = data["error"]?.toString() ?? "加载失败";
+        });
+        return;
+      }
+      setState(() {
+        _phoneLoading = false;
+        _phoneError = "";
+        _phoneClaimed = data["claimed"] == true;
+        _phoneNumber = data["virtualPhone"]?.toString() ?? "";
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _phoneLoading = false;
+        _phoneError = "网络异常，无法获取号码状态";
+      });
+    }
+  }
+
+  /// 释放站内号码（DELETE /phone/me），号码回池；释放后可重新申领。
+  Future<void> _releaseNumber() async {
+    if (_phoneReleasing) return;
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: const Text("释放站内号码"),
+        content: Text("释放后 $_phoneNumber 将不再属于你，他人申领可能占用该号；通话记录不受影响。确定释放？"),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text("取消"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text("释放"),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() => _phoneReleasing = true);
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/phone/me").replace(
+        queryParameters: <String, String>{
+          "userId": ApiConfig.effectiveActorId,
+        },
+      );
+      final http.Response res = await http
+          .delete(
+            uri,
+            headers: <String, String>{
+              "Content-Type": "application/json",
+              ...AccessCredentialStore.instance.authHeaders,
+            },
+          )
+          .timeout(_phoneHttpTimeout);
+      final Map<String, dynamic> data =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      if (!mounted) return;
+      if (res.statusCode == 200 && data["ok"] == true) {
+        _snack("已释放号码 $_phoneNumber");
+        setState(() {
+          _phoneClaimed = false;
+          _phoneNumber = "";
+        });
+      } else {
+        _snack(data["error"]?.toString() ?? "释放失败，请重试");
+      }
+    } catch (_) {
+      if (mounted) _snack("网络异常，释放失败");
+    } finally {
+      if (mounted) setState(() => _phoneReleasing = false);
+    }
+  }
+
+  /// 站内号码卡：申领走对话（Agent 办理），已申领展示号码并支持释放。
+  Widget _buildPhoneNumberCard() {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.call_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("站内号码", style: Theme.of(context).textTheme.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              "6 位站内号码是你的虚拟电话号：申领后 Agent 才能呼出虚拟电话（语音提醒/通话），"
+              "也是你在站内电话网络的注册凭证。App 内呼叫 Agent 无需号码。",
+              style: TextStyle(fontSize: 12.5),
+            ),
+            const SizedBox(height: 8),
+            if (_phoneLoading)
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text("正在获取号码状态…"),
+                dense: true,
+              )
+            else if (_phoneError.isNotEmpty)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(_phoneError),
+                trailing: TextButton(
+                  onPressed: () {
+                    setState(() => _phoneLoading = true);
+                    _loadPhoneStatus();
+                  },
+                  child: const Text("重试"),
+                ),
+              )
+            else if (_phoneClaimed) ...<Widget>[
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                leading: const Icon(Icons.confirmation_number_outlined),
+                title: Text(
+                  _phoneNumber,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 2,
+                  ),
+                ),
+                subtitle: const Text("已注册 · 申领后可使用虚拟电话呼出"),
+                trailing: TextButton(
+                  onPressed: _phoneReleasing ? null : _releaseNumber,
+                  child: const Text("释放"),
+                ),
+              ),
+            ] else
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                leading: const Icon(Icons.info_outline),
+                title: const Text("尚未申领"),
+                subtitle: const Text("申领后即可使用虚拟电话服务"),
+                trailing: FilledButton(
+                  onPressed: widget.onClaimNumberViaChat,
+                  child: const Text("去申领"),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ------------------------------------------------------------------ //
