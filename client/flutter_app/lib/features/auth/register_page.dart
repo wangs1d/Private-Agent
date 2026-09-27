@@ -1,27 +1,30 @@
 import "dart:async";
 import "dart:convert";
 import "dart:developer" as developer;
-import "dart:io" show Platform;
+import "dart:io";
 import "dart:math" as math;
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:http/http.dart" as http;
+import "package:url_launcher/url_launcher.dart";
 import "package:window_manager/window_manager.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/theme/app_theme.dart";
 import "../../widgets/app_window_titlebar.dart";
 
-/// 注册界面（NEXTBOT 创建账号）。
+/// 登录界面（NEXTBOT 桌面端）。
 ///
-/// 按设计稿还原的整页注册界面：左侧表单（邮箱/密码/确认密码），
-/// 右侧机器人形象面板（CustomPainter 手绘的暗色球体 + 发光眼睛）。
+/// 左列按扣子桌面端版式：大标题在顶、底部问候 + 「立即登录」按钮，
+/// 不再放表单——点击按钮后跳系统浏览器到控制面登录页（/accounts/web），
+/// 网页完成注册/登录后经本机回环地址把邮箱回连给本页（见 [_startWebAuth]）。
+/// 右侧仍为机器人形象面板（CustomPainter 手绘的暗色球体 + 发光眼睛）。
 ///
-/// 集成约定：页面自身不依赖任何全局服务，注册动效通过 [RegisterPage.onRegister]
-/// 回调外抛（null 时走 1.2s 模拟延迟，供预览/验收）。后续接入真实注册 API 时
-/// 在调用方注入回调即可，页面无需改动。
+/// 集成约定：页面自身不依赖任何全局服务，登录结果通过
+/// [RegisterPage.onAuthenticated] 回调外抛（null 时走 1.2s 模拟延迟，
+/// 供预览/验收）。
 ///
 /// 预览入口：环境变量 `PAI_REGISTER_PREVIEW=1` 启动独立预览窗口
 /// （不 bootstrap 主应用任何服务），见 [runRegisterPreviewWindow]。
@@ -54,6 +57,46 @@ Future<void> runRegisterPreviewWindow() async {
   runApp(const _RegisterPreviewApp());
 }
 
+/// 真实注册：名单落后台账号服务（`POST /accounts/register`，email 已透传）。
+/// 开发/单机形态 [ApiConfig.controlPlaneBase] 回落 httpBase（127.0.0.1:3000
+/// 本地 server，与管理后台同库）；发版形态烤入 CONTROL_PLANE_URL 指云端后台。
+/// 幂等：后台报「已存在」同样视为成功（退出登录后同一邮箱重新注册/重装重进）。
+/// 抛错时调用方捕获展示。
+///
+/// 网页登录流程里这一步由 /accounts/web 页面自己完成；本函数保留给
+/// 预览窗口与调试直调通道直接驱动真实注册用。
+Future<void> registerAccountToControlPlane(
+  String email,
+) async {
+  final String mail = email.trim();
+  final http.Client client = http.Client();
+  try {
+    final http.Response res = await client
+        .post(
+          Uri.parse("${ApiConfig.controlPlaneBase}/accounts/register"),
+          headers: const <String, String>{
+            "Content-Type": "application/json",
+          },
+          body: jsonEncode(<String, String>{
+            // 名单主键用邮箱：后台用户列表 userId/email 同值，一眼可辨
+            "userId": mail,
+            "displayName": mail.split("@").first,
+            "email": mail,
+          }),
+        )
+        .timeout(const Duration(seconds: 10));
+    final Map<String, dynamic> data =
+        jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode == 200 && data["ok"] == true) return;
+    if ((data["message"]?.toString() ?? "").contains("已存在")) return;
+    final String message =
+        data["message"]?.toString() ?? "注册失败（HTTP ${res.statusCode}）";
+    throw Exception(message);
+  } finally {
+    client.close();
+  }
+}
+
 class _RegisterPreviewApp extends StatelessWidget {
   const _RegisterPreviewApp();
 
@@ -64,45 +107,16 @@ class _RegisterPreviewApp extends StatelessWidget {
       theme: AppTheme.of(AppThemeVariant.dark).copyWith(
         scaffoldBackgroundColor: Colors.black,
       ),
-      home: RegisterPage(onRegister: _registerToControlPlane),
+      home: RegisterPage(onAuthenticated: registerAccountToControlPlane),
     );
-  }
-
-  /// 真实注册：名单落后台账号服务（`POST /accounts/register`，email 已透传）。
-  /// 开发/单机形态 [ApiConfig.controlPlaneBase] 回落 httpBase（127.0.0.1:3000
-  /// 本地 server，与管理后台同库）；发版形态烤入 CONTROL_PLANE_URL 指云端后台。
-  Future<void> _registerToControlPlane(String email, String password) async {
-    final String mail = email.trim();
-    final http.Client client = http.Client();
-    try {
-      final http.Response res = await client
-          .post(
-            Uri.parse("${ApiConfig.controlPlaneBase}/accounts/register"),
-            headers: const <String, String>{
-              "Content-Type": "application/json",
-            },
-            body: jsonEncode(<String, String>{
-              // 名单主键用邮箱：后台用户列表 userId/email 同值，一眼可辨
-              "userId": mail,
-              "displayName": mail.split("@").first,
-              "email": mail,
-            }),
-          )
-          .timeout(const Duration(seconds: 10));
-      final Map<String, dynamic> data =
-          jsonDecode(res.body) as Map<String, dynamic>;
-      if (res.statusCode == 200 && data["ok"] == true) return;
-      final String message =
-          data["message"]?.toString() ?? "注册失败（HTTP ${res.statusCode}）";
-      throw Exception(message);
-    } finally {
-      client.close();
-    }
   }
 }
 
-/// 注册页回调载荷：注册成功后携带邮箱（预留，接真实 API 时用）。
-typedef OnRegister = Future<void> Function(String email, String password);
+/// 登录回调载荷：网页回连成功后携带邮箱。
+typedef OnWebAuth = Future<void> Function(String email);
+
+/// debug 直调扩展只注册一次（门禁会反复挂载注册页）。
+bool _debugFillExtensionRegistered = false;
 
 /// 注册界面整页。
 ///
@@ -111,15 +125,11 @@ typedef OnRegister = Future<void> Function(String email, String password);
 class RegisterPage extends StatefulWidget {
   const RegisterPage({
     super.key,
-    this.onRegister,
-    this.onGoLogin,
+    this.onAuthenticated,
   });
 
-  /// 注册提交回调（null = 模拟延迟，预览用）。
-  final OnRegister? onRegister;
-
-  /// 「已有账号？登录」点击回调（null = 无动作，接登录页时注入）。
-  final VoidCallback? onGoLogin;
+  /// 网页登录回连成功后的回调（null = 模拟延迟，预览用）。
+  final OnWebAuth? onAuthenticated;
 
   @override
   State<RegisterPage> createState() => _RegisterPageState();
@@ -131,10 +141,6 @@ class _RegisterPageState extends State<RegisterPage> {
   static const Color cardBg = Color(0xFF141414);
   static const Color cardBorder = Color(0xFF232323);
   static const Color panelBg = Color(0xFF0D0D0D);
-  static const Color fieldBorder = Color(0xFF3D3D3D);
-  static const Color fieldBorderFocused = Color(0xFFE8E8E8);
-  static const Color fieldBorderError = Color(0xFFF2604E);
-  static const Color fieldBg = Color(0xFF101010);
   static const Color textPrimary = Color(0xFFF2F2F2);
   static const Color textSecondary = Color(0xFF9B9B9B);
   static const Color textMuted = Color(0xFF6B6B6B);
@@ -142,43 +148,35 @@ class _RegisterPageState extends State<RegisterPage> {
   static const Color pillDark = Color(0xFF1F1F1F);
   static const Color pillBorder = Color(0xFF303030);
 
-  final TextEditingController _emailCtrl = TextEditingController();
-  final TextEditingController _passwordCtrl = TextEditingController();
-  final TextEditingController _confirmCtrl = TextEditingController();
-  final FocusNode _emailFocus = FocusNode();
-  final FocusNode _passwordFocus = FocusNode();
-  final FocusNode _confirmFocus = FocusNode();
+  static final RegExp _emailRe = RegExp(r"^[^\s@]+@[^\s@]+\.[^\s@]+$");
 
-  bool _submitAttempted = false;
-  bool _submitting = false;
-  bool _registered = false;
-  String? _emailError;
-  String? _passwordError;
-  String? _confirmError;
-  String? _apiError;
+  // ── 网页登录状态机：拉起浏览器 → 等回环回调 → 交回调进主界面 ──
+  bool _authBusy = false;
+  bool _done = false;
+  String? _authError;
+  HttpServer? _loopbackServer;
+  Uri? _webAuthUrl;
+  Completer<String>? _callbackCompleter;
 
   @override
   void initState() {
     super.initState();
-    _emailCtrl.addListener(_onFieldChanged);
-    _passwordCtrl.addListener(_onFieldChanged);
-    _confirmCtrl.addListener(_onFieldChanged);
-    // debug 预览的 VM service 直调通道：脚本无法往被遮挡的窗口注入键盘/鼠标
-    // （全屏游戏等前景遮挡时 SendKeys/点击会落 elsewhere），预览模式下注册
-    // 一个扩展，经 VM service websocket 直接驱动表单做真机取证。
-    if (kDebugMode &&
-        Platform.environment[kRegisterPreviewEnv] == "1") {
+    // debug 的 VM service 直调通道：脚本无法往被遮挡的窗口注入键盘/鼠标
+    // （全屏游戏等前景遮挡时 SendKeys/点击会落 elsewhere），debug 构建统一
+    // 注册，经 VM service websocket 直接驱动登录流程做真机取证（启动门禁与
+    // 独立预览窗口共用本页，故不再限定 PAI_REGISTER_PREVIEW=1）。
+    // 门禁会在「登录↔主界面」间反复挂载本页，扩展只允许注册一次。
+    // 兼容旧取证脚本：password/confirm 参数收下但忽略（网页登录形态无表单）。
+    if (kDebugMode && !_debugFillExtensionRegistered) {
+      _debugFillExtensionRegistered = true;
       developer.registerExtension("ext.pai.debug.registerFill", (
         String method,
         Map<String, String> parameters,
       ) async {
         Future<void>.sync(() {
-          _emailCtrl.text = parameters["email"] ?? "";
-          _passwordCtrl.text = parameters["password"] ?? "";
-          _confirmCtrl.text = parameters["confirm"] ?? "";
-          if (parameters["submit"] == "1") {
-            unawaited(_submit());
-          }
+          final String email = (parameters["email"] ?? "").trim();
+          if (parameters["submit"] != "1" || email.isEmpty) return;
+          unawaited(_debugComplete(email));
         });
         return developer.ServiceExtensionResponse.result(
           jsonEncode(<String, dynamic>{"ok": true}),
@@ -189,91 +187,153 @@ class _RegisterPageState extends State<RegisterPage> {
 
   @override
   void dispose() {
-    _emailCtrl.dispose();
-    _passwordCtrl.dispose();
-    _confirmCtrl.dispose();
-    _emailFocus.dispose();
-    _passwordFocus.dispose();
-    _confirmFocus.dispose();
+    _closeLoopback();
     super.dispose();
   }
 
-  /// 首次提交后输入即实时重校验（错误随修正消失，与设计稿错误态配合）。
-  void _onFieldChanged() {
-    if (!_submitAttempted || _submitting || _registered) return;
-    setState(_validate);
-  }
+  // ═══════════════════════════════════════════════════════════
+  // 网页登录：本机回环握手
+  // ═══════════════════════════════════════════════════════════
 
-  void _validate() {
-    _emailError = _validateEmail(_emailCtrl.text);
-    _passwordError = _validatePassword(_passwordCtrl.text);
-    _confirmError = _validateConfirm(
-      _confirmCtrl.text,
-      _passwordCtrl.text,
-    );
-  }
-
-  static String? _validateEmail(String v) {
-    final String t = v.trim();
-    if (t.isEmpty) return "请输入邮箱";
-    final RegExp email = RegExp(r"^[^\s@]+@[^\s@]+\.[^\s@]+$");
-    if (!email.hasMatch(t)) return "请输入有效的邮箱地址";
-    return null;
-  }
-
-  static String? _validatePassword(String v) {
-    if (v.isEmpty) return "请输入密码";
-    final bool hasLetter = v.contains(RegExp(r"[A-Za-z]"));
-    final bool hasDigit = v.contains(RegExp(r"[0-9]"));
-    if (v.length < 8 || !hasLetter || !hasDigit) return "至少 8 位，含字母与数字";
-    return null;
-  }
-
-  static String? _validateConfirm(String v, String password) {
-    if (v.isEmpty) return "请再次输入密码";
-    if (v != password) return "两次输入的密码不一致";
-    return null;
-  }
-
-  Future<void> _submit() async {
-    if (_submitting || _registered) return;
+  /// 点「立即登录」：起本机回环监听 → 开系统浏览器到控制面登录页
+  /// （/accounts/web?cb=…&state=…），网页完成注册/登录后携带邮箱回连。
+  Future<void> _startWebAuth() async {
+    if (_authBusy || _done) return;
     setState(() {
-      _submitAttempted = true;
-      _apiError = null;
-      _validate();
+      _authBusy = true;
+      _authError = null;
     });
-    if (_emailError != null) {
-      _emailFocus.requestFocus();
-      return;
-    }
-    if (_passwordError != null) {
-      _passwordFocus.requestFocus();
-      return;
-    }
-    if (_confirmError != null) {
-      _confirmFocus.requestFocus();
-      return;
-    }
-    setState(() => _submitting = true);
     try {
-      if (widget.onRegister != null) {
-        await widget.onRegister!(_emailCtrl.text.trim(), _passwordCtrl.text);
-      } else {
-        // 预览/验收：模拟一次真实注册的往返延迟
-        await Future<void>.delayed(const Duration(milliseconds: 1200));
-      }
+      final HttpServer server =
+          await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      _loopbackServer = server;
+      final String state = _randomState();
+      final String cb = "http://127.0.0.1:${server.port}/callback";
+      _webAuthUrl = Uri.parse(
+        "${ApiConfig.controlPlaneBase}/accounts/web"
+        "?cb=${Uri.encodeComponent(cb)}&state=$state",
+      );
+      unawaited(launchUrl(
+        _webAuthUrl!,
+        mode: LaunchMode.externalApplication,
+      ));
+      final String email = await _waitLoopbackCallback(server, state);
       if (!mounted) return;
-      setState(() {
-        _submitting = false;
-        _registered = true;
-      });
+      await _completeAuth(email);
     } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _submitting = false;
-        _apiError = e.toString();
-      });
+      if (mounted && e is! _WebAuthCancelled) {
+        setState(() => _authError = _friendlyAuthError(e));
+      }
+    } finally {
+      await _closeLoopback();
+      _callbackCompleter = null;
+      if (mounted) setState(() => _authBusy = false);
     }
+  }
+
+  /// 等待网页回连：只认 path=/callback 且 state 匹配的请求，取邮箱交给完成态。
+  /// 5 分钟未回连视为超时；取消由 [_cancelWebAuth] 注入 [_WebAuthCancelled]。
+  Future<String> _waitLoopbackCallback(HttpServer server, String state) {
+    final Completer<String> completer = Completer<String>();
+    _callbackCompleter = completer;
+    server.listen((HttpRequest req) async {
+      if (req.uri.path != "/callback") {
+        req.response.statusCode = 404;
+        await req.response.close();
+        return;
+      }
+      if (completer.isCompleted) return;
+      if (req.uri.queryParameters["state"] != state) {
+        req.response.statusCode = 400;
+        await req.response.close();
+        return;
+      }
+      final String email = (req.uri.queryParameters["email"] ?? "").trim();
+      // 浏览器停留在回连页：给一句终态提示，窗口可自行关闭
+      req.response.headers.contentType = ContentType.html;
+      req.response.write(_loopbackAckHtml());
+      await req.response.close();
+      if (email.isEmpty || !_emailRe.hasMatch(email)) {
+        completer.completeError(Exception("回连参数缺少有效邮箱"));
+        return;
+      }
+      completer.complete(email);
+    });
+    return completer.future.timeout(const Duration(minutes: 5));
+  }
+
+  /// 登录成功（真实回连或 debug 直调）后的收尾：交调用方落会话并切主界面。
+  Future<void> _completeAuth(String email) async {
+    if (widget.onAuthenticated != null) {
+      await widget.onAuthenticated!(email);
+    } else {
+      // 预览/验收：模拟一次真实回连的往返延迟
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+    }
+    if (!mounted) return;
+    setState(() => _done = true);
+  }
+
+  /// debug 直调通道的完成路径（跳过浏览器，直接走回调）。
+  Future<void> _debugComplete(String email) async {
+    if (_authBusy || _done) return;
+    setState(() {
+      _authBusy = true;
+      _authError = null;
+    });
+    try {
+      await _completeAuth(email);
+    } catch (e) {
+      if (mounted) setState(() => _authError = e.toString());
+    } finally {
+      if (mounted) setState(() => _authBusy = false);
+    }
+  }
+
+  void _cancelWebAuth() {
+    final Completer<String>? completer = _callbackCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError(const _WebAuthCancelled());
+    }
+    _closeLoopback();
+  }
+
+  Future<void> _closeLoopback() async {
+    final HttpServer? server = _loopbackServer;
+    _loopbackServer = null;
+    await server?.close(force: true);
+  }
+
+  /// 重新打开浏览器（等待回连期间浏览器被误关时的兜底）。
+  Future<void> _relaunchBrowser() async {
+    final Uri? url = _webAuthUrl;
+    if (url == null) return;
+    await launchUrl(url, mode: LaunchMode.externalApplication);
+  }
+
+  String _randomState() {
+    final math.Random random = math.Random.secure();
+    return List<String>.generate(
+      16,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, "0"),
+    ).join();
+  }
+
+  String _friendlyAuthError(Object e) {
+    if (e is TimeoutException) return "登录超时，请重试。";
+    return "登录失败：$e";
+  }
+
+  /// 回连成功页：浏览器窗口停留在这一页，提示用户回到桌面应用。
+  String _loopbackAckHtml() {
+    return "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<title>NEXTBOT — 登录完成</title><style>"
+        "body{background:#000;color:#F2F2F2;text-align:center;margin:0;"
+        "font-family:'Noto Sans SC','Microsoft YaHei UI',sans-serif;"
+        "display:flex;align-items:center;justify-content:center;height:100vh;}"
+        "h1{font-size:22px;font-weight:700;margin:0 0 10px;}"
+        "p{color:#9B9B9B;font-size:14px;margin:0;}</style></head>"
+        "<body><div><h1>登录完成</h1><p>已回连桌面端，本页可以关闭。</p></div></body></html>";
   }
 
   @override
@@ -331,195 +391,71 @@ class _RegisterPageState extends State<RegisterPage> {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 左侧表单列
+  // 左列（扣子桌面端版式：大标题在顶，问候与登录按钮沉底）
   // ═══════════════════════════════════════════════════════════
 
   Widget _buildFormColumn() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(56, 52, 56, 36),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            const Text(
-              "NEXTBOT",
-              style: TextStyle(
-                fontFamily: AppTheme.appFontFamily,
-                fontSize: 14,
-                height: 1.2,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 3.2,
-                color: textPrimary,
-              ),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(56, 52, 56, 44),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Text(
+            "欢迎来到\nNEXTBOT 桌面端",
+            style: TextStyle(
+              fontFamily: AppTheme.appFontFamily,
+              fontSize: 34,
+              height: 1.35,
+              fontWeight: FontWeight.w700,
+              color: textPrimary,
             ),
-            const SizedBox(height: 48),
-            const Text(
-              "创建账号",
-              style: TextStyle(
-                fontFamily: AppTheme.appFontFamily,
-                fontSize: 32,
-                height: 1.25,
-                fontWeight: FontWeight.w700,
-                color: textPrimary,
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              "注册后，即刻开启我们的旅程",
-              style: TextStyle(
-                fontFamily: AppTheme.appFontFamily,
-                fontSize: 14,
-                height: 1.5,
-                color: textSecondary,
-              ),
-            ),
-            const SizedBox(height: 44),
-            _buildField(
-              label: "邮箱",
-              controller: _emailCtrl,
-              focus: _emailFocus,
-              hint: "you@example.com",
-              error: _emailError,
-              obscure: false,
-              enabled: !_registered,
-            ),
-            const SizedBox(height: 22),
-            _buildField(
-              label: "密码",
-              controller: _passwordCtrl,
-              focus: _passwordFocus,
-              hint: "至少 8 位，含字母与数字",
-              error: _passwordError,
-              obscure: true,
-              enabled: !_registered,
-            ),
-            const SizedBox(height: 22),
-            _buildField(
-              label: "确认密码",
-              controller: _confirmCtrl,
-              focus: _confirmFocus,
-              hint: "再次输入密码",
-              error: _confirmError,
-              obscure: true,
-              enabled: !_registered,
-              onSubmitted: (_) => unawaited(_submit()),
-            ),
-            const SizedBox(height: 36),
-            if (_apiError != null) ...<Widget>[
-              Text(
-                _apiError!,
-                style: const TextStyle(
-                  fontFamily: AppTheme.appFontFamily,
-                  fontSize: 12,
-                  height: 1.3,
-                  color: errorRed,
+          ),
+          // 中段整块留白：标题独占上部，问候与按钮沉底（与扣子桌面端同构）
+          const Spacer(),
+          const _DelayedAppear(
+            delay: Duration(milliseconds: 300),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  "Hi，朋友",
+                  style: TextStyle(
+                    fontFamily: AppTheme.appFontFamily,
+                    fontSize: 20,
+                    height: 1.3,
+                    fontWeight: FontWeight.w600,
+                    color: textPrimary,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 12),
-            ],
-            _buildSubmitButton(),
-            const SizedBox(height: 40),
-            _buildLoginRow(),
-          ],
-        ),
+                SizedBox(height: 10),
+                Text(
+                  "登录后，就可以开启我们的旅程了。",
+                  style: TextStyle(
+                    fontFamily: AppTheme.appFontFamily,
+                    fontSize: 14,
+                    height: 1.5,
+                    color: textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 28),
+          _DelayedAppear(
+            delay: const Duration(milliseconds: 550),
+            child: _buildLoginButton(),
+          ),
+          const SizedBox(height: 12),
+          _buildAuthStatus(),
+        ],
       ),
     );
   }
 
-  Widget _buildField({
-    required String label,
-    required TextEditingController controller,
-    required FocusNode focus,
-    required String hint,
-    required String? error,
-    required bool obscure,
-    required bool enabled,
-    ValueChanged<String>? onSubmitted,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Text(
-          label,
-          style: const TextStyle(
-            fontFamily: AppTheme.appFontFamily,
-            fontSize: 13,
-            height: 1.3,
-            fontWeight: FontWeight.w600,
-            color: textPrimary,
-          ),
-        ),
-        const SizedBox(height: 8),
-        AnimatedBuilder(
-          animation: focus,
-          builder: (BuildContext context, Widget? _) {
-            final bool hasFocus = focus.hasFocus;
-            final Color border = error != null
-                ? fieldBorderError
-                : (hasFocus ? fieldBorderFocused : fieldBorder);
-            return Container(
-              height: 48,
-              decoration: BoxDecoration(
-                color: fieldBg,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: border, width: 1),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              alignment: Alignment.centerLeft,
-              child: TextField(
-                controller: controller,
-                focusNode: focus,
-                obscureText: obscure,
-                enabled: enabled,
-                onSubmitted: onSubmitted,
-                style: const TextStyle(
-                  fontFamily: AppTheme.appFontFamily,
-                  fontSize: 14,
-                  color: textPrimary,
-                ),
-                cursorColor: textPrimary,
-                decoration: InputDecoration(
-                  isCollapsed: true,
-                  // 页面自绘容器边框，TextField 自身四种边框全部关掉，
-                  // 避免主题 InputDecorationTheme 在容器内再画一圈
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  disabledBorder: InputBorder.none,
-                  errorBorder: InputBorder.none,
-                  hintText: hint,
-                  hintStyle: const TextStyle(
-                    fontFamily: AppTheme.appFontFamily,
-                    fontSize: 14,
-                    color: textMuted,
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-        if (error != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(
-              error,
-              style: const TextStyle(
-                fontFamily: AppTheme.appFontFamily,
-                fontSize: 12,
-                height: 1.3,
-                color: errorRed,
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildSubmitButton() {
-    final bool busy = _submitting;
-    final bool done = _registered;
+  /// 「立即登录」：白底胶囊，跳系统浏览器到控制面登录页。
+  Widget _buildLoginButton() {
+    final bool busy = _authBusy;
+    final bool done = _done;
     return MouseRegion(
       cursor: (busy || done) ? SystemMouseCursors.basic : SystemMouseCursors.click,
       child: AnimatedContainer(
@@ -531,7 +467,7 @@ class _RegisterPageState extends State<RegisterPage> {
           borderRadius: BorderRadius.circular(24),
         ),
         child: TextButton(
-          onPressed: busy || done ? null : () => unawaited(_submit()),
+          onPressed: busy || done ? null : () => unawaited(_startWebAuth()),
           style: TextButton.styleFrom(
             foregroundColor: done ? textSecondary : const Color(0xFF0A0A0A),
             shape: RoundedRectangleBorder(
@@ -548,7 +484,7 @@ class _RegisterPageState extends State<RegisterPage> {
                   ),
                 )
               : Text(
-                  done ? "✓ 账号创建成功" : "创建账号",
+                  done ? "登录完成" : "立即登录",
                   style: TextStyle(
                     fontFamily: AppTheme.appFontFamily,
                     fontSize: 15,
@@ -561,37 +497,67 @@ class _RegisterPageState extends State<RegisterPage> {
     );
   }
 
-  Widget _buildLoginRow() {
-    final VoidCallback? go = widget.onGoLogin;
-    return Row(
-      children: <Widget>[
-        Text(
-          "已有账号？",
-          style: const TextStyle(
-            fontFamily: AppTheme.appFontFamily,
-            fontSize: 13,
-            color: textSecondary,
-          ),
-        ),
-        MouseRegion(
-          cursor: SystemMouseCursors.click,
-          child: GestureDetector(
-            onTap: go,
-            child: Text(
-              "登录",
-              style: TextStyle(
-                fontFamily: AppTheme.appFontFamily,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: go == null ? textPrimary : textPrimary,
-                decoration: TextDecoration.underline,
-                decorationColor: textPrimary,
-              ),
+  /// 按钮下的状态区：等待回连提示（取消 / 重开浏览器）或错误信息。
+  Widget _buildAuthStatus() {
+    if (_authBusy && !_done) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          const SizedBox(height: 18),
+          const Text(
+            "已打开浏览器完成登录，成功后会自动回到这里。",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontFamily: AppTheme.appFontFamily,
+              fontSize: 12,
+              height: 1.5,
+              color: textMuted,
             ),
           ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              TextButton(
+                onPressed: _cancelWebAuth,
+                style: TextButton.styleFrom(foregroundColor: textMuted),
+                child: const Text(
+                  "取消",
+                  style: TextStyle(fontFamily: AppTheme.appFontFamily, fontSize: 13),
+                ),
+              ),
+              TextButton(
+                onPressed: () => unawaited(_relaunchBrowser()),
+                style: TextButton.styleFrom(foregroundColor: textPrimary),
+                child: const Text(
+                  "重新打开浏览器",
+                  style: TextStyle(
+                    fontFamily: AppTheme.appFontFamily,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+    if (_authError != null) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Text(
+          _authError!,
+          style: const TextStyle(
+            fontFamily: AppTheme.appFontFamily,
+            fontSize: 12,
+            height: 1.4,
+            color: errorRed,
+          ),
         ),
-      ],
-    );
+      );
+    }
+    return const SizedBox.shrink();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -665,6 +631,11 @@ class _RegisterPageState extends State<RegisterPage> {
       ),
     );
   }
+}
+
+/// 用户在等待回连时主动取消（内部信号，不作为错误展示）。
+class _WebAuthCancelled implements Exception {
+  const _WebAuthCancelled();
 }
 
 // ═══════════════════════════════════════════════════════════

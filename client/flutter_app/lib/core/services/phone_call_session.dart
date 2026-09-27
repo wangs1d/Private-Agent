@@ -1,4 +1,8 @@
+import "dart:async";
+
 import "package:flutter/foundation.dart";
+
+import "voice_duplex_service.dart";
 
 /// 虚拟电话通话会话：`agent.phone.*` WS 事件 → 手机端全屏通话页的数据总线。
 ///
@@ -8,8 +12,12 @@ import "package:flutter/foundation.dart";
 /// - 桌面端仍走 Win32 原生悬浮窗，本会话在桌面端只承载 voice_reply 的
 ///   转写与播报状态，不驱动页面。
 ///
-/// 页面动作（接听/挂断/回复）通过 [onAccept] 等钩子回到 main.dart 统一处理，
+/// 页面动作（接听/挂断）通过 [onAccept] 等钩子回到 main.dart 统一处理，
 /// WS 发送经 [transport]（启动时绑定为 `WsChatService.sendEvent`）。
+///
+/// 通话对话（2026-09-28 起）：MiniMax realtime 端到端语音——接通即经
+/// /ws/voice-duplex（sessionId=callId 注入通话上下文）开麦克风上行，
+/// 服务端 VAD 断句 + realtime 应答，回复语音整轮回流；打字回复已删除。
 enum PhoneCallPhase { idle, incoming, inCall }
 
 class PhoneCallTranscriptEntry {
@@ -36,6 +44,12 @@ class PhoneCallSession extends ChangeNotifier {
   DateTime? connectedAt;
   /// 振铃自动挂断时限（incoming 阶段倒计时用）
   DateTime? ringDeadline;
+
+  /// realtime 语音通路状态（供通话 UI 显示：聆听中/思考中/播报中）
+  String voiceState = "";
+  /// realtime 语音通路是否就绪（false = 回落提示，服务端无 minimax 等）
+  bool voiceReady = false;
+  bool _voiceStarting = false;
 
   /// WS 发送通道（main.dart initState 绑定）
   bool Function(String type, Map<String, dynamic> payload)? transport;
@@ -91,6 +105,8 @@ class PhoneCallSession extends ChangeNotifier {
       // 首次进入通话（如用户呼出场景），由页面打开方据此弹页
       _openedFromIdle = true;
     }
+    // 接通即起 realtime 语音（幂等）：麦克风上行 + 语音回流，通话上下文经 callId 注入
+    unawaited(_startRealtimeVoice());
   }
 
   /// 标记「本次 markInCall 是从 idle 直接进入」，供 main.dart 决定是否开页。
@@ -126,25 +142,95 @@ class PhoneCallSession extends ChangeNotifier {
     connectedAt = null;
     ringDeadline = null;
     _openedFromIdle = false;
+    _stopRealtimeVoice();
+    notifyListeners();
+  }
+
+  // ---- realtime 语音通路（MiniMax 端到端通话） ----
+
+  Future<void> _startRealtimeVoice() async {
+    if (_voiceStarting || voiceReady) return;
+    if (phase != PhoneCallPhase.inCall || callId.isEmpty) return;
+    _voiceStarting = true;
+    voiceState = "连接实时语音…";
+    notifyListeners();
+
+    final VoiceDuplexService duplex = VoiceDuplexService.instance;
+    duplex
+      ..onStateChanged = _onVoiceStateChanged
+      ..onTurnCompleted = _onVoiceTurnCompleted
+      ..onError = (String message, bool recoverable) {
+        if (!isActive) return;
+        voiceState = recoverable ? "请再说一遍" : "语音链路异常";
+        notifyListeners();
+      }
+      ..onConnectionLost = () {
+        if (!isActive) return;
+        voiceReady = false;
+        voiceState = "语音已断开";
+        notifyListeners();
+      };
+
+    final bool ok = await duplex.start(sessionId: callId);
+    _voiceStarting = false;
+    if (!ok || !isActive) {
+      voiceReady = false;
+      voiceState = "实时语音不可用";
+      notifyListeners();
+      return;
+    }
+    voiceReady = true;
+    voiceState = "聆听中，请直接说话";
+    notifyListeners();
+    final bool micOk = await duplex.startMic();
+    if (!micOk && isActive) {
+      voiceState = "麦克风不可用";
+      notifyListeners();
+    }
+  }
+
+  void _stopRealtimeVoice() {
+    _voiceStarting = false;
+    voiceReady = false;
+    voiceState = "";
+    final VoiceDuplexService duplex = VoiceDuplexService.instance;
+    duplex.onStateChanged = null;
+    duplex.onTurnCompleted = null;
+    duplex.onError = null;
+    duplex.onConnectionLost = null;
+    unawaited(duplex.stop());
+  }
+
+  void _onVoiceStateChanged(String state) {
+    if (!isActive) return;
+    voiceState = switch (state) {
+      "listening" => "聆听中，请直接说话",
+      "thinking" => "思考中…",
+      "speaking" => "正在播报…",
+      _ => voiceState,
+    };
+    if (state == "speaking") {
+      agentTalking = true;
+    } else if (state == "listening") {
+      agentTalking = false;
+    }
+    notifyListeners();
+  }
+
+  void _onVoiceTurnCompleted(String userText, String assistantText) {
+    if (!isActive) return;
+    agentTalking = false;
+    if (userText.trim().isNotEmpty) {
+      transcript.add(PhoneCallTranscriptEntry(fromUser: true, text: userText.trim()));
+    }
+    if (assistantText.trim().isNotEmpty) {
+      transcript.add(PhoneCallTranscriptEntry(fromUser: false, text: assistantText.trim()));
+    }
+    voiceState = "聆听中，请直接说话";
     notifyListeners();
   }
 
   // ---- 页面动作 → WS ----
-
-  /// 通话中用户回复（phone.call_reply；进服务端通话回复总线）
-  bool sendReply(String text) {
-    final String t = text.trim();
-    if (t.isEmpty || callId.isEmpty) return false;
-    if (phase != PhoneCallPhase.inCall) return false;
-    // sendEvent 离线时会入队补发，这里乐观写入转写区
-    transcript.add(PhoneCallTranscriptEntry(fromUser: true, text: t));
-    notifyListeners();
-    return transport?.call("phone.call_reply", <String, dynamic>{
-          "callId": callId,
-          "text": t,
-        }) ??
-        false;
-  }
 
   /// 用户挂断（phone.call_hangup；服务端推 ended 并清理会话）
   bool hangup() {

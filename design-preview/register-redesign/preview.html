@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>注册页改版预览</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    width: 1200px;
+    height: 740px;
+    background: #141414;
+    border: 1px solid #232323;
+    border-radius: 24px;
+    display: flex;
+    overflow: hidden;
+  }
+  /* ── 左列 ───────────────────────────── */
+  .left {
+    flex: 47;
+    padding: 52px 52px 44px 56px;
+    display: flex;
+    flex-direction: column;
+  }
+  .lettermark {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 3.2px;
+    color: #F2F2F2;
+  }
+  .title {
+    margin-top: 56px;
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1.25;
+    color: #F2F2F2;
+  }
+  .subtitle {
+    margin-top: 12px;
+    font-size: 15px;
+    line-height: 1.5;
+    color: #9B9B9B;
+  }
+  .fields { margin-top: 44px; display: flex; flex-direction: column; gap: 20px; }
+  .field label { display: block; font-size: 13px; font-weight: 600; color: #F2F2F2; margin-bottom: 8px; }
+  .field .box {
+    height: 48px;
+    background: #101010;
+    border: 1px solid #3D3D3D;
+    border-radius: 10px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    font-size: 14px;
+    color: #6B6B6B;
+  }
+  .field.primary .box { border-color: #E8E8E8; }
+  .bottom { margin-top: auto; }
+  .submit {
+    width: 100%;
+    height: 48px;
+    background: #FFFFFF;
+    border-radius: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    font-weight: 600;
+    color: #0A0A0A;
+  }
+  .login-row { margin-top: 20px; font-size: 13px; color: #9B9B9B; text-align: center; }
+  .login-row b { color: #F2F2F2; font-weight: 600; }
+  /* ── 右面板 ─────────────────────────── */
+  .right { flex: 53; padding: 20px 20px 20px 0; }
+  .panel {
+    position: relative;
+    height: 100%;
+    border-radius: 16px;
+    border: 1px solid #232323;
+    overflow: hidden;
+    background: #0D0D0D;
+  }
+  .panel img.bg {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    filter: grayscale(0.2) brightness(0.96);
+  }
+  .panel .shade {
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0.0) 40%, rgba(0,0,0,0.38) 100%);
+  }
+  /* ── 前景对话卡 ─────────────────────── */
+  .chat-card {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -52%);
+    width: 76%;
+    background: rgba(14,14,14,0.72);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 18px;
+    padding: 22px 22px 18px;
+    backdrop-filter: blur(18px);
+    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg { display: flex; gap: 10px; align-items: flex-start; }
+  .msg.user { justify-content: flex-end; }
+  .avatar {
+    width: 24px; height: 24px; border-radius: 50%;
+    flex: none; margin-top: 2px;
+    background: radial-gradient(circle at 38% 32%, #FFFFFF 0%, #C9C9C9 34%, #4A4A4A 78%, #2E2E2E 100%);
+    box-shadow: 0 0 10px rgba(255,255,255,0.28);
+  }
+  .avatar.user-av {
+    background: #262626;
+    border: 1px solid #4A4A4A;
+    box-shadow: none;
+  }
+  .bubble {
+    max-width: 82%;
+    padding: 10px 14px;
+    border-radius: 14px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .msg.ai .bubble {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #EDEDED;
+    border-top-left-radius: 4px;
+  }
+  .msg.user .bubble {
+    background: #F2F2F2;
+    color: #141414;
+    border-top-right-radius: 4px;
+  }
+  .status {
+    align-self: flex-end;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 2px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.09);
+    font-size: 12px;
+    color: #C9C9C9;
+  }
+  .status .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #EDEDED;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="left">
+      <div class="lettermark">NEXTBOT</div>
+      <div class="title">创建账号</div>
+      <div class="subtitle">注册后，即刻开启我们的旅程</div>
+      <div class="fields">
+        <div class="field primary"><label>邮箱</label><div class="box">you@example.com</div></div>
+        <div class="field"><label>密码</label><div class="box">至少 8 位，含字母与数字</div></div>
+        <div class="field"><label>确认密码</label><div class="box">再次输入密码</div></div>
+      </div>
+      <div class="bottom">
+        <div class="submit">创建账号</div>
+        <div class="login-row">已有账号？ <b>直接登录</b></div>
+      </div>
+    </div>
+    <div class="right">
+      <div class="panel">
+        <img class="bg" id="bg" src="">
+        <div class="shade"></div>
+        <div class="chat-card">
+          <div class="msg user">
+            <div class="bubble">明早 7 点叫我起床，顺便把今天的安排过一遍。</div>
+            <div class="avatar user-av"></div>
+          </div>
+          <div class="msg ai">
+            <div class="avatar"></div>
+            <div class="bubble">已设好 7:00 提醒。今天有 3 件事：9:30 项目评审、14:00 牙医、20:00 健身。评审要用的资料，我昨晚已经帮你整理好了。</div>
+          </div>
+          <div class="msg user">
+            <div class="bubble">盯着那台空气炸锅，降到 300 以内就告诉我。</div>
+            <div class="avatar user-av"></div>
+          </div>
+          <div class="msg ai">
+            <div class="avatar"></div>
+            <div class="bubble">在盯。现价 349，近 30 天最低 289，降到 300 以内我会第一时间提醒你。</div>
+          </div>
+          <div class="status"><div class="dot"></div>正在后台盯价格…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const map = {
+      a: 'bg-a-window-light.png',
+      b: 'bg-b-blind-shadow.png',
+      c: 'bg-c-fabric-side-light.png',
+    };
+    const v = new URLSearchParams(location.search).get('bg') || 'a';
+    document.getElementById('bg').src = map[v];
+  </script>
+</body>
+</html>

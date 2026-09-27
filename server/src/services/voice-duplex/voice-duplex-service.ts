@@ -1,6 +1,8 @@
 import type { LLMMessage } from "../voice-dialogue/types.js";
 import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
+import type { MiniMaxRealtimeService } from "../voice-dialogue/minimax-realtime-service.js";
 import { DuplexVoiceSession } from "./duplex-session.js";
+import { MinimaxDuplexSession } from "./minimax-duplex-session.js";
 import { parseClientMessage, type DuplexServerMessage } from "./protocol.js";
 
 /**
@@ -33,13 +35,27 @@ export interface VoiceDuplexServiceDeps {
   /** 会话默认 system prompt（管家口语化短回复风格） */
   systemPrompt?: string;
   maxSessions?: number;
+  /**
+   * MiniMax Realtime 服务：已配置且未设 MINIMAX_REALTIME_DUPLEX_DISABLED=1 时，
+   * 新会话默认走端到端实时语音引擎（context 延续 + 单连接 ASR/LLM/TTS）；
+   * 未配置或被禁用时回退 pipeline 引擎（FunASR/Whisper + LLM + TTS）。
+   */
+  minimaxRealtime?: MiniMaxRealtimeService;
+  /**
+   * 通话上下文注入：session.start 携带 sessionId=callId 时调用，
+   * 返回该通电话的场景人设（来电汇报/用户来电），并入 realtime instructions。
+   */
+  callVoiceContext?: (callId: string) => string | null;
 }
 
 const DEFAULT_SYSTEM_PROMPT =
   "你是用户的私人管家，正在与用户进行实时语音对话。要求：回复口语化、简短（通常一两句话）、直接给出行动和结论，不要列表和标题；听不懂就简短追问。";
 
+/** 两种引擎会话的公共面（handle/stop/dispose）。 */
+type AnyDuplexSession = DuplexVoiceSession | MinimaxDuplexSession;
+
 export class VoiceDuplexService {
-  private readonly sessions = new Map<DuplexSocketLike, DuplexVoiceSession>();
+  private readonly sessions = new Map<DuplexSocketLike, AnyDuplexSession>();
 
   constructor(private readonly deps: VoiceDuplexServiceDeps) {}
 
@@ -64,7 +80,7 @@ export class VoiceDuplexService {
       }
     };
 
-    let session: DuplexVoiceSession | null = null;
+    let session: AnyDuplexSession | null = null;
     socket.on("message", (data: unknown) => {
       const raw = typeof data === "string" ? data : data instanceof Buffer ? data.toString("utf8") : String(data ?? "");
       const msg = parseClientMessage(raw);
@@ -97,7 +113,20 @@ export class VoiceDuplexService {
     socket.on("error", cleanup);
   }
 
-  private createSession(sink: (msg: DuplexServerMessage) => void, systemPromptOverride?: string): DuplexVoiceSession {
+  private createSession(sink: (msg: DuplexServerMessage) => void, systemPromptOverride?: string): DuplexVoiceSession | MinimaxDuplexSession {
+    const systemPrompt = systemPromptOverride || this.deps.systemPrompt || DEFAULT_SYSTEM_PROMPT;
+
+    // 引擎选择：MiniMax realtime 已配置且未被禁用 → 端到端引擎
+    const minimax = this.deps.minimaxRealtime;
+    const minimaxDisabled = process.env.MINIMAX_REALTIME_DUPLEX_DISABLED?.trim() === "1";
+    if (minimax?.isEnabled() && !minimaxDisabled) {
+      return new MinimaxDuplexSession(
+        `vdx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        sink,
+        { realtime: minimax, systemPrompt, callVoiceContext: this.deps.callVoiceContext },
+      );
+    }
+
     const provider = this.deps.voiceDialogueService.getProvider(this.deps.providerName);
     const llmStream = createLlmStream(provider.llm);
     return new DuplexVoiceSession(
@@ -107,7 +136,7 @@ export class VoiceDuplexService {
         asr: provider.asr,
         tts: provider.tts,
         llmStream,
-        systemPrompt: systemPromptOverride || this.deps.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+        systemPrompt,
         historyLimit: 20,
       },
     );

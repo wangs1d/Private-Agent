@@ -158,17 +158,23 @@ export class PhoneCallHandler {
     // （TTS 合成 + agent.phone.voice_reply WS 事件）；接通首帧正文已由
     // callUserWithRinging 随 call_connecting 下发，此处不再重复播报。
     try {
-      while (callState.isActive && !userAcknowledged) {
-        const remainingMs = maxDurationMs - (Date.now() - startTime);
-        if (remainingMs <= 0) {
-          this.deps.logger?.info(`Call timeout after ${maxDurationMs / 1000}s`);
-          break;
-        }
+      // Realtime 语音模式：通话对话由 duplex realtime 引擎按 callId 上下文接管
+      // （提醒正文已在接通首帧播报），本循环让位，只等通话结束走统一收尾。
+      if (this.deps.virtualPhoneService.isRealtimeVoice?.()) {
+        this.deps.logger?.info(`Call ${callId}: realtime voice engine owns the dialogue, waiting for call end`);
+        await this.deps.virtualPhoneService.waitForCallEnd(callId, maxDurationMs);
+      } else {
+        while (callState.isActive && !userAcknowledged) {
+          const remainingMs = maxDurationMs - (Date.now() - startTime);
+          if (remainingMs <= 0) {
+            this.deps.logger?.info(`Call timeout after ${maxDurationMs / 1000}s`);
+            break;
+          }
 
-        // 等待用户在通话中的真实回复（客户端经 phone.call_reply 上行，
-        // 打字或本地 ASR 转写均可）；超时/挂断返回 null
-        const input = await this.deps.virtualPhoneService.waitForCallReply(callId, remainingMs);
-        if (!input) break;
+          // 等待用户在通话中的真实回复（客户端经 phone.call_reply 上行，
+          // 打字或本地 ASR 转写均可）；超时/挂断返回 null
+          const input = await this.deps.virtualPhoneService.waitForCallReply(callId, remainingMs);
+          if (!input) break;
         const userText = input.text.trim();
         if (!userText) continue;
 
@@ -208,6 +214,7 @@ export class PhoneCallHandler {
             await this.pushVoiceReply(callId, userId, assistantText);
             this.deps.logger?.info(`Assistant voice reply: "${assistantText}"`);
           }
+        }
         }
       }
     } finally {

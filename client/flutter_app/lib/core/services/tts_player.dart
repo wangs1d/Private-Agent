@@ -67,12 +67,13 @@ class TtsPlayer {
 
   /// 从 base64 字符串播放 TTS
   ///
-  /// [base64Str] MP3 的 base64 编码
-  Future<bool> playFromBase64(String base64Str) async {
+  /// [base64Str] 音频的 base64 编码；[format] 决定临时文件扩展名
+  /// （mp3 = 简报/常规 TTS，wav = 全双工实时语音 tts.chunk）。
+  Future<bool> playFromBase64(String base64Str, {String format = "mp3"}) async {
     if (base64Str.isEmpty) return false;
     try {
       final Uint8List bytes = base64Decode(base64Str);
-      return await playFromBytes(bytes);
+      return await playFromBytes(bytes, format: format);
     } catch (e) {
       debugPrint("[TtsPlayer] base64 decode failed: $e");
       _fireCompletion();
@@ -81,7 +82,7 @@ class TtsPlayer {
   }
 
   /// 从字节数组播放 TTS
-  Future<bool> playFromBytes(Uint8List bytes) async {
+  Future<bool> playFromBytes(Uint8List bytes, {String format = "mp3"}) async {
     if (bytes.isEmpty) {
       _fireCompletion();
       return false;
@@ -109,7 +110,7 @@ class TtsPlayer {
       try {
         final Directory dir = await getTemporaryDirectory();
         final File f = File(
-          "${dir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3",
+          "${dir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.$format",
         );
         await f.writeAsBytes(bytes, flush: true);
         _tempFile = f;
@@ -130,7 +131,7 @@ class TtsPlayer {
       try {
         final Directory dir = await getTemporaryDirectory();
         final File f = File(
-          "${dir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3",
+          "${dir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.$format",
         );
         await f.writeAsBytes(bytes, flush: true);
         _tempFile = f;

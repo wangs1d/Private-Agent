@@ -8,6 +8,7 @@ import "agent_sphere_voice_controller.dart";
 import "briefing_tts_api.dart";
 import "desktop_notification_launcher.dart";
 import "tts_player.dart";
+import "voice_duplex_service.dart";
 
 /// 纯语音模式阶段（岛条目跟随该阶段而非自由映射状态文案）。
 enum PureVoicePhase { ambient, thinking, speaking }
@@ -24,6 +25,14 @@ enum PureVoicePhase { ambient, thinking, speaking }
 ///   3. 播报收尾：原生玻璃卡简洁弹窗 + TTS 播报，播完开 10 秒追问窗口
 ///      （窗口内开口免唤醒，同样过声纹），超时回唤醒待命；
 ///   4. 语音指令「打开界面」退出回完整界面；对话记录照常落聊天流。
+///
+/// 对话通路（2026-09-28 起）：
+///   - 默认优先 MiniMax 实时语音通道（VoiceDuplexService，/ws/voice-duplex）：
+///     识别文本经 `text.turn` 喂服务端端到端 realtime，回复语音整轮回流直接播，
+///     会话期内上下文延续；回复**不落聊天流**，文字经播报弹窗呈现。
+///     麦克风仍归本地唤醒/声纹/识别所有，无抢麦冲突。
+///   - 通道不可用（服务端无 MINIMAX_API_KEY / 连接失败 / 中途断开）时
+///     静默回落既有聊天链路（识别文本转交原回调 → 回复落流 → notifyReply 播报）。
 ///
 /// 能力栈全部复用既有服务：唤醒 VoiceWakeService、声纹 ASR
 /// MultimodalRecognitionService（经 AgentSphereVoiceController 编排，
@@ -45,6 +54,7 @@ class PureVoiceModeController {
   Timer? _followUpTimer;
   Timer? _submitSafetyTimer;
   Timer? _transientEntryTimer;
+  bool _duplexActive = false;
   static const List<String> _exitPhrases = <String>[
     "打开界面",
     "打开主界面",
@@ -92,6 +102,21 @@ class PureVoiceModeController {
       await _voice.toggleWakeEnabled();
     }
     await _voice.startWakeListening();
+
+    // MiniMax 实时语音通道：连上后对话改走 text.turn → 语音整轮回流。
+    // 麦克风仍归本地唤醒/声纹/识别；连不上静默回落聊天链路。
+    final bool duplexOk = await VoiceDuplexService.instance.start();
+    if (duplexOk) {
+      _duplexActive = true;
+      _wireDuplexCallbacks();
+      IslandRealFeeds.setVoiceEntry(title: "实时语音", trailing: "已连接，直接说话");
+      _transientEntryTimer?.cancel();
+      _transientEntryTimer = Timer(const Duration(seconds: 3), () {
+        if (isActive.value && _phase == PureVoicePhase.ambient) {
+          IslandRealFeeds.dismissVoice(); // 回唤醒待命原态
+        }
+      });
+    }
   }
 
   /// 退出纯语音模式，回完整界面（岛条目撤下、识别回调还原）。
@@ -101,6 +126,11 @@ class PureVoiceModeController {
     _followUpTimer?.cancel();
     _submitSafetyTimer?.cancel();
     _transientEntryTimer?.cancel();
+    _duplexActive = false;
+    VoiceDuplexService.instance.onTurnCompleted = null;
+    VoiceDuplexService.instance.onError = null;
+    VoiceDuplexService.instance.onConnectionLost = null;
+    unawaited(VoiceDuplexService.instance.stop());
     _voice.state.removeListener(_onVoiceStateChanged);
     _voice.onRecognizedText = _originalOnRecognized;
     _originalOnRecognized = null;
@@ -134,6 +164,65 @@ class PureVoiceModeController {
     _startFollowUpWindow();
   }
 
+  // ── 实时语音通路 ──
+
+  /// 挂接实时语音回调（enter 成功连上后调用；exit 时清空）。
+  void _wireDuplexCallbacks() {
+    VoiceDuplexService.instance
+      ..onTurnCompleted = _onDuplexTurnCompleted
+      ..onError = (String message, bool recoverable) {
+        if (!isActive.value || !_duplexActive) return;
+        IslandRealFeeds.setVoiceEntry(title: "语音链路异常", trailing: recoverable ? "请再说一遍" : "即将回落常规链路");
+        _transientEntryTimer?.cancel();
+        _transientEntryTimer = Timer(const Duration(seconds: 4), () {
+          if (isActive.value && _phase == PureVoicePhase.ambient) {
+            IslandRealFeeds.dismissVoice();
+          }
+        });
+        if (!recoverable) {
+          _fallbackFromDuplex();
+        }
+      }
+      ..onConnectionLost = () {
+        if (!isActive.value) return;
+        _fallbackFromDuplex();
+      };
+  }
+
+  /// realtime 回合完成：弹窗呈现回复文字（语音已由 tts.chunk 回流直接播），
+  /// 播完再开追问窗口——否则扬声器声音会被本地识别当成人声。
+  void _onDuplexTurnCompleted(String userText, String assistantText) {
+    if (!isActive.value || !_duplexActive) return;
+    _submitSafetyTimer?.cancel();
+    _phase = PureVoicePhase.speaking;
+    IslandRealFeeds.setVoiceEntry(title: "播报中", trailing: "实时语音");
+    unawaited(_showReplyPopup(
+      assistantText.trim().isEmpty ? "（本轮无文字回复）" : assistantText.trim(),
+    ));
+    unawaited(() async {
+      await VoiceDuplexService.instance.waitPlayback();
+      _startFollowUpWindow();
+    }());
+  }
+
+  /// 实时语音通道失效：断开并静默回落聊天链路（后续识别文本照常落聊天流）。
+  void _fallbackFromDuplex() {
+    if (!_duplexActive) return;
+    _duplexActive = false;
+    unawaited(VoiceDuplexService.instance.stop());
+    _submitSafetyTimer?.cancel();
+    if (_phase == PureVoicePhase.thinking) {
+      _phase = PureVoicePhase.ambient;
+    }
+    IslandRealFeeds.setVoiceEntry(title: "实时语音已断开", trailing: "回落常规链路");
+    _transientEntryTimer?.cancel();
+    _transientEntryTimer = Timer(const Duration(seconds: 4), () {
+      if (isActive.value && _phase == PureVoicePhase.ambient) {
+        IslandRealFeeds.dismissVoice();
+      }
+    });
+  }
+
   // ── 内部 ──
 
   /// 识别文本接管（声纹验证通过才会回调）：退出指令截胡；其余置「思考中」
@@ -149,6 +238,35 @@ class PureVoiceModeController {
     }
     if (t.isEmpty) return;
     _followUpTimer?.cancel();
+
+    // 实时语音通路：识别文本直接喂 MiniMax realtime，回复语音整轮回流。
+    if (_duplexActive) {
+      _phase = PureVoicePhase.thinking;
+      IslandRealFeeds.setVoiceEntry(title: "思考中", spinning: true);
+      // 识别会话收尾（内部自动恢复唤醒监听）；realtime 服务端回合超时 45s。
+      if (_voice.state.value.isSpeaking) {
+        _voice.toggleVoiceSession();
+      }
+      unawaited(() async {
+        final bool queued = await VoiceDuplexService.instance.sendTextTurn(t);
+        if (!queued) {
+          // 连接已失效：回落常规聊天链路（本轮文本继续走原路）
+          _fallbackFromDuplex();
+          _originalOnRecognized?.call(text);
+          return;
+        }
+        _submitSafetyTimer?.cancel();
+        _submitSafetyTimer = Timer(const Duration(seconds: 60), () {
+          if (!isActive.value) return;
+          if (_phase == PureVoicePhase.thinking) {
+            _phase = PureVoicePhase.ambient;
+            IslandRealFeeds.dismissVoice(); // 回唤醒待命原态
+          }
+        });
+      }());
+      return;
+    }
+
     _phase = PureVoicePhase.thinking;
     IslandRealFeeds.setVoiceEntry(title: "思考中", spinning: true);
     // 识别会话收尾（内部自动恢复唤醒监听）；回复超时兜底 120s 回唤醒待命。

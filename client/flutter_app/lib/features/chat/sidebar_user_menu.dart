@@ -379,7 +379,7 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
     // 这样弹窗是从头像位置往上长的,视觉上紧贴头像,不会跑到屏幕最底端。
     final double screenHeight = MediaQuery.of(context).size.height;
     // 预估面板高度,用来在面板太高时夹一下避免溢出屏幕顶部
-    // (header + 主题/帮助/设备/站内信/退出 5 行 + 3 条分隔线)
+    // (header + 退出/主题/反馈/设备/站内信/纯语音 6 行 + 分隔线)
     const double estimatedPanelHeight = 200;
     double bottom = screenHeight - widget.anchor.bottom + 8;
     final double maxBottom = screenHeight - 8 - estimatedPanelHeight;
@@ -434,6 +434,20 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                   Divider(
                       height: 1, thickness: 1,
                       color: cs.outline.withValues(alpha: 0.2)),
+                  // 退出登录紧贴头像/用户名下方:菜单打开即见,不用扫到底部找
+                  _Row(
+                    leading: Icon(
+                      Icons.logout,
+                      size: 18,
+                      color: cs.error,
+                    ),
+                    title: "退出登录",
+                    titleColor: cs.error,
+                    onTap: widget.onLogout,
+                  ),
+                  Divider(
+                      height: 1, thickness: 1,
+                      color: cs.outline.withValues(alpha: 0.2)),
                   _ThemeRow(
                     rowKey: _themeRowKey,
                     currentTheme: widget.currentTheme,
@@ -474,19 +488,6 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                     title: "纯语音模式",
                     trailing: const _TrailingValue(showChevron: true),
                     onTap: widget.onEnterPureVoiceMode,
-                  ),
-                  Divider(
-                      height: 1, thickness: 1,
-                      color: cs.outline.withValues(alpha: 0.2)),
-                  _Row(
-                    leading: Icon(
-                      Icons.logout,
-                      size: 18,
-                      color: cs.error,
-                    ),
-                    title: "退出登录",
-                    titleColor: cs.error,
-                    onTap: widget.onLogout,
                   ),
                 ],
               ),

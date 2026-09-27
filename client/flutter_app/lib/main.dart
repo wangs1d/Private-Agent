@@ -58,6 +58,7 @@ import "core/services/shared_browser_host.dart";
 import "core/services/ws_chat_service.dart";
 import "core/services/inbox_api.dart";
 import "core/services/control_plane_account.dart";
+import "core/services/account_session_store.dart";
 import "core/utils/play_url_utils.dart";
 import "features/catalog/catalog_page.dart";
 import "features/help/feedback_dialog.dart";
@@ -253,6 +254,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     with WidgetsBindingObserver {
   final GlobalKey<NavigatorState> _rootNavigatorKey =
       GlobalKey<NavigatorState>();
+  // 注册门禁专用：见 _buildRegisterGate 内注释（禁止与主应用共享）
+  final GlobalKey<NavigatorState> _gateNavigatorKey =
+      GlobalKey<NavigatorState>();
   final IsarLocalHistoryStore _store =
       IsarLocalHistoryStore(userPin: ApiConfig.localPin);
   final WsChatService _ws = WsChatService(url: ApiConfig.wsUrl);
@@ -442,6 +446,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 是否已初始化完成
   bool _isInitialized = false;
 
+  /// 本机账号会话：null = 未注册/已退出登录 → 启动与退出后停在注册页。
+  /// 重量级初始化不依赖它，读盘独立先行，注册页能赶在 init 完成前亮出。
+  String? _accountEmail;
+  bool _sessionLoaded = false;
+
   /// 是否正在播放进场动画
   final bool _showBootAnimation = true;
   bool _bootAnimDone = false;   // 开场动画是否已播完
@@ -515,7 +524,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // ignore: unused_field
   String? _phoneCallStatus;
   String? _phoneCallToActorId;
-  /// 当前活跃通话的 callId（phone.call_reply / phone.call_hangup 需携带）
+  /// 当前活跃通话的 callId（phone.call_hangup 等需携带；对话走 realtime 语音通路）
   String? _activeCallId;
 
   /// 已弹窗处理的「其与 Agent 来电」callId，避免重复弹)
@@ -542,6 +551,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 账号门禁读盘（毫秒级文件读）：未注册先亮注册页，重量级初始化照常并行
+    unawaited(_loadAccountSession());
     // debug 构建注册 VM service 扩展：远程直调决策弹窗链路做真机验收
     // （WS 事件无法从脚本侧注入，须走 VM service websocket call extension）
     if (kDebugMode) {
@@ -563,6 +574,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }));
       });
       debugPrint("[glass-notify] debug extension registered");
+    }
+    // debug 构建的 VM service 直调通道：注册页表单有 ext.pai.debug.registerFill
+    // （register_page.dart）；退出登录同理——全屏遮挡时注入点击不可靠，
+    // 「确认框」UI 用截图验收，这里直调跳过确认的退出本体。
+    if (kDebugMode) {
+      developer.registerExtension("ext.pai.debug.logout", (
+        String method,
+        Map<String, String> parameters,
+      ) async {
+        unawaited(Future<void>.sync(() => _performLogout()));
+        return developer.ServiceExtensionResponse.result(jsonEncode(<String, dynamic>{
+          "ok": true,
+        }));
+      });
     }
     // 共用浏览器桥：浏览器宿主经本 ws 回传 browser.bridge.result（jobId 配对）
     SharedBrowserHost.instance.bindSend(_ws.sendEvent);
@@ -4628,52 +4653,79 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  Widget _buildApp() {
-    // 如果还未初始化，显示加载界面
-    if (!_isInitialized) {
-      return ValueListenableBuilder<AppThemeVariant>(
-        valueListenable: AppThemeController.instance,
-        builder: (BuildContext _, AppThemeVariant variant, __) {
-          final bool isLightTheme = variant == AppThemeVariant.warm;
-          final Color loadingColor =
-              isLightTheme ? AppPalette.warmOnSurface : Colors.white;
-          return MaterialApp(
-            navigatorKey: _rootNavigatorKey,
-            title: "",
-            theme: AppTheme.of(variant),
-            home: Scaffold(
-              backgroundColor: AppPalette.resolveMainPanel(variant),
-              // 初始化页也铺自绘标题栏，保证窗口可拖拽/可关闭。
-              body: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  const AppWindowTitleBar(),
-                  Expanded(
-                    child: Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          CircularProgressIndicator(
-                            color: loadingColor,
+  /// 注册门禁页：与独立预览窗口同款深色整页（页面自带自绘标题栏与
+  /// 窗口按钮，深色独占不随应用主题切换）。
+  Widget _buildRegisterGate() {
+    return MaterialApp(
+      // 门禁用独立 navigatorKey：与加载页/主应用互斥切换时，共享 GlobalKey
+      // 会触发 Navigator 收养重挂，旧页面子树被搬进新 MaterialApp，
+      // home: RegisterPage 永不生效（表现为永远停在旧分支页面）。
+      navigatorKey: _gateNavigatorKey,
+      title: "",
+      theme: AppTheme.of(AppThemeVariant.dark).copyWith(
+        scaffoldBackgroundColor: Colors.black,
+      ),
+      home: RegisterPage(onAuthenticated: _completeWebAuth),
+    );
+  }
+
+  Widget _buildLoadingApp() {
+    return ValueListenableBuilder<AppThemeVariant>(
+      valueListenable: AppThemeController.instance,
+      builder: (BuildContext _, AppThemeVariant variant, __) {
+        final bool isLightTheme = variant == AppThemeVariant.warm;
+        final Color loadingColor =
+            isLightTheme ? AppPalette.warmOnSurface : Colors.white;
+        return MaterialApp(
+          title: "",
+          theme: AppTheme.of(variant),
+          home: Scaffold(
+            backgroundColor: AppPalette.resolveMainPanel(variant),
+            // 初始化页也铺自绘标题栏，保证窗口可拖拽/可关闭。
+            body: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                const AppWindowTitleBar(),
+                Expanded(
+                  child: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        CircularProgressIndicator(
+                          color: loadingColor,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          '正在初始化...',
+                          style: TextStyle(
+                            color: loadingColor.withValues(alpha: 0.7),
+                            fontSize: 14,
                           ),
-                          const SizedBox(height: 16),
-                          Text(
-                            '正在初始化...',
-                            style: TextStyle(
-                              color: loadingColor.withValues(alpha: 0.7),
-                              fontSize: 14,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          );
-        },
-      );
+          ),
+        );
+      },
+    );
+  }
+
+  /// 账号门禁：读盘结果未出前沿用加载页；未注册/已退出登录时整页注册页
+  /// 顶在最前——重量级初始化照常在后台跑，注册成功落盘即切入主界面。
+  Widget _buildApp() {
+    if (!_sessionLoaded) {
+      return _buildLoadingApp();
+    }
+    if (_accountEmail == null) {
+      return _buildRegisterGate();
+    }
+    // 如果还未初始化，显示加载界面
+    if (!_isInitialized) {
+      return _buildLoadingApp();
     }
 
     // 监听主题控制器，切换配色时重建整个 MaterialApp。
@@ -4730,6 +4782,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                             unawaited(
                                 PureVoiceModeController.instance.enter());
                           },
+                          userName: _accountEmail?.split("@").first ?? "king",
                           onLogout: _logout,
                         ),
                         VerticalDivider(
@@ -4899,6 +4952,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     FeedbackDialog.show(navCtx);
   }
 
+  /// 读本机账号会话：已注册直接进主界面，否则停在注册页门禁。
+  Future<void> _loadAccountSession() async {
+    await AccountSessionStore.instance.load();
+    if (!mounted) return;
+    setState(() {
+      _accountEmail = AccountSessionStore.instance.email;
+      _sessionLoaded = true;
+    });
+  }
+
+  /// 网页登录回连：落盘会话 → 切入主界面。
+  /// 注册/登录本身已在 /accounts/web 网页端对控制面完成（幂等），
+  /// 这里只负责本机登录态；落盘成功前门禁不放行，抛错由注册页捕获展示。
+  Future<void> _completeWebAuth(String email) async {
+    final String mail = email.trim();
+    await AccountSessionStore.instance.save(mail);
+    if (!mounted) return;
+    setState(() => _accountEmail = mail);
+  }
+
   /// 用户菜单「我的设备」:与对话框构成双面板分栏
   void _openDevicesPage() {
     setState(() {
@@ -4912,9 +4985,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 用户菜单「退出登录」:先弹确认,确认后弹 SnackBar 占位
+  /// 用户菜单「退出登录」:先弹确认,确认后清本地会话回到注册页
   ///
   /// 同 [_openUserMenuFeedback]:确认框必须用 Navigator 内部的 context。
+  /// 控制面账号行保留（同邮箱重新注册幂等），本机登录态即刻失效。
   Future<void> _logout() async {
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null || !navCtx.mounted) return;
@@ -4938,14 +5012,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       },
     );
     if (confirmed != true || !mounted) return;
-    if (navCtx.mounted) {
-      ScaffoldMessenger.of(navCtx).showSnackBar(
-        const SnackBar(
-          content: Text("退出登录:暂未开放"),
-          duration: Duration(seconds: 2),
-        ),
-      );
-    }
+    await _performLogout();
+  }
+
+  /// 退出登录本体：清本地会话回到注册页（确认框之后/调试直调共用）。
+  /// 控制面账号行保留（同邮箱重新注册幂等），本机登录态即刻失效。
+  Future<void> _performLogout() async {
+    await AccountSessionStore.instance.clear();
+    if (!mounted) return;
+    setState(() => _accountEmail = null);
   }
 
   Future<void> _handleMorningBriefingEvent(

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
 import { registerAccountRoutes } from "./accounts.js";
+import { registerAccountWebRoutes } from "./accounts-web.js";
 import { registerFinanceIngestRoutes } from "./finance-ingest.js";
 import { registerAgentCollaborationRoutes } from "./agent.js";
 import { registerBodyRoutes } from "./body.js";
@@ -50,6 +51,7 @@ import { registerMemoryCrudRoutes } from "./memory-crud.js";
 import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
+import { registerVoiceRealtimeRoutes } from "./voice-realtime.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerFeedbackRoutes } from "./feedback.js";
 import { registerAdminAuthRoutes } from "./admin-session-auth.js";
@@ -117,6 +119,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerChatWeb(app);
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
+  registerAccountWebRoutes(app);
   registerFinanceIngestRoutes(app, deps);
   registerFriendRoutes(app, deps);
   registerVoiceMessageRoutes(app, {
@@ -251,6 +254,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     llmComplete: briefingLlmComplete,
   });
   registerBriefingTtsRoutes(app, { ttsService: deps.ttsService });
+  // MiniMax 端到端实时语音对话探针（text 或 PCM 音频进 → 24kHz wav 语音+转录出）
+  registerVoiceRealtimeRoutes(app);
   registerPresenceDetectRoutes(app);
   registerUserPreferencesRoutes(app);
   registerAgentHomepageRoutes(app, {

@@ -27,6 +27,7 @@ class AppSidebar extends StatefulWidget {
     required this.onOpenDevices,
     required this.onEnterPureVoiceMode,
     required this.onLogout,
+    this.userName = "king",
   });
 
   /// 「检查更新」结果浮卡的锚点：浮卡贴在按钮正上方
@@ -71,6 +72,9 @@ class AppSidebar extends StatefulWidget {
 
   /// 用户菜单「退出登录」行
   final VoidCallback onLogout;
+
+  /// 用户菜单头部展示名：登录邮箱的本地部分（未登录兜底 "king"）
+  final String userName;
 
   @override
   State<AppSidebar> createState() => _AppSidebarState();
@@ -173,7 +177,7 @@ class _AppSidebarState extends State<AppSidebar> {
                 child: Tooltip(
                   message: "用户菜单",
                   child: SidebarUserMenu(
-                    userName: "king",
+                    userName: widget.userName,
                     inboxUnread: widget.inboxUnread,
                     currentTheme: widget.currentTheme,
                     onSetLightTheme: widget.onSetLightTheme,

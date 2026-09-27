@@ -32,6 +32,25 @@ export function registerPhoneRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
     };
   });
 
+  // 申领站内号码（与 DELETE 对称；6 位号登记在 Actor 名下后方可呼出/接听虚拟电话）
+  app.post("/phone/me", async (request, reply) => {
+    const parsed = phoneMeQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const { sessionId, userId } = parsed.data;
+    const actorId = resolveActorId({ sessionId, userId });
+    try {
+      const virtualPhone = virtualPhoneService.ensureNumber(actorId);
+      return { ok: true, actorId, virtualPhone, ttsConfigured: deps.ttsService.isEnabled() };
+    } catch (e) {
+      return reply.code(503).send({
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
   // 释放站内号码（号码回池；账号注销/用户主动解绑走这里）
   app.delete("/phone/me", async (request, reply) => {
     const parsed = phoneMeQuerySchema.safeParse(request.query);

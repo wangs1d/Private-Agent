@@ -141,3 +141,56 @@
 | `server/src/ws/connection.ts` | `mode.changed` 事件接入 |
 | `server/src/protocol.ts` | 事件类型定义 |
 | `server/src/external-model/openai-compatible-tool-loop.ts` | `surface.show` 的 LLM schema |
+
+## 8. MiniMax 实时语音通道（2026-09-28 接入）
+
+纯语音模式的对话通路升级：识别文本不再走「聊天管线 → 服务端 TTS」，
+而是经 `/ws/voice-duplex` 的 `text.turn` 帧喂给 MiniMax Realtime
+（端到端单连接：LLM + 语音合成一体，`conversation.item.create` 支持
+`status:"completed"` 的文本输入），整轮回复语音以 `tts.chunk`（24kHz wav
+base64）回流，客户端 `TtsPlayer` 直接播。
+
+- **麦克风归属不变**：唤醒词/声纹/识别仍由本地 `speech_to_text` 独占，
+  duplex 通道只收发文本与音频，规避双消费者抢麦；
+- **会话期上下文延续**：realtime 连接与纯语音模式等长（enter 建连 /
+  exit 断开），追问"刚才说了什么"能答上；回复**不落聊天流**，
+  文字经原生玻璃卡弹窗呈现；
+- **引擎自选**：服务端配置了 `MINIMAX_API_KEY` 且未设
+  `MINIMAX_REALTIME_DUPLEX_DISABLED=1` 时新会话走 realtime 引擎
+  （`session.ready.engine = "minimax-realtime"`），否则回退
+  pipeline 引擎（FunASR/Whisper + LLM + TTS，协议不变）；
+- **降级链**：客户端连接失败 / 引擎不符 / 中途断开 → `_fallbackFromDuplex()`
+  静默回落聊天链路，体验不中断；
+- **半双工**：thinking/speaking 期间服务端丢弃上行音频（防扬声器回流），
+  客户端追问窗口在 `waitPlayback()`（TtsPlayer 播完）之后才开。
+
+关键文件：`server/src/services/voice-duplex/minimax-duplex-session.ts`（引擎会话）、
+`server/src/services/voice-dialogue/minimax-realtime-service.ts`（realtime 客户端 +
+PersistentRealtimeClient）、`client/flutter_app/lib/core/services/voice_duplex_service.dart`、
+`pure_voice_mode.dart`（通路选择/降级）、探针
+`server/test/tmp-probe/probe-duplex-minimax.ts`。
+
+## 9. 电话通话切 Realtime（2026-09-28）
+
+虚拟电话的通话对话从「打字回复 → Agent 对话管线 → TTS」整体切换为
+MiniMax realtime 端到端语音（与 §8 纯语音模式同一条 /ws/voice-duplex 通路）：
+
+- **打字回复已删除**：客户端通话页输入框、`PhoneCallSession.sendReply`、
+  服务端 `phone.call_reply` WS 处理、接通首问 LLM/回复管线接线全部移除；
+- **接通即起语音**：`PhoneCallSession.markInCall` → duplex 连接
+  （`sessionId=callId`）→ 麦克风 16kHz PCM 流式上行（record 插件）→
+  服务端能量 VAD 断句 → realtime 应答 → `tts.chunk` 语音回流；
+- **通话上下文注入**：`VirtualPhoneService.getCallVoiceContext(callId)`
+  按 active call 会话生成场景人设（来电汇报内容 / 来电留言），经
+  `VoiceDuplexService.callVoiceContext` 并进 realtime instructions；
+- **两个通话循环让位**：提醒电话（phone-call-handler）与主动呼叫
+  （proactive-caller）在 realtime 模式下不再走 `waitForCallReply` 对话循环，
+  改 `waitForCallEnd` 等通话结束即收尾（结果回灌 outcome=replied）；
+  非实时模式（无 MINIMAX_API_KEY / MINIMAX_REALTIME_DUPLEX_DISABLED=1）
+  保留旧循环作降级；
+- **回声防护双层**：客户端任何 TTS 播报期间麦克风上行门控暂停（播完恢复），
+  服务端 thinking/speaking 态丢弃上行音频；
+- **号码申领补了对称 HTTP**：`POST /phone/me`（原只有 DELETE 释放）。
+
+探针：`server/test/tmp-probe/probe-duplex-minimax.ts`（三腿：text.turn /
+audio.chunk / 真实拨号+上下文注入）。

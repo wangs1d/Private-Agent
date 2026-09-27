@@ -1,0 +1,276 @@
+import {
+  MINIMAX_REALTIME_OUTPUT_SAMPLE_RATE,
+  type MiniMaxRealtimeService,
+  type PersistentRealtimeClient,
+  type RealtimeTurnResult,
+} from "../voice-dialogue/minimax-realtime-service.js";
+import { EndpointDetector, pcmToWav } from "./endpoint-detector.js";
+import type { DuplexClientMessage, DuplexServerMessage, DuplexSessionConfig, DuplexSessionState } from "./protocol.js";
+
+/**
+ * MiniMax Realtime 引擎的全双工语音会话。
+ *
+ * 与 DuplexVoiceSession（pipeline 引擎）同一客户端协议，差异只在引擎：
+ *   - ASR + LLM + 语音合成全部发生在 MiniMax realtime 单连接里，
+ *     会话期上下文延续（追问"刚才说了什么"能答上），服务端不存历史；
+ *   - text.turn：客户端把本地识别好的文本直接喂进来（纯语音模式主路径，
+ *     麦克风仍归本地唤醒/声纹/识别所有，无双消费者冲突）；
+ *   - audio.chunk：整段 16kHz PCM 也支持——本地能量 VAD 断句后整句
+ *     append+commit 喂给 realtime（MiniMax 无 server_vad，必须手动 commit）；
+ *   - 回合输出按整轮下发：单条 tts.chunk（24kHz wav，客户端 TtsPlayer 可直接播）。
+ *
+ * 半双工约定：thinking/speaking 期间上行音频直接丢弃（客户端播放时
+ * 不采集，扬声器不会回流进 realtime 上下文）；此期间收到 text.turn 回错。
+ * 打断语义沿用代次（generation）：interrupt 后完成的旧回合输出整体丢弃
+ * （realtime 无 response.cancel，服务端侧会跑完但结果不下发）。
+ */
+
+export interface MinimaxDuplexSessionDeps {
+  realtime: MiniMaxRealtimeService;
+  /** realtime 会话人设（口语化短回复） */
+  systemPrompt?: string;
+  /** 端点检测静音时长（毫秒） */
+  endpointSilenceMs?: number;
+  /** session.start 带 sessionId=callId 时解析通话场景人设（电话实时语音） */
+  callVoiceContext?: (callId: string) => string | null;
+}
+
+export class MinimaxDuplexSession {
+  readonly id: string;
+  readonly engine = "minimax-realtime" as const;
+
+  private state: DuplexSessionState = "idle";
+  private config: DuplexSessionConfig = { sampleRate: 16000, language: "zh" };
+  private client: PersistentRealtimeClient | null = null;
+  private generation = 0;
+  private ttsSeq = 0;
+  /** 通话场景人设（session.start 带 callId 时注入），空为默认助手 */
+  private voiceContext: string | null = null;
+
+  private readonly detector: EndpointDetector;
+  private readonly pcmBuffers: Buffer[] = [];
+  private pcmBytes = 0;
+
+  constructor(
+    id: string,
+    private readonly sink: (msg: DuplexServerMessage) => void,
+    private readonly deps: MinimaxDuplexSessionDeps,
+  ) {
+    this.id = id;
+    this.detector = new EndpointDetector({ silenceMs: deps.endpointSilenceMs ?? 700 });
+  }
+
+  getState(): DuplexSessionState {
+    return this.state;
+  }
+
+  getConfig(): DuplexSessionConfig {
+    return { ...this.config };
+  }
+
+  // ------------------------------------------------------------------ //
+  // 客户端消息入口（与 DuplexVoiceSession.handle 同一契约）
+  // ------------------------------------------------------------------ //
+
+  async handle(msg: DuplexClientMessage): Promise<void> {
+    switch (msg.type) {
+      case "session.start": {
+        this.config = {
+          sampleRate: clampInt(msg.sampleRate ?? 16000, 8000, 48000),
+          language: msg.language?.trim() || "zh",
+          voiceId: msg.voiceId?.trim() || undefined,
+          sessionId: msg.sessionId?.trim() || undefined,
+        };
+        if (msg.systemPrompt?.trim()) {
+          this.deps.systemPrompt = msg.systemPrompt.trim();
+        }
+        // 电话实时语音：sessionId=callId → 解析通话场景人设（非通话连接解析不到，用默认）
+        this.voiceContext = msg.sessionId?.trim()
+          ? this.deps.callVoiceContext?.(msg.sessionId.trim()) ?? null
+          : null;
+        this.client?.close();
+        this.client = null;
+        this.resetListeningBuffers();
+        this.setState("listening");
+        this.sink({
+          type: "session.ready",
+          config: this.config,
+          streamingAsr: false,
+          engine: this.engine,
+        });
+        return;
+      }
+      case "text.turn":
+        void this.runTextTurn(msg.text ?? "");
+        return;
+      case "audio.chunk":
+        this.feedAudio(msg.pcm);
+        return;
+      case "audio.end":
+        void this.forceEndpoint();
+        return;
+      case "interrupt":
+        this.interrupt();
+        return;
+      case "session.stop":
+        await this.stop();
+        return;
+      default:
+        return;
+    }
+  }
+
+  // ------------------------------------------------------------------ //
+  // 上行
+  // ------------------------------------------------------------------ //
+
+  feedAudio(pcmBase64: string): void {
+    if (this.state !== "listening") {
+      // 半双工：回复生成/播报期间的上行音频丢弃（防扬声器回流污染上下文）
+      return;
+    }
+    const pcm = Buffer.from(pcmBase64, "base64");
+    if (pcm.length === 0) return;
+    this.pcmBuffers.push(pcm);
+    this.pcmBytes += pcm.length;
+    const event = this.detector.feed(pcm, this.config.sampleRate);
+    if (event === "endpoint") {
+      void this.runAudioTurn();
+    }
+  }
+
+  /** audio.end / 客户端主动收句。 */
+  async forceEndpoint(): Promise<void> {
+    if (this.state !== "listening") return;
+    await this.runAudioTurn();
+  }
+
+  interrupt(): void {
+    if (this.state === "thinking" || this.state === "speaking") {
+      this.generation += 1; // 在途回合完成后输出按代次丢弃
+      this.setState("listening");
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.generation += 1;
+    this.dropClient();
+    this.setState("idle");
+    this.sink({ type: "session.ended" });
+  }
+
+  dispose(): void {
+    this.generation += 1;
+    this.dropClient();
+  }
+
+  // ------------------------------------------------------------------ //
+  // 回合
+  // ------------------------------------------------------------------ //
+
+  private async runTextTurn(text: string): Promise<void> {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (this.state !== "listening") {
+      this.sink({ type: "error", message: "上一轮回复还在生成中，稍候再说", recoverable: true });
+      return;
+    }
+    const gen = ++this.generation;
+    this.setState("thinking");
+    await this.runTurn(trimmed, { text: trimmed }, gen);
+  }
+
+  private async runAudioTurn(): Promise<void> {
+    if (this.state !== "listening") return;
+    const pcm = Buffer.concat(this.pcmBuffers.splice(0, this.pcmBuffers.length));
+    this.pcmBytes = 0;
+    this.detector.reset();
+    // 过短（<0.3s）大概率是噪声
+    if (pcm.length < this.config.sampleRate * 2 * 0.3) return;
+    const gen = ++this.generation;
+    this.setState("thinking");
+    await this.runTurn("", { pcm16k: pcm }, gen);
+  }
+
+  private async runTurn(userText: string, input: { text?: string; pcm16k?: Buffer }, gen: number): Promise<void> {
+    try {
+      const client = this.ensureClient();
+      const turn = await client.turn(input);
+      if (gen !== this.generation) return; // 已被打断：输出整体丢弃
+      this.emitTurnOutput(userText, turn);
+    } catch (err) {
+      if (gen !== this.generation) return;
+      this.sink({
+        type: "error",
+        message: `实时语音回合失败：${err instanceof Error ? err.message : String(err)}`,
+        recoverable: true,
+      });
+      this.dropClient(); // 连接状态可疑，下一回合懒重连
+      this.setState("listening");
+    }
+  }
+
+  private emitTurnOutput(userText: string, turn: RealtimeTurnResult): void {
+    const asrText = (turn.asrText ?? "").trim() || userText;
+    this.sink({ type: "asr.final", text: asrText });
+
+    if (!turn.transcript.trim() && turn.audio.length === 0) {
+      this.sink({ type: "error", message: "本轮没有产生回复", recoverable: true });
+      this.setState("listening");
+      return;
+    }
+
+    this.setState("speaking");
+    this.sink({ type: "tts.start" });
+    this.sink({
+      type: "tts.chunk",
+      seq: ++this.ttsSeq,
+      audio: pcmToWav(turn.audio, MINIMAX_REALTIME_OUTPUT_SAMPLE_RATE).toString("base64"),
+      format: "wav",
+    });
+    this.sink({ type: "tts.end" });
+    this.sink({ type: "assistant.completed", text: turn.transcript });
+    this.sink({ type: "turn.completed", userText: asrText, assistantText: turn.transcript });
+    this.setState("listening");
+  }
+
+  // ------------------------------------------------------------------ //
+  // 内部
+  // ------------------------------------------------------------------ //
+
+  private ensureClient(): PersistentRealtimeClient {
+    this.client ??= this.deps.realtime.openPersistentClient({
+      voiceId: this.config.voiceId,
+      instructions: [this.deps.systemPrompt, this.voiceContext].filter((s) => !!s && s.trim()).join("\n\n") || undefined,
+    });
+    return this.client;
+  }
+
+  private dropClient(): void {
+    if (this.client) {
+      try {
+        this.client.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.client = null;
+  }
+
+  private resetListeningBuffers(): void {
+    this.pcmBuffers.length = 0;
+    this.pcmBytes = 0;
+    this.detector.reset();
+  }
+
+  private setState(state: DuplexSessionState): void {
+    if (this.state === state) return;
+    this.state = state;
+    this.sink({ type: "state", state });
+  }
+}
+
+function clampInt(v: number, min: number, max: number): number {
+  const n = Math.round(Number.isFinite(v) ? v : min);
+  return Math.max(min, Math.min(max, n));
+}

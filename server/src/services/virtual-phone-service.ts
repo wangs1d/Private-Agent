@@ -115,6 +115,103 @@ export class VirtualPhoneService {
   }
 
   // ============================================================
+  // Realtime 语音模式（MiniMax 端到端通话）
+  // ============================================================
+
+  /**
+   * 通话对话是否由 duplex realtime 引擎接管。
+   * 开启后：通话中语音经 /ws/voice-duplex（callId 上下文注入）端到端处理，
+   * phone.call_reply 打字回复入口与接通首问 LLM 链路停用。
+   */
+  private realtimeVoice = false;
+
+  setRealtimeVoiceEnabled(enabled: boolean): void {
+    this.realtimeVoice = enabled;
+  }
+
+  isRealtimeVoice(): boolean {
+    return this.realtimeVoice;
+  }
+
+  /**
+   * 按通话上下文构建 realtime 会话人设（经 VoiceDuplexService 注入
+   * MinimaxDuplexSession 的 instructions）。非活跃通话返回 null（用默认人设）。
+   */
+  getCallVoiceContext(callId: string): string | null {
+    const session = this.callSessions.get(callId.trim());
+    if (!session) return null;
+    const rules =
+      "规则：这是实时语音通话，口语化、每次只说一两句话、直接回答；" +
+      "不要报数据清单、不要输出 Markdown 和表情；" +
+      "用户说再见/挂了/就这样就礼貌收尾。";
+    if (session.direction === "agent_to_user") {
+      return (
+        `你正与用户实时通话（这通电话是你主动打给用户的）。` +
+        (session.initialTranscript
+          ? `你接通时已播报：「${session.initialTranscript}」。`
+          : "") +
+        `接下来的追问由你即时回答，信息以播报内容为准，不知道就说确认后补答。` +
+        rules
+      );
+    }
+    return (
+      `用户主动来电找你（Agent），正在实时通话中。` +
+      (session.initialTranscript
+        ? `来电时留言：「${session.initialTranscript}」。`
+        : `没有留言，先简短问候并问有什么可以帮忙。`) +
+      rules
+    );
+  }
+
+  // ============================================================
+  // 通话结束等待器（realtime 模式下通话循环让位后用于收尾同步）
+  // ============================================================
+
+  private readonly callEndWaiters = new Map<string, Array<{ resolve: (ended: boolean) => void; timer?: ReturnType<typeof setTimeout> }>>();
+
+  /**
+   * 等待指定通话结束（用户挂断/任一方 endCall/closeCall）。
+   * 超时返回 false；通话不存在视为已结束返回 true。
+   */
+  waitForCallEnd(callId: string, timeoutMs: number): Promise<boolean> {
+    const id = callId.trim();
+    if (!id) return Promise.resolve(true);
+    if (!this.callSessions.has(id)) return Promise.resolve(true);
+    if (!(timeoutMs > 0)) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const waiter: { resolve: (ended: boolean) => void; timer?: ReturnType<typeof setTimeout> } = { resolve };
+      const list = this.callEndWaiters.get(id) ?? [];
+      const timer = setTimeout(() => {
+        const arr = this.callEndWaiters.get(id);
+        if (arr) {
+          const idx = arr.indexOf(waiter);
+          if (idx >= 0) arr.splice(idx, 1);
+          if (arr.length === 0) this.callEndWaiters.delete(id);
+        }
+        resolve(false);
+      }, timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+      waiter.timer = timer;
+      list.push(waiter);
+      this.callEndWaiters.set(id, list);
+    });
+  }
+
+  private resolveCallEndWaiters(callId: string): void {
+    const arr = this.callEndWaiters.get(callId);
+    if (!arr) return;
+    this.callEndWaiters.delete(callId);
+    for (const w of arr.splice(0, arr.length)) {
+      if (w.timer) clearTimeout(w.timer);
+      try {
+        w.resolve(true);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // ============================================================
   // 通话回复总线：通话中的用户输入（phone.call_reply）与等待方（提醒电话
   // 交互循环 / Agent 主对话管线）在此汇合。
   // ============================================================
@@ -254,6 +351,7 @@ export class VirtualPhoneService {
     if (!session) return false;
     this.callSessions.delete(id);
     this.cancelCallReplyWaiters(id);
+    this.resolveCallEndWaiters(id);
     this.scheduleSessionsPersist();
     this.recordCallHistory(session, reason);
     return true;
@@ -835,6 +933,27 @@ export class VirtualPhoneService {
     toPhone: string | null;
     userMessage: string;
   }): Promise<void> {
+    // Realtime 语音模式：对话由 duplex realtime 引擎按 callId 上下文接管，
+    // 不走首问 LLM、不下发开场 TTS（用户先开口，Agent 实时应答）。
+    if (this.realtimeVoice) {
+      this.wsRegistry.trySend(
+        args.fromUserId,
+        JSON.stringify({
+          type: ServerEventType.VirtualPhoneCallStatus,
+          payload: {
+            callId: args.callId,
+            toActorId: args.toActorId,
+            toPhone: args.toPhone,
+            direction: "user_to_agent" as const,
+            status: "connected",
+            realtimeVoice: true,
+            message: "Agent 已接听，请直接说话",
+          },
+        }),
+      );
+      return;
+    }
+
     let replyText = "";
     const handler = this.userCallAgentHandler;
     if (handler) {

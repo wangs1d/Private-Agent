@@ -506,44 +506,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
-        if (event.type === ClientEventType.VirtualPhoneCallReply) {
-          if (!boundActorId) {
-            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
-            return;
-          }
-          const replyPl = event.payload as Record<string, unknown>;
-          const replyCallId = String(replyPl.callId ?? "").trim();
-          const replyText = String(replyPl.text ?? replyPl.message ?? "").trim();
-          if (!replyCallId) {
-            sendUnifiedError("BAD_PHONE_CALL", "缺少 callId");
-            return;
-          }
-          if (!replyText) {
-            sendUnifiedError("BAD_PHONE_CALL", "缺少回复内容（text）");
-            return;
-          }
-          const replyResult = virtualPhoneService.deliverCallReply(
-            replyCallId,
-            replyText,
-            boundActorId,
-          );
-          if (!replyResult.ok) {
-            sendUnifiedError("PHONE_CALL_FAILED", replyResult.error ?? "回复投递失败");
-            return;
-          }
-          socket.send(
-            JSON.stringify({
-              type: ServerEventType.VirtualPhoneCallStatus,
-              payload: {
-                ok: true,
-                callId: replyCallId,
-                status: "reply_received",
-                handled: replyResult.handled ?? "chat",
-              },
-            }),
-          );
-          return;
-        }
+        // phone.call_reply（通话中打字回复）已删除：通话对话由 duplex realtime
+        // 语音引擎接管（麦克风语音进、语音回，callId 上下文注入），无打字通道。
 
         // 用户挂断当前通话
         if (event.type === ClientEventType.VirtualPhoneCallHangup) {

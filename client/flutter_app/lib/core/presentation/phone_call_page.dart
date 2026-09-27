@@ -8,7 +8,8 @@ import "../services/phone_call_session.dart";
 ///
 /// 由 `showPhoneCallPage` 以全屏对话框弹出，内容随 [PhoneCallSession.phase] 切换：
 ///   - incoming : 振铃接听（呼吸头像 + 倒计时 + 接听/挂断）
-///   - inCall   : 通话中（计时 + 语音稿 + 回复输入 + 挂断）
+///   - inCall   : 通话中（计时 + 实时语音转写 + 挂断）——
+///                对话走 MiniMax realtime 端到端语音，直接说话即可，无打字输入
 /// 会话结束（session.end()）时自动关闭。
 Future<void> showPhoneCallPage(BuildContext context) {
   return showGeneralDialog(
@@ -36,7 +37,6 @@ class _PhoneCallPageState extends State<PhoneCallPage>
     with SingleTickerProviderStateMixin {
   final PhoneCallSession _session = PhoneCallSession.instance;
   Timer? _tick;
-  final TextEditingController _replyController = TextEditingController();
   late final AnimationController _pulse = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1400),
@@ -58,7 +58,6 @@ class _PhoneCallPageState extends State<PhoneCallPage>
     _session.removeListener(_onSessionChanged);
     _pulse.dispose();
     _tick?.cancel();
-    _replyController.dispose();
     super.dispose();
   }
 
@@ -69,14 +68,6 @@ class _PhoneCallPageState extends State<PhoneCallPage>
       Navigator.of(context).pop();
       return;
     }
-    setState(() {});
-  }
-
-  void _submitReply() {
-    final String text = _replyController.text.trim();
-    if (text.isEmpty) return;
-    _replyController.clear();
-    _session.sendReply(text);
     setState(() {});
   }
 
@@ -198,12 +189,26 @@ class _PhoneCallPageState extends State<PhoneCallPage>
           style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 15),
         ),
         Text(
-          _session.agentTalking ? "正在播报…" : "聆听中，可随时回复",
+          _session.agentTalking
+              ? "正在播报…"
+              : (_session.voiceState.isEmpty
+                  ? "聆听中，直接说话"
+                  : _session.voiceState),
           style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 13),
         ),
         const SizedBox(height: 16),
         Expanded(child: _buildTranscriptList()),
-        _buildReplyBar(),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Text(
+            "直接说话即可对话，无需打字",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.35),
+              fontSize: 12,
+            ),
+          ),
+        ),
         const SizedBox(height: 8),
         SafeArea(
           minimum: const EdgeInsets.only(bottom: 28),
@@ -294,52 +299,6 @@ class _PhoneCallPageState extends State<PhoneCallPage>
           ),
         );
       },
-    );
-  }
-
-  Widget _buildReplyBar() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            child: TextField(
-              controller: _replyController,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-              cursorColor: Colors.white70,
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => _submitReply(),
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: "输入回复，Agent 会语音回应…",
-                hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.35)),
-                filled: true,
-                fillColor: const Color(0xFF262A31),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(22),
-                  borderSide: BorderSide.none,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Material(
-            color: const Color(0xFF2F6FED),
-            shape: const CircleBorder(),
-            child: InkWell(
-              customBorder: const CircleBorder(),
-              onTap: _submitReply,
-              child: const SizedBox(
-                width: 40,
-                height: 40,
-                child: Icon(Icons.send_rounded, size: 20, color: Colors.white),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

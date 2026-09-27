@@ -182,6 +182,8 @@ import { buildQuoteAggregator } from "../services/booking/quote/index.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
 import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
+import { MiniMaxTTSAdapter } from "../services/voice-dialogue/adapters/minimax-tts-adapter.js";
+import { MiniMaxRealtimeService } from "../services/voice-dialogue/minimax-realtime-service.js";
 import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm-adapter.js";
 import { FunAsrAdapter } from "../services/voice-dialogue/adapters/funasr-asr-adapter.js";
 import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
@@ -676,7 +678,21 @@ export async function createAppServices(): Promise<AppServices> {
     llm: new OpenAILLMAdapter(),
   });
 
-  // 注册硅基流动 TTS provider（中文语音质量更佳，优先使用）
+  // 注册 MiniMax TTS provider（speech-2.5，中文拟真度最佳，优先使用）
+  const minimaxTTS = new MiniMaxTTSAdapter();
+  if (minimaxTTS.isEnabled()) {
+    voiceDialogueService.registerProvider("minimax", {
+      asr: funasrAdapter, // ASR 走 FunASR
+      tts: minimaxTTS,
+      llm: new OpenAILLMAdapter(),
+    });
+    voiceDialogueService.setDefaultProvider("minimax");
+    app.log.info(
+      `[VoiceDialogue] MiniMax TTS 已启用，设为默认提供商（ASR：${funasrAdapter.name}）`,
+    );
+  }
+
+  // 注册硅基流动 TTS provider（MiniMax 未配置时作为默认）
   const siliconflowTTS = new SiliconFlowTTSAdapter();
   if (siliconflowTTS.isEnabled()) {
     voiceDialogueService.registerProvider("siliconflow", {
@@ -684,11 +700,13 @@ export async function createAppServices(): Promise<AppServices> {
       tts: siliconflowTTS,
       llm: new OpenAILLMAdapter(),
     });
-    voiceDialogueService.setDefaultProvider("siliconflow");
-    app.log.info(
-      `[VoiceDialogue] 硅基流动 TTS 已启用，设为默认提供商（ASR：${funasrAdapter.name}）`,
-    );
-  } else {
+    if (!minimaxTTS.isEnabled()) {
+      voiceDialogueService.setDefaultProvider("siliconflow");
+      app.log.info(
+        `[VoiceDialogue] 硅基流动 TTS 已启用，设为默认提供商（ASR：${funasrAdapter.name}）`,
+      );
+    }
+  } else if (!minimaxTTS.isEnabled()) {
     app.log.info("[VoiceDialogue] 硅基流动 TTS 未配置或凭证不完整，使用 OpenAI 作为默认提供商");
     voiceDialogueService.setDefaultProvider("openai");
   }
@@ -2054,19 +2072,8 @@ export async function createAppServices(): Promise<AppServices> {
     return { replyText: reply.text.trim() };
   });
 
-  // 通话中用户回复（phone.call_reply → deliverCallReply）：进 Agent 对话，回应经 TTS 推回通话
-  virtualPhoneService.setUserReplyHandler(async ({ callId, fromActorId, toUserId, text }) => {
-    const prompt = `【通话中用户回复】用户在当前通话中说了：「${text}」。请用简短中文口语直接回应（将转为语音播报），不要输出 Markdown。`;
-    const reply = await runtime.handleUserMessage(fromActorId, prompt, {
-      chatUserMessageId: `phone-reply:${callId}:${Date.now()}`,
-      preferFullPipeline: true,
-    });
-    await runtime.runToolIfNeeded(fromActorId, reply, {
-      chatUserMessageId: `phone-reply-tool:${callId}:${Date.now()}`,
-    });
-    const replyText = reply.text.trim() || "抱歉，我刚才没听清，麻烦您再说一遍。";
-    await virtualPhoneService.pushVoiceReply(callId, toUserId, replyText);
-  });
+  // 通话中用户打字回复（phone.call_reply）已删除：通话对话由 duplex realtime
+  // 语音引擎接管（virtualPhoneService.setRealtimeVoiceEnabled，见下方 VoiceDuplex 装配处）。
 
   scheduleTaskService.setAgentTaskHandler(async (task) => {
     const prompt = task.agentTask?.prompt?.trim();
@@ -2702,14 +2709,30 @@ export async function createAppServices(): Promise<AppServices> {
   }
 
   // ── 全双工实时语音（WS /ws/voice-duplex）──
+  // 引擎自动选择：配置了 MINIMAX_API_KEY 且未设 MINIMAX_REALTIME_DUPLEX_DISABLED=1
+  // 时走 MiniMax 端到端实时语音（text.turn/audio.chunk 进 → 整轮 wav 语音出）；
+  // 否则回退 pipeline 引擎（FunASR/Whisper + LLM + TTS）。
+  const minimaxRealtimeService = new MiniMaxRealtimeService();
+  // 电话通话同步切 realtime：开启后通话对话由 duplex 引擎按 callId 上下文接管，
+  // phone.call_reply 打字回复与接通首问 LLM 链路停用。
+  virtualPhoneService.setRealtimeVoiceEnabled(
+    minimaxRealtimeService.isEnabled() && process.env.MINIMAX_REALTIME_DUPLEX_DISABLED?.trim() !== "1",
+  );
   const voiceDuplexService = new VoiceDuplexService({
     voiceDialogueService,
+    minimaxRealtime: minimaxRealtimeService,
+    // 通话上下文注入：session.start 带 sessionId=callId 时，把通话场景并进 realtime 人设
+    callVoiceContext: (callId) => virtualPhoneService.getCallVoiceContext(callId),
     systemPrompt: process.env.VOICE_DUPLEX_SYSTEM_PROMPT?.trim() || undefined,
     maxSessions: 16,
   });
   registerVoiceDuplexWsRoute(app, voiceDuplexService);
   app.log.info(
-    `[VoiceDuplex] 全双工语音已启用（/ws/voice-duplex，ASR=${process.env.FUNASR_BASE_URL ? "FunASR流式" : "回退整句"}）`,
+    `[VoiceDuplex] 全双工语音已启用（/ws/voice-duplex，引擎=${
+      process.env.MINIMAX_API_KEY?.trim() && process.env.MINIMAX_REALTIME_DUPLEX_DISABLED?.trim() !== "1"
+        ? "minimax-realtime"
+        : `pipeline（ASR=${process.env.FUNASR_BASE_URL ? "FunASR流式" : "回退整句"}）`
+    }）`,
   );
 
   // ── Task 16 消费管家：工具执行成功事件（tool.executed）发布 ──

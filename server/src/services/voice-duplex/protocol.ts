@@ -45,11 +45,18 @@ export type DuplexClientMessage =
     }
   | { type: "audio.chunk"; pcm: string }
   | { type: "audio.end" }
+  | { type: "text.turn"; text: string }
   | { type: "interrupt" }
   | { type: "session.stop" };
 
 export type DuplexServerMessage =
-  | { type: "session.ready"; config: DuplexSessionConfig; streamingAsr: boolean }
+  | {
+      type: "session.ready";
+      config: DuplexSessionConfig;
+      streamingAsr: boolean;
+      /** 会话引擎：pipeline=ASR+LLM+TTS 三段式；minimax-realtime=端到端实时语音 */
+      engine?: "pipeline" | "minimax-realtime";
+    }
   | { type: "state"; state: DuplexSessionState }
   | { type: "asr.partial"; text: string }
   | { type: "asr.final"; text: string }
@@ -71,6 +78,7 @@ export function parseClientMessage(raw: string): DuplexClientMessage | null {
       case "session.start":
       case "audio.chunk":
       case "audio.end":
+      case "text.turn":
       case "interrupt":
       case "session.stop":
         return parsed as DuplexClientMessage;

@@ -131,6 +131,22 @@ export class ProactiveCaller {
     this.kindLastAt.set(input.kind, this.nowFn());
     this.persist();
 
+    // ── Realtime 语音模式：对话由 duplex realtime 引擎接管（callId 上下文注入，
+    //    客户端麦克风语音进、语音回），本循环只等通话结束并回灌结果。
+    //    汇报正文已在接通首帧播报，信息必达，不再走沉默文本兜底。
+    if (this.deps.virtualPhone.isRealtimeVoice?.()) {
+      await this.deps.virtualPhone.waitForCallEnd(call.callId, MAX_CALL_MS);
+      this.deps.virtualPhone.endCall(call.callId, "completed");
+      this.record({
+        actorId: input.actorId,
+        kind: input.kind,
+        outcome: "replied",
+        callId: call.callId,
+        transcript: [{ role: "assistant", content: input.report }],
+      });
+      return { ok: true, outcome: "replied", callId: call.callId };
+    }
+
     // ── 通话内对话循环：用户说话 → LLM 口语回复 → TTS 推回 ──
     const transcript: Array<{ role: "user" | "assistant"; content: string }> = [
       { role: "assistant", content: input.report },

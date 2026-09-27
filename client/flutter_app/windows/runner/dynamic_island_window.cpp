@@ -1223,6 +1223,8 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
           // 分级自动收回：展开先退回 hover（环境信息），hover 再静默回胶囊。
           if (stage_target_ == Stage::kExpanded) {
             SetStage(Stage::kHover);
+            // 鼠标仍不在岛上：续排 hover 段收回，否则会卡死在 hover 层。
+            SetTimer(hwnd, 2, 2500, nullptr);
           } else if (stage_target_ == Stage::kHover) {
             SetStage(Stage::kCompact);
             FireEvent(EventType::kExpandedChanged, "false");
@@ -1271,6 +1273,9 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
           break;
         case Stage::kExpanded:
           SetStage(Stage::kHover);
+          // hover 不是 Dart 已知的展开态：必须同步，否则 Dart 残留
+          // expanded=true，下次同步会把岛强行拉回展开层。
+          FireEvent(EventType::kExpandedChanged, "false");
           break;
       }
       return 0;
