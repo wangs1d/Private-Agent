@@ -12,6 +12,7 @@ import "../../core/db/local_history_store.dart";
 import "../../core/presentation/agent_avatar_catalog.dart";
 import "../../core/presentation/voice_call_ui_labels.dart";
 import "../../core/utils/agent_result_parser.dart";import "../../core/utils/content_summary_parser.dart";
+import "../../core/utils/link_utils.dart";
 import "../../core/services/speech_service.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
@@ -2650,13 +2651,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     // 底部只保留真正的裸 URL 作为来源。
     final String stripped =
         text.replaceAll(RegExp(r'\[[^\]]+\]\([^)]+\)'), ' ');
-    final RegExp urlRegex = RegExp(r'https?://\S+');
-    final Set<String> seen = <String>{};
-    final List<String> urls = <String>[];
-    for (final match in urlRegex.allMatches(stripped)) {
-      final String url = match.group(0)!.replaceAll(RegExp(r'[),.;，。！？]+$'), '');
-      if (seen.add(url)) urls.add(url);
-    }
+    final List<String> urls = LinkUtils.extractAll(stripped);
 
     if (urls.isEmpty) return const SizedBox.shrink();
 
@@ -2684,7 +2679,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               Icon(Icons.link, size: 11, color: cs.primary),
               const SizedBox(width: 4),
               Text(
-                _linkLabel(url),
+                LinkUtils.shortLabel(url),
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: cs.primary,
                       fontSize: 11,
@@ -2702,14 +2697,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: linkWidgets,
     );
-  }
-
-  /// 从 URL 生成简短可读的文字链接标签：取域名并去掉 www，不展示路径与协议。
-  static String _linkLabel(String url) {
-    final Uri? uri = Uri.tryParse(url);
-    final String host = (uri == null || uri.host.isEmpty) ? url : uri.host;
-    final String clean = host.replaceFirst(RegExp(r'^www\.'), '');
-    return clean.isEmpty ? url : clean;
   }
 }
 

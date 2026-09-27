@@ -1,9 +1,9 @@
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
-import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
+import "../../core/utils/link_utils.dart";
 import "travel_plan_launcher.dart";
 import "travel_plan_models.dart";
 import "travel_theme.dart";
@@ -12,6 +12,7 @@ import "display_effects/compare_slider.dart";
 import "display_effects/display_effects.dart";
 import "display_effects/soft_icon_chip.dart";
 import "media_gallery.dart";
+import "morning_briefing_card.dart";
 import "media_thumbnail.dart";
 
 /// 智能体结果卡片 —— 用于呈现「任务执行总结」「工具调用结果」
@@ -83,6 +84,19 @@ class AgentResultCard extends StatelessWidget {
           return _TravelItineraryCard(data: data, cs: cs);
         case "product_compare":
           return _ProductCompareCard(data: data, cs: cs);
+        case "morning_briefing":
+          // 简报卡（岛上条目退役后简报的聊天流落点）：extra 携带原始简报
+          // 载荷，渲染复用 MorningBriefingCard（与兜底 Dialog 同一组件）。
+          final Map<String, dynamic>? extra = data.extra;
+          final Map<String, dynamic> briefingPayload =
+              (extra?["briefing"] as Map<String, dynamic>?) ??
+                  const <String, dynamic>{};
+          return _MorningBriefingChatCard(
+            briefing: briefingPayload,
+            narrationText: extra?["narrationText"]?.toString(),
+            modeLabel: extra?["modeLabel"]?.toString(),
+            cs: cs,
+          );
         default:
           return _SpecializedCard(data: data, cs: cs);
       }
@@ -844,7 +858,7 @@ class _MediaCard extends StatelessWidget {
         })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl})>[];
     for (final AgentResultItem it in items) {
       final String text = it.text.trim();
-      final String? textUrl = extractUrlFromText(text);
+      final String? textUrl = LinkUtils.extractFirst(text);
       final String? previewUrl = _firstNonEmpty(<String?>[
         it.thumbnailUrl,
         it.mediaType == "video" ? null : it.mediaUrl,
@@ -871,7 +885,7 @@ class _MediaCard extends StatelessWidget {
           openUrl: openUrl,
         ));
       } else {
-        final String resolved = _resolveMediaUrl(previewUrl!);
+        final String resolved = LinkUtils.resolveMediaUrl(previewUrl!);
         // 同一张图不重复展示：地址已在集内则跳过（服务端已去重，此处双保险）
         if (allPhotoUrls.contains(resolved)) continue;
         photos.add((
@@ -1572,13 +1586,6 @@ class _TravelItineraryCard extends StatelessWidget {
   }
 }
 
-/// 从任意文本中提取第一个 http(s) URL，去掉尾部标点。
-String? extractUrlFromText(String text) {
-  final RegExpMatch? m = RegExp(r'https?://\S+').firstMatch(text);
-  if (m == null) return null;
-  return m.group(0)!.replaceAll(RegExp(r'[),.;，。！？、]+$'), '');
-}
-
 /// 轻量内联媒体行（无外层 card 边框）——给「renderBlocks 小簇」用。
 ///
 /// 设计：服务端 `buildInterleavedRenderBlocks` 会把一次 `search_images` 的 N 张
@@ -1616,7 +1623,7 @@ class MediaInlineRow extends StatelessWidget {
         })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl})>[];
     for (final AgentResultItem it in items) {
       final String text = it.text.trim();
-      final String? textUrl = extractUrlFromText(text);
+      final String? textUrl = LinkUtils.extractFirst(text);
       final String? previewUrl = _firstNonEmpty(<String?>[
         it.thumbnailUrl,
         it.mediaType == "video" ? null : it.mediaUrl,
@@ -1643,7 +1650,7 @@ class MediaInlineRow extends StatelessWidget {
           openUrl: openUrl,
         ));
       } else {
-        final String resolved = _resolveMediaUrl(previewUrl!);
+        final String resolved = LinkUtils.resolveMediaUrl(previewUrl!);
         if (allUrls.contains(resolved)) continue;
         photos.add((
           url: resolved,
@@ -1751,7 +1758,7 @@ class _VideoTile extends StatelessWidget {
             if (video.thumbnailUrl != null &&
                 video.thumbnailUrl!.trim().isNotEmpty)
               MediaThumbnail(
-                url: _resolveMediaUrl(video.thumbnailUrl!),
+                url: LinkUtils.resolveMediaUrl(video.thumbnailUrl!),
                 cs: cs,
                 errorIcon: Icons.video_file_outlined,
                 borderRadius: 0,
@@ -1818,22 +1825,9 @@ class _VideoTile extends StatelessWidget {
   }
 }
 
-String _resolveMediaUrl(String url) {
-  if (url.startsWith("http://") || url.startsWith("https://")) {
-    return url;
-  }
-  final String base = ApiConfig.httpBase;
-  if (url.startsWith("/")) return "$base$url";
-  return "$base/$url";
-}
-
-Future<void> _launchUrl(String url) async {
-  final Uri? uri = Uri.tryParse(_resolveMediaUrl(url));
-  if (uri == null) return;
-  try {
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
-  } catch (_) {}
-}
+/// 顶层转发：卡片内多处 fire-and-forget 打开链接（媒体地址先拼绝对 URL）。
+Future<void> _launchUrl(String url) =>
+    LinkUtils.launchExternal(LinkUtils.resolveMediaUrl(url));
 
 /// 搜索结果卡片 —— 把搜索工具返回的列表项渲染为垂直排列的新闻条目。
 ///
@@ -1893,7 +1887,7 @@ class _SearchResultCard extends StatelessWidget {
           ...data.items.map((AgentResultItem it) {
             final (String t, String d) = _splitSearchItem(it.text);
             final bool hasUrl = it.url != null && it.url!.isNotEmpty;
-            final String? detectedUrl = hasUrl ? it.url : _detectUrl(d);
+            final String? detectedUrl = hasUrl ? it.url : LinkUtils.extractFirst(d);
             return Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: InkWell(
@@ -2003,12 +1997,6 @@ class _SearchResultCard extends StatelessWidget {
     return (raw.substring(0, sep).trim(), raw.substring(sep).trim());
   }
 
-  /// 从文本中检测 http/https URL。
-  String? _detectUrl(String text) {
-    final RegExpMatch? m = RegExp(r'https?://\S+').firstMatch(text);
-    return m?.group(0);
-  }
-
   Future<void> _launchUrl(String url) async {
     final Uri? uri = Uri.tryParse(url);
     if (uri == null) return;
@@ -2032,12 +2020,6 @@ class _ProductCompareCard extends StatelessWidget {
 
   static const Color _accent = Color(0xFF7FD4A0);
   static const Color _warn = Color(0xFFE5B567);
-
-  String _resolve(String url) {
-    if (url.startsWith("http://") || url.startsWith("https://")) return url;
-    if (url.startsWith("/")) return "${ApiConfig.httpBase}$url";
-    return url;
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -2137,7 +2119,7 @@ class _ProductCompareCard extends StatelessWidget {
                   AspectRatio(
                     aspectRatio: 0.74,
                     child: Image.network(
-                      _resolve(side.image!),
+                      LinkUtils.resolveMediaUrl(side.image!),
                       fit: BoxFit.cover,
                       filterQuality: FilterQuality.low,
                       errorBuilder: (_, __, ___) => _imageFallback(),
@@ -2364,7 +2346,7 @@ class _ProductCompareCard extends StatelessWidget {
                   onTap: v.url == null
                       ? null
                       : () => launchUrl(
-                            Uri.parse(_resolve(v.url!)),
+                            Uri.parse(LinkUtils.resolveMediaUrl(v.url!)),
                             mode: LaunchMode.externalApplication,
                           ),
                   child: Padding(
@@ -2424,6 +2406,49 @@ class _SideHeader extends StatelessWidget {
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+/// 简报卡在聊天流里的容器（morning_briefing cardType）。
+///
+/// 内容复用 [MorningBriefingCard]（与兜底 Dialog 同一组件，视觉一致）；
+/// 外层限宽到聊天气泡密度，避免宽屏拉成横幅。
+class _MorningBriefingChatCard extends StatelessWidget {
+  const _MorningBriefingChatCard({
+    required this.briefing,
+    required this.cs,
+    this.narrationText,
+    this.modeLabel,
+  });
+
+  final Map<String, dynamic> briefing;
+  final ColorScheme cs;
+  final String? narrationText;
+  final String? modeLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 430),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: MorningBriefingCard(
+          briefing: briefing,
+          narrationText: narrationText,
+          modeLabel: modeLabel,
+          onSpeak: (String text) {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(content: Text(text)),
+            );
+          },
+        ),
       ),
     );
   }

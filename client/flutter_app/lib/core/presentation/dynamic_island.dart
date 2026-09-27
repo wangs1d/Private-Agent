@@ -4,7 +4,23 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// 岛内容类别（与原生 Kind 枚举一一对应）。
-enum IslandKind { task, update, schedule, briefing, inbox }
+/// briefing 已退役：简报就绪不再上岛，触达交给各呈现形态（悬浮窗/系统通知/
+/// 对话流卡片），见 _handleMorningBriefingEvent。
+enum IslandKind { task, update, schedule, inbox, voice }
+
+/// 展开卡「任务动态」里的一行 agent 步骤（工具调用状态流，对齐 eisland
+/// 的 agent/thinking/todo 上岛思路：岛直接呈现 agent 正在干什么）。
+class IslandAgentStep {
+  const IslandAgentStep({required this.label, this.state = 0, this.key});
+
+  final String label;
+
+  /// 0=进行中 1=成功 2=失败（与原生 AgentStep.state 对应）。
+  final int state;
+
+  /// 幂等键（通常为工具名）；同键新步骤开始时旧步骤视为已收尾。
+  final String? key;
+}
 
 /// 一条要在岛上展示的信息。
 class IslandEntry {
@@ -53,11 +69,71 @@ class DynamicIslandController extends ChangeNotifier {
   bool _expanded = false;
   final List<IslandEntry> _queue = <IslandEntry>[];
 
+  // 语音模式独占（岛=唯一视觉）：激活期间非语音条目停泊在此，
+  // 退出语音模式后按原顺序放行回常规仲裁。
+  bool _voiceExclusive = false;
+  final List<IslandEntry> _voiceParking = <IslandEntry>[];
+
+  // 环境数据（不走条目优先级仲裁，直接进原生 hover 态/展开卡）。
+  List<IslandAgentStep> _agentSteps = const <IslandAgentStep>[];
+  int _taskPlaneCount = 0;
+  bool _foregroundAgentActive = false;
+  int _ambientUnread = 0;
+  String _agentStatusLine = '';
+
   IslandEntry? get entry => _entry;
   bool get expanded => _expanded;
+  List<IslandAgentStep> get agentSteps => _agentSteps;
+  int get ambientUnread => _ambientUnread;
+  String get agentStatusLine => _agentStatusLine;
+
+  /// agent 是否在忙：后台任务面有活任务，或前台轮次处理中。
+  bool get agentActive => _taskPlaneCount > 0 || _foregroundAgentActive;
+
+  /// 更新后台任务面活跃任务数（chat.task_update 生命周期）。
+  void updateTaskPlaneCount(int count) {
+    if (_taskPlaneCount == count) return;
+    _taskPlaneCount = count;
+    notifyListeners();
+  }
+
+  /// 前台轮次 agent 处理状态（tool.call 开始 / 收尾清位）。
+  void setForegroundAgent({required bool active}) {
+    if (_foregroundAgentActive == active) return;
+    _foregroundAgentActive = active;
+    notifyListeners();
+  }
+
+  /// hover「任务」页状态行（最后一次工具调用的 userStatusLine）。
+  void updateAgentStatusLine(String line) {
+    final String trimmed = line.trim();
+    if (_agentStatusLine == trimmed) return;
+    _agentStatusLine = trimmed;
+    notifyListeners();
+  }
+
+  /// 更新展开卡「任务动态」步骤流（同引用跳过，最多保留 5 条）。
+  void setAgentSteps(List<IslandAgentStep> steps) {
+    if (listEquals(steps, _agentSteps)) return;
+    _agentSteps = List<IslandAgentStep>.unmodifiable(
+        steps.length > 5 ? steps.sublist(steps.length - 5) : steps);
+    notifyListeners();
+  }
+
+  /// 站内信未读数（hover 环境行数据源）。
+  void setAmbientUnread(int count) {
+    if (_ambientUnread == count) return;
+    _ambientUnread = count;
+    notifyListeners();
+  }
 
   /// 展示/刷新一条信息。同 id 原地刷新；不同 id 按优先级抢占或排队。
+  /// 语音模式独占期间，非语音条目改道停泊区（不抢屏）。
   void present(IslandEntry e) {
+    if (_voiceExclusive && e.kind != IslandKind.voice) {
+      _park(e);
+      return;
+    }
     if (_entry?.id == e.id) {
       _entry = e;
       notifyListeners();
@@ -73,6 +149,38 @@ class DynamicIslandController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _park(IslandEntry e) {
+    _voiceParking
+      ..removeWhere((IslandEntry q) => q.id == e.id)
+      ..add(e);
+    if (_voiceParking.length > _maxQueue + 3) _voiceParking.removeAt(0);
+  }
+
+  /// 语音模式独占开关。
+  /// 开：当前条目与轮播队列整体停泊（语音条目之外不再上屏）；
+  /// 关：停泊条目按原顺序放行回常规队列。
+  void setVoiceExclusive(bool exclusive) {
+    if (_voiceExclusive == exclusive) return;
+    _voiceExclusive = exclusive;
+    if (exclusive) {
+      final IslandEntry? top = _entry;
+      if (top != null && top.kind != IslandKind.voice) {
+        _park(top);
+        _entry = null;
+      }
+      for (final IslandEntry q in List<IslandEntry>.of(_queue)) {
+        _park(q);
+      }
+      _queue.clear();
+    } else {
+      for (final IslandEntry p in List<IslandEntry>.of(_voiceParking)) {
+        _enqueue(p);
+      }
+      _voiceParking.clear();
+    }
+    notifyListeners();
+  }
+
   void _enqueue(IslandEntry e) {
     _queue
       ..removeWhere((IslandEntry q) => q.id == e.id)
@@ -81,6 +189,11 @@ class DynamicIslandController extends ChangeNotifier {
   }
 
   void dismiss(String id) {
+    if (_voiceExclusive && id != 'voice') {
+      // 独占期间只从停泊区摘除，不放行上屏。
+      _voiceParking.removeWhere((IslandEntry q) => q.id == id);
+      return;
+    }
     final bool wasTop = _entry?.id == id;
     _queue.removeWhere((IslandEntry q) => q.id == id);
     if (!wasTop) {
@@ -94,9 +207,10 @@ class DynamicIslandController extends ChangeNotifier {
   }
 
   void dismissAll() {
-    if (_entry == null && _queue.isEmpty) return;
+    if (_entry == null && _queue.isEmpty && _voiceParking.isEmpty) return;
     _entry = null;
     _queue.clear();
+    _voiceParking.clear();
     _expanded = false;
     notifyListeners();
   }
@@ -125,6 +239,21 @@ class DynamicIslandLauncher {
   DynamicIslandController? _controller;
   bool _nativeReady = false;
   bool _syncingFromNative = false;
+
+  /// 原生窗口是否就绪（E2E 断言用）。
+  bool get isNativeReady => _nativeReady;
+
+  /// 胶囊本体点击回调（payload="voice"=纯语音模式点击说话）。
+  void Function(String payload)? onIslandTapped;
+
+  /// 点击说话模式开关（纯语音模式进入时开启，退出时关闭）。
+  Future<void> setVoiceTalkMode(bool enabled) async {
+    if (!_nativeReady) return;
+    try {
+      await _channel.invokeMethod<bool>(
+          'setVoiceTalkMode', <String, Object?>{'enabled': enabled});
+    } on PlatformException catch (_) {}
+  }
 
   /// 绑定控制器并创建原生窗口。应用启动后调用一次。
   Future<void> attach(DynamicIslandController controller) async {
@@ -156,6 +285,9 @@ class DynamicIslandLauncher {
           _syncingFromNative = false;
         } else if (event == 'action') {
           handleIslandAction(payload);
+        } else if (event == 'tapped') {
+          // 胶囊本体点击（纯语音模式：点击说话）。无注册回调时静默。
+          onIslandTapped?.call(payload);
         }
       }
       return null;
@@ -205,6 +337,20 @@ class DynamicIslandLauncher {
       }
       await _channel.invokeMethod<bool>('setExpanded',
           <String, Object?>{'expanded': _controller!.expanded});
+      // hover 态环境行 + 展开卡任务动态：轻量数据随状态同步直推。
+      await _channel.invokeMethod<bool>('setAmbient', <String, Object?>{
+        'unread': _controller!.ambientUnread,
+        'agentActive': _controller!.agentActive,
+        'agentStatus': _controller!.agentStatusLine,
+      });
+      await _channel.invokeMethod<bool>('setAgentSteps', <String, Object?>{
+        'labels': <String>[
+          for (final IslandAgentStep s in _controller!.agentSteps) s.label
+        ],
+        'states': <int>[
+          for (final IslandAgentStep s in _controller!.agentSteps) s.state
+        ],
+      });
     } on PlatformException catch (_) {}
   }
 }
@@ -356,10 +502,14 @@ class IslandRealFeeds {
 
   static final DynamicIslandController _c = DynamicIslandController.instance;
   static final DynamicIslandLauncher _l = DynamicIslandLauncher.instance;
-  static Timer? _briefingDismissTimer;
 
   /// 后台任务进行中（chat.task_update 生命周期驱动）。
-  static void setTaskActivity({required int activeCount}) {
+  /// [statusLine] 可选：最后一次工具状态行，进 hover「任务」页。
+  static void setTaskActivity({required int activeCount, String? statusLine}) {
+    _c.updateTaskPlaneCount(activeCount);
+    if (statusLine != null && statusLine.trim().isNotEmpty) {
+      _c.updateAgentStatusLine(statusLine);
+    }
     if (activeCount > 0) {
       _c.present(IslandEntry(
         id: 'task',
@@ -411,23 +561,10 @@ class IslandRealFeeds {
     ));
   }
 
-  /// 早报就绪（morning.briefing 事件驱动），10 分钟后自动撤下。
-  static void setBriefingReady({String trailing = '点击查看'}) {
-    _briefingDismissTimer?.cancel();
-    _c.present(IslandEntry(
-      id: 'briefing',
-      title: '今日简报已就绪',
-      kind: IslandKind.briefing,
-      trailing: trailing,
-      priority: 3,
-    ));
-    _briefingDismissTimer = Timer(const Duration(minutes: 10), () {
-      _c.dismiss('briefing');
-    });
-  }
-
   /// 站内信未读（inbox.message / 轮询校准驱动）。
+  /// 未读数同时进 hover 环境行（「日期 · 下一日程 · N 未读」）。
   static void setInboxUnread(int count) {
+    _c.setAmbientUnread(count);
     if (count > 0) {
       _c.present(IslandEntry(
         id: 'inbox',
@@ -439,5 +576,30 @@ class IslandRealFeeds {
     } else {
       _c.dismiss('inbox');
     }
+  }
+
+  // ───────────────────── 纯语音模式（岛=唯一视觉） ─────────────────────
+  // 原玻璃胶囊悬浮球（voice-orb-py）退役，语音交互的状态载体移交通灵岛。
+
+  /// 语音模式状态条目：等待唤醒 / 聆听 / 思考 / 播报共用一个 id 原地刷新。
+  /// priority 0 与任务态同级——纯语音模式下它是唯一的常驻视觉，必须置顶。
+  static void setVoiceEntry({
+    required String title,
+    bool spinning = false,
+    String? trailing,
+  }) {
+    _c.present(IslandEntry(
+      id: 'voice',
+      title: title,
+      kind: IslandKind.voice,
+      spinning: spinning,
+      trailing: (trailing ?? '').trim().isEmpty ? null : trailing,
+      priority: 0,
+    ));
+  }
+
+  /// 退出语音模式：撤下语音条目。
+  static void dismissVoice() {
+    _c.dismiss('voice');
   }
 }

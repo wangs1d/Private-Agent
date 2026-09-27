@@ -35,7 +35,7 @@ void EnsureGdiplusIsland() {
 }
 
 // Gdiplus::Font(hdc, hfont) 只在构造时读一次 LOGFONT，不接管 HFONT。
-// 动画态 60fps 渲染、每帧最多 9 处字体构造——若每次 CreateFontW 都不释放，
+// 动画态 60fps 渲染、每帧多处字体构造——若每次 CreateFontW 都不释放，
 // 约 1 分钟就打满进程 GDI 句柄上限（默认 1 万），此后 CreateDIBSection
 // 失败、premultiply 循环读空位图直接 0xc0000005。字体组合有限
 // （族 × 字号 × 字重 × 删除线），进程级缓存复用，句柄数有界。
@@ -62,14 +62,14 @@ HFONT MakeIslandGlyphFont(int size) {
   return CachedIslandFont(L"Segoe MDL2 Assets", size, 400, false);
 }
 
-// 字形（Segoe MDL2 Assets）：task/update/schedule/briefing/inbox
+// 字形（Segoe MDL2 Assets）：task/update/schedule/inbox/voice
 const wchar_t* KindGlyph(DynamicIslandWindow::Kind kind) {
   switch (kind) {
     case DynamicIslandWindow::Kind::kTask: return L"\uE9D9";     // Diagnostic
     case DynamicIslandWindow::Kind::kUpdate: return L"\uE74E";   // Download
     case DynamicIslandWindow::Kind::kSchedule: return L"\uE787"; // Calendar
-    case DynamicIslandWindow::Kind::kBriefing: return L"\uE8A5"; // Document
     case DynamicIslandWindow::Kind::kInbox: return L"\uE896";    // Mail
+    case DynamicIslandWindow::Kind::kVoice: return L"\uE720";    // Microphone
   }
   return L"\uE787";
 }
@@ -77,24 +77,12 @@ const wchar_t* KindGlyph(DynamicIslandWindow::Kind kind) {
 // 自绘状态图标（字体字形在 MDL2 里缺失的类别用矢量画，杜绝豆腐块）。
 // task：进度圆环（spinning 时旋转）；briefing：文档；inbox：信封。
 void DrawTaskIcon(Gdiplus::Graphics& g, float cx, float cy, float r,
-                  double phase_s) {
-  Gdiplus::Pen pen(Gdiplus::Color(190, 255, 255, 255), 1.6f);
+                  double phase_s, BYTE alpha = 190) {
+  Gdiplus::Pen pen(Gdiplus::Color(alpha, 255, 255, 255), 1.6f);
   const float d = r * 2;
   const float start = static_cast<float>(std::fmod(phase_s * 240.0, 360.0));
   Gdiplus::RectF ring(cx - r, cy - r, d, d);
   g.DrawArc(&pen, ring, start, 300);
-}
-
-void DrawDocIcon(Gdiplus::Graphics& g, float cx, float cy, float w,
-                 float h) {
-  Gdiplus::Pen pen(Gdiplus::Color(190, 255, 255, 255), 1.4f);
-  Gdiplus::RectF body(cx - w / 2, cy - h / 2, w, h);
-  g.DrawRectangle(&pen, body);
-  Gdiplus::Pen line_pen(Gdiplus::Color(150, 255, 255, 255), 1.1f);
-  for (int i = 1; i <= 2; i++) {
-    const float ly = cy - h / 2 + h * i / 3.0f;
-    g.DrawLine(&line_pen, cx - w * 0.28f, ly, cx + w * 0.28f, ly);
-  }
 }
 
 void DrawMailIcon(Gdiplus::Graphics& g, float cx, float cy, float w,
@@ -106,14 +94,45 @@ void DrawMailIcon(Gdiplus::Graphics& g, float cx, float cy, float w,
   g.DrawLine(&pen, cx + w / 2, cy - h / 2, cx, cy + h * 0.08f);
 }
 
+// 步骤状态勾/叉（展开卡「任务动态」行首）：勾=成功，叉=失败。
+void DrawCheckMark(Gdiplus::Graphics& g, float cx, float cy, float s,
+                   BYTE alpha) {
+  Gdiplus::Pen pen(Gdiplus::Color(alpha, 150, 235, 165), 1.7f);
+  g.DrawLine(&pen, cx - 3.5f * s, cy + 0.4f * s, cx - 0.8f * s, cy + 3.1f * s);
+  g.DrawLine(&pen, cx - 0.8f * s, cy + 3.1f * s, cx + 4.2f * s, cy - 3.2f * s);
+}
+
+void DrawCrossMark(Gdiplus::Graphics& g, float cx, float cy, float s,
+                   BYTE alpha) {
+  Gdiplus::Pen pen(Gdiplus::Color(alpha, 255, 130, 120), 1.7f);
+  g.DrawLine(&pen, cx - 3.1f * s, cy - 3.1f * s, cx + 3.1f * s, cy + 3.1f * s);
+  g.DrawLine(&pen, cx - 3.1f * s, cy + 3.1f * s, cx + 3.1f * s, cy - 3.1f * s);
+}
+
 const wchar_t* kActionLabels[] = {L"创建日程", L"打开简报", L"静音"};
 constexpr int kActionCount = 3;
-
-constexpr double kMorphDurationS = 0.36;
 
 double EaseOutCubic(double t) { return 1.0 - std::pow(1.0 - t, 3.0); }
 
 double Clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+
+// 声明宽度下的文案兜底：超出档宽按字符截断加省略号（每帧少量 MeasureString，
+// 与既有头部排版同量级）。
+std::wstring FitText(Gdiplus::Graphics& g, const std::wstring& text,
+                     const Gdiplus::Font& font, float max_w) {
+  if (text.empty() || max_w <= 0) return L"";
+  Gdiplus::RectF m;
+  g.MeasureString(text.c_str(), -1, &font, Gdiplus::PointF(0, 0), &m);
+  if (m.Width <= max_w) return text;
+  std::wstring t = text;
+  while (!t.empty()) {
+    t.pop_back();
+    const std::wstring cand = t + L"…";
+    g.MeasureString(cand.c_str(), -1, &font, Gdiplus::PointF(0, 0), &m);
+    if (m.Width <= max_w) return cand;
+  }
+  return L"";
+}
 
 // 轻提醒音（随 attention 动画）：waveOut 现场合成。
 // 用户从三候选中选定 C：A4 低钟单音——钟体泛音（1/2/2.92 倍频）、
@@ -171,6 +190,9 @@ void RoundedPath(Gdiplus::GraphicsPath* path, const Gdiplus::RectF& r,
 }
 
 }  // namespace
+
+DynamicIslandWindow* DynamicIslandWindow::hook_instance_ = nullptr;
+HHOOK DynamicIslandWindow::wheel_hook_ = nullptr;
 
 DynamicIslandWindow::DynamicIslandWindow() = default;
 
@@ -259,6 +281,8 @@ void DynamicIslandWindow::Show() {
 
 void DynamicIslandWindow::Hide() {
   visible_ = false;
+  hovering_ = false;
+  UpdateWheelHook();
   if (window_handle_ != nullptr) {
     ShowWindow(window_handle_, SW_HIDE);
   }
@@ -285,27 +309,86 @@ void DynamicIslandWindow::SetAgenda(std::vector<AgendaItem> items) {
   if (window_handle_ != nullptr) Render();
 }
 
-void DynamicIslandWindow::SetExpanded(bool expanded) {
-  if (expanded_ == expanded) return;
-  morph_from_ = morph_;
-  expanded_ = expanded;
-  if (window_handle_ != nullptr) {
-    morph_start_s_ = now_s_;
-    StartAnimTimer();
+void DynamicIslandWindow::SetAgentSteps(std::vector<AgentStep> steps) {
+  if (steps.size() > static_cast<size_t>(kMaxSteps)) {
+    steps.erase(steps.begin(), steps.end() - kMaxSteps);
   }
+  agent_steps_ = std::move(steps);
+  if (window_handle_ != nullptr) Render();
+}
+
+void DynamicIslandWindow::SetAmbient(int unread_count, bool agent_active,
+                                     const std::string& agent_status) {
+  ambient_unread_ = unread_count;
+  agent_active_ = agent_active;
+  agent_status_ = agent_status;
+  if (window_handle_ != nullptr) Render();
+}
+
+void DynamicIslandWindow::SetVoiceTalkMode(bool enabled) {
+  // 纯语音模式标志：对话全语音（免点击），这里只负责悬停自动 glance。
+  if (voice_talk_mode_ == enabled) return;
+  voice_talk_mode_ = enabled;
+  if (window_handle_ != nullptr) Render();
+}
+
+// ── 三级形变（eisland islandTransition 思路）──
+
+double DynamicIslandWindow::TargetLevel() const {
+  switch (stage_target_) {
+    case Stage::kExpanded: return 2.0;
+    case Stage::kHover: return 1.0;
+    case Stage::kCompact: return 0.0;
+  }
+  return 0.0;
+}
+
+// 形变时长随目标距离查表：hover 档过渡轻快，跨两级（胶囊⇄展开）稍缓。
+double DynamicIslandWindow::MorphDurationFor(double from_level,
+                                             double to_level) {
+  const double d = std::abs(to_level - from_level);
+  if (d <= 0.01) return 0.16;
+  if (d <= 1.0) return 0.16 + 0.10 * d;   // 邻级：≤0.26s
+  return 0.26 + 0.20 * (d - 1.0);         // 跨级：≤0.46s
+}
+
+void DynamicIslandWindow::SetStage(Stage stage) {
+  if (stage_target_ == stage) return;
+  morph_from_ = morph_;
+  stage_target_ = stage;
+  morph_duration_s_ = MorphDurationFor(morph_from_, TargetLevel());
+  morph_start_s_ = now_s_;
+  morph_active_ = true;
+  if (stage == Stage::kHover) hover_tab_ = HoverTab::kToday;
+  // 滚轮钩子的挂载条件含 stage——点击进 hover 后光标可能不再移动，
+  // 不 here 补挂的话首次滚轮会丢失（WM_MOUSEMOVE 不会再来）。
+  UpdateWheelHook();
+  if (window_handle_ != nullptr) StartAnimTimer();
+}
+
+void DynamicIslandWindow::SetExpanded(bool expanded) {
+  if (!expanded) {
+    // Dart 侧不知道 hover 这个原生中间态（原生点击 compact→hover 不上报），
+    // 这里只负责「从展开卡退场」；若岛在 hover 态收到同步 false，保持不动，
+    // 否则任意一次控制器通知都会把用户的 hover 态拽回胶囊（镜像打架）。
+    if (stage_target_ == Stage::kExpanded) SetStage(Stage::kCompact);
+    return;
+  }
+  SetStage(Stage::kExpanded);
 }
 
 void DynamicIslandWindow::StartAttention(const std::string& title,
-                                          const std::string& trailing) {
+                                         const std::string& trailing) {
   PlayAttentionChime();
   attention_title_ = Utf8ToWide(title);
   attention_trailing_ = Utf8ToWide(trailing);
   // 展开态来提醒：瞬时收起（不播收缩动画），attention 恒以小胶囊为基准。
-  if (expanded_) {
-    expanded_ = false;
+  if (stage_target_ != Stage::kCompact) {
+    stage_target_ = Stage::kCompact;
     morph_ = 0.0;
     morph_from_ = 0.0;
-    morph_start_s_ = now_s_ - kMorphDurationS;
+    morph_start_s_ = now_s_ - 1.0;
+    morph_active_ = false;
   }
   attention_start_s_ = now_s_;
   // 待机态来提醒：注入临时条目让胶囊有内容可显（结束由 Dart 侧收口）。
@@ -371,11 +454,12 @@ void DynamicIslandWindow::StopAnimTimer() {
 void DynamicIslandWindow::UpdateAnimations() {
   const ULONGLONG now = GetTickCount64();
   now_s_ = static_cast<double>(now - anim_epoch_ms_) / 1000.0;
-  // 从形变起点值向目标（expanded_）插值；时长走完后精确停在目标，
-  // 避免起点过期后 morph 漂移到 1（曾致所有胶囊被画成展开卡尺寸）。
-  const double target = expanded_ ? 1.0 : 0.0;
-  const double raw = Clamp01((now_s_ - morph_start_s_) / kMorphDurationS);
+  // 从形变起点电平向目标（0/1/2）插值；时长走完后精确停在目标并解除
+  // 形变保护，避免起点过期后 morph 漂移（曾致所有胶囊被画成展开卡尺寸）。
+  const double target = TargetLevel();
+  const double raw = Clamp01((now_s_ - morph_start_s_) / morph_duration_s_);
   morph_ = morph_from_ + (target - morph_from_) * EaseOutCubic(raw);
+  if (raw >= 1.0) morph_active_ = false;
   // 约每 2 秒做一次前台全屏检查。
   static ULONGLONG last_check = 0;
   if (now - last_check >= 2000) {
@@ -403,26 +487,174 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {
   }
 }
 
+// ── 声明尺寸档（islandTransition 思路）：每种状态一个设计好的尺寸 ──
+// 胶囊宽不再按文案实时测量，杜绝文案长短引起的大小抖动；
+// 超档文案渲染时截断加省略号。
+
+int DynamicIslandWindow::CompactWidthFor(Kind kind) const {
+  switch (kind) {
+    case Kind::kTask: return 200;      // 「后台任务进行中」+ 活点
+    case Kind::kUpdate: return 200;    // 「更新下载中 64%」+ 进度线
+    case Kind::kSchedule: return 230;  // 「设计评审 · 25 分钟后」
+    case Kind::kInbox: return 200;     // 「站内信 · 3 条未读」
+    case Kind::kVoice: return 210;     // 「等待唤醒 · 说「小助手」」
+  }
+  return 200;
+}
+
 int DynamicIslandWindow::CompactWidth() const {
   if (!has_entry_) return kRestCapsuleW;
-  const std::wstring title = Utf8ToWide(entry_.title);
-  const std::wstring trailing = Utf8ToWide(entry_.trailing);
-  // CJK 字形宽约为字号；ASCII 约一半。粗估足够，渲染用 MeasureString 实测。
-  auto width_of = [](const std::wstring& t) {
-    int w = 0;
-    for (wchar_t c : t) w += (c < 0x2E80) ? 9 : 17;
-    return w;
-  };
-  int w = 14 + 8 + width_of(title) + 9;
-  if (entry_.spinning) w += 15;
-  if (!trailing.empty()) w += width_of(trailing);
-  w += 14;
-  return std::clamp(w, 70, 560);
+  return CompactWidthFor(entry_.kind);
 }
 
 int DynamicIslandWindow::ExpandedHeight() const {
   const int rows = std::clamp(static_cast<int>(agenda_.size()), 0, kMaxRows);
-  return 30 + 12 + 20 + rows * kRowH + (rows > 0 ? 6 : 0) + kBtnRowH + 10;
+  const int steps = std::clamp(static_cast<int>(agent_steps_.size()), 0, kMaxSteps);
+  int h = 30 + 12 + 20 + rows * kRowH + (rows > 0 ? 6 : 0);
+  if (steps > 0) h += 6 + 20 + steps * kStepRowH + 4;
+  return h + kBtnRowH + 10;
+}
+
+void DynamicIslandWindow::StageLerpSize(double level, double* w, double* h,
+                                        double* radius) const {
+  const double lv = std::max(0.0, std::min(2.0, level));
+  // 端点均为声明档：compact（按当前条目档）→ hover → expanded。
+  const double cw = CompactWidth();
+  const double ch = static_cast<double>(kCapsuleH);
+  const double cr = 15.0;
+  const double hw = static_cast<double>(kHoverW);
+  const double hh = static_cast<double>(kHoverH);
+  const double hr = static_cast<double>(kHoverH) / 2.0;  // 胶囊圆角
+  const double ew = static_cast<double>(kExpandedW);
+  const double eh = static_cast<double>(ExpandedHeight());
+  const double er = 26.0;
+  if (lv <= 1.0) {
+    *w = cw + (hw - cw) * lv;
+    *h = ch + (hh - ch) * lv;
+    *radius = cr + (hr - cr) * lv;
+  } else {
+    const double t = lv - 1.0;
+    *w = hw + (ew - hw) * t;
+    *h = hh + (eh - hh) * t;
+    *radius = hr + (er - hr) * t;
+  }
+}
+
+RECT DynamicIslandWindow::IslandScreenRect() const {
+  RECT rc = {};
+  if (window_handle_ == nullptr) return rc;
+  double lw = 0, lh = 0, lr = 0;
+  StageLerpSize(morph_, &lw, &lh, &lr);
+  RECT wr;
+  if (!GetWindowRect(window_handle_, &wr)) return rc;
+  const int w = S(static_cast<int>(lw + 0.5));
+  const int h = S(static_cast<int>(lh + 0.5));
+  const int left = wr.left + (S(kWindowW) - w) / 2;
+  const int top = wr.top + S(kTopMargin);
+  rc = {left, top, left + w, top + h};
+  return rc;
+}
+
+// ── hover 态滚轮：低级鼠标钩子 ──
+// WS_EX_NOACTIVATE 窗口拿不到键盘焦点，收不到 WM_MOUSEWHEEL；
+// 悬停期间挂 WH_MOUSE_LL 钩子，光标落在岛形内且处于 hover 态时
+// 消费滚轮（切环境页 / 滚进展开态），其余一律放行。
+
+void DynamicIslandWindow::UpdateWheelHook() {
+  const bool want = hovering_ && window_handle_ != nullptr &&
+                    stage_target_ != Stage::kCompact;
+  if (want && wheel_hook_ == nullptr) {
+    hook_instance_ = this;
+    wheel_hook_ = SetWindowsHookExW(WH_MOUSE_LL, WheelHookProc,
+                                    GetModuleHandle(nullptr), 0);
+    if (wheel_hook_ == nullptr) hook_instance_ = nullptr;
+  } else if (!want && wheel_hook_ != nullptr) {
+    UnhookWindowsHookEx(wheel_hook_);
+    wheel_hook_ = nullptr;
+    hook_instance_ = nullptr;
+  }
+}
+
+LRESULT CALLBACK DynamicIslandWindow::WheelHookProc(int code, WPARAM wparam,
+                                                    LPARAM lparam) noexcept {
+  if (code == HC_ACTION && hook_instance_ != nullptr &&
+      wparam == WM_MOUSEWHEEL) {
+    const auto* info = reinterpret_cast<const MSLLHOOKSTRUCT*>(lparam);
+    if (hook_instance_->ConsumeWheelAt(
+            info->pt, static_cast<short>(HIWORD(info->mouseData)))) {
+      return 1;  // 已消费，不传给下层窗口
+    }
+  }
+  return CallNextHookEx(wheel_hook_, code, wparam, lparam);
+}
+
+bool DynamicIslandWindow::ConsumeWheelAt(const POINT& screen_pt, short delta) {
+  if (window_handle_ == nullptr || IsMorphing() ||
+      stage_target_ != Stage::kHover) {
+    return false;
+  }
+  const RECT rc = IslandScreenRect();
+  if (!PtInRect(&rc, screen_pt)) return false;
+  // 钩子回调里只投递，滚动逻辑回到窗口消息循环执行（保持钩子轻快）。
+  PostMessageW(window_handle_, kIslandWheelMsg, 0,
+               static_cast<LPARAM>(static_cast<short>(delta)));
+  return true;
+}
+
+void DynamicIslandWindow::OnWheelDelta(short delta) {
+  if (IsMorphing() || stage_target_ != Stage::kHover) return;
+  if (delta < 0) {
+    // 下滚 = 下一个；滚过「任务」页即进展开态（零点击成本）。
+    if (hover_tab_ == HoverTab::kToday) {
+      hover_tab_ = HoverTab::kAgent;
+      Render();
+      return;
+    }
+    SetStage(Stage::kExpanded);
+    FireEvent(EventType::kExpandedChanged, "true");
+    return;
+  }
+  // 上滚 = 上一个，「今日」是头档。
+  if (hover_tab_ == HoverTab::kAgent) {
+    hover_tab_ = HoverTab::kToday;
+    Render();
+  }
+}
+
+// hover 态环境信息行：今日页 = 日期 · 下一日程 · 未读数；任务页 = agent 状态。
+std::wstring DynamicIslandWindow::BuildHoverLine() const {
+  if (hover_tab_ == HoverTab::kAgent) {
+    const bool any_running = std::any_of(
+        agent_steps_.begin(), agent_steps_.end(),
+        [](const AgentStep& s) { return s.state == 0; });
+    if (agent_active_ || any_running) {
+      std::wstring line = L"Agent";
+      if (!agent_status_.empty()) line += L" · " + Utf8ToWide(agent_status_);
+      return line;
+    }
+    std::wstring line = L"暂无进行中任务";
+    if (ambient_unread_ > 0) {
+      line += L" · " + std::to_wstring(ambient_unread_) + L" 未读";
+    }
+    return line;
+  }
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  static const wchar_t* kWeek[] = {L"周日", L"周一", L"周二",
+                                   L"周三", L"周四", L"周五", L"周六"};
+  std::wstring line = std::to_wstring(st.wMonth) + L"月" +
+                      std::to_wstring(st.wDay) + L"日 " +
+                      kWeek[st.wDayOfWeek % 7];
+  for (const AgendaItem& it : agenda_) {
+    if (it.completed) continue;
+    line += L" · 下一节 " + Utf8ToWide(it.time_text) + L" " +
+            Utf8ToWide(it.title);
+    break;
+  }
+  if (ambient_unread_ > 0) {
+    line += L" · " + std::to_wstring(ambient_unread_) + L" 未读";
+  }
+  return line;
 }
 
 void DynamicIslandWindow::Render() {
@@ -453,6 +685,7 @@ void DynamicIslandWindow::Render() {
   HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem_dc, dib));
 
   button_rects_.clear();
+  hover_dot_rects_.clear();
 
   {
     Gdiplus::Graphics g(mem_dc);
@@ -460,14 +693,12 @@ void DynamicIslandWindow::Render() {
     g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
     g.Clear(Gdiplus::Color(0, 0, 0, 0));
 
-    // ── 胶囊几何：compact ⇄ expanded 连续变形 ──
-    const int compact_w = CompactWidth();
-    const int exp_h = ExpandedHeight();
-    const float cur_w =
-        static_cast<float>((compact_w + (kExpandedW - compact_w) * morph_)) * s;
-    const float cur_h =
-        static_cast<float>((kCapsuleH + (exp_h - kCapsuleH) * morph_)) * s;
-    const float radius = static_cast<float>(15 + (26 - 15) * morph_) * s;
+    // ── 胶囊几何：三级声明档之间连续变形（0 胶囊 / 1 hover / 2 展开）──
+    double lw = 0, lh = 0, lr = 0;
+    StageLerpSize(morph_, &lw, &lh, &lr);
+    const float cur_w = static_cast<float>(lw) * s;
+    const float cur_h = static_cast<float>(lh) * s;
+    const float radius = static_cast<float>(lr) * s;
     // attention 缩放：提醒时刻整体放大（几何 + 内容统一经变换缩放）。
     double att = AttentionScale();
     if (attention_start_s_ >= 0 &&
@@ -532,7 +763,7 @@ void DynamicIslandWindow::Render() {
       const double pulse = 0.5 + 0.5 * std::sin(now_s_ * 6.2832 / 0.9);
       drawRimRings(static_cast<BYTE>(110 + 110 * pulse));
     } else if (morph_ < 0.3) {
-      // 呼吸灯分档（仅 compact；展开卡静态不呼吸）：
+      // 呼吸灯分档（仅 compact；hover/展开卡静态不呼吸）：
       // 待机 4s/30-70；任务进行中 2.8s/60-130；更新下载 3.5s/45-100；
       // 日程/简报/未读静态。
       double period = 0.0, a0 = 0.0, a1 = 0.0;
@@ -555,127 +786,221 @@ void DynamicIslandWindow::Render() {
     // 内容全部裁剪在胶囊内。
     g.SetClip(&cap_path);
 
+    // 三段内容交叉淡化（渐进展开的梯子）：
+    //   compact 内容 0→0.5 淡出；hover 内容仅在 [0.5,1.5] 区间可见；
+    //   展开区 morph>1 淡入，展开卡头部行沿用 compact 内容（1→2 淡入）。
+    const float mf = static_cast<float>(morph_);
+    const float entry_alpha =
+        std::max(1.0f - static_cast<float>(Clamp01(mf * 2.0f)),
+                 static_cast<float>(Clamp01(mf - 1.0f)));
+    const float hover_alpha =
+        1.0f - static_cast<float>(Clamp01(std::abs(mf - 1.0f) * 2.0f));
+    const BYTE ea = static_cast<BYTE>(entry_alpha * 255.0f + 0.5f);
+
     // ── 头部行（compact 内容 / 展开态保留为头部）──
     const float header_h = static_cast<float>(kCapsuleH) * s;
     const float header_cy = cap_y + header_h / 2.0f;
 
-    if (!has_entry_) {
-      // 待机：金属球镜头 + 呼吸光。
-      const float r = 5.0f * s * (1.0f - 0.25f * static_cast<float>(morph_));
-      const float cx = phys_w / 2.0f;
-      const double breath = 0.5 + 0.5 * std::sin(now_s_ * 2.2439948);  // 2.8s 周期
-      const float glow_r = r * (2.2f + 0.5f * static_cast<float>(breath));
-      Gdiplus::GraphicsPath glow_path;
-      glow_path.AddEllipse(cx - glow_r, header_cy - glow_r, glow_r * 2,
-                           glow_r * 2);
-      Gdiplus::PathGradientBrush glow_brush(&glow_path);
-      glow_brush.SetCenterColor(Gdiplus::Color(
-          static_cast<BYTE>(20 + 55 * breath), 255, 255, 255));
-      const Gdiplus::Color glow_surround(0, 255, 255, 255);
-      INT sc = 1;
-      glow_brush.SetSurroundColors(&glow_surround, &sc);
-      g.FillPath(&glow_brush, &glow_path);
+    if (ea > 5) {
+      if (!has_entry_) {
+        // 待机：金属球镜头 + 呼吸光。
+        const float r = 5.0f * s * (1.0f - 0.25f * mf);
+        const float cx = phys_w / 2.0f;
+        const double breath = 0.5 + 0.5 * std::sin(now_s_ * 2.2439948);  // 2.8s 周期
+        const float glow_r = r * (2.2f + 0.5f * static_cast<float>(breath));
+        Gdiplus::GraphicsPath glow_path;
+        glow_path.AddEllipse(cx - glow_r, header_cy - glow_r, glow_r * 2,
+                             glow_r * 2);
+        Gdiplus::PathGradientBrush glow_brush(&glow_path);
+        glow_brush.SetCenterColor(Gdiplus::Color(
+            static_cast<BYTE>((20 + 55 * breath) * ea / 255), 255, 255, 255));
+        const Gdiplus::Color glow_surround(0, 255, 255, 255);
+        INT sc = 1;
+        glow_brush.SetSurroundColors(&glow_surround, &sc);
+        g.FillPath(&glow_brush, &glow_path);
 
-      Gdiplus::GraphicsPath sphere_path;
-      sphere_path.AddEllipse(cx - r, header_cy - r, r * 2, r * 2);
-      Gdiplus::PathGradientBrush sphere_brush(&sphere_path);
-      sphere_brush.SetCenterPoint(
-          Gdiplus::PointF(cx - r * 0.35f, header_cy - r * 0.4f));
-      sphere_brush.SetCenterColor(Gdiplus::Color(255, 244, 245, 247));
-      const Gdiplus::Color sphere_surround(255, 20, 21, 25);
-      sphere_brush.SetSurroundColors(&sphere_surround, &sc);
-      g.FillPath(&sphere_brush, &sphere_path);
+        Gdiplus::GraphicsPath sphere_path;
+        sphere_path.AddEllipse(cx - r, header_cy - r, r * 2, r * 2);
+        Gdiplus::PathGradientBrush sphere_brush(&sphere_path);
+        sphere_brush.SetCenterPoint(
+            Gdiplus::PointF(cx - r * 0.35f, header_cy - r * 0.4f));
+        sphere_brush.SetCenterColor(Gdiplus::Color(ea, 244, 245, 247));
+        const Gdiplus::Color sphere_surround(ea, 20, 21, 25);
+        sphere_brush.SetSurroundColors(&sphere_surround, &sc);
+        g.FillPath(&sphere_brush, &sphere_path);
 
-      Gdiplus::SolidBrush hl(Gdiplus::Color(150, 255, 255, 255));
-      g.FillEllipse(&hl, cx - r * 0.55f, header_cy - r * 0.62f, r * 0.5f,
-                    r * 0.42f);
-    } else {
-      // 内容头部：图标 + 标题 + 尾注/活点，整体在头部行居中。
-      // attention 提醒期间标题/尾注切换为提醒文案（若下发）。
-      const std::wstring title =
-          attention_start_s_ >= 0 && !attention_title_.empty()
-              ? attention_title_
-              : Utf8ToWide(entry_.title);
-      const std::wstring trailing =
-          attention_start_s_ >= 0 && !attention_trailing_.empty()
-              ? attention_trailing_
-              : Utf8ToWide(entry_.trailing);
-      Gdiplus::Font icon_font(mem_dc, MakeIslandGlyphFont(S(15)));
-      Gdiplus::Font title_font(mem_dc, MakeIslandFont(S(17), 600));
-      Gdiplus::Font trail_font(mem_dc, MakeIslandFont(S(14), 600));
+        Gdiplus::SolidBrush hl(Gdiplus::Color(ea * 150 / 255, 255, 255, 255));
+        g.FillEllipse(&hl, cx - r * 0.55f, header_cy - r * 0.62f, r * 0.5f,
+                      r * 0.42f);
+      } else {
+        // 内容头部：图标 + 标题 + 尾注/活点，整体在头部行居中。
+        // attention 提醒期间标题/尾注切换为提醒文案（若下发）。
+        std::wstring title =
+            attention_start_s_ >= 0 && !attention_title_.empty()
+                ? attention_title_
+                : Utf8ToWide(entry_.title);
+        std::wstring trailing =
+            attention_start_s_ >= 0 && !attention_trailing_.empty()
+                ? attention_trailing_
+                : Utf8ToWide(entry_.trailing);
+        Gdiplus::Font icon_font(mem_dc, MakeIslandGlyphFont(S(15)));
+        Gdiplus::Font title_font(mem_dc, MakeIslandFont(S(17), 600));
+        Gdiplus::Font trail_font(mem_dc, MakeIslandFont(S(14), 600));
 
-      Gdiplus::RectF m_icon, m_title, m_trail;
-      const wchar_t* glyph = KindGlyph(entry_.kind);
-      g.MeasureString(glyph, -1, &icon_font, Gdiplus::PointF(0, 0), &m_icon);
-      g.MeasureString(title.c_str(), -1, &title_font, Gdiplus::PointF(0, 0),
-                      &m_title);
-      if (!trailing.empty()) {
-        g.MeasureString(trailing.c_str(), -1, &trail_font,
-                        Gdiplus::PointF(0, 0), &m_trail);
-      }
-      const float icon_w = entry_.spinning ? 0.0f : m_icon.Width;
-      const float trail_w =
-          entry_.spinning ? 5.0f * s : m_trail.Width;
-      const float gap = 7.0f * s;
-      const float total = icon_w + gap + m_title.Width + 8.0f * s + trail_w;
-      float x = cap_x + (cur_w - total) / 2.0f;
-
-      const float icon_cy = header_cy;
-      if (!entry_.spinning) {
-        // task/briefing/inbox 用矢量图标（对应字形在 MDL2 缺失或为豆腐块）。
-        if (entry_.kind == DynamicIslandWindow::Kind::kTask) {
-          DrawTaskIcon(g, x + m_icon.Width / 2.0f, icon_cy, 6.5f * s,
-                       now_s_);
-        } else if (entry_.kind == DynamicIslandWindow::Kind::kBriefing) {
-          DrawDocIcon(g, x + m_icon.Width / 2.0f, icon_cy, 11.0f * s,
-                      13.0f * s);
-        } else if (entry_.kind == DynamicIslandWindow::Kind::kInbox) {
-          DrawMailIcon(g, x + m_icon.Width / 2.0f, icon_cy, 13.0f * s,
-                       10.0f * s);
-        } else {
-          Gdiplus::SolidBrush icon_brush(Gdiplus::Color(190, 255, 255, 255));
-          g.DrawString(glyph, -1, &icon_font,
-                       Gdiplus::PointF(x, header_cy - m_icon.Height / 2.0f),
-                       &icon_brush);
+        // 声明档宽下排版：尾注封顶 40%，标题吃剩余，超档截断加省略号。
+        Gdiplus::RectF m_icon, m_title, m_trail;
+        const wchar_t* glyph = KindGlyph(entry_.kind);
+        g.MeasureString(glyph, -1, &icon_font, Gdiplus::PointF(0, 0), &m_icon);
+        const float pad_x = 14.0f * s;
+        const float gap = 7.0f * s;
+        const float avail = cur_w - pad_x * 2;
+        const float icon_w = entry_.spinning ? 0.0f : m_icon.Width;
+        const float icon_block = icon_w + gap;
+        const float tail_base = entry_.spinning
+                                    ? 5.0f * s
+                                    : (trailing.empty()
+                                           ? 0.0f
+                                           : ([&]() {
+                                               Gdiplus::RectF mm;
+                                               g.MeasureString(
+                                                   trailing.c_str(), -1,
+                                                   &trail_font,
+                                                   Gdiplus::PointF(0, 0), &mm);
+                                               return mm.Width;
+                                             })());
+        const float tail_use = std::min(tail_base, avail * 0.40f);
+        const float title_cap =
+            std::max(30.0f * s, avail - icon_block - tail_use - 8.0f * s);
+        title = FitText(g, title, title_font, title_cap);
+        g.MeasureString(title.c_str(), -1, &title_font, Gdiplus::PointF(0, 0),
+                        &m_title);
+        if (!entry_.spinning && !trailing.empty() && tail_use > 0.0f) {
+          trailing = FitText(g, trailing, trail_font, tail_use);
+          g.MeasureString(trailing.c_str(), -1, &trail_font,
+                          Gdiplus::PointF(0, 0), &m_trail);
         }
-      }
-      x += icon_w + gap;
-      Gdiplus::SolidBrush title_brush(Gdiplus::Color(236, 236, 236));
-      g.DrawString(title.c_str(), -1, &title_font,
-                   Gdiplus::PointF(x, header_cy - m_title.Height / 2.0f),
-                   &title_brush);
-      x += m_title.Width + 8.0f * s;
-      if (entry_.spinning) {
-        // 呼吸活点
-        const double pulse = 0.5 + 0.5 * std::sin(now_s_ * 4.4879895);  // 1.4s 周期
-        const float dot_r = 2.5f * s;
-        Gdiplus::SolidBrush dot_brush(
-            Gdiplus::Color(static_cast<BYTE>(64 + 165 * pulse), 255, 255, 255));
-        g.FillEllipse(&dot_brush, x, header_cy - dot_r, dot_r * 2, dot_r * 2);
-      } else if (!trailing.empty()) {
-        Gdiplus::SolidBrush trail_brush(Gdiplus::Color(107, 255, 255, 255));
-        g.DrawString(trailing.c_str(), -1, &trail_font,
-                     Gdiplus::PointF(x, header_cy - m_trail.Height / 2.0f),
-                     &trail_brush);
-      }
+        const float trail_w = entry_.spinning ? 5.0f * s : m_trail.Width;
+        const float total = icon_block + m_title.Width + 8.0f * s +
+                            (entry_.spinning || !trailing.empty() ? trail_w : 0.0f);
+        float x = cap_x + (cur_w - total) / 2.0f;
 
-      // 进度线（贴头部行底缘，仅 compact 态；展开后无意义）
-      if (entry_.progress >= 0 && entry_.progress <= 1 && morph_ < 0.5) {
-        const float line_y = cap_y + header_h - 3.0f * s;
-        const float inset = 14.0f * s;
-        const float track_w = cur_w - inset * 2;
-        const float line_h = 2.0f * s;
-        Gdiplus::SolidBrush track_brush(Gdiplus::Color(26, 255, 255, 255));
-        g.FillRectangle(&track_brush, cap_x + inset, line_y, track_w, line_h);
-        Gdiplus::SolidBrush fill_brush(Gdiplus::Color(230, 255, 255, 255));
-        g.FillRectangle(&fill_brush, cap_x + inset, line_y,
-                        track_w * static_cast<float>(entry_.progress), line_h);
+        const float icon_cy = header_cy;
+        if (!entry_.spinning) {
+          // task/inbox 用矢量图标（对应字形在 MDL2 缺失或为豆腐块）。
+          if (entry_.kind == DynamicIslandWindow::Kind::kTask) {
+            DrawTaskIcon(g, x + m_icon.Width / 2.0f, icon_cy, 6.5f * s,
+                         now_s_, ea);
+          } else if (entry_.kind == DynamicIslandWindow::Kind::kInbox) {
+            DrawMailIcon(g, x + m_icon.Width / 2.0f, icon_cy, 13.0f * s,
+                         10.0f * s);
+          } else {
+            Gdiplus::SolidBrush icon_brush(
+                Gdiplus::Color(ea * 190 / 255, 255, 255, 255));
+            g.DrawString(glyph, -1, &icon_font,
+                         Gdiplus::PointF(x, header_cy - m_icon.Height / 2.0f),
+                         &icon_brush);
+          }
+        }
+        x += icon_block;
+        Gdiplus::SolidBrush title_brush(
+            Gdiplus::Color(ea * 236 / 255, 236, 236));
+        g.DrawString(title.c_str(), -1, &title_font,
+                     Gdiplus::PointF(x, header_cy - m_title.Height / 2.0f),
+                     &title_brush);
+        x += m_title.Width + 8.0f * s;
+        if (entry_.spinning) {
+          // 呼吸活点
+          const double pulse = 0.5 + 0.5 * std::sin(now_s_ * 4.4879895);  // 1.4s 周期
+          const float dot_r = 2.5f * s;
+          Gdiplus::SolidBrush dot_brush(
+              Gdiplus::Color(static_cast<BYTE>((64 + 165 * pulse) * ea / 255),
+                             255, 255, 255));
+          g.FillEllipse(&dot_brush, x, header_cy - dot_r, dot_r * 2, dot_r * 2);
+        } else if (!trailing.empty()) {
+          Gdiplus::SolidBrush trail_brush(
+              Gdiplus::Color(ea * 107 / 255, 255, 255, 255));
+          g.DrawString(trailing.c_str(), -1, &trail_font,
+                       Gdiplus::PointF(x, header_cy - m_trail.Height / 2.0f),
+                       &trail_brush);
+        }
+
+        // 进度线（贴头部行底缘，仅 compact 态；展开后无意义）
+        if (entry_.progress >= 0 && entry_.progress <= 1 && morph_ < 0.5) {
+          const float line_y = cap_y + header_h - 3.0f * s;
+          const float inset = 14.0f * s;
+          const float track_w = cur_w - inset * 2;
+          const float line_h = 2.0f * s;
+          Gdiplus::SolidBrush track_brush(
+              Gdiplus::Color(ea * 26 / 255, 255, 255, 255));
+          g.FillRectangle(&track_brush, cap_x + inset, line_y, track_w, line_h);
+          Gdiplus::SolidBrush fill_brush(
+              Gdiplus::Color(ea * 230 / 255, 255, 255, 255));
+          g.FillRectangle(&fill_brush, cap_x + inset, line_y,
+                          track_w * static_cast<float>(entry_.progress), line_h);
+        }
       }
     }
 
-    // ── 展开区：日程卡（随 morph 淡入）──
-    if (morph_ > 0.01) {
-      const BYTE fade = static_cast<BYTE>(255 * Clamp01(morph_ * 1.2));
+    // ── hover 态：导航点 + 环境信息行 ──
+    if (hover_alpha > 0.02f) {
+      const BYTE ha = static_cast<BYTE>(hover_alpha * 255.0f + 0.5f);
+      const float dot_cy = cap_y + cur_h / 2.0f;
+      float dx = cap_x + 22.0f * s;
+      for (int i = 0; i < 3; i++) {
+        const bool expand_pt = i == 2;
+        const bool active = !expand_pt && i == static_cast<int>(hover_tab_);
+        const bool hov = hovering_ && hover_dot_ == i;
+        if (expand_pt) {
+          // 「展开」点画下箭头（点击/滚进都进展开卡）。
+          Gdiplus::Font glyph_font(mem_dc, MakeIslandGlyphFont(S(11)));
+          const wchar_t* chev = L"\uE96E";  // ChevronDownSmall
+          Gdiplus::RectF m_c;
+          g.MeasureString(chev, -1, &glyph_font, Gdiplus::PointF(0, 0), &m_c);
+          Gdiplus::SolidBrush cb(Gdiplus::Color(
+              static_cast<BYTE>(ha * (active || hov ? 90 : 42) / 100), 255,
+              255, 255));
+          g.DrawString(chev, -1, &glyph_font,
+                       Gdiplus::PointF(dx - m_c.Width / 2.0f,
+                                       dot_cy - m_c.Height / 2.0f),
+                       &cb);
+        } else {
+          const float r = (active ? 4.2f : 3.1f) * s;
+          Gdiplus::SolidBrush db(Gdiplus::Color(
+              static_cast<BYTE>(ha * (active ? 100 : (hov ? 75 : 34)) / 100),
+              255, 255, 255));
+          g.FillEllipse(&db, dx - r, dot_cy - r, r * 2, r * 2);
+          if (active) {
+            Gdiplus::Pen ring_pen(Gdiplus::Color(
+                static_cast<BYTE>(ha * 30 / 100), 255, 255, 255), 1.2f * s);
+            g.DrawEllipse(&ring_pen, dx - r - 2.5f * s, dot_cy - r - 2.5f * s,
+                          (r + 2.5f * s) * 2, (r + 2.5f * s) * 2);
+          }
+        }
+        RECT drc = {static_cast<LONG>(dx - 10.0f * s),
+                    static_cast<LONG>(dot_cy - 12.0f * s),
+                    static_cast<LONG>(dx + 10.0f * s),
+                    static_cast<LONG>(dot_cy + 12.0f * s)};
+        hover_dot_rects_.push_back(drc);
+        dx += static_cast<float>(kHoverDotPitch) * s;
+      }
+      const std::wstring line = BuildHoverLine();
+      Gdiplus::Font line_font(mem_dc, MakeIslandFont(S(14), 500));
+      const float line_x = dx - 4.0f * s;
+      const float line_max = cap_x + cur_w - 18.0f * s - line_x;
+      const std::wstring fitted = FitText(g, line, line_font, line_max);
+      Gdiplus::RectF m_line;
+      g.MeasureString(fitted.c_str(), -1, &line_font, Gdiplus::PointF(0, 0),
+                      &m_line);
+      Gdiplus::SolidBrush line_brush(
+          Gdiplus::Color(static_cast<BYTE>(ha * 62 / 100), 255, 255, 255));
+      g.DrawString(fitted.c_str(), -1, &line_font,
+                   Gdiplus::PointF(line_x, dot_cy - m_line.Height / 2.0f),
+                   &line_brush);
+    }
+
+    // ── 展开区：日程卡 + 任务动态（随 morph 越过 hover 档淡入）──
+    if (morph_ > 1.01) {
+      const BYTE fade = static_cast<BYTE>(255 * Clamp01((morph_ - 1.0) * 1.2));
       const float pad = 18.0f * s;
       float y = cap_y + header_h + 6.0f * s;
 
@@ -730,6 +1055,51 @@ void DynamicIslandWindow::Render() {
           y += static_cast<float>(kRowH) * s;
         }
         y += 6.0f * s;
+      }
+
+      // ── 任务动态：agent 工具步骤流（进行中转圈 / 成功勾 / 失败叉）──
+      const int step_rows =
+          std::min(static_cast<int>(agent_steps_.size()), kMaxSteps);
+      if (step_rows > 0) {
+        Gdiplus::SolidBrush step_div_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 6 / 100), 255, 255, 255));
+        g.FillRectangle(&step_div_brush, cap_x + pad, y, cur_w - pad * 2,
+                        1.0f * s);
+        y += 6.0f * s;
+
+        Gdiplus::Font step_label_font(mem_dc, MakeIslandFont(S(13), 700));
+        Gdiplus::SolidBrush step_label_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 38 / 100), 255, 255, 255));
+        g.DrawString(L"任务动态", -1, &step_label_font,
+                     Gdiplus::PointF(cap_x + pad, y), &step_label_brush);
+        y += 20.0f * s;
+
+        Gdiplus::Font step_font(mem_dc, MakeIslandFont(S(14), 500));
+        for (int i = 0; i < step_rows; i++) {
+          const AgentStep& st = agent_steps_[i];
+          const float glyph_cx = cap_x + pad + 5.0f * s;
+          const float glyph_cy = y + 9.0f * s;
+          if (st.state == 0) {
+            DrawTaskIcon(g, glyph_cx, glyph_cy, 4.5f * s, now_s_,
+                         static_cast<BYTE>(fade * 80 / 100));
+          } else if (st.state == 1) {
+            DrawCheckMark(g, glyph_cx, glyph_cy, s,
+                          static_cast<BYTE>(fade * 70 / 100));
+          } else {
+            DrawCrossMark(g, glyph_cx, glyph_cy, s,
+                          static_cast<BYTE>(fade * 80 / 100));
+          }
+          const std::wstring step_text = FitText(
+              g, Utf8ToWide(st.label), step_font,
+              cur_w - pad * 2 - 16.0f * s);
+          Gdiplus::SolidBrush step_brush(
+              Gdiplus::Color(static_cast<BYTE>(fade * 55 / 100), 255, 255, 255));
+          g.DrawString(step_text.c_str(), -1, &step_font,
+                       Gdiplus::PointF(cap_x + pad + 14.0f * s, y),
+                       &step_brush);
+          y += static_cast<float>(kStepRowH) * s;
+        }
+        y += 4.0f * s;
       }
 
       // 快捷按钮行
@@ -806,6 +1176,17 @@ int DynamicIslandWindow::HoverButtonAt(int client_x, int client_y) const {
   return -1;
 }
 
+int DynamicIslandWindow::HoverDotAt(int client_x, int client_y) const {
+  for (size_t i = 0; i < hover_dot_rects_.size(); i++) {
+    const RECT& rc = hover_dot_rects_[i];
+    if (client_x >= rc.left && client_x <= rc.right && client_y >= rc.top &&
+        client_y <= rc.bottom) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
 LRESULT CALLBACK DynamicIslandWindow::WndProc(HWND hwnd, UINT message,
                                               WPARAM wparam,
                                               LPARAM lparam) noexcept {
@@ -838,16 +1219,26 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         UpdateAnimations();
       } else if (wparam == 2) {
         KillTimer(hwnd, 2);
-        if (expanded_ && !hovering_ && attention_start_s_ < 0) {
-          SetExpanded(false);
-          FireEvent(EventType::kExpandedChanged, "false");
+        if (!hovering_ && attention_start_s_ < 0) {
+          // 分级自动收回：展开先退回 hover（环境信息），hover 再静默回胶囊。
+          if (stage_target_ == Stage::kExpanded) {
+            SetStage(Stage::kHover);
+          } else if (stage_target_ == Stage::kHover) {
+            SetStage(Stage::kCompact);
+            FireEvent(EventType::kExpandedChanged, "false");
+          }
         }
       }
       return 0;
     case WM_NCHITTEST:
       return HTCLIENT;  // 岛形以外 alpha=0，系统自动穿透
     case WM_LBUTTONDOWN: {
-      const int btn = HoverButtonAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+      // 形变保护（eisland morphing guard）：动画未完成时吞掉点击，
+      // 避免连点按出半截状态。
+      if (IsMorphing()) return 0;
+      const int cx = GET_X_LPARAM(lparam);
+      const int cy = GET_Y_LPARAM(lparam);
+      const int btn = HoverButtonAt(cx, cy);
       if (btn >= 0) {
         char utf8[128] = {};
         WideCharToMultiByte(CP_UTF8, 0, kActionLabels[btn], -1, utf8,
@@ -855,22 +1246,63 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         FireEvent(EventType::kAction, utf8);
         return 0;
       }
-      SetExpanded(!expanded_);
-      FireEvent(EventType::kExpandedChanged, expanded_ ? "true" : "false");
+      // hover 导航点：今日/任务切页，「展开」点进展开卡。
+      if (std::abs(morph_ - 1.0) < 0.45) {
+        const int dot = HoverDotAt(cx, cy);
+        if (dot == 2) {
+          SetStage(Stage::kExpanded);
+          FireEvent(EventType::kExpandedChanged, "true");
+          return 0;
+        }
+        if (dot >= 0) {
+          hover_tab_ = static_cast<HoverTab>(dot);
+          Render();
+          return 0;
+        }
+      }
+      // 三级渐进展开：胶囊→hover→展开；收起从展开先回 hover。
+      switch (stage_target_) {
+        case Stage::kCompact:
+          SetStage(Stage::kHover);
+          break;
+        case Stage::kHover:
+          SetStage(Stage::kExpanded);
+          FireEvent(EventType::kExpandedChanged, "true");
+          break;
+        case Stage::kExpanded:
+          SetStage(Stage::kHover);
+          break;
+      }
       return 0;
     }
+    case WM_MOUSEWHEEL:
+      OnWheelDelta(GET_WHEEL_DELTA_WPARAM(wparam));
+      return 0;
+    case kIslandWheelMsg:
+      OnWheelDelta(static_cast<short>(LOWORD(lparam)));
+      return 0;
     case WM_MOUSEMOVE: {
-      const int btn = HoverButtonAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+      const int cx = GET_X_LPARAM(lparam);
+      const int cy = GET_Y_LPARAM(lparam);
+      const int btn = HoverButtonAt(cx, cy);
       hovering_ = true;
-      if (expanded_) KillTimer(hwnd, 2);  // 鼠标回到岛上：取消自动收回
+      if (stage_target_ != Stage::kCompact) {
+        KillTimer(hwnd, 2);  // 鼠标回到岛上：取消分级自动收回
+      } else if (voice_talk_mode_ && !IsMorphing()) {
+        // 纯语音模式：悬停自动 glance 环境行（无需点击进 hover）。
+        SetStage(Stage::kHover);
+      }
+      UpdateWheelHook();
 
       if (!tracking_mouse_) {
         TRACKMOUSEEVENT tme = {sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
         TrackMouseEvent(&tme);
         tracking_mouse_ = true;
       }
-      if (btn != hover_btn_) {
+      const int dot = std::abs(morph_ - 1.0) < 0.45 ? HoverDotAt(cx, cy) : -1;
+      if (btn != hover_btn_ || dot != hover_dot_) {
         hover_btn_ = btn;
+        hover_dot_ = dot;
         Render();
       }
       return 0;
@@ -879,10 +1311,14 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
       hovering_ = false;
       tracking_mouse_ = false;
       hover_btn_ = -1;
+      hover_dot_ = -1;
+      UpdateWheelHook();
       Render();
-      // 人为展开后鼠标离开：3 秒后自动收回（attention 期间不收）。
-      if (expanded_ && attention_start_s_ < 0) {
-        SetTimer(hwnd, 2, 3000, nullptr);
+      // 分级自动收回：展开 3 秒退回 hover，hover 2.5 秒回胶囊
+      // （attention 期间不收）。
+      if (stage_target_ != Stage::kCompact && attention_start_s_ < 0) {
+        SetTimer(hwnd, 2, stage_target_ == Stage::kExpanded ? 3000 : 2500,
+                 nullptr);
       }
       return 0;
     case WM_DPICHANGED: {
@@ -900,6 +1336,8 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
       return 0;
     case WM_DESTROY:
       StopAnimTimer();
+      hovering_ = false;
+      UpdateWheelHook();
       return 0;
     default:
       break;

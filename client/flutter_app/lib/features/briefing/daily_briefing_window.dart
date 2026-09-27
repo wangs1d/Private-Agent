@@ -5,12 +5,12 @@ import "dart:math";
 
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
-import "package:http/http.dart" as http;
 import "package:webview_windows/webview_windows.dart";
 import "package:window_manager/window_manager.dart";
 
-import "../../core/config/api_config.dart";
 import "../../core/services/access_auth_api.dart";
+import "../../core/services/account_profile_api.dart";
+import "../../core/services/briefing_tts_api.dart";
 import "../../core/services/daily_briefing_card_model.dart";
 import "../../core/services/tts_player.dart";
 import "../../core/services/windows_webview_bootstrap.dart";
@@ -41,50 +41,6 @@ import "../../core/services/windows_webview_bootstrap.dart";
 
 /// 子进程窗口模式的环境变量名（值为载荷 JSON 文件路径）。
 const String kDailyBriefingWindowEnv = "PAI_DAILY_BRIEFING_WINDOW";
-
-/// 单字常见姓氏（与 server appellation.ts 同源的启发式子集）：
-/// 用于把"连名带姓的 displayName"得体化为「姓氏+先生」。
-const String _kCommonSingleSurnames =
-    "王李张刘陈杨黄赵吴周徐孙马朱胡郭何林罗高郑梁谢宋唐许韩冯邓曹彭曾肖田董"
-    "潘袁蔡蒋余于杜叶程魏苏吕丁任卢姚沈钟姜崔谭陆范汪廖石金韦贾夏付方邹熊白"
-    "孟秦邱侯江尹薛闫段雷龙黎史陶贺毛郝顾龚邵万钱严覃武戴莫孔向汤温康施文柯"
-    "柴倪凌米谷代桂";
-
-/// 常见复姓（ displayName 以复姓开头时截复姓）。
-const List<String> _kCompoundSurnames = [
-  "欧阳", "司马", "上官", "诸葛", "东方", "夏侯", "皇甫", "尉迟", "公孙",
-  "令狐", "慕容", "司徒", "长孙", "宇文", "南宫", "西门", "独孤", "司空",
-];
-
-/// 尾缀称谓词（王哥/王总/王先生/老王…）或昵称前缀（老王/小张/阿强）→
-/// 本身就是得体称呼，原样保留。
-final RegExp _kHonorificTail =
-    RegExp(r"(先生|女士|小姐|老师|教授|博士|医生|大夫|老板|同学|哥|姐|弟|妹|叔|姨|伯|婶|舅|总|工|师)$");
-final RegExp _kNicknameHead = RegExp(r"^(老|小|阿|大)");
-
-/// 注册 displayName 得体化（业务硬规则：问候绝不直呼大名）。
-/// 「王铭川」→「王先生」、「欧阳文山」→「欧阳先生」；已是称呼（王哥/老王/
-/// Tony…）原样返回；无法判断时原样返回（宁可不改也不误伤用户指定的称呼）。
-String politeDisplayName(String raw) {
-  final v = raw.trim().replaceAll(RegExp(r"\s+"), "");
-  if (v.isEmpty) return v;
-  if (_kHonorificTail.hasMatch(v) || _kNicknameHead.hasMatch(v)) return v;
-  final cjk = RegExp(r"^[\u4e00-\u9fff]{2,4}$");
-  if (!cjk.hasMatch(v)) return v;
-
-  for (final compound in _kCompoundSurnames) {
-    if (v.startsWith(compound)) {
-      return v.length >= 3 ? "$compound先生" : v;
-    }
-  }
-  final head = v.substring(0, 1);
-  if (!_kCommonSingleSurnames.contains(head)) return v;
-  if (v.length == 2) {
-    final tail = v.substring(1);
-    if (_kHonorificTail.hasMatch(tail)) return v;
-  }
-  return "$head先生";
-}
 
 /// 卡片逻辑宽（= 设计稿宽，Flutter 逻辑像素与 CSS 像素 1:1）。
 const double kCardWidth = 400;
@@ -137,43 +93,6 @@ class DailyBriefingWindowLauncher {
 
   static Process? _current;
 
-  /// 称呼缓存（账号 displayName）：进程内只查一次，失败记空串不再重试。
-  static String? _appellationCache;
-
-  /// 用户称呼：取账号注册的 displayName（GET /accounts/me），如「王先生」。
-  /// 未注册 / 接口失败 → 空串（问候退化为不带称呼）。
-  static Future<String> resolveAppellation() async {
-    final String? cached = _appellationCache;
-    if (cached != null) return cached;
-    try {
-      final Uri uri = Uri
-          .parse("${ApiConfig.httpBase}/accounts/me")
-          .replace(queryParameters: ApiConfig.accountAuthQuery);
-      final http.Response res = await http
-          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
-          .timeout(const Duration(seconds: 4));
-      if (res.statusCode == 200) {
-        final Map<String, dynamic> data =
-            jsonDecode(res.body) as Map<String, dynamic>;
-        final Object? rawAccount = data["account"];
-        if (data["registered"] == true && rawAccount is Map) {
-          final String name =
-              (rawAccount.cast<String, dynamic>()["displayName"] ?? "")
-                  .toString()
-                  .trim();
-          // 业务硬规则：displayName 常是注册大名，问候前先得体化
-          // （王铭川 → 王先生），绝不直呼大名。
-          _appellationCache = politeDisplayName(name);
-          return _appellationCache ?? "";
-        }
-      }
-    } catch (_) {
-      // 查询失败：本次不带称呼，不打断简报展示
-    }
-    _appellationCache = "";
-    return "";
-  }
-
   /// 尝试在独立系统窗口中展示简报；成功返回 true。
   /// 失败（非 Windows / spawn 失败）时由调用方退回通知/对话框路径。
   ///
@@ -189,7 +108,7 @@ class DailyBriefingWindowLauncher {
       final String resolvedAppellation =
           (appellation != null && appellation.trim().isNotEmpty)
               ? appellation.trim()
-              : await resolveAppellation();
+              : await AccountProfileApi.resolveAppellation();
       final File payloadFile = await _writePayloadFile(
         DailyBriefingWindowPayload(
           narrationText: narrationText,
@@ -598,38 +517,13 @@ class _DailyBriefingWindowAppState extends State<DailyBriefingWindowApp> {
       await _pushIdle("语音暂不可用");
       return;
     }
-    try {
-      // 注意：authHeaders 未绑定时返回 const map，不能级联修改，需展开合并
-      final Map<String, String> headers = <String, String>{
-        "Content-Type": "application/json",
-        ...AccessCredentialStore.instance.authHeaders,
-      };
-      debugPrint("[DailyBriefingWindow] tts request -> ${ApiConfig.httpBase}");
-      final http.Response res = await http
-          .post(
-            Uri.parse("${ApiConfig.httpBase}/api/morning-briefing/tts"),
-            headers: headers,
-            body: jsonEncode(<String, dynamic>{"text": script}),
-          )
-          .timeout(const Duration(seconds: 15));
-      debugPrint("[DailyBriefingWindow] tts response ${res.statusCode} "
-          "len=${res.body.length}");
-      if (res.statusCode != 200) {
-        await _pushIdle("语音暂不可用 · 点击重试");
-        return;
-      }
-      final Map<String, dynamic> data =
-          jsonDecode(res.body) as Map<String, dynamic>;
-      final String? base64Audio = data["base64"]?.toString();
-      if (base64Audio == null || base64Audio.isEmpty) {
-        await _pushIdle("语音暂不可用 · 点击重试");
-        return;
-      }
-      _audioBase64 = base64Audio;
-      await _playCached();
-    } catch (_) {
+    final String? base64Audio = await BriefingTtsApi.fetchSpeech(script);
+    if (base64Audio == null) {
       await _pushIdle("语音暂不可用 · 点击重试");
+      return;
     }
+    _audioBase64 = base64Audio;
+    await _playCached();
   }
 
   Future<void> _playCached() async {

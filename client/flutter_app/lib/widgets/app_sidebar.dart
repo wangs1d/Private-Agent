@@ -25,6 +25,7 @@ class AppSidebar extends StatefulWidget {
     required this.onCheckUpdate,
     required this.onOpenUserMenuFeedback,
     required this.onOpenDevices,
+    required this.onEnterPureVoiceMode,
     required this.onLogout,
   });
 
@@ -64,6 +65,9 @@ class AppSidebar extends StatefulWidget {
 
   /// 用户菜单「我的设备」行:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
+
+  /// 点击「纯语音模式」:主窗口隐藏，唤醒/对话由灵动岛承载
+  final VoidCallback onEnterPureVoiceMode;
 
   /// 用户菜单「退出登录」行
   final VoidCallback onLogout;
@@ -178,6 +182,7 @@ class _AppSidebarState extends State<AppSidebar> {
                     onInboxUnreadChanged: widget.onInboxUnreadChanged,
                     onOpenFeedback: widget.onOpenUserMenuFeedback,
                     onOpenDevices: widget.onOpenDevices,
+                    onEnterPureVoiceMode: widget.onEnterPureVoiceMode,
                     onLogout: widget.onLogout,
                   ),
                 ),

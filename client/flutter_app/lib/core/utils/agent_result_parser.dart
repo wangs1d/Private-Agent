@@ -243,6 +243,7 @@ class AgentResultData {
     this.sides = const <AgentResultCardSide>[],
     this.compare,
     this.videos = const <AgentResultCardVideo>[],
+    this.extra,
   });
 
   /// 智能体头像缩写（默认 "NB"）。
@@ -303,10 +304,15 @@ class AgentResultData {
   /// product_compare 卡：评测/试色视频入口。
   final List<AgentResultCardVideo> videos;
 
+  /// 卡片私有载荷透传（morning_briefing 等自渲染卡携带的原始数据）。
+  /// 通用卡不读它；由对应 cardType 的渲染分支自行解析。
+  final Map<String, dynamic>? extra;
+
   factory AgentResultData.fromJson(Map<String, dynamic> json) {
     final List<dynamic>? rawItems = json["items"] as List<dynamic>?;
     final List<dynamic>? rawActions = json["actions"] as List<dynamic>?;
     final Map<String, dynamic>? rawTravelPlan = json["travelPlan"] as Map<String, dynamic>?;
+    final Map<String, dynamic>? rawExtra = json["extra"] as Map<String, dynamic>?;
     return AgentResultData(
       avatar: json["avatar"]?.toString() ?? "NB",
       avatarStyle: json["avatarStyle"]?.toString() ?? "default",
@@ -328,6 +334,7 @@ class AgentResultData {
       speak: json["speak"]?.toString() ?? "",
       travelPlan: rawTravelPlan,
       autoOpen: json["autoOpen"] == true,
+      extra: rawExtra,
       sides: (json["sides"] as List<dynamic>? ?? const <dynamic>[])
           .whereType<Map<String, dynamic>>()
           .map(AgentResultCardSide.fromJson)
@@ -355,6 +362,7 @@ class AgentResultData {
         "cardType": cardType,
         "speak": speak,
         if (travelPlan != null) "travelPlan": travelPlan,
+        if (extra != null) "extra": extra,
         "autoOpen": autoOpen,
         "sides": sides.map((AgentResultCardSide e) => <String, dynamic>{
               "side": e.side,

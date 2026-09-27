@@ -81,4 +81,104 @@ void main() {
       expect(c.entry?.id, 'inbox');
     });
   });
+
+  group('DynamicIslandController 环境数据（hover 行 + 任务动态）', () {
+    test('agentActive = 后台任务面 or 前台轮次，两者独立记账', () {
+      final DynamicIslandController c = DynamicIslandController();
+      expect(c.agentActive, isFalse);
+
+      c.updateTaskPlaneCount(2);
+      expect(c.agentActive, isTrue);
+      c.updateTaskPlaneCount(0);
+      expect(c.agentActive, isFalse);
+
+      c.setForegroundAgent(active: true);
+      expect(c.agentActive, isTrue);
+      // 前台收尾不影响后台计数。
+      c.updateTaskPlaneCount(1);
+      c.setForegroundAgent(active: false);
+      expect(c.agentActive, isTrue);
+    });
+
+    test('setAgentSteps 去重且最多保留 5 条', () {
+      final DynamicIslandController c = DynamicIslandController();
+      final List<IslandAgentStep> steps = <IslandAgentStep>[
+        for (int i = 0; i < 7; i++)
+          IslandAgentStep(label: '步骤$i', state: 1, key: 't$i'),
+      ];
+      c.setAgentSteps(steps);
+      expect(c.agentSteps.length, 5);
+      expect(c.agentSteps.first.label, '步骤2');
+
+      // 同内容重复推送不触发 notifyListeners。
+      var notified = 0;
+      c.addListener(() => notified++);
+      c.setAgentSteps(c.agentSteps.toList());
+      expect(notified, 0);
+    });
+
+    test('未读数与状态行刷新进环境数据', () {
+      final DynamicIslandController c = DynamicIslandController();
+      c.setAmbientUnread(3);
+      c.updateAgentStatusLine(' 正在搜索资料 ');
+      expect(c.ambientUnread, 3);
+      expect(c.agentStatusLine, '正在搜索资料');
+      c.setAmbientUnread(3); // 幂等
+      expect(c.ambientUnread, 3);
+    });
+
+    test('IslandAgentStep 状态语义：0 进行中 / 1 成功 / 2 失败', () {
+      const IslandAgentStep running = IslandAgentStep(label: 'a');
+      const IslandAgentStep ok = IslandAgentStep(label: 'a', state: 1);
+      const IslandAgentStep err = IslandAgentStep(label: 'a', state: 2);
+      expect(running.state, 0);
+      expect(ok.state, 1);
+      expect(err.state, 2);
+    });
+  });
+
+  group('DynamicIslandController 语音模式独占', () {
+    test('独占开启：现有条目停泊，非语音条目不抢屏，退出按序放行', () {
+      final DynamicIslandController c = DynamicIslandController();
+      c.present(const IslandEntry(
+          id: 'schedule.next',
+          title: '日程',
+          kind: IslandKind.schedule,
+          priority: 2));
+      c.setVoiceExclusive(true);
+      expect(c.entry, isNull, reason: '日程应停泊，语音模式从零开始');
+
+      c.present(const IslandEntry(
+          id: 'voice', title: '等待唤醒', kind: IslandKind.voice, priority: 0));
+      expect(c.entry?.id, 'voice');
+
+      // 语音期间后台任务启动：停泊，不打断语音条目。
+      c.present(const IslandEntry(
+          id: 'task', title: '任务', kind: IslandKind.task, priority: 0));
+      expect(c.entry?.id, 'voice');
+
+      // 退出：停泊条目按原顺序放行，撤语音后停泊第一条顶上。
+      c.setVoiceExclusive(false);
+      c.dismiss('voice');
+      expect(c.entry?.id, 'schedule.next');
+      c.dismiss('schedule.next');
+      expect(c.entry?.id, 'task');
+    });
+
+    test('独占期间 dismiss 非语音条目只从停泊区摘除，不外漏', () {
+      final DynamicIslandController c = DynamicIslandController();
+      c.setVoiceExclusive(true);
+      c.present(const IslandEntry(
+          id: 'voice', title: '等待唤醒', kind: IslandKind.voice, priority: 0));
+      c.present(const IslandEntry(
+          id: 'inbox', title: '未读', kind: IslandKind.inbox, priority: 3));
+      expect(c.entry?.id, 'voice', reason: 'inbox 应停在停泊区');
+
+      c.dismiss('inbox');
+      c.setVoiceExclusive(false);
+      expect(c.entry?.id, 'voice', reason: '被 dismiss 的停泊条目不外漏');
+      c.dismiss('voice');
+      expect(c.entry, isNull);
+    });
+  });
 }
