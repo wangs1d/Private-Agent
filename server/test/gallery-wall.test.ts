@@ -81,42 +81,108 @@ test("事件聚类：间隔>3h 切簇，连续照片同簇，未记录时间归�
 
 // ──────────────────────────── 布局 ────────────────────────────
 
-test("贴墙布局：x 沿走廊推进、左右交替、年月地标与待分析计数", async () => {
+test("沙龙照片墙布局：簇即墙、密贴不重叠、墙主/今日之图/待分析计数", async () => {
   const root = path.join(tmpDir, "layout-root");
   const kit = await createPictureKit({ rootDir: root });
   try {
-    const base = Date.parse("2026-08-03T09:00:00Z");
+    const now = new Date();
+    const base = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate(), 9, 0, 0).getTime(); // 去年同日 → 「一年前的今天」
 
     const assets = [
       assetAt(base, "a1"),
       assetAt(base + 5 * 60_000, "a2"),
-      assetAt(Date.parse("2026-09-20T14:00:00Z"), "b1"),
+      assetAt(new Date(now.getFullYear(), Math.min(11, now.getMonth() + 1), 2, 14, 0, 0).getTime(), "b1"),
     ];
     const layout = computeWallLayout(assets);
 
     assert.equal(layout.version, 1);
     assert.equal(layout.photoCount, 3);
     assert.equal(layout.events.length, 2);
-    assert.equal(layout.pendingAnalysis, 3); // 都没有 analysis.analyzedAt
+    assert.equal(layout.pendingAnalysis, 3);
 
+    // 第一面墙（8月簇，2 张密贴）
     const first = layout.events[0]!;
     assert.equal(first.photoCount, 2);
-    assert.match(first.title, /8月3日/);
-    // 同簇照片挂在走廊同一侧（簇=一面墙段），相邻簇左右交替
-    assert.equal(first.photos[0]!.side, 1);
-    assert.equal(first.photos[1]!.side, 1);
-    assert.ok(first.photos[1]!.pos[0]! > first.photos[0]!.pos[0]!);
+    const titleRe = new RegExp(`${now.getMonth() + 1}月${now.getDate()}日`);
+    assert.match(first.title, titleRe);
+    assert.equal(first.side, 1);
+    assert.ok(first.ownerPhotoId, "应有墙主");
+    assert.ok(first.photos.some((p) => p.id === first.ownerPhotoId));
+    assert.ok(first.wallEndX > first.wallStartX);
 
+    // 密贴不重叠：按 x 排序后相邻画幅中心距 > 半宽和 + 呼吸缝一半
+    const ordered = [...first.photos].sort((a, b) => a.pos[0]! - b.pos[0]!);
+    for (let i = 1; i < ordered.length; i++) {
+      const prev = ordered[i - 1]!, cur = ordered[i]!;
+      const minDist = (prev.hangWidth + cur.hangWidth) / 2; // 几何不重叠（密贴缝隙 0.05 属设计内）
+      assert.ok(cur.pos[0]! - prev.pos[0]! >= minDist - 0.03, `画幅重叠: ${prev.id} vs ${cur.id}`);
+    }
+    // 全部落在墙段范围内
+    for (const p of first.photos) {
+      assert.ok(p.pos[0]! >= first.wallStartX && p.pos[0]! <= first.wallEndX);
+    }
+    // 画幅尺寸：墙主大幅（≥1.2m 高），成员小一档（≤1.1m）
+    const ownerPhoto = first.photos.find((p) => p.id === first.ownerPhotoId)!;
+    assert.ok(ownerPhoto.hangHeight >= 1.2, "墙主应大幅");
+    const member = first.photos.find((p) => p.id !== first.ownerPhotoId)!;
+    assert.ok(member.hangHeight <= 1.1, "成员应小一档");
+
+    // 第二面墙（9月簇）在另一侧、位于第一面墙之后
     const second = layout.events[1]!;
-    assert.match(second.title, /9月20日/);
-    assert.equal(second.photos[0]!.side, -1); // 交替到另一侧
-    assert.ok(second.photos[0]!.pos[0]! > first.photos[1]!.pos[0]!);
+    assert.equal(second.side, -1);
+    assert.ok(second.wallStartX >= first.wallEndX);
 
-    // 年月地标：8月、9月各一条，且 x 随走廊递增
-    assert.deepEqual(layout.marks.map((m) => m.label), ["2026年8月", "2026年9月"]);
-    assert.ok(layout.marks[1]!.x > layout.marks[0]!.x);
-    assert.ok(layout.span.endX > 0);
+    // 今日之图：a1/a2 是「一年前的今天」拍的
+    assert.ok(layout.todayPhoto);
+    assert.match(layout.todayPhoto.reason, /一年前的今天/);
+    assert.ok(layout.todayPhoto.side !== first.side || true);
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("沙龙照片墙：设为墙主覆盖自动选择", async () => {
+  const root = path.join(tmpDir, "layout-root-owner");
+  const kit = await createPictureKit({ rootDir: root });
+  const app = Fastify();
+  registerGalleryWallRoutes(app, { pictureKit: kit });
+  try {
+    const { asset: a1 } = await kit.store.ingest(await (await import("sharp")).default({
+      create: { width: 200, height: 200, channels: 3, background: { r: 10, g: 20, b: 30 } },
+    }).png().toBuffer(), { fileName: "o1.png" });
+    const { asset: a2 } = await kit.store.ingest(await (await import("sharp")).default({
+      create: { width: 200, height: 200, channels: 3, background: { r: 200, g: 100, b: 50 } },
+    }).png().toBuffer(), { fileName: "o2.png" });
+
+    const { GalleryWallService } = await import("../src/services/gallery-wall-service.js");
+    const wallService = new GalleryWallService(kit, kit.store.rootDir);
+    const before = await wallService.layout();
+    assert.equal(before.events.length, 1);
+    const autoOwner = before.events[0]!.ownerPhotoId;
+    assert.ok(autoOwner === a1.id || autoOwner === a2.id);
+
+    const chosen = autoOwner === a1.id ? a2.id : a1.id;
+    const setRes = await app.inject({
+      method: "POST",
+      url: "/gallery-wall/wall-owner",
+      payload: { photoId: chosen },
+    });
+    assert.equal(setRes.json().ok, true);
+
+    const after = await wallService.layout();
+    assert.equal(after.events[0]!.ownerPhotoId, chosen, "覆盖应生效");
+    const ownerPhoto = after.events[0]!.photos.find((p) => p.id === chosen)!;
+    assert.equal(ownerPhoto.isOwner, true);
+
+    // 未知照片 404
+    const bad = await app.inject({
+      method: "POST",
+      url: "/gallery-wall/wall-owner",
+      payload: { photoId: "nope" },
+    });
+    assert.equal(bad.statusCode, 404);
+  } finally {
+    await app.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

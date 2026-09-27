@@ -60,6 +60,22 @@ export function registerGalleryWallRoutes(
     return layout;
   });
 
+  /** POST /gallery-wall/wall-owner — 「设为墙主」：photoId 所在墙的墙主覆盖为它 */
+  app.post("/gallery-wall/wall-owner", async (request, reply) => {
+    const photoId = String((request.body as { photoId?: unknown } | null)?.photoId ?? "").trim();
+    if (!photoId) {
+      return reply.code(400).send({ ok: false, error: "photoId 不能为空" });
+    }
+    if (!deps.pictureKit.store.get(photoId)) {
+      return reply.code(404).send({ ok: false, error: `照片不存在: ${photoId}` });
+    }
+    const eventId = await wallService.setOwnerForPhoto(photoId);
+    if (!eventId) {
+      return reply.code(404).send({ ok: false, error: "该照片不在任何一面照片墙上" });
+    }
+    return reply.send({ ok: true, eventId, photoId });
+  });
+
   app.post("/gallery-wall/analyze", async (request, reply) => {
     const body = (request.body ?? {}) as { limit?: unknown };
     const limit = Number(body.limit);
