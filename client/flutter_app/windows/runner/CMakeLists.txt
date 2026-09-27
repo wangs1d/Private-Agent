@@ -20,7 +20,7 @@ add_executable(${BINARY_NAME} WIN32
   "incoming_call_window.cpp"
   "main.cpp"
   "outgoing_call_window.cpp"
-  "schedule_floating_window.cpp"
+  "dynamic_island_window.cpp"
   "sphere_overlay_window.cpp"
   "utils.cpp"
   "webview_ghost_window_guardian.cpp"

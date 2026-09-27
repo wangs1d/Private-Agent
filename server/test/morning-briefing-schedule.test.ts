@@ -215,8 +215,8 @@ test("播报稿润色：注入 LLM 时用其口语输出", async () => {
   });
   const { narrationText } = await svc.narrateBriefing(SESSION);
   assert.match(narrationText, /上午9点半的产品评审会/);
-  // 短于 80 字的润色稿会自动补温暖收尾（与模板路径同规则）
-  assert.match(narrationText, /祝你今天顺利/);
+  // 2026-09-24 定调：短稿原样采用，不再补「祝你今天顺利」客套垫尾
+  assert.doesNotMatch(narrationText, /祝你今天顺利/);
 
   // 足够长（≥80 字）的润色稿原样采用，不补收尾、不截断
   const long = new MorningBriefingService({
@@ -241,14 +241,14 @@ test("播报稿润色：LLM 失败/输出过短 → 回退确定性模板", asyn
       } as never,
       llmComplete: llm,
     });
-  // LLM 抛错 → 回退模板（含固定收尾）
+  // LLM 抛错 → 回退模板（2026-09-24 定调：模板不再带客套垫尾）
   const fallback = await makeSvc(async () => {
     throw new Error("llm down");
   }).narrateBriefing(SESSION);
-  assert.match(fallback.narrationText, /祝你今天顺利/);
+  assert.doesNotMatch(fallback.narrationText, /祝你今天顺利|我随时在这儿/);
   // 输出为空 → 回退模板
   const empty = await makeSvc(async () => "  ").narrateBriefing(SESSION);
-  assert.match(empty.narrationText, /祝你今天顺利/);
+  assert.doesNotMatch(empty.narrationText, /祝你今天顺利|我随时在这儿/);
 });
 
 test("sanitizeNarrationText：去围栏/引号/换行", () => {
@@ -271,4 +271,7 @@ test("buildNarrationPrompt：事实材料只含真实数据且带口语化指令
   const prompt = buildNarrationPrompt(briefing as never);
   assert.match(prompt, /禁止编造/);
   assert.match(prompt, /私人智能管家/);
+  // 2026-09-24 定调：润色 prompt 必须带禁空话/禁客套收尾规则
+  assert.match(prompt, /想起来喊我一声/);
+  assert.match(prompt, /宁短勿凑/);
 });

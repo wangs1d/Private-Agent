@@ -6,15 +6,17 @@
 #include <functional>
 #include <string>
 
+namespace Gdiplus {
+class Bitmap;
+}
+
 // 独立的"通话中"悬浮窗 —— 脱离主 Flutter 窗口存在。
 //
-// 仿电脑微信电话窗口设计：
-//   - 竖向布局（320 x 540）
-//   - 顶部：状态文字（"通话中 / 静音中"）
-//   - 中央：大圆形头像（120 x 120），外圈光晕（呼吸动画表示对方在说话/音频在播）
-//   - 头像下：通话对方名称
-//   - 名称下：通话计时 mm:ss（每秒自增）
-//   - 底部一排：静音按钮 | 免提按钮 | 挂断按钮（红色突出）
+// 黑白极简玻璃深卡（视觉原语见 call_visuals.h）：
+//   - 标题栏：信号条 + 「Nextbot 通话」+ 最小化/关闭（×=挂断，—=收起）
+//   - 金属球头像（首字符），TTS 播放中双层光环呼吸
+//   - 状态行：小波形（播报时跳动）+ 计时 mm:ss（静音时前缀「已静音」）
+//   - 分隔线下：静音 / 免提两颗切换圆钮（激活=瓷白球）+ 挂断胶囊
 //   - 标题区可拖动
 //
 // 生命周期：
@@ -24,10 +26,9 @@
 //   - Hide()              停计时 + 销毁窗口
 //
 // 事件回传（MethodChannel pai/connected_call）：
-//   - onHangUp     : 用户点挂断
+//   - onHangUp     : 用户点挂断（挂断胶囊或标题栏 ×）
 //   - onMuteToggle : 用户点静音（payload 包含 newMute 布尔）
 //   - onSpeakerToggle
-//   - onMinimize   : 用户点最小化（未来扩展）
 class ConnectedCallWindow {
  public:
   using HangUpCallback = std::function<void()>;
@@ -63,6 +64,10 @@ class ConnectedCallWindow {
   // 由 GetTickCount64 等推过来的 server 端时间戳校准（可选）
   void SetElapsedSeconds(int seconds);
 
+  // 窗口尺寸（.cpp 布局常量引用；对齐微信语音通话弹窗）
+  static constexpr int kWindowWidth = 300;
+  static constexpr int kWindowHeight = 368;
+
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
                                   WPARAM wparam, LPARAM lparam) noexcept;
@@ -72,7 +77,6 @@ class ConnectedCallWindow {
   void EnsureClassRegistered();
   bool CreateWindowIfNeeded();
   void PositionAtBottomRight();
-  void RepositionChildren();
 
   void StartTimer();
   void StopTimer();
@@ -81,23 +85,14 @@ class ConnectedCallWindow {
   void DestroyNativeWindow();
 
   void Paint(HWND hwnd, HDC hdc);
-  void DrawRoundedRect(HDC hdc, const RECT& rc, int radius, COLORREF fill,
-                       COLORREF border);
-  void DrawRoundActionButton(HDC hdc, const RECT& rc, wchar_t glyph,
-                             COLORREF fill, COLORREF glyph_color,
-                             bool draw_off_slash);
-  void DrawGlyph(HDC hdc, const RECT& rc, wchar_t glyph, COLORREF color,
-                 int font_size, const wchar_t* font_family);
 
   static void CALLBACK TickProc(HWND hwnd, UINT msg, UINT_PTR id,
                                 DWORD time) noexcept;
 
   HWND window_handle_ = nullptr;
-  HWND mute_btn_ = nullptr;
-  HWND speaker_btn_ = nullptr;
-  HWND hangup_btn_ = nullptr;
 
   std::wstring caller_name_;
+  std::wstring caller_initial_;
 
   // 状态
   int elapsed_seconds_ = 0;
@@ -105,6 +100,15 @@ class ConnectedCallWindow {
   bool speaker_on_ = true;
   bool talking_ = false;  // 头像是否在呼吸（TTS 播放中）
   int pulse_phase_ = 0;
+  bool title_min_hover_ = false;    // 标题栏最小化悬停
+  bool title_close_hover_ = false;  // 标题栏关闭悬停
+  bool mute_hover_ = false;         // 静音钮悬停
+  bool speaker_hover_ = false;      // 免提钮悬停
+  bool pill_hover_ = false;         // 挂断胶囊悬停
+
+  // 玻璃底（Show 时抓拍，见 call_visuals.h）
+  Gdiplus::Bitmap* backdrop_ = nullptr;
+  float backdrop_dim_ = 1.0f;
 
   HangUpCallback on_hangup_;
   MuteCallback on_mute_toggle_;
@@ -116,10 +120,8 @@ class ConnectedCallWindow {
   // 自定义消息：延迟销毁窗口（避免在 WM_COMMAND 中嵌套 DestroyWindow）
   static constexpr UINT kMsgDeferredHide = WM_USER + 200;
 
-  // 窗口尺寸
-  static constexpr int kWindowWidth = 320;
-  static constexpr int kWindowHeight = 304;
-  static constexpr int kMargin = 16;
+  // 窗口位置边距
+  static constexpr int kMargin = 20;
 
   static constexpr const wchar_t* kClassName =
       L"PAI_ConnectedCall_Window";

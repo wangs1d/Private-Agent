@@ -404,6 +404,45 @@ class TravelMediaStore {
     return { ok: true, url: `/travel/media/assets/${dirName}/${fileName}` };
   }
 
+  /**
+   * 远程图片落盘 assets（2026-09-25 目的地封面专用）：抓取远程 URL 的图片字节
+   * 写入本机 assets 目录，返回本地展示 URL（/travel/media/assets/...）。
+   * 背景：封面/POI 图存远程 wikimedia URL 时，Flutter 客户端不走系统代理
+   * 直连常被墙，海报永远停在渐变兜底。服务端代抓一次落盘，客户端走本机
+   * server 秒开。失败返回 null（调用方回退远程 URL 或渐变兜底）。
+   */
+  async saveRemoteAsset(dirKey: string, remoteUrl: string, timeoutMs = 15_000): Promise<string | null> {
+    if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return null;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(remoteUrl, {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) private-agent-travel-cover' },
+      });
+      clearTimeout(timer);
+      if (!res.ok) return null;
+      const mime = (res.headers.get('content-type') || '').toLowerCase();
+      const ext = mime.includes('png')
+        ? 'png'
+        : mime.includes('webp')
+          ? 'webp'
+          : mime.includes('gif')
+            ? 'gif'
+            : 'jpg';
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length < 2048 || buf.length > 10 * 1024 * 1024) return null;
+      const dirName = fileNameFor(dirKey);
+      const dir = path.join(this.assetsRoot, dirName);
+      this.ensureDir(dir);
+      const fileName = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+      fs.writeFileSync(path.join(dir, fileName), buf);
+      return `/travel/media/assets/${dirName}/${fileName}`;
+    } catch {
+      return null;
+    }
+  }
+
   private loadFromFile(poiKey: string): PoiMediaEntry | null {
     const file = path.join(this.root, `${fileNameFor(poiKey)}.json`);
     if (!fs.existsSync(file)) return null;

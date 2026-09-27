@@ -27,6 +27,8 @@ export type TaskOutboxEntry = {
   finalText: string;
   /** 任务面媒体卡片：照片/视频结果与 finalText 同生命周期，重放必须原样携带。 */
   mediaCards?: Array<Record<string, unknown>>;
+  /** 「接下来你可以」接续建议：与 finalText 同生命周期，重放原样携带（可点胶囊）。 */
+  followups?: string[];
   enqueuedAt: number;
 };
 
@@ -71,7 +73,12 @@ export class TaskOutbox {
   /** 投递失败入箱（同 messageId 去重——同一结果只补投一次）。 */
   enqueue(
     sessionId: string,
-    entry: { messageId: string; finalText: string; mediaCards?: Array<Record<string, unknown>> },
+    entry: {
+      messageId: string;
+      finalText: string;
+      mediaCards?: Array<Record<string, unknown>>;
+      followups?: string[];
+    },
   ): void {
     if (!sessionId || !entry.messageId || !entry.finalText) return;
     let queue = this.entries.get(sessionId);
@@ -85,6 +92,7 @@ export class TaskOutbox {
       messageId: entry.messageId,
       finalText: entry.finalText,
       ...(entry.mediaCards && entry.mediaCards.length > 0 ? { mediaCards: entry.mediaCards } : {}),
+      ...(entry.followups && entry.followups.length > 0 ? { followups: entry.followups } : {}),
       enqueuedAt: Date.now(),
     });
     if (queue.length > MAX_PER_SESSION) queue.splice(0, queue.length - MAX_PER_SESSION);
@@ -128,6 +136,9 @@ export class TaskOutbox {
               ...(entry.mediaCards && entry.mediaCards.length > 0
                 ? { mediaCards: entry.mediaCards }
                 : {}),
+              ...(entry.followups && entry.followups.length > 0
+                ? { followups: entry.followups }
+                : {}),
             },
           }),
         );
@@ -137,6 +148,7 @@ export class TaskOutbox {
           messageId: entry.messageId,
           finalText: entry.finalText,
           mediaCards: entry.mediaCards,
+          followups: entry.followups,
         });
       }
     }

@@ -64,6 +64,7 @@ export type ProactiveIntent = {
     | "weather"       // 天气预警联动（晨报/天气服务检测）
     | "finance"       // 消费管家（自动入账/预算超支/月报）
     | "email"         // 邮箱盯梢（IMAP 轮询新邮件 → VIP/关键词分级 → 主动提醒）
+    | "ics"           // 日历订阅（ICS 轮询 diff → 日程导入/改期/取消 → 主动提醒）
     | "relationship"  // 人情关系（重要日子扫描/祝福草稿）
     | "health"        // 健康关怀（节律提醒等）
     | "location"      // 位置场景（围栏事件 / 到达常去地点）

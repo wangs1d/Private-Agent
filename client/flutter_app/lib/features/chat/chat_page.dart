@@ -11,8 +11,7 @@ import "../../core/models/turn_state.dart";
 import "../../core/db/local_history_store.dart";
 import "../../core/presentation/agent_avatar_catalog.dart";
 import "../../core/presentation/voice_call_ui_labels.dart";
-import "../../core/utils/agent_result_parser.dart";
-import "../../core/utils/content_summary_parser.dart";
+import "../../core/utils/agent_result_parser.dart";import "../../core/utils/content_summary_parser.dart";
 import "../../core/services/speech_service.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
@@ -21,6 +20,7 @@ import "agent_home_page.dart";
 import "agent_profile_page.dart" show AgentProfileData;
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
+import "agent_result_card.dart";
 import "typewriter_reveal.dart";
 import "mood_driven_emotion_ball.dart";
 import "chat_suggestions.dart";
@@ -2175,12 +2175,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     } else {
       // Agent 回复描边框：宽度收敛为可用宽度的 75%（2026-09-03 用户反馈，
       // 相比全宽减少 1/4），文字与照片都框在内；短回复仍按内容自适应收窄。
-      // 行程海报卡例外（2026-09-06 用户反馈）：放宽到 92%，配合卡内
-      // maxWidth 460 让海报/简介/叮嘱有足够幅面。与正文渲染同源：判定用
-      // 解析出的 cardType（[_agentResult]），不探测原始文本子串——
-      // cardType 改名或标记格式调整时只需改解析器一处。
-      final bool isTravelCard = _agentResult?.cardType == "travel_itinerary";
-      final double widthFactor = isTravelCard ? 0.92 : 0.75;
+      // 2026-09-25 用户定稿：travel_itinerary 卡不再框进本气泡——正文气泡
+      // 只装文字/照片介绍，卡片在气泡下方作为第二条独立消息形态渲染
+      // （见 _buildMessageColumn），因此宽度恒 0.75。
+      const double widthFactor = 0.75;
       // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
       bubble = LayoutBuilder(
         builder: (BuildContext context, BoxConstraints constraints) {
@@ -2230,6 +2228,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   }
 
   Widget _buildMessageColumn(Widget bubble) {
+    final AgentResultData? travelCard =
+        (!widget.isUser && _agentResult?.cardType == "travel_itinerary")
+            ? _agentResult
+            : null;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment:
@@ -2237,6 +2239,15 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       children: <Widget>[
         _buildMessageHeader(),
         bubble,
+        // 行程卡独立第二条消息形态（2026-09-25 用户定稿）：上一条气泡用文字/
+        // 照片介绍规划，卡片不框进任何气泡外壳，作为消息流中的独立大卡
+        // 跟在下方（卡自带完整外观与 460 限宽：海报/叮嘱/CTA/脚注）。正文
+        // 气泡内的卡渲染由 buildMessageBody(excludeTravelCard) 关闭，避免双份。
+        if (travelCard != null)
+          Padding(
+            padding: const EdgeInsets.only(top: AppTypography.space2),
+            child: AgentResultCard(data: travelCard),
+          ),
       ],
     );
   }
@@ -2627,6 +2638,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       onFollowupTap: onFollowupTap,
       typewriterRawText: typewriterRawText,
       typewriterCursor: typewriterCursor,
+      // 行程卡由消息行在气泡外独立渲染（第二条消息形态），body 内不再重复。
+      excludeTravelCard: true,
     );
   }
 

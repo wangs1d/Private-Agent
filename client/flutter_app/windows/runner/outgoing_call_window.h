@@ -6,6 +6,10 @@
 #include <functional>
 #include <string>
 
+namespace Gdiplus {
+class Bitmap;
+}
+
 class OutgoingCallWindow {
  public:
   using HangUpCallback = std::function<void()>;
@@ -20,6 +24,10 @@ class OutgoingCallWindow {
             uint32_t accent_color_hex);
   void Hide();
   bool IsVisible() const;
+
+  // 窗口尺寸（.cpp 布局常量引用；对齐微信语音通话弹窗）
+  static constexpr int kWindowWidth = 300;
+  static constexpr int kWindowHeight = 316;
 
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
@@ -36,17 +44,21 @@ class OutgoingCallWindow {
   void Paint(HWND hwnd, HDC hdc);
 
   HWND window_handle_ = nullptr;
-  HWND hangup_btn_ = nullptr;
   std::wstring caller_name_;
   std::wstring subtitle_;
+  std::wstring caller_initial_;
   int pulse_phase_ = 0;
+  bool title_min_hover_ = false;    // 标题栏最小化悬停
+  bool title_close_hover_ = false;  // 标题栏关闭悬停
+  bool pill_hover_ = false;         // 挂断胶囊悬停
   HangUpCallback on_hangup_;
 
+  // 玻璃底（Show 时抓拍，见 call_visuals.h）
+  Gdiplus::Bitmap* backdrop_ = nullptr;
+  float backdrop_dim_ = 1.0f;
+
   static constexpr UINT_PTR kPulseTimerId = 4001;
-  static constexpr int kIdHangup = 31;
-  static constexpr int kWindowWidth = 300;
-  static constexpr int kWindowHeight = 276;
-  static constexpr int kMargin = 16;
+  static constexpr int kMargin = 20;
   static constexpr const wchar_t* kClassName = L"PAI_OutgoingCall_Window";
 };
 

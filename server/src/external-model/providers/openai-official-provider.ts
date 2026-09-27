@@ -187,6 +187,9 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
       finalizeOptions,
       tools: ctx.toolSearchPrepared?.visibleTools,
       variant: ctx.tools ? "chat-tools" : "chat",
+      // 展示形式协议只属于聊天面：ephemeral 工具调用（简报润色/摘要/改写等）
+      // 不注入，否则模型声明的 [RENDER_HINT:xxx] 在无剥除层的下游直透用户屏幕。
+      includeRenderProtocol: ctx.streamOpts?.ephemeralTurn !== true,
     });
 
     return { sysContent: promptPlan.fullSystemPrompt, promptPlan };

@@ -7,9 +7,7 @@
 #include <cmath>
 #include <cwctype>
 
-#ifndef CLR_NONE
-#define CLR_NONE static_cast<COLORREF>(0xFFFFFFFFL)
-#endif
+#include "call_visuals.h"
 
 #ifndef DWMNCR_ENABLED
 #define DWMNCR_ENABLED 1
@@ -21,71 +19,35 @@
 
 namespace {
 
-// ── 配色（豆包风深色卡片） ──
-constexpr COLORREF kBg            = RGB(0x1A, 0x1A, 0x1C);  // 卡片底
-constexpr COLORREF kCircle        = RGB(0x2C, 0x2C, 0x2E);  // 波形圆底
-constexpr COLORREF kNameColor     = RGB(0xFF, 0xFF, 0xFF);  // 名称白
-constexpr COLORREF kMutedColor    = RGB(0x8E, 0x8E, 0x93);  // 状态/标签灰
-constexpr COLORREF kWhiteBtn      = RGB(0xFF, 0xFF, 0xFF);  // 挂断白钮/激活态
-constexpr COLORREF kWhiteBtnHover = RGB(0xE5, 0xE5, 0xEA);  // 白钮悬停
-constexpr COLORREF kDarkBtn       = RGB(0x2C, 0x2C, 0x2E);  // 静音/免提深钮
-constexpr COLORREF kDarkBtnHover  = RGB(0x3A, 0x3A, 0x3C);  // 深钮悬停
-constexpr COLORREF kGlyphOnWhite  = RGB(0x1A, 0x1A, 0x1C);  // 白钮上深图标
-
 // ── 内部布局 ──
-constexpr int kAvatarCx  = 160;  // 波形圆心 x
-constexpr int kAvatarCy  = 78;   // 波形圆心 y
-constexpr int kAvatarR   = 36;   // 波形圆半径
-constexpr int kNameTop   = 124;  // 名称 top
-constexpr int kStatusTop = 152;  // 状态行 top
-constexpr int kBtnCy     = 232;  // 按钮圆心 y
-constexpr int kSideBtn   = 52;   // 静音/免提直径
-constexpr int kMainBtn   = 60;   // 挂断直径
-constexpr int kMuteCx    = 92;   // 静音圆心 x
-constexpr int kHangupCx  = 160;  // 挂断圆心 x
-constexpr int kSpeakerCx = 228;  // 免提圆心 x
-constexpr int kLabelTop  = 266;  // 标签 top
+constexpr int kAvatarCx = ConnectedCallWindow::kWindowWidth / 2;  // 头像盘圆心 x
+constexpr int kAvatarCy = 122;               // 头像盘圆心 y
+constexpr int kAvatarR = 38;                 // 头像盘半径
+constexpr int kNameTop = 172;                // 名称 top
+constexpr int kStatusTop = 202;              // 状态行（波形+计时）top
+constexpr int kStatusH = 18;                 // 状态行高
+constexpr int kDividerY = 240;               // 分隔线 y
+constexpr int kToggleSize = 46;              // 静音/免提直径
+constexpr int kToggleCy = 272;               // 切换钮圆心 y
+constexpr int kMuteCx = 110;                 // 静音圆心 x
+constexpr int kSpeakerCx = 190;              // 免提圆心 x
+constexpr int kPillLeft = 96;                // 挂断胶囊 left
+constexpr int kPillTop = 306;                // 挂断胶囊 top
+constexpr int kPillW = 108;
+constexpr int kPillH = 38;
 
-// 字形（Segoe MDL2 Assets）：E717 = Phone, E720 = Mic, E767 = Volume
-constexpr wchar_t kGlyphPhone   = L'\uE717';
-constexpr wchar_t kGlyphMic     = L'\uE720';
-constexpr wchar_t kGlyphVolume  = L'\uE767';
-
-COLORREF MixColor(COLORREF a, COLORREF b, double t) {
-  if (t < 0) t = 0;
-  if (t > 1) t = 1;
-  return RGB(
-      static_cast<int>(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t),
-      static_cast<int>(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
-      static_cast<int>(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t));
+RECT MuteRect() {
+  return {kMuteCx - kToggleSize / 2, kToggleCy - kToggleSize / 2,
+          kMuteCx + kToggleSize / 2, kToggleCy + kToggleSize / 2};
 }
 
-// 在实心圆内画波形图标：5 根圆角竖条（phase < 0 为静态）
-void DrawWaveform(HDC hdc, int cx, int cy, int max_h, COLORREF color,
-                  int phase) {
-  constexpr int kBarHeights[5] = {45, 100, 62, 100, 45};
-  constexpr int kBarW = 4;
-  constexpr int kGap = 4;
-  const int total_w = 5 * kBarW + 4 * kGap;
-  int x = cx - total_w / 2;
-  for (int i = 0; i < 5; ++i) {
-    double k = kBarHeights[i] / 100.0;
-    if (phase >= 0) {
-      k *= 0.82 + 0.18 * std::sin((phase + i * 6) * 6.28318 / 30.0);
-    }
-    const int h = (std::max)(3, static_cast<int>(max_h * k));
-    RECT bar = {x, cy - h / 2, x + kBarW, cy + h / 2};
-    HBRUSH brush = CreateSolidBrush(color);
-    HPEN pen = CreatePen(PS_NULL, 0, 0);
-    HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, brush));
-    HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
-    RoundRect(hdc, bar.left, bar.top, bar.right, bar.bottom, kBarW, kBarW);
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    DeleteObject(brush);
-    DeleteObject(pen);
-    x += kBarW + kGap;
-  }
+RECT SpeakerRect() {
+  return {kSpeakerCx - kToggleSize / 2, kToggleCy - kToggleSize / 2,
+          kSpeakerCx + kToggleSize / 2, kToggleCy + kToggleSize / 2};
+}
+
+RECT PillRect() {
+  return {kPillLeft, kPillTop, kPillLeft + kPillW, kPillTop + kPillH};
 }
 
 std::wstring Utf8ToWide(const std::string& s) {
@@ -98,36 +60,28 @@ std::wstring Utf8ToWide(const std::string& s) {
   return out;
 }
 
+// 计时文案：不足 1 小时用 mm:ss，超过后 h:mm:ss
 std::wstring FormatDuration(int seconds) {
   if (seconds < 0) seconds = 0;
-  int hh = seconds / 3600;
-  int mm = (seconds % 3600) / 60;
-  int ss = seconds % 60;
+  const int hh = seconds / 3600;
+  const int mm = (seconds % 3600) / 60;
+  const int ss = seconds % 60;
   wchar_t buf[20];
-  swprintf_s(buf, L"%02d:%02d:%02d", hh, mm, ss);
+  if (hh > 0) {
+    swprintf_s(buf, L"%d:%02d:%02d", hh, mm, ss);
+  } else {
+    swprintf_s(buf, L"%02d:%02d", mm, ss);
+  }
   return std::wstring(buf);
 }
 
-// 启用 DWM 圆角阴影（柔和投影）
-void EnableDwmShadow(HWND hwnd) {
-  DWMNCRENDERINGPOLICY policy = static_cast<DWMNCRENDERINGPOLICY>(DWMNCR_ENABLED);
-  DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY,
-                        &policy, sizeof(policy));
-
-  MARGINS margins = {0, 0, 0, 1};
-  DwmExtendFrameIntoClientArea(hwnd, &margins);
-
-  BOOL prefer_angular_corners = FALSE;
-  DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
-                        &prefer_angular_corners, sizeof(prefer_angular_corners));
-}
-
-void FillCircle(HDC hdc, int cx, int cy, int r, COLORREF fill) {
-  HRGN rgn = CreateEllipticRgn(cx - r, cy - r, cx + r, cy + r);
-  HBRUSH brush = CreateSolidBrush(fill);
-  FillRgn(hdc, rgn, brush);
-  DeleteObject(brush);
-  DeleteObject(rgn);
+bool UpdateHover(bool& state, const RECT& rc, const POINT& pt) {
+  const bool hover = call_vis::PointInRect(rc, pt);
+  if (hover != state) {
+    state = hover;
+    return true;
+  }
+  return false;
 }
 
 }  // namespace
@@ -162,9 +116,11 @@ void ConnectedCallWindow::SetCallbacks(
 bool ConnectedCallWindow::CreateWindowIfNeeded() {
   if (window_handle_) return true;
   EnsureClassRegistered();
+  call_vis::EnsureGdiplus();
 
+  // 无子控件：整窗一层玻璃自绘表面，按钮全靠命中测试
   DWORD ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-  DWORD style = WS_POPUP | WS_CLIPCHILDREN;
+  DWORD style = WS_POPUP;
 
   HWND hwnd = CreateWindowExW(
       ex_style, kClassName, L"", style, 0, 0, kWindowWidth, kWindowHeight,
@@ -175,49 +131,8 @@ bool ConnectedCallWindow::CreateWindowIfNeeded() {
   }
   window_handle_ = hwnd;
 
-  // 自绘圆形图标按钮
-  mute_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"",
-      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
-      reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdMute)),
-      GetModuleHandle(nullptr), nullptr);
-  speaker_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"",
-      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
-      reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdSpeaker)),
-      GetModuleHandle(nullptr), nullptr);
-  hangup_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"",
-      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
-      reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdHangup)),
-      GetModuleHandle(nullptr), nullptr);
-
-  HFONT ui_font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-  SendMessage(mute_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
-  SendMessage(speaker_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
-  SendMessage(hangup_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
-
-  EnableDwmShadow(hwnd);
+  call_vis::ApplyRoundedCorners(hwnd);
   return true;
-}
-
-void ConnectedCallWindow::RepositionChildren() {
-  if (!window_handle_) return;
-  // 底部三钮：静音（左）· 挂断（中，略大白钮）· 免提（右）+ 下方标签
-  const int side_y = kBtnCy - kSideBtn / 2;
-  if (mute_btn_) {
-    SetWindowPos(mute_btn_, nullptr, kMuteCx - kSideBtn / 2, side_y,
-                 kSideBtn, kSideBtn, SWP_NOZORDER | SWP_NOACTIVATE);
-  }
-  if (hangup_btn_) {
-    SetWindowPos(hangup_btn_, nullptr, kHangupCx - kMainBtn / 2,
-                 kBtnCy - kMainBtn / 2, kMainBtn, kMainBtn,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-  }
-  if (speaker_btn_) {
-    SetWindowPos(speaker_btn_, nullptr, kSpeakerCx - kSideBtn / 2, side_y,
-                 kSideBtn, kSideBtn, SWP_NOZORDER | SWP_NOACTIVATE);
-  }
 }
 
 void ConnectedCallWindow::PositionAtBottomRight() {
@@ -229,21 +144,29 @@ void ConnectedCallWindow::PositionAtBottomRight() {
   const int work_h = mi.rcWork.bottom - mi.rcWork.top;
   const int x = mi.rcWork.left + (work_w - kWindowWidth - kMargin);
   const int y = mi.rcWork.top + (work_h - kWindowHeight - kMargin);
+
+  // 玻璃底在窗口可见前抓拍；已可见（更新内容）则沿用旧底
+  if (!IsWindowVisible(window_handle_)) {
+    delete backdrop_;
+    call_vis::CaptureGlassBackdrop(x, y, kWindowWidth, kWindowHeight,
+                                   &backdrop_, &backdrop_dim_);
+  }
+
   SetWindowPos(window_handle_, HWND_TOPMOST, x, y, kWindowWidth, kWindowHeight,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  RepositionChildren();
 }
 
 void ConnectedCallWindow::Show(const std::string& caller_name,
-                               const std::string& /*caller_initial*/,
+                               const std::string& caller_initial,
                                uint32_t /*accent_color_hex*/) {
   caller_name_ = Utf8ToWide(caller_name);
+  caller_initial_ = Utf8ToWide(caller_initial);
 
   if (!CreateWindowIfNeeded()) return;
   PositionAtBottomRight();
   StartTimer();
   if (talking_) StartPulse();
-  InvalidateRect(window_handle_, nullptr, TRUE);
+  InvalidateRect(window_handle_, nullptr, FALSE);
 }
 
 void ConnectedCallWindow::Hide() {
@@ -257,24 +180,8 @@ void ConnectedCallWindow::Hide() {
 void ConnectedCallWindow::DestroyNativeWindow() {
   StopTimer();
   StopPulse();
-  if (mute_btn_) {
-    if (IsWindow(mute_btn_)) {
-      DestroyWindow(mute_btn_);
-    }
-    mute_btn_ = nullptr;
-  }
-  if (speaker_btn_) {
-    if (IsWindow(speaker_btn_)) {
-      DestroyWindow(speaker_btn_);
-    }
-    speaker_btn_ = nullptr;
-  }
-  if (hangup_btn_) {
-    if (IsWindow(hangup_btn_)) {
-      DestroyWindow(hangup_btn_);
-    }
-    hangup_btn_ = nullptr;
-  }
+  delete backdrop_;
+  backdrop_ = nullptr;
   if (window_handle_) {
     if (IsWindow(window_handle_)) {
       DestroyWindow(window_handle_);
@@ -290,13 +197,13 @@ bool ConnectedCallWindow::IsVisible() const {
 void ConnectedCallWindow::SetMute(bool muted) {
   if (muted_ == muted) return;
   muted_ = muted;
-  if (window_handle_) InvalidateRect(window_handle_, nullptr, TRUE);
+  if (window_handle_) InvalidateRect(window_handle_, nullptr, FALSE);
 }
 
 void ConnectedCallWindow::SetSpeaker(bool on) {
   if (speaker_on_ == on) return;
   speaker_on_ = on;
-  if (window_handle_) InvalidateRect(window_handle_, nullptr, TRUE);
+  if (window_handle_) InvalidateRect(window_handle_, nullptr, FALSE);
 }
 
 void ConnectedCallWindow::SetTalking(bool talking) {
@@ -304,7 +211,7 @@ void ConnectedCallWindow::SetTalking(bool talking) {
   talking_ = talking;
   if (talking_) StartPulse();
   else StopPulse();
-  if (window_handle_) InvalidateRect(window_handle_, nullptr, TRUE);
+  if (window_handle_) InvalidateRect(window_handle_, nullptr, FALSE);
 }
 
 void ConnectedCallWindow::ResetDuration() {
@@ -343,81 +250,6 @@ void CALLBACK ConnectedCallWindow::TickProc(HWND, UINT, UINT_PTR,
 
 // Drawing
 
-void ConnectedCallWindow::DrawRoundedRect(HDC hdc, const RECT& rc, int radius,
-                                          COLORREF fill, COLORREF border) {
-  HBRUSH brush = CreateSolidBrush(fill);
-  HPEN pen = CreatePen(PS_NULL, 0, 0);
-  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, brush));
-  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
-  RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-  if (border != CLR_NONE) {
-    HPEN border_pen = CreatePen(PS_SOLID, 1, border);
-    HPEN old_pen2 = static_cast<HPEN>(SelectObject(hdc, border_pen));
-    HBRUSH null_brush = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
-    HBRUSH old_brush2 = static_cast<HBRUSH>(SelectObject(hdc, null_brush));
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-    SelectObject(hdc, old_brush2);
-    SelectObject(hdc, old_pen2);
-    DeleteObject(border_pen);
-    // null_brush is a stock object.
-  }
-  SelectObject(hdc, old_brush);
-  SelectObject(hdc, old_pen);
-  DeleteObject(brush);
-  DeleteObject(pen);
-}
-
-void ConnectedCallWindow::DrawGlyph(HDC hdc, const RECT& rc, wchar_t glyph,
-                                    COLORREF color, int font_size,
-                                    const wchar_t* font_family) {
-  HFONT f = CreateFontW(-font_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH | FF_SWISS, font_family);
-  HFONT old = static_cast<HFONT>(SelectObject(hdc, f));
-  SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, color);
-  RECT r = rc;
-  DrawTextW(hdc, &glyph, 1, &r,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-  SelectObject(hdc, old);
-  DeleteObject(f);
-}
-
-// 圆形动作按钮：白卡矩形铺底 + 实心圆 + 居中字形（可选斜线表示 off）
-void ConnectedCallWindow::DrawRoundActionButton(HDC hdc, const RECT& rc,
-                                                wchar_t glyph,
-                                                COLORREF fill,
-                                                COLORREF glyph_color,
-                                                bool draw_off_slash) {
-  HBRUSH bg = CreateSolidBrush(kBg);
-  FillRect(hdc, &rc, bg);
-  DeleteObject(bg);
-
-  HRGN rgn = CreateEllipticRgn(rc.left, rc.top, rc.right, rc.bottom);
-  HBRUSH brush = CreateSolidBrush(fill);
-  FillRgn(hdc, rgn, brush);
-  DeleteObject(brush);
-  DeleteObject(rgn);
-
-  const int font_size = (rc.right - rc.left) / 2;
-  RECT icon_rc = rc;
-  DrawGlyph(hdc, icon_rc, glyph, glyph_color, font_size,
-            L"Segoe MDL2 Assets");
-
-  if (draw_off_slash) {
-    HPEN pen = CreatePen(PS_SOLID, 2, glyph_color);
-    HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
-    int cx = (rc.left + rc.right) / 2;
-    int cy = (rc.top + rc.bottom) / 2;
-    int off = font_size / 3;
-    MoveToEx(hdc, cx + off, cy + off, nullptr);
-    LineTo(hdc, cx - off, cy - off);
-    SelectObject(hdc, old_pen);
-    DeleteObject(pen);
-  }
-}
-
 void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
   RECT rc;
   GetClientRect(hwnd, &rc);
@@ -426,88 +258,79 @@ void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
   HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
   HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem, bmp));
 
-  // 深色卡片背景（豆包风，28px 圆角，DWM 阴影）
-  HBRUSH bg_brush = CreateSolidBrush(kBg);
-  FillRect(mem, &rc, bg_brush);
-  DeleteObject(bg_brush);
+  // ── 玻璃底 ──
+  call_vis::DrawGlassBase(mem, backdrop_, backdrop_dim_, kWindowWidth,
+                          kWindowHeight);
 
-  constexpr int kRadius = 28;
-  HRGN clip_rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1,
-                                     kRadius, kRadius);
-  SelectClipRgn(mem, clip_rgn);
+  // ── 标题栏 ──
+  call_vis::PaintTitleBar(mem, kWindowWidth, title_min_hover_,
+                          title_close_hover_);
 
-  // ── 中央波形圆 + 播报呼吸光环（双层相位错开） ──
+  // ── 金属盘头像 + 播报呼吸光环（双层相位错开） ──
   if (talking_) {
-    double t = (pulse_phase_ % 30) / 30.0;
-    double t2 = fmod(t + 0.5, 1.0);
+    const double t = (pulse_phase_ % 30) / 30.0;
+    const double t2 = fmod(t + 0.5, 1.0);
     for (int i = 0; i < 2; ++i) {
       const double tt = (i == 0) ? t : t2;
-      const int r = kAvatarR + 6 + static_cast<int>(16 * tt);
-      FillCircle(mem, kAvatarCx, kAvatarCy, r,
-                 MixColor(kBg, kCircle, 0.5 * (1 - tt)));
+      const int r = kAvatarR + 5 + static_cast<int>(12 * tt);
+      call_vis::FillDiscAlpha(mem, kAvatarCx, kAvatarCy, r,
+                              RGB(0xBE, 0xBE, 0xC4),
+                              static_cast<BYTE>(call_vis::kHaloBaseA *
+                                                (1 - tt)));
     }
   }
-  FillCircle(mem, kAvatarCx, kAvatarCy, kAvatarR, kCircle);
-  DrawWaveform(mem, kAvatarCx, kAvatarCy, 20, RGB(0xFF, 0xFF, 0xFF),
-               talking_ ? pulse_phase_ : -1);
+  const wchar_t* initial =
+      !caller_initial_.empty()
+          ? caller_initial_.c_str()
+          : (!caller_name_.empty() ? caller_name_.c_str() : nullptr);
+  call_vis::PaintAvatarDisc(mem, kAvatarCx, kAvatarCy, kAvatarR,
+                            initial ? std::wstring(initial) : std::wstring());
 
-  // ── 名称（17px 白色 Semibold） ──
-  SetBkMode(mem, TRANSPARENT);
-  HFONT name_font = CreateFontW(-17, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                DEFAULT_PITCH | FF_SWISS,
-                                L"Microsoft YaHei UI");
-  HFONT old_font = static_cast<HFONT>(SelectObject(mem, name_font));
-  SetTextColor(mem, kNameColor);
+  // ── 名称（18px 白 Semibold） ──
   RECT name_rc = {20, kNameTop, rc.right - 20, kNameTop + 26};
-  DrawTextW(mem, caller_name_.c_str(), -1, &name_rc,
-            DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-  SelectObject(mem, old_font);
-  DeleteObject(name_font);
+  call_vis::DrawCenteredText(mem, name_rc, caller_name_, call_vis::kNameColor,
+                             18, FW_SEMIBOLD, L"Microsoft YaHei UI");
 
-  // ── 状态 + 计时（13px 中灰） ──
-  std::wstring status_text = muted_ ? L"\u5DF2\u9759\u97F3"   // 已静音
-                                    : L"\u901A\u8BDD\u4E2D";  // 通话中
-  std::wstring status_line =
-      status_text + L" \u00B7 " + FormatDuration(elapsed_seconds_);
-  HFONT status_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                  CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                  DEFAULT_PITCH | FF_SWISS,
-                                  L"Microsoft YaHei UI");
-  old_font = static_cast<HFONT>(SelectObject(mem, status_font));
-  SetTextColor(mem, kMutedColor);
-  RECT status_rc = {20, kStatusTop, rc.right - 20, kStatusTop + 22};
-  DrawTextW(mem, status_line.c_str(), -1, &status_rc,
-            DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+  // ── 状态行：小波形 + 计时（12px 中灰，居中成组） ──
+  std::wstring status_text =
+      (muted_ ? L"已静音 · " : L"") + FormatDuration(elapsed_seconds_);
+  HFONT status_font =
+      call_vis::MakeFont(12, FW_NORMAL, L"Microsoft YaHei UI");
+  HFONT old_font = static_cast<HFONT>(SelectObject(mem, status_font));
+  SIZE sz = {0, 0};
+  GetTextExtentPoint32W(mem, status_text.c_str(),
+                        static_cast<int>(status_text.size()), &sz);
   SelectObject(mem, old_font);
   DeleteObject(status_font);
 
-  // ── 底部按钮标签（12px 中灰） ──
-  HFONT label_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH | FF_SWISS,
-                                 L"Microsoft YaHei UI");
-  old_font = static_cast<HFONT>(SelectObject(mem, label_font));
-  SetTextColor(mem, kMutedColor);
-  RECT labels[3] = {
-      {kMuteCx - 40, kLabelTop, kMuteCx + 40, kLabelTop + 18},
-      {kHangupCx - 40, kLabelTop, kHangupCx + 40, kLabelTop + 18},
-      {kSpeakerCx - 40, kLabelTop, kSpeakerCx + 40, kLabelTop + 18}};
-  const wchar_t* label_texts[3] = {L"\u9759\u97F3", L"\u6302\u65AD",
-                                   L"\u514D\u63D0"};  // 静音/挂断/免提
-  for (int i = 0; i < 3; ++i) {
-    DrawTextW(mem, label_texts[i], -1, &labels[i],
-              DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
-  }
+  constexpr int kBarsW = 30;
+  const int total_w = kBarsW + 10 + sz.cx;
+  const int group_left = kAvatarCx - total_w / 2;
+  const int status_cy = kStatusTop + kStatusH / 2;
+  call_vis::DrawWaveBars(mem, group_left + kBarsW / 2, status_cy, 12,
+                         call_vis::kSubColor, talking_ ? pulse_phase_ : -1);
+  old_font = static_cast<HFONT>(SelectObject(mem, status_font =
+      call_vis::MakeFont(12, FW_NORMAL, L"Microsoft YaHei UI")));
+  SetBkMode(mem, TRANSPARENT);
+  SetTextColor(mem, call_vis::kSubColor);
+  RECT status_rc = {group_left + kBarsW + 10, kStatusTop, rc.right - 20,
+                    kStatusTop + kStatusH};
+  DrawTextW(mem, status_text.c_str(), -1, &status_rc,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
   SelectObject(mem, old_font);
-  DeleteObject(label_font);
+  DeleteObject(status_font);
 
-  // 清除圆角裁剪
-  SelectClipRgn(mem, nullptr);
-  DeleteObject(clip_rgn);
+  // ── 分隔线 ──
+  call_vis::DrawDivider(mem, kWindowWidth, kDividerY);
+
+  // ── 切换钮：静音 / 免提（激活=瓷白盘，自绘无子控件） ──
+  call_vis::DrawSphereButton(mem, MuteRect(), call_vis::kGlyphMic, muted_,
+                             muted_, mute_hover_);
+  call_vis::DrawSphereButton(mem, SpeakerRect(), call_vis::kGlyphVolume,
+                             speaker_on_, false, speaker_hover_);
+
+  // ── 挂断胶囊 ──
+  call_vis::DrawPillButton(mem, PillRect(), pill_hover_);
 
   BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
   SelectObject(mem, old_bmp);
@@ -557,56 +380,65 @@ LRESULT ConnectedCallWindow::HandleMessage(HWND hwnd, UINT message,
         return 0;
       }
       break;
-    case WM_COMMAND: {
-      int id = LOWORD(wparam);
-      if (id == kIdMute) {
+    case WM_MOUSEMOVE: {
+      TRACKMOUSEEVENT tme = {};
+      tme.cbSize = sizeof(tme);
+      tme.dwFlags = TME_LEAVE;
+      tme.hwndTrack = hwnd;
+      TrackMouseEvent(&tme);
+
+      POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      bool changed = false;
+      const call_vis::TitleRects tr = call_vis::TitleRectsFor(kWindowWidth);
+      changed |= UpdateHover(title_min_hover_, tr.minimize, pt);
+      changed |= UpdateHover(title_close_hover_, tr.close, pt);
+      changed |= UpdateHover(mute_hover_, MuteRect(), pt);
+      changed |= UpdateHover(speaker_hover_, SpeakerRect(), pt);
+      changed |= UpdateHover(pill_hover_, PillRect(), pt);
+      if (changed) InvalidateRect(hwnd, nullptr, FALSE);
+      break;
+    }
+    case WM_MOUSELEAVE:
+      if (title_min_hover_ || title_close_hover_ || mute_hover_ ||
+          speaker_hover_ || pill_hover_) {
+        title_min_hover_ = false;
+        title_close_hover_ = false;
+        mute_hover_ = false;
+        speaker_hover_ = false;
+        pill_hover_ = false;
+        InvalidateRect(hwnd, nullptr, FALSE);
+      }
+      break;
+    case WM_LBUTTONUP: {
+      POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      const call_vis::TitleRects tr = call_vis::TitleRectsFor(kWindowWidth);
+      if (call_vis::PointInRect(tr.close, pt)) {
+        // 关闭 = 挂断
+        if (on_hangup_) on_hangup_();
+        PostMessage(hwnd, kMsgDeferredHide, 0, 0);
+        return 0;
+      }
+      if (call_vis::PointInRect(tr.minimize, pt)) {
+        // 最小化 = 收起窗口（通话继续，服务端结束时 Dart 侧仍会 Hide）
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+      }
+      if (call_vis::PointInRect(MuteRect(), pt)) {
         muted_ = !muted_;
         InvalidateRect(hwnd, nullptr, FALSE);
         if (on_mute_toggle_) on_mute_toggle_(muted_);
         return 0;
       }
-      if (id == kIdSpeaker) {
+      if (call_vis::PointInRect(SpeakerRect(), pt)) {
         speaker_on_ = !speaker_on_;
         InvalidateRect(hwnd, nullptr, FALSE);
         if (on_speaker_toggle_) on_speaker_toggle_(speaker_on_);
         return 0;
       }
-      if (id == kIdHangup) {
+      if (call_vis::PointInRect(PillRect(), pt)) {
         if (on_hangup_) on_hangup_();
         PostMessage(hwnd, kMsgDeferredHide, 0, 0);
         return 0;
-      }
-      break;
-    }
-    case WM_DRAWITEM: {
-      auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
-      if (dis->CtlType == ODT_BUTTON) {
-        bool hovered = (dis->itemState & ODS_SELECTED) ||
-                       (dis->itemState & ODS_HOTLIGHT);
-        if (dis->CtlID == kIdMute) {
-          const bool active = muted_;
-          DrawRoundActionButton(
-              dis->hDC, dis->rcItem, kGlyphMic,
-              active ? (hovered ? kWhiteBtnHover : kWhiteBtn)
-                     : (hovered ? kDarkBtnHover : kDarkBtn),
-              active ? kGlyphOnWhite : RGB(255, 255, 255), false);
-          return TRUE;
-        }
-        if (dis->CtlID == kIdSpeaker) {
-          const bool active = speaker_on_;
-          DrawRoundActionButton(
-              dis->hDC, dis->rcItem, kGlyphVolume,
-              active ? (hovered ? kWhiteBtnHover : kWhiteBtn)
-                     : (hovered ? kDarkBtnHover : kDarkBtn),
-              active ? kGlyphOnWhite : RGB(255, 255, 255), false);
-          return TRUE;
-        }
-        if (dis->CtlID == kIdHangup) {
-          DrawRoundActionButton(dis->hDC, dis->rcItem, kGlyphPhone,
-                                hovered ? kWhiteBtnHover : kWhiteBtn,
-                                kGlyphOnWhite, true);
-          return TRUE;
-        }
       }
       break;
     }
@@ -614,19 +446,15 @@ LRESULT ConnectedCallWindow::HandleMessage(HWND hwnd, UINT message,
       POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       ScreenToClient(hwnd, &pt);
 
-      // 按钮区域外整卡可拖动
-      const int side_y = kBtnCy - kSideBtn / 2;
-      const bool in_mute = pt.x >= kMuteCx - kSideBtn / 2 &&
-                           pt.x <= kMuteCx + kSideBtn / 2 &&
-                           pt.y >= side_y && pt.y <= side_y + kSideBtn;
-      const bool in_speaker = pt.x >= kSpeakerCx - kSideBtn / 2 &&
-                              pt.x <= kSpeakerCx + kSideBtn / 2 &&
-                              pt.y >= side_y && pt.y <= side_y + kSideBtn;
-      const bool in_hangup = pt.x >= kHangupCx - kMainBtn / 2 &&
-                             pt.x <= kHangupCx + kMainBtn / 2 &&
-                             pt.y >= kBtnCy - kMainBtn / 2 &&
-                             pt.y <= kBtnCy + kMainBtn / 2;
-      if (in_mute || in_speaker || in_hangup) return HTCLIENT;
+      // 标题栏钮、切换钮与挂断胶囊可点击，其余整卡可拖动
+      const call_vis::TitleRects tr = call_vis::TitleRectsFor(kWindowWidth);
+      if (call_vis::PointInRect(tr.minimize, pt) ||
+          call_vis::PointInRect(tr.close, pt) ||
+          call_vis::PointInRect(MuteRect(), pt) ||
+          call_vis::PointInRect(SpeakerRect(), pt) ||
+          call_vis::PointInRect(PillRect(), pt)) {
+        return HTCLIENT;
+      }
       return HTCAPTION;
     }
     case kMsgDeferredHide:

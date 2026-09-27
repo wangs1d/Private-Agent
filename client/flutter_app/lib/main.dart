@@ -13,6 +13,7 @@ import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
 import "core/presentation/client_update_dialog.dart";
+import "core/presentation/dynamic_island.dart";
 import "core/presentation/glass_notify.dart";
 import "core/presentation/update_result_card.dart";
 import "core/presentation/voice_call_ui_labels.dart";
@@ -26,6 +27,7 @@ import "core/models/turn_state.dart";
 import "core/utils/agent_result_parser.dart";
 import "core/utils/assistant_text_sanitizer.dart";
 import "core/utils/content_summary_parser.dart";
+import "core/services/app_auto_start.dart";
 import "core/services/client_update_checker.dart";
 import "core/services/local_runtime_config.dart";
 import "core/services/local_runtime_manager.dart";
@@ -51,12 +53,12 @@ import "core/services/shared_browser_host.dart";
 import "core/services/ws_chat_service.dart";
 import "core/services/inbox_api.dart";
 import "core/services/control_plane_account.dart";
-import "core/services/schedule_floating_launcher.dart";
 import "core/utils/play_url_utils.dart";
 import "features/catalog/catalog_page.dart";
 import "features/help/feedback_dialog.dart";
 import "features/browser/browser_page.dart";
-import "features/gallery/gallery_page.dart";
+import "features/gallery/gallery_workbench_page.dart";
+import "features/gallery/gallery_wall_host.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
 import "features/chat/agent_profile_page.dart";
@@ -100,6 +102,7 @@ import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
 import "features/schedule/schedule_page.dart";
 import "features/chat/image_preview_panel.dart";
+import "features/auth/register_page.dart";
 import "app/app_helpers.dart";
 import "widgets/app_sidebar.dart";
 import "widgets/app_window_titlebar.dart";
@@ -125,6 +128,13 @@ void main() async {
         Platform.environment[kDailyBriefingWindowEnv];
     if (briefingWindowPayload != null && briefingWindowPayload.isNotEmpty) {
       await runDailyBriefingWindow(briefingWindowPayload);
+      return;
+    }
+    // 注册界面独立预览模式：只渲染注册页，不 bootstrap 主应用任何服务
+    // （设计还原/真机验收用，见 features/auth/register_page.dart）。
+    final String? registerPreview = Platform.environment[kRegisterPreviewEnv];
+    if (registerPreview == "1") {
+      await runRegisterPreviewWindow();
       return;
     }
     // 预加载本机访问凭据（token），确保首次 session.init 就能带上
@@ -595,6 +605,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
     // 右侧双栏「图片预览」面板：媒体卡点击 → 打开右栏大图
     ImagePreviewLauncher.setHandler(_openImagePreview);
+    // 预览面板「在照片墙中查看」：切图库 tab + 3D 墙飞到该照片
+    ImagePreviewLauncher.onOpenInWall = (String photoId) {
+      _selectTab(1);
+      unawaited(GalleryWallHost.instance.flyToPhoto(photoId));
+    };
     // 右侧双栏「内容详情」面板：详情卡（长内容折叠卡）点击 → 右栏继续展示
     ContentSummaryLauncher.setHandler(_openContentSummaryPanel);
     // 「行程规划」独立界面：行程卡点击 / autoOpen → 全屏路由打开
@@ -644,6 +659,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _calendarReloadSignal.dispose();
     _stopMessagePolling();
     _surfaceAutoHideTimer?.cancel();
+    _islandScheduleTicker?.cancel();
     _stopContinuousLocationTracking();
     super.dispose();
   }
@@ -827,6 +843,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           dedupedMessages, messageIndexById, duplicateMessageIds));
     }
 
+    // 桌面顶部灵动岛：原生窗口 + 控制器绑定（数据全部来自真实事件源）。
+    setDynamicIslandActionHandler((String label) {
+      unawaited(windowManager.show());
+      unawaited(windowManager.focus());
+    });
+    unawaited(initDynamicIsland());
+    // 日程倒计时每 30s 刷新一次（「25 分钟后」随时间推进），并立即初同步。
+    unawaited(_syncIslandSchedule());
+    _islandScheduleTicker = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(_syncIslandSchedule()),
+    );
+
     unawaited(_loadAgentProfile());
     _onScheduleReloadSignal();
     unawaited(_flushScheduleOfflineDeletes());
@@ -926,6 +955,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 原由右侧面板天气 Header 触发，组件移除后改由应用启动兜底；
       // Agent 运行中仍可走 agent.location_request 按需再拉。
       unawaited(_reportStartupLocation());
+      // 自启重认领：已启用则把 Run 键重写为当前 exe 路径（详见 AppAutoStart.reassert）。
+      unawaited(AppAutoStart.reassert());
     });
     _ws.events.listen((Map<String, dynamic> event) async {
       final String type = event["type"] as String? ?? "";
@@ -1236,8 +1267,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             if (_isMobile && _appBackgrounded) {
               unawaited(LocalNotificationService.show(title: title, body: message));
             } else {
-              // 决策类触达恒走桌面弹窗（右下角原生窗口），不依赖主窗可见性
-              unawaited(_showScheduleReminderPopup(title, message));
+              // 日程到点提醒改道灵动岛：attention 动画（放大 2 倍 + 高亮），
+              // 服务端已算好提前量，message 直接作为尾注。
+              IslandReminderScheduler.instance.fireNow(
+                title: title,
+                trailingOverride: message,
+              );
             }
 
             await _syncScheduleFromServer();
@@ -1578,16 +1613,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             });
             await _store.saveMessage(finalMessage);
           }
-          // 行程卡自动展开：本轮规划实时完成且带 autoOpen 的 travel_itinerary 卡
-          // → 直接弹出独立规划界面，无需用户点按钮。卡片已随消息入列/落库，
-          // 历史回看时可随时点卡片按钮重开；历史加载不走本事件，不会重复弹开。
+          // 行程卡预热/自动展开（2026-09-25）：本轮产出 travel_itinerary 卡即把
+          // 载荷预注入规划窗口（常驻进程换载或隐藏拉起），用户点「打开行程规划」
+          // 时窗口与地图已就绪零等待；带 autoOpen 的卡照旧直接弹出独立界面。
           final AgentResultParseResult doneParsed =
               AgentResultParser.parse(resolvedText);
           final AgentResultData? doneCard = doneParsed.data;
-          if (doneCard != null &&
-              doneCard.cardType == "travel_itinerary" &&
-              doneCard.autoOpen) {
-            _openTravelPlanPanel(doneCard);
+          if (doneCard != null && doneCard.cardType == "travel_itinerary") {
+            if (doneCard.autoOpen) {
+              _openTravelPlanPanel(doneCard);
+            } else {
+              unawaited(TravelPlanWindowLauncher.warm(doneCard));
+            }
           }
           unawaited(_loadAgentProfile());
         }
@@ -1766,7 +1803,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final bool inboxImportant =
               inboxImportance == "high" || inboxImportance == "critical";
           // 角标即时 +1（轮询会在下个周期校准）
-          if (mounted) setState(() => _inboxUnread += 1);
+          if (mounted) {
+            setState(() => _inboxUnread += 1);
+            IslandRealFeeds.setInboxUnread(_inboxUnread);
+          }
           // 手机后台（类微信常在线）：系统通知触达，点开回前台后到邮箱-消息 Tab 查看
           if (_isMobile && _appBackgrounded && inboxImportant) {
             unawaited(LocalNotificationService.show(
@@ -2375,6 +2415,47 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       debugPrint("[schedule] syncServerRemindersToLocal failed: $e\n$st");
     } finally {
       _notifyScheduleViewsChanged();
+      unawaited(_syncIslandSchedule());
+    }
+  }
+
+  /// 把今日日程喂给灵动岛：展开卡内容 + 下一事项倒计时条目 + 提醒计划。
+  /// 由日程同步 / 30s 倒计时刷新 / surface.show 共用。
+  Future<void> _syncIslandSchedule() async {
+    try {
+      final List<ScheduleEvent> events = await _loadTodayScheduleFuture();
+      final DateTime now = DateTime.now();
+      final List<ScheduleEvent> sorted =
+          List<ScheduleEvent>.from(events)
+            ..sort((a, b) => a.startAt.compareTo(b.startAt));
+      ScheduleEvent? next;
+      final List<Map<String, Object?>> agenda = <Map<String, Object?>>[];
+      for (final ScheduleEvent e in sorted) {
+        final bool done = !e.startAt.isAfter(now);
+        if (next == null && !done) next = e;
+        agenda.add(<String, Object?>{
+          "time":
+              "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
+          "title": e.shortTitle ?? simplifyScheduleTitle(e.title),
+          "hint": done ? "已完成" : "",
+          "completed": done,
+        });
+      }
+      Map<String, Object?>? nextMap;
+      final ScheduleEvent? focus = next;
+      if (focus != null) {
+        final int minutesAhead =
+            focus.startAt.difference(now).inMinutes.clamp(0, 24 * 60);
+        nextMap = <String, Object?>{
+          "title": focus.shortTitle ?? simplifyScheduleTitle(focus.title),
+          "minutesAhead": minutesAhead,
+          "trailing": IslandReminderPolicy.trailingFor(
+              minutesAhead, 0, 1),
+        };
+      }
+      IslandRealFeeds.setSchedule(agenda: agenda, next: nextMap);
+    } catch (e, st) {
+      debugPrint("[island] sync schedule failed: $e\n$st");
     }
   }
 
@@ -3266,6 +3347,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final inboxResult = await _inboxApi.unreadCount();
     if (inboxResult.ok && mounted) {
       setState(() => _inboxUnread = inboxResult.value ?? 0);
+      IslandRealFeeds.setInboxUnread(_inboxUnread);
     }
   }
 
@@ -3355,18 +3437,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 图库入口：与好友/消息/日程一致，从右侧滑出 split 双栏面板
-  /// （照片网格浏览 / 上传 / 删除）。
+  /// 图库入口（右面板工具格「图库」）：切到一级图库 tab。
+  /// 2026-09-25 起图库从右面板升级为一级 tab（3D 照片墙 + 2D 管理视图），
+  /// 窄栏放不下照片墙，也收掉双入口。
   void _openGalleryPanel() {
-    setState(() {
-      _tabIndex = 0;
-      _rightPanel = RightPanelKind.gallery;
-      // 保存当前 splitRatio，关闭时恢复
-      _previousSplitRatio = _splitRatio;
-      // 保存 side 模式下的原右面板宽度，关闭时恢复
-      _previousRightPanelWidth = _rightPanelWidth;
-      _splitRatio = RightPanelKind.gallery.defaultSplitRatio;
-    });
+    _selectTab(1);
   }
 
   /// 常用工具「浏览器」入口：打开用户与 Agent 共用的内嵌浏览器面板。
@@ -3445,6 +3520,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (changed && mounted) {
       setState(() {});
     }
+    if (changed) {
+      IslandRealFeeds.setTaskActivity(
+          activeCount: _taskPlaneActiveTaskIds.length);
+    }
   }
 
   /// 取消后台任务（回执 hover 取消入口）：与「发送新消息打断前台回复」
@@ -3519,6 +3598,21 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     await _store.saveMessage(message).catchError((Object e) {
       debugPrint("[chat] task plane result saveMessage failed: $e");
     });
+    // 行程卡预热（2026-09-25）：任务面是旅游规划的主车道——结果落位后把
+    // 行程载荷预注入规划窗口（常驻换载或隐藏拉起），点「打开行程规划」零等待。
+    // 与前台轮次 done 分支的预热同款；只认 blocks 里的行程卡（text 已被
+    // 服务端收口，标记仍在，双路解析等价，这里走 blocks 与渲染同源）。
+    final Map<String, dynamic>? travelCardJson = (replyBlocksFromPayload ?? const <Map<String, dynamic>>[])
+        .where((b) => b["type"]?.toString() == "card")
+        .map((b) => b["card"] as Map<String, dynamic>?)
+        .firstWhere(
+          (c) => c?["cardType"]?.toString() == "travel_itinerary",
+          orElse: () => null,
+        );
+    if (travelCardJson != null) {
+      unawaited(
+          TravelPlanWindowLauncher.warm(AgentResultData.fromJson(travelCardJson)));
+    }
   }
 
   /// 按结果 messageId（`assistant-task-<taskId>`）定位并移除对话流内的过程回执。
@@ -3527,6 +3621,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final String taskId = resultMessageId.substring("assistant-task-".length);
     final String? receiptId = _taskReceiptMessageIdByTaskId.remove(taskId);
     _taskPlaneActiveTaskIds.remove(taskId);
+    IslandRealFeeds.setTaskActivity(
+        activeCount: _taskPlaneActiveTaskIds.length);
     if (receiptId == null || !mounted) return;
     final int? idx = _messageIndexById(receiptId);
     if (idx == null || idx >= _messages.length) return;
@@ -3631,6 +3727,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         _relayInbound.clear();
         _taskReceiptMessageIdByTaskId.clear();
         _taskPlaneActiveTaskIds.clear();
+        IslandRealFeeds.setTaskActivity(activeCount: 0);
         _rebuildAssistantIndex();
       });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tip)));
@@ -4068,30 +4165,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 日程提醒（schedule.reminder_fired）：需要用户知悉的决策类触达，恒走
-  /// 桌面原生弹窗（右下角 DesktopNotificationWindow 专属，不依赖主窗可见
-  /// 性）；原生不可用（非 Windows/移动端）降级应用内玻璃卡。
-  Future<void> _showScheduleReminderPopup(String title, String message) async {
-    // 日程提醒接管共享右下角窗口：未决的主动消息 outcome 不再有效
-    _pendingProactiveDeliveryId = null;
-    _desktopNotificationNeedsFeedback = true;
-    _desktopNotificationFeedbackChannel = "websocket";
-
-    if (!kIsWeb && !_isMobile) {
-      final bool shown = await DesktopNotificationLauncher.show(
-        title: title,
-        message: message,
-        priority: "high",
-        showConfirmButton: true,
-        confirmText: "我知道了",
-      );
-      if (shown) return;
-    }
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx == null || !navCtx.mounted) return;
-    _showInAppReminderCard(title, message, "high", true, "我知道了");
-  }
-
   /// 主动性决策弹窗（reminder_popup）：恒走桌面原生弹窗（右下角
   /// DesktopNotificationWindow，决策类统一承载面，不依赖主窗可见性）；
   /// 原生不可用（非 Windows/移动端）降级应用内玻璃卡。
@@ -4386,8 +4459,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 今日安排悬浮卡自动淡出计时器（surface.show 召唤时启动）
   Timer? _surfaceAutoHideTimer;
 
+  /// 灵动岛日程倒计时刷新（「25 分钟后」随时间推进）。
+  Timer? _islandScheduleTicker;
+
   /// 处理服务端 surface.show：按 surface 名召唤对应悬浮卡（Surface-on-Demand）。
-  /// 目前支持 today_schedule（今日安排悬浮窗）；未知 surface 静默忽略。
+  /// today_schedule 现召唤「桌面顶部灵动岛」：显示下一事项倒计时条目 +
+  /// 自动展开日程卡，ttl 秒后收回。未知 surface 静默忽略。
   /// 数据由客户端自取（_loadTodayScheduleFuture），服务端只下发指令不搬日程数据。
   Future<void> _handleSurfaceShow(Map<String, dynamic> payload) async {
     if (kIsWeb || !Platform.isWindows) return;
@@ -4400,38 +4477,44 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final DateTime now = DateTime.now();
       final List<ScheduleEvent> sorted = List<ScheduleEvent>.from(events)
         ..sort((a, b) => a.startAt.compareTo(b.startAt));
-      final List<ScheduleFloatingItem> items = sorted
-          .map(
-            (ScheduleEvent e) => ScheduleFloatingItem(
-              id: e.id,
-              timeText:
-                  "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
-              title: e.shortTitle ?? simplifyScheduleTitle(e.title),
-              notes: (e.notes ?? "").trim(),
-              completed: !e.startAt.isAfter(now),
-            ),
-          )
-          .toList();
-      final bool wasVisible = ScheduleFloatingLauncher.isVisible.value;
-      final bool ok = await ScheduleFloatingLauncher.show();
-      if (!ok) {
-        debugPrint("[surface.show] failed to launch schedule floating window");
-        return;
-      }
-      // 悬浮窗配色跟随当前 App 主题（保证与主界面面板一致）
-      await ScheduleFloatingLauncher.syncAppTheme();
-      await ScheduleFloatingLauncher.setSchedule(items);
-      // 召唤前未常驻的窗口按 TTL 自动淡出；用户本来就开着的只刷新数据，不打扰
-      if (!wasVisible) {
-        _surfaceAutoHideTimer?.cancel();
-        _surfaceAutoHideTimer = Timer(Duration(seconds: ttlSeconds), () {
-          if (ScheduleFloatingLauncher.isVisible.value) {
-            ScheduleFloatingLauncher.hide();
-          }
+      final List<Map<String, Object?>> agenda = <Map<String, Object?>>[];
+      ScheduleEvent? next;
+      for (final ScheduleEvent e in sorted) {
+        final bool done = !e.startAt.isAfter(now);
+        if (next == null && !done) next = e;
+        agenda.add(<String, Object?>{
+          "time":
+              "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
+          "title": e.shortTitle ?? simplifyScheduleTitle(e.title),
+          "hint": done ? "已完成" : "",
+          "completed": done,
         });
       }
+      final DynamicIslandLauncher launcher = DynamicIslandLauncher.instance;
+      await launcher.setAgenda(agenda);
+      final DynamicIslandController controller = DynamicIslandController.instance;
+      final ScheduleEvent? focus = next;
+      if (focus != null) {
+        final int minutesAhead =
+            focus.startAt.difference(now).inMinutes.clamp(0, 24 * 60);
+        final String trailing = minutesAhead >= 60
+            ? "${minutesAhead ~/ 60} 小时后"
+            : (minutesAhead > 0 ? "$minutesAhead 分钟后" : "即将开始");
+        controller.present(IslandEntry(
+          id: "schedule.next",
+          title: focus.shortTitle ?? simplifyScheduleTitle(focus.title),
+          kind: IslandKind.schedule,
+          trailing: trailing,
+          priority: 2,
+        ));
+      }
+      if (!controller.expanded) controller.toggleExpanded();
+      _surfaceAutoHideTimer?.cancel();
+      _surfaceAutoHideTimer = Timer(Duration(seconds: ttlSeconds), () {
+        DynamicIslandController.instance.collapse();
+      });
     } catch (e, st) {
-      debugPrint("[surface.show] $surface failed: $e\n$st");
+      debugPrint("[surface.show] $surface failed: $e | $st");
     }
   }
 
@@ -4699,6 +4782,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           // 玻璃态通知卡挂在 navigator 之上：任意路由上方均可弹出，
           // 关闭后及时移除 BackdropFilter 层避免常驻模糊开销。
           // 「检查更新」结果浮卡同层锚定在侧栏更新按钮正上方。
+          // （灵动岛已移至桌面顶部原生窗口，不再挂在 builder 层。）
           builder: (BuildContext context, Widget? child) =>
               GlassNotifyHost(child: UpdateResultCardHost(child: child)),
           home: Builder(
@@ -4967,6 +5051,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       UserPreferencesApi.modeWindow => "独立窗口",
       _ => "卡片",
     };
+
+    // 岛上简报就绪条目（所有触达模式共用；10 分钟后自动撤下）。
+    IslandRealFeeds.setBriefingReady();
 
     if (markDesktopShown) {
       _lastDesktopBriefingAt = DateTime.now();
@@ -5514,9 +5601,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           index: item.index < urls.length ? item.index : 0,
           source: item.source,
         );
-      case RightPanelKind.gallery:
-        // 嵌入模式：面板顶栏已有"图库"标题，图库页不再渲染自带 AppBar
-        return const GalleryPage(embedded: true);
       case RightPanelKind.browser:
         // 用户与 Agent 共用的内嵌浏览器（WebView2 进程级单例，页面常驻）；
         // 主页「试试让 Agent」chips 把任务文本直接发进对话
@@ -5618,11 +5702,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚定+ 桌面漫游）
+  /// 根级 Tab 栈：0=对话，1=图库（3D 照片墙 + 2D 管理视图，见
+  /// GalleryWorkbenchPage），2=钱包 dialog 占位（栈里不挂载）。
   ///
-  /// 注：已不再作为整页 tab 出现，而是从右侧滑出折叠面板。
-  /// 为了不破坏 _tabIndex 的取值约定,这里保留 1(好友占位),
-  /// 渲染为空 SizedBox —— _openAgentLinkTab
+  /// 注：IndexedStack 会构建全部子项 —— GalleryWorkbenchPage 内部用
+  /// 「首次激活才挂载」闸挡住 WebView 提前创建（幽灵窗铁律）。
   Widget _buildTabStack() {
     return Builder(
       builder: (BuildContext context) {
@@ -5630,8 +5714,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           index: _tabIndex,
           children: <Widget>[
             _buildChatPage(context),
-            const SizedBox.shrink(), // 1: 好友 → 右侧面板
-            // 2: 钱包由 dialog 弹出,栈里不占位
+            GalleryWorkbenchPage(visible: _tabIndex == 1),
             const SizedBox.shrink(),
           ],
         );

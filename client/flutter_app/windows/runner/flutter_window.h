@@ -18,7 +18,7 @@
 #include "incoming_call_window.h"
 #include "connected_call_window.h"
 #include "outgoing_call_window.h"
-#include "schedule_floating_window.h"
+#include "dynamic_island_window.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -51,8 +51,8 @@ class FlutterWindow : public Win32Window {
   // 桌面右上角玻璃通知栈（主动性消息专属，脱离主窗口存在）
   std::unique_ptr<GlassNotifyWindow> glass_notify_window_;
 
-  // 今日安排独立悬浮窗（同进程 HWND + GDI 自绘，不依赖 Electron）
-  std::unique_ptr<ScheduleFloatingWindow> schedule_floating_window_;
+  // 桌面顶部灵动岛（同进程 HWND + GDI+ 分层窗口自绘）
+  std::unique_ptr<DynamicIslandWindow> dynamic_island_window_;
 
   // Agent 主页信息弹出窗
   std::unique_ptr<AgentProfileOverlayWindow> agent_profile_window_;
@@ -86,9 +86,9 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       glass_notify_channel_;
 
-  // pai/schedule_floating MethodChannel —— 控制今日安排悬浮窗
+  // pai/dynamic_island MethodChannel —— 控制桌面顶部灵动岛
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
-      schedule_floating_channel_;
+      dynamic_island_channel_;
 
   // pai/daily_briefing MethodChannel —— 简报独立窗口工作区查询
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
@@ -109,7 +109,7 @@ class FlutterWindow : public Win32Window {
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void ReportGlassNotifyEvent(const std::string& id,
                               const std::string& event);
-  void HandleScheduleFloatingMethodCall(
+  void HandleDynamicIslandMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void HandleDailyBriefingMethodCall(

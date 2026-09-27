@@ -80,6 +80,12 @@ class _AppSidebarState extends State<AppSidebar> {
       label: '对话',
       tabIndex: 0,
     ),
+    SidebarItemSpec(
+      iconOutlined: Icons.photo_library_outlined,
+      iconFilled: Icons.photo_library_rounded,
+      label: '图库',
+      tabIndex: 1,
+    ),
   ];
 
   // 预定义常量

@@ -71,6 +71,10 @@ npm run autostart:uninstall  # 注销，并停止由自启拉起的服务进程
 - 默认 dev 模式（ts watch，改动即热载）。生产模式：先 `npm run build --workspace=server`，再把 `scripts/autostart/autostart-server.mjs` 顶部 `MODE` 改为 `prod`（或启动前设 `AUTOSTART_MODE=prod`），然后重跑 `npm run autostart:install`。
 - 手动立即验证：`schtasks /run /tn PrivateAgentServer`。
 
+## 工程铁律
+
+硬约束清单（出口收口 / 敏感动作分级 / 凭据不进模型上下文 + 两条默认策略）见 [docs/engineering-rules.md](docs/engineering-rules.md)，合入前自查。
+
 ## 现在最值得继续整理的区域
 
 - 根目录存在较多预览页、临时脚本、产物目录，建议后续继续收拢

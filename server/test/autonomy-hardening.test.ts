@@ -188,6 +188,10 @@ test("TaskOutbox 落盘恢复：重启后离线结果照常补投", () => {
 
 test("定时任务连续失败：退避递增、达阈值死信停摆、死信通知恰好一次", async () => {
   const dir = tmpDir();
+  // 隔离持久化文件：不设会被 persist() 写进 server/data/schedule-tasks.json，
+  // 把线上任务整库冲掉（2026-09-24 科技早报任务就是这样被本测试删掉的）
+  const prevScheduleFile = process.env.SCHEDULE_TASKS_FILE;
+  process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
   try {
     const svc = new ScheduleTaskService();
     let deadLetters = 0;
@@ -220,6 +224,8 @@ test("定时任务连续失败：退避递增、达阈值死信停摆、死信�
     // 死信后 triggerNow 应拒绝（不再空烧）
     await assert.rejects(() => svc.triggerNow(task.taskId));
   } finally {
+    if (prevScheduleFile === undefined) delete process.env.SCHEDULE_TASKS_FILE;
+    else process.env.SCHEDULE_TASKS_FILE = prevScheduleFile;
     rmSync(dir, { recursive: true, force: true });
   }
 });

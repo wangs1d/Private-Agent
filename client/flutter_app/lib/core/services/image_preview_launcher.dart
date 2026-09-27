@@ -59,6 +59,10 @@ class ImagePreviewLauncher {
   static void Function(ImagePreviewSnapshot item, BuildContext? anchorContext)?
       beforeOpen;
 
+  /// 「在照片墙中查看」回调（主壳注册：切图库 tab + 3D 墙 flyToPhoto）。
+  /// 入参为图库照片 id（/picture/assets/{id}/... 才有，其他图源为 null 不显示入口）。
+  static void Function(String photoId)? onOpenInWall;
+
   /// 请求在右侧双栏中预览某张图片。
   ///
   /// [gallery] 传入同一绿泡内的全部照片，[index] 指定当前位次，
@@ -92,5 +96,6 @@ class ImagePreviewLauncher {
     _handler = null;
     _last = null;
     beforeOpen = null;
+    onOpenInWall = null;
   }
 }

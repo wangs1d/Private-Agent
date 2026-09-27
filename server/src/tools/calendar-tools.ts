@@ -524,4 +524,95 @@ export function registerCalendarTools(
           : "没有可用空闲时段时，如实告知用户并询问是否缩小范围、缩短时长或改天。",
     };
   });
+
+  // 批量创建（课表/排班表/会议日程等一次性导入场景）：逐条走与 create_task 相同的
+  // 冲突预检与幂等创建；部分失败不影响其余条目，逐条结果回传给模型转述。
+  registry.register("calendar.batch_create", async (input, context) => {
+    const sessionId = resolveActorId(context);
+    const timezone = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
+    const forceCreate = input.forceCreate === true;
+    const rawItems = Array.isArray(input.items) ? (input.items as Array<Record<string, unknown>>) : [];
+    if (rawItems.length === 0) {
+      return { ok: false, error: "items 必填：至少一条 {description, runAt}（runAt 为 ISO 时间字符串）" };
+    }
+    if (rawItems.length > 60) {
+      return { ok: false, error: `单次最多批量创建 60 条，收到 ${rawItems.length} 条；请拆分调用` };
+    }
+    const results: Array<Record<string, unknown>> = [];
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (let i = 0; i < rawItems.length; i++) {
+      const raw = rawItems[i] ?? {};
+      const description = String(raw.description ?? "").trim();
+      const runAt = String(raw.runAt ?? "").trim();
+      const itemLabel = description ? `「${description.slice(0, 20)}」` : `第 ${i + 1} 条`;
+      if (!description || !runAt) {
+        failed += 1;
+        results.push({ index: i, description, ok: false, error: "description、runAt（ISO 时间字符串）必填" });
+        continue;
+      }
+      const recurrenceRaw = String(raw.recurrence ?? "none").trim();
+      if (!["none", "daily", "weekly", "yearly"].includes(recurrenceRaw)) {
+        failed += 1;
+        results.push({ index: i, description, ok: false, error: "recurrence 须为 none、daily、weekly 或 yearly" });
+        continue;
+      }
+      const category = parseScheduleTaskCategory(raw.category) ?? "itinerary";
+      const durationMinutes = normalizeDurationMinutes(raw.durationMinutes);
+      const remindBeforeMinutes = normalizeRemindBeforeMinutes(raw.remindBeforeMinutes);
+      try {
+        if (conflictService) {
+          const conflictResult = precheckCreateConflict(conflictService, {
+            sessionId,
+            runAt,
+            durationMinutes,
+            category,
+            timezone,
+            forceCreate,
+          });
+          if (conflictResult) {
+            skipped += 1;
+            results.push({ index: i, description, ok: false, skipped: true, conflict: conflictResult });
+            continue;
+          }
+        }
+        const task = await scheduleTaskService.createTask({
+          sessionId,
+          title: String(raw.title ?? "").trim() || undefined,
+          shortTitle: String(raw.shortTitle ?? "").trim() || undefined,
+          description,
+          kind: "reminder",
+          category,
+          runAt,
+          recurrence: recurrenceRaw as "none" | "daily" | "weekly" | "yearly",
+          timezone,
+          reminderMessage: String(raw.reminderMessage ?? description).trim(),
+          durationMinutes,
+          remindBeforeMinutes,
+        });
+        results.push({
+          index: i,
+          description,
+          ok: true,
+          taskId: task.taskId,
+          nextRunAt: task.nextRunAt,
+          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
+          durationMinutes: task.durationMinutes,
+        });
+        created += 1;
+      } catch (e) {
+        failed += 1;
+        results.push({ index: i, description: itemLabel, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return {
+      ok: failed === 0,
+      summary: `批量创建完成：成功 ${created} 条${skipped > 0 ? `，冲突跳过 ${skipped} 条` : ""}${failed > 0 ? `，失败 ${failed} 条` : ""}。请逐条转述（用 nextRunAtLocal 展示时间），冲突与失败条目如实说明，不要声称全部成功。`,
+      created,
+      skipped,
+      failed,
+      results,
+    };
+  });
 }

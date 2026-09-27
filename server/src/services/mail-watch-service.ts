@@ -60,6 +60,8 @@ export interface MailWatchFetchedMail {
   /** ISO 时间（信封 Date 优先，退 internalDate） */
   date?: string;
   textSnippet?: string;
+  /** 原始 RFC822 字节（截 256KB）：票务/日历提取从这里面拿全文与附件 */
+  source?: Buffer;
 }
 
 /** handleIncoming 入参（对外稳定形状；uid/messageId 为轮询层可选补充，用于判重）。 */
@@ -70,6 +72,8 @@ export interface IncomingMail {
   subject: string;
   date?: string;
   textSnippet?: string;
+  /** 原始 RFC822 字节（与 MailWatchFetchedMail.source 同源；提取层用） */
+  source?: Buffer;
   /** 邮箱 UID：拼进 message-hub external_message_id 做稳定判重 */
   uid?: number;
   /** 未提供 uid 时的替代判重键 */
@@ -444,6 +448,52 @@ function htmlToText(html: string): string {
     .replace(/&#39;|&apos;/gi, "'");
 }
 
+/**
+ * 提取邮件全文与 ICS 日历附件（票务→日程提取用；尽力而为，失败返回空）。
+ * 与 extractMailTextSnippet 共用同一套手写 MIME 解析件，区别：
+ *   - fullText 收全部 text/* 部件（plain 优先、HTML 去标签），拼接后截 12000 字符（规则正则用）；
+ *   - icsTexts 收 text/calendar 部件或 .ics 附件（保真解码，不折叠空白——喂 RFC5545 解析器）。
+ */
+export function extractMailCalendarParts(
+  source: Buffer | null | undefined,
+): { fullText: string; icsTexts: string[] } {
+  const empty = { fullText: "", icsTexts: [] as string[] };
+  if (!source || source.length === 0) return empty;
+  try {
+    const raw = source.toString("latin1");
+    const top = splitHeaderBody(raw);
+    const texts: string[] = [];
+    const icsTexts: string[] = [];
+    const walk = (headersBlock: string, body: string, depth: number): void => {
+      const ct = parseContentType(headersBlock);
+      if (ct.type.startsWith("multipart/")) {
+        const boundary = ct.params.boundary;
+        if (!boundary || depth >= 5) return;
+        for (const child of splitMultipart(body, boundary)) walk(child.headers, child.body, depth + 1);
+        return;
+      }
+      if (!ct.type.startsWith("text/")) return;
+      const cte = readHeader(headersBlock, "content-transfer-encoding");
+      const decoded = decodeCharset(decodeTransferEncoding(body, cte), ct.params.charset);
+      const disposition = readHeader(headersBlock, "content-disposition").toLowerCase();
+      const filenameHint = `${ct.params.name ?? ""} ${/filename\s*=\s*"?([^";]+)"?/.exec(disposition)?.[1] ?? ""}`;
+      if (ct.type === "text/calendar" || /\.ics\b/i.test(filenameHint.trim())) {
+        icsTexts.push(decoded);
+        return;
+      }
+      const text = (ct.type === "text/html" ? htmlToText(decoded) : decoded).replace(/[ \t]+/g, " ").trim();
+      if (text) texts.push(text);
+    };
+    walk(top.headers, top.body, 0);
+    return {
+      fullText: texts.join("\n").slice(0, 12000),
+      icsTexts,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 // ---------------------------------------------------------------------- //
 // 生产默认客户端工厂（imapflow）
 // ---------------------------------------------------------------------- //
@@ -526,6 +576,7 @@ export async function createImapflowClient(cfg: ImapflowClientConfig): Promise<M
           subject: env?.subject ?? "",
           date,
           textSnippet: extractMailTextSnippet(msg.source),
+          source: msg.source ?? undefined,
         });
       }
       return out.sort((a, b) => a.uid - b.uid);

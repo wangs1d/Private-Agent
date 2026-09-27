@@ -118,3 +118,34 @@ test("非法入箱：空字段直接忽略", () => {
   outbox.enqueue("s1", { messageId: "m2", finalText: "" });
   assert.equal(outbox.pendingCount("s1"), 0);
 });
+
+test("followups：入箱重放原样携带（NEXT_UP 接续建议随任务结果补投）", () => {
+  const outbox = new TaskOutbox();
+  outbox.enqueue("s1", {
+    messageId: "assistant-task-t1",
+    finalText: "行程已出",
+    followups: ["把这份行程建成日程", "预算压到2500再算一版"],
+  });
+  const { socket, sent } = fakeSocket();
+  outbox.replayFor("s1", socket);
+  const frames = parseSent(sent);
+  assert.equal(frames.length, 1);
+  assert.deepEqual(frames[0]?.payload.followups, [
+    "把这份行程建成日程",
+    "预算压到2500再算一版",
+  ]);
+});
+
+test("followups：空数组不入箱（重放载荷不带空字段）", () => {
+  const outbox = new TaskOutbox();
+  outbox.enqueue("s1", {
+    messageId: "assistant-task-t1",
+    finalText: "结果",
+    followups: [],
+  });
+  const { socket, sent } = fakeSocket();
+  outbox.replayFor("s1", socket);
+  const frames = parseSent(sent);
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0]?.payload.followups, undefined);
+});

@@ -1261,6 +1261,47 @@ export function extractMediaCards(
       },
     ];
   }
+  // 照片风格化（picture.stylize）：风格版确定性建图卡（caption 带风格名）。
+  if (toolName === "picture.stylize") {
+    const photo = toolResult?.photo as Record<string, unknown> | undefined;
+    const imageUrl = String(photo?.imageUrl ?? "").trim();
+    if (!imageUrl) return [];
+    const styleLabel = String(toolResult?.styleLabel ?? "").trim();
+    return [
+      {
+        type: "image",
+        title: styleLabel ? `风格化 · ${styleLabel}` : "风格化",
+        thumbnailUrl: String(photo?.thumbnailUrl ?? "").trim() || imageUrl,
+        mediaUrl: imageUrl,
+        caption: styleLabel ? `已变成「${styleLabel}」风格` : undefined,
+      },
+    ];
+  }
+  // 照片记忆回顾（picture.memories）：记忆段代表照片建图卡，caption 走
+  // 视觉分析的一句短句（没有则留空，前端按普通图廊渲染）。
+  if (toolName === "picture.memories") {
+    const memories = Array.isArray(toolResult?.memories) ? toolResult.memories : [];
+    const cards: MediaCardItem[] = [];
+    for (const memory of memories as Array<Record<string, unknown>>) {
+      const photos = Array.isArray(memory?.photos) ? memory.photos : [];
+      for (const photo of photos as Array<Record<string, unknown>>) {
+        const thumbnailUrl = String(photo?.thumbnailUrl ?? "").trim();
+        const imageUrl = String(photo?.imageUrl ?? "").trim();
+        if (!thumbnailUrl && !imageUrl) continue;
+        cards.push({
+          type: "image",
+          title: String(memory?.title ?? "记忆").trim() || "记忆",
+          thumbnailUrl: thumbnailUrl || imageUrl,
+          mediaUrl: imageUrl || thumbnailUrl,
+          ...(typeof photo?.caption === "string" && photo.caption.trim()
+            ? { caption: photo.caption.trim() }
+            : {}),
+        });
+      }
+      if (cards.length >= 9) break;
+    }
+    return cards.slice(0, 9);
+  }
   if (
     toolName !== "search_images" &&
     toolName !== "search_images_batch" &&

@@ -1305,6 +1305,16 @@ async function processBatchedMessage(
       goal: batched.text,
       finalText,
     });
+    // 「接下来你可以」接续建议（NEXT_UP 协议）：从正文提取成独立 followups
+    // 字段并从文本剥离——done 载荷与落库文本都不再含标记块（时机性内容不落
+    // 历史；流式阶段已由 stream-marker-guard 扣下，用户全程看不到原始标记）。
+    // 顺序铁律（2026-09-24 大理轮任务面复现）：必须先剥 NEXT_UP 再附确定性
+    // 卡片——模型把建议块写在回复末尾，行程卡附在它后面，若先附卡后剥离，
+    // extractNextUpSuggestions 从 [NEXT_UP_START] 起整段截断会把尾部行程卡
+    // 一并吃掉。
+    const nextUp = extractNextUpSuggestions(finalText);
+    finalText = nextUp.text;
+    const followups = nextUp.followups;
     // done 阶段确定性附卡链（L1）：行程 → 天气 → 搜索 → 其余注册工具 → 视频，
     // 顺序与优先级见 deterministic-card-chain.ts；各 attach 自带结构化标记
     // guard，先附上的卡生效、后续自动让位。视频回执 loop 捕获优先、直跑兜底。
@@ -1473,13 +1483,6 @@ async function processBatchedMessage(
     // finalText（此前 renderBlocks 在归一化前构建，媒体锚点与卡片版式会分叉），
     // 见 normalizeReplyCardLayout。
     finalText = normalizeReplyCardLayout(finalText);
-
-    // 「接下来你可以」接续建议（NEXT_UP 协议）：从正文提取成独立 followups
-    // 字段并从文本剥离——done 载荷与落库文本都不再含标记块（时机性内容不落
-    // 历史；流式阶段已由 stream-marker-guard 扣下，用户全程看不到原始标记）。
-    const nextUp = extractNextUpSuggestions(finalText);
-    finalText = nextUp.text;
-    const followups = nextUp.followups;
 
     // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，
     // 前端按块顺序渲染 → 「一段文字介绍后放一组照片，再一段文字，再一组照片」，

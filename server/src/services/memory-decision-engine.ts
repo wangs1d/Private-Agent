@@ -1,6 +1,5 @@
 import OpenAI from "openai";
 
-import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 
 export type MemoryDecision = "remember" | "reject" | "overwrite" | "decay";
 
@@ -141,6 +140,12 @@ async function llmDecision(
   context: MemoryDecisionContext,
   heuristic: MemoryDecisionResult,
 ): Promise<MemoryDecisionResult | null> {
+  // 惰性导入：本模块处于 capability-modules → agentic-memory 的静态链上，
+  // 静态引 resolve-provider 会构成 resolve-provider → providers → abstract-chat-provider
+  // 的 module-init 循环（2026-09-25 冷启动崩溃），与下方 llm-token-audit 同款处理。
+  const { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } = await import(
+    "../external-model/resolve-provider.js"
+  );
   const llm = resolvePrimaryLlmClientConfig();
   if (!llm) return null;
 

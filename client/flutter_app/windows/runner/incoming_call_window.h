@@ -7,17 +7,22 @@
 #include <memory>
 #include <string>
 
+namespace Gdiplus {
+class Bitmap;
+}
+
 // 独立的来电悬浮窗 —— 脱离主 Flutter 窗口存在。
 //
-// 用途：Agent 推送 agent.voice.ringing_start 时，弹出一个 topmost 的
-// borderless popup 窗口，位于工作区右下角，带铃声循环 + 接听/挂断按钮。
+// 真玻璃深卡（视觉原语见 call_visuals.h）：弹出前抓取落点桌面模糊成毛玻璃底，
+// 全自绘无子控件（按钮手动命中），DWM 系统圆角。位于工作区右下角，
+// 带铃声循环 + 接听/挂断按钮。
 // 主窗口最小化、被遮挡都不会影响该窗口可见。
 //
 // 生命周期：
 // - Show(payload)：创建/更新窗口内容 + 启动铃声
 // - Hide()：停止铃声 + 销毁窗口
 // - 用户点接听 → 触发 on_accept 回调，Dart 端会拉起主窗口并打开通话 UI
-// - 用户点挂断 → 触发 on_decline 回调，Dart 端发 voice.hangup
+// - 用户点挂断/标题栏 × → 触发 on_decline 回调，Dart 发 voice.hangup
 // - 超时（默认 30s）→ 触发 on_timeout 回调
 class IncomingCallWindow {
  public:
@@ -71,24 +76,20 @@ class IncomingCallWindow {
   void DestroyNativeWindow();
 
   void Paint(HWND hwnd, HDC hdc);
-  // 自绘圆形图标按钮（豆包风：深底拒接 / 白底接听）
-  void DrawRoundIconButton(HDC hdc, const RECT& rc, wchar_t glyph,
-                           bool is_accept, bool hovered);
-  // 用指定字体画一个居中字形（Segoe MDL2 Assets 图标）
-  void DrawGlyph(HDC hdc, const RECT& rc, wchar_t glyph, COLORREF color,
-                 int font_size, const wchar_t* font_family);
-  // 挂断图标：电话字形 + 斜线
-  void DrawPhoneOffGlyph(HDC hdc, const RECT& rc, COLORREF color,
-                         int font_size);
+  // 头像首字符（payload 未带时退回姓名首字，空名返回 nullptr）
+  const wchar_t* AvatarInitial() const;
 
   HWND window_handle_ = nullptr;
-  HWND accept_btn_ = nullptr;
-  HWND decline_btn_ = nullptr;
 
   // 内容字段
   std::wstring caller_name_;
   std::wstring subtitle_;
+  std::wstring caller_initial_;
   int ring_timeout_ms_ = 30000;
+
+  // 玻璃底（Show 时抓拍，见 call_visuals.h）
+  Gdiplus::Bitmap* backdrop_ = nullptr;
+  float backdrop_dim_ = 1.0f;
 
   // 状态
   bool ringing_ = false;

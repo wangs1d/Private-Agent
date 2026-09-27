@@ -67,6 +67,7 @@ import { registerAttentionRoutes } from "./attention.js";
 import { registerVoiceMessageRoutes } from "./voice-messages.js";
 import { registerImageFileRoutes } from "./image-files.js";
 import { registerPictureRoutes } from "./picture.js";
+import { registerGalleryWallRoutes } from "./gallery-wall.js";
 import { registerVideoProxyRoutes } from "./video-files.js";
 import { registerMediaStreamProxyRoutes } from "./media.js";
 import { registerUserFileRoutes } from "./user-files.js";
@@ -124,6 +125,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   });
   registerImageFileRoutes(app, { imageGenerationService: deps.imageGenerationService });
   registerPictureRoutes(app, { pictureKit: deps.pictureKit });
+  // 3D 照片墙（自包含页面 + 贴墙布局 + 视觉分析触发；见 gallery-wall.ts）
+  registerGalleryWallRoutes(app, { pictureKit: deps.pictureKit });
   registerVideoProxyRoutes(app);
   registerMediaStreamProxyRoutes(app);
   registerUserFileRoutes(app, { fileProcessingService: deps.fileProcessingService });
@@ -235,7 +238,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerChatSuggestionRoutes(app);
   registerMemoryCrudRoutes(app);
   registerPaymentGuardrailRoutes(app);
-  registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore });
+  registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore, auditTrailService: deps.auditTrailService });
   registerBriefingTestRoutes(app, {
     wsConnectionRegistry: deps.wsConnectionRegistry,
     agentMemorySyncService: deps.agentMemorySyncService,

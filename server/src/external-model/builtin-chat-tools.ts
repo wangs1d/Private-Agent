@@ -576,6 +576,42 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "calendar.batch_create",
+      description:
+        "【内置 Calendar】批量创建日程（一次最多 60 条）。用于用户一次性导入多件日程的场景：发来课表/排班表/会议日程/行程单图片或文字并希望记入日程时，先从图/文提取每条的 description 与 runAt（ISO 时间），再用本工具一次创建；逐条转述结果，冲突/失败条目如实说明。单条日程不要用本工具。",
+      parameters: {
+        type: "object",
+        properties: {
+          timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
+          forceCreate: { type: "boolean", description: "冲突时仍强制创建（默认 false：冲突条目跳过并回传详情）" },
+          items: {
+            type: "array",
+            description: "日程条目数组",
+            items: {
+              type: "object",
+              properties: {
+                description: { type: "string", description: "日程内容（必填），如「高数 课上」" },
+                runAt: { type: "string", description: "开始时间（ISO-8601，必填）；周期项填首次时间" },
+                title: { type: "string", description: "完整标题，可选" },
+                shortTitle: { type: "string", description: "紧凑短标题（≤12字，今日安排展示用）" },
+                category: { type: "string", enum: ["itinerary", "trivia"], description: "缺省 itinerary（正事）" },
+                recurrence: { type: "string", enum: ["none", "daily", "weekly", "yearly"], description: "缺省 none" },
+                durationMinutes: { type: "number", description: "时长（分钟），可选" },
+                remindBeforeMinutes: { type: "array", items: { type: "number" }, description: "提前量提醒（分钟），可选" },
+                reminderMessage: { type: "string", description: "到点提醒文案，可选（缺省用 description）" },
+              },
+              required: ["description", "runAt"],
+            },
+          },
+        },
+        required: ["items"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "calendar.list_tasks",
       description:
         "【内置 Calendar】查询当前用户已创建的定时日程/提醒（含下次执行时间）。仅当用户**明确**要查看/确认日程或定时任务时调用；禁止用于「你确定？」「真的吗？」等短句追问（应结合对话线程上一轮回复作答）。",

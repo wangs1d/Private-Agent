@@ -28,6 +28,27 @@ import { stripLeadingTimestampFrames } from "../utils/timestamp-frame.js";
  */
 const userMessageClientIdMap = new WeakMap<ChatCompletionMessageParam, string>();
 
+/**
+ * 落库协议标记剥离（2026-09-25）：线程是 LLM 上下文的唯一事实源，模型按
+ * render 协议写的 [NEXT_UP_START] 块（含漏发 END 的残块）与 RENDER_HINT/RENDER_AS
+ * 声明属「展示时机性内容」，落库即成上下文噪音并会被后续轮模仿（此前对话面
+ * done 载荷已剥但线程未剥，残块实测进历史）。卡片标记（AGENT_RESULT_CARD）不剥
+ * ——历史渲染依赖正文标记还原行程卡。
+ */
+const THREAD_NEXT_UP_BLOCK_RE = /\[NEXT_UP_START\][\s\S]*?(?:\[NEXT_UP_END\]|$)/g;
+const THREAD_NEXT_UP_ORPHAN_RE = /\[NEXT_UP_(?:START|END)\]/g;
+const THREAD_RENDER_DECL_RE = /^\s*\[(?:RENDER_HINT|RENDER_AS):[A-Za-z_]+\]\s*$/gm;
+const THREAD_RENDER_DECL_INLINE_RE = /\[(?:RENDER_HINT|RENDER_AS):[A-Za-z_]+\]/g;
+const THREAD_PROTOCOL_ANY_RE = /\[NEXT_UP_(?:START|END)\]|\[(?:RENDER_HINT|RENDER_AS):/;
+
+function stripProtocolMarkersForThread(text: string): string {
+  let out = text.replace(THREAD_NEXT_UP_BLOCK_RE, "");
+  out = out.replace(THREAD_NEXT_UP_ORPHAN_RE, "");
+  out = out.replace(THREAD_RENDER_DECL_RE, "");
+  out = out.replace(THREAD_RENDER_DECL_INLINE_RE, "");
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function tagUserMessageClientId(
   msg: ChatCompletionMessageParam,
   clientMessageId: string | undefined,
@@ -1358,7 +1379,7 @@ export class ChatThreadStore {
     clientMessageId?: string,
     model?: string,
   ): void {
-    const trimmed = assistantText.trim();
+    const trimmed = stripProtocolMarkersForThread(assistantText.trim());
     if (!trimmed) return;
     const msgs = this.thread(sessionId, defaultSystemPrompt);
     const userAt = new Date(now.getTime());
@@ -1512,6 +1533,20 @@ export class ChatThreadStore {
       }
       return msg;
     });
+    // 落库协议标记剥离（2026-09-25）：工具循环回写/非工具分支的 assistant 正文
+    // 直 push 进线程，绕过 appendTurn——NEXT_UP 残块与 RENDER 声明在此统一收口。
+    // 快测守卫避免对无标记消息做无谓重建。
+    for (let i = 0; i < annotated.length; i++) {
+      const m = annotated[i];
+      if (
+        m &&
+        m.role === "assistant" &&
+        typeof m.content === "string" &&
+        THREAD_PROTOCOL_ANY_RE.test(m.content)
+      ) {
+        annotated[i] = { ...m, content: stripProtocolMarkersForThread(m.content) };
+      }
+    }
     msgs.length = 0;
     msgs.push(...annotated);
     // 根源防串台：轮次完成的瞬间折叠已完成的 tool_call 链，移除 raw tool 结果。

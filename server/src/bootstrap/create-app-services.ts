@@ -140,6 +140,9 @@ import { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { ScheduleConflictService } from "../services/schedule-conflict-service.js";
 import { ScheduleBookingBridge } from "../services/schedule-booking-bridge.js";
+import { createCommitmentScheduleOutlet } from "../services/commitment-schedule-outlet.js";
+import { IcsSubscriptionService, readIcsWatchConfig } from "../services/ics-subscription-service.js";
+import { MailScheduleBridge } from "../services/mail-schedule-extractor.js";
 import { SessionService } from "../services/session-service.js";
 import { TtsService } from "../services/tts-service.js";
 import { VirtualPhoneService } from "../services/virtual-phone-service.js";
@@ -167,6 +170,7 @@ import { CodeSandboxService } from "../services/code-sandbox-service.js";
 import { ShoppingOrderService } from "../services/shopping-order-service.js";
 import { ShoppingOrderStore } from "../services/shopping-order-store.js";
 import { ShoppingCompareService } from "../services/shopping-compare-service.js";
+import { OfficialPriceGateway } from "../services/shopping-platforms/official-price-source.js";
 import { AgentBrowserService } from "../services/agent-browser-service.js";
 import {
   BookingService,
@@ -466,6 +470,8 @@ import {
 import { buildBoardRules } from "../proactivity/mapping-rules.js";
 import { WorldBoard, bridgeSensorKernelToBoard } from "../proactivity/world-board.js";
 import { GoalBoard } from "../proactivity/goal-board.js";
+import { GoalPlanner } from "../proactivity/goal-planner.js";
+import { AuditTrailService } from "../proactivity/audit-timeline.js";
 import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
 import { fabricSelftest } from "../proactivity/selftest.js";
 import { CostCalibrator } from "../proactivity/cost-calibrator.js";
@@ -743,6 +749,7 @@ export async function createAppServices(): Promise<AppServices> {
   const shoppingCompareService = new ShoppingCompareService({
     shoppingOrderService,
     upstreamSearchService,
+    officialPriceGateway: new OfficialPriceGateway(),
     dataDir: join(process.cwd(), "data", "shopping"),
   });
   // 初始化 Agent 虚拟浏览器服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
@@ -1174,6 +1181,12 @@ export async function createAppServices(): Promise<AppServices> {
   // agentic-memory.db），各建各表；各自 env 开关独立回退，互不阻断。
   const agenticLedger = createAgenticLedgerIfEnabled();
   const commitmentBoard = createCommitmentBoardIfEnabled();
+  // 承诺 → 日程物化出口（2026-09-24）：active 且 deadline 在未来的承诺自动落成
+  // source=commitment 的日程（进「今日安排」/冲突检测/到点提醒）；终态/改期反向同步。
+  // 承诺板的召回与催办（梯度提醒/超时升级）不变，日程只补「到点那一响」与展示面。
+  if (commitmentBoard) {
+    commitmentBoard.setScheduleOutlet(createCommitmentScheduleOutlet({ tasks: scheduleTaskService }));
+  }
   const provenance = createProvenanceIfEnabled({
     memory: agenticMemoryRuntime?.memory ?? null,
     graph: humanLikeMemory,
@@ -2115,7 +2128,10 @@ export async function createAppServices(): Promise<AppServices> {
       toolName: reply.toolName,
       toolResult: toolRun.result,
     };
-    wsConnectionRegistry.trySend(
+    // 完成事件投递失败（用户离线：app 没开/断连）→ TaskOutbox 暂存，session.init 重连时
+    // 重放——补发/定时任务的结果不再依赖"执行那一刻用户恰好在线"。与 task_plane 的
+    // pushDone 同一兜底语义；在线时正常走流式，不入箱不重复。
+    const completionDelivered = wsConnectionRegistry.trySend(
       task.sessionId,
       JSON.stringify({
         type: ServerEventType.ScheduleAgentTaskFired,
@@ -2127,6 +2143,12 @@ export async function createAppServices(): Promise<AppServices> {
         },
       }),
     );
+    if (!completionDelivered && reply.text.trim()) {
+      getTaskOutbox().enqueue(task.sessionId, {
+        messageId: task.taskId,
+        finalText: reply.text,
+      });
+    }
     return result;
   });
 
@@ -4186,6 +4208,21 @@ export async function createAppServices(): Promise<AppServices> {
       source: "time",
     });
   });
+  // 定时任务超窗未补发通知：runtime 离线跨过触发点且超过补发窗口（默认 24h）时，
+  // 不再静默执行也不再静默丢弃——告知一次"这个任务错过了，没补"，要补由用户决定。
+  scheduleTaskService.setTaskMissedHandler((task, plannedAt) => {
+    proactivityHub.submitIntent({
+      actorId: task.sessionId,
+      kind: "life_reminder",
+      importance: "low",
+      title: `定时任务「${task.title ?? task.description.slice(0, 30)}」错过太久，已跳过`,
+      summary:
+        `原定 ${plannedAt} 的这个任务在 runtime 未运行期间错过，已超过补发窗口，我没有再自动执行。` +
+        `还需要的话说一声，我重新安排一次。`,
+      mode: "speak",
+      source: "time",
+    });
+  });
   // 确认超时不再静默：过期未回复的确认逐条告知用户（"没等到回复，先不做了"）。
   // 防重入：通知路径若再触发 prune（理论上不会）不递归。
   let notifyingExpiredConfirmations = false;
@@ -4298,7 +4335,7 @@ export async function createAppServices(): Promise<AppServices> {
     emitGoal: (goal) => {
       goalFeeder({
         at: Date.now(),
-        fingerprint: `goal:${goal.goalId}:${goal.status}`,
+        fingerprint: `goal:${goal.goalId}:${goal.status}:${goal.rev ?? 0}`,
         salience: goal.status === "ready" ? "medium" : "low",
         delta: `目标「${goal.title}」状态 → ${goal.status}`,
         payload: {
@@ -4512,6 +4549,12 @@ export async function createAppServices(): Promise<AppServices> {
   //   这是"后台自动获取财务数据"里延迟最低的通道（邮件到达即入账，秒~分钟级）；
   //   浏览器拉取通道（FinanceBillAutoFetchService）负责兜底对账，两者靠幂等键互补。
   // MAIL_WATCH_ENABLED=0 或配置不齐时 start() 如实 no-op，状态查 mailWatchService.status()。
+  // 票务/日历邮件 → 日程物化桥（2026-09-25）：粗筛命中才解 MIME（ICS 附件直取 +
+  // 12306/出票/酒店模板规则），静默落 source=email 日程，一轮汇总一条轻提醒。
+  const mailScheduleBridge = new MailScheduleBridge({
+    tasks: scheduleTaskService,
+    notify: (intent) => proactivityHub.submitIntent(intent),
+  });
   const mailWatchService = new MailWatchService({
     env: process.env,
     messageHub: messageHubService,
@@ -4532,6 +4575,19 @@ export async function createAppServices(): Promise<AppServices> {
             app.log.warn(`[mail-watch] 账单邮件自动入账失败（忽略）: ${e instanceof Error ? e.message : String(e)}`);
           });
       }
+      // 票务/日历提取支路：非票务邮件内部廉价预筛直接跳过，零成本
+      void mailScheduleBridge
+        .onMail(mail)
+        .then((report) => {
+          if (report && report.created + report.updated + report.cancelled > 0) {
+            app.log.info(
+              `[mail-watch] 票务邮件已同步日程（${mail.subject}）: +${report.created} ~${report.updated} -${report.cancelled}`,
+            );
+          }
+        })
+        .catch((e) => {
+          app.log.warn(`[mail-watch] 票务邮件日程提取失败（忽略）: ${e instanceof Error ? e.message : String(e)}`);
+        });
       if (classification.importance === "normal") return;
       proactivityHub.submitIntent({
         actorId: mail.actorId,
@@ -4552,6 +4608,23 @@ export async function createAppServices(): Promise<AppServices> {
   console.log(
     `[Bootstrap] 邮箱盯梢 ${mailWatchService.status().running ? "已启动" : "未启用（MAIL_WATCH_ENABLED/MAIL_WATCH_HOST/USER/PASS）"}`,
   );
+
+  // ─── ICS 日历订阅轮询（2026-09-24，「日程零手工」外部信源）───
+  // 拉取用户配置的 .ics 订阅链接 → RFC5545 子集解析 → 事件键 diff →
+  // 自动落成 source=ics 的日程（新增/改期/取消反向同步），变更走一次汇总提醒。
+  // ICS_SUB_ENABLED=0 或未配 ICS_SUB_URLS 时 start() 如实 no-op，状态查 icsSubscriptionService.status()。
+  const icsSubscriptionService = new IcsSubscriptionService({
+    config: readIcsWatchConfig(process.env),
+    tasks: scheduleTaskService,
+    notify: (intent) => proactivityHub.submitIntent(intent),
+  });
+  icsSubscriptionService.start();
+  {
+    const icsStatus = icsSubscriptionService.status();
+    console.log(
+      `[Bootstrap] ICS 日历订阅 ${icsStatus.enabled && icsStatus.feeds.length > 0 ? `已启动（${icsStatus.feeds.length} 个订阅源，每 ${icsStatus.pollSec}s）` : "未启用（ICS_SUB_ENABLED/ICS_SUB_URLS）"}`,
+    );
+  }
 
   // ─── 财务账单后台自动拉取（2026-09-18，"系统后台自动获取财务数据"）───
   // 双模式调度：准实时（FINANCE_BILL_AUTO_FETCH_INTERVAL_MIN>0，每 N 分钟拉增量，
@@ -4788,6 +4861,47 @@ export async function createAppServices(): Promise<AppServices> {
   // 助手动态台账：action.* 代办提案投递成功后落一条记录，右侧面板「助手动态」卡读取
   const agentActivityStore = new AgentActivityStore(
     join(process.cwd(), "data", "proactivity", "activities.json"),
+  );
+  // ─── 计划推进（2026-09-24，对标 Muse 大目标模式）+ 行为审计时间线 ───
+  // plan 型目标拆步 → 逐步派后台任务（agentCore.dispatchBackgroundTask）→
+  // TaskHub 终态回调自动推进下一步；外部副作用步骤转「等你确认」（敏感动作分级闸）。
+  const goalPlanner = new GoalPlanner({
+    goalBoard,
+    launchTask: (input) =>
+      agentCore.dispatchBackgroundTask(input.actorId, {
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        goal: input.goal,
+        source: "goal_plan",
+      }),
+    recordActivity: (input) => {
+      agentActivityStore.record({
+        actorId: input.actorId,
+        kind: "action.plan",
+        title: input.title,
+        summary: input.summary,
+        ...(input.status ? { status: input.status } : {}),
+        dedupKey: `plan-notify:${input.actorId}:${input.title}:${input.summary}`,
+      });
+    },
+  });
+  goalPlanner.attachTaskHub(getTaskHub());
+  goalPlanner.reconcile(getTaskHub());
+  capabilityModuleDeps.goalPlanner = goalPlanner;
+
+  // 行为审计时间线（对标 Muse「全量审计轨迹」）：聚合 台账/目标板/任务面/挂起确认，
+  // 出口 = GET /agent/audit-timeline + activity.timeline 工具（memory-governance 模块）
+  const auditTrailService = new AuditTrailService({
+    activityStore: agentActivityStore,
+    goalBoard,
+    taskHub: getTaskHub(),
+    pendingConfirmations: proactivityConfirmations,
+  });
+  capabilityModuleDeps.auditTrailService = auditTrailService;
+  capabilityModuleDeps.interestWatcher = interestWatcher;
+  capabilityModuleDeps.commitmentBoard = commitmentBoard;
+  capabilityModuleDeps.goalBoard = goalBoard;
+  console.log(
+    "[Bootstrap] 计划推进 + 行为审计已装配（goal.plan.* / memory.forget / activity.timeline）",
   );
   // 任务面台账/离线结果落盘：重启后台账恢复（非终态如实标记 failed，
   // "怎么样了"答得出"重启中断"）；已入箱未投递的任务结果重连后照常补投
@@ -5107,15 +5221,21 @@ export async function createAppServices(): Promise<AppServices> {
     audit.cost = action.cost;
     appendEventAudit(join(process.cwd(), "data", "proactivity", "events.ndjson"), audit);
   });
-  // 会前准备包触发：60s 检查下一个日程，25-40min 窗口内启动后台预执行（幂等）
+  // 会前准备包触发：60s 检查下一个日程，20-40min 窗口内启动后台预执行（幂等）。
+  // actor 遍历状态板已知用户（与映射执行器同源），primaryActor 仅作兜底——
+  // hub 交互记录为空（新装/纯设备在线）时 prep 不能因此哑火（2026-09-24 E2E 实证）。
   const meetingPrepTimer = setInterval(() => {
-    const actorId = primaryActor();
     const next = scheduleSensor.latest();
-    if (!actorId || !next || next.min <= 0) return;
-    goalBoard.maybeStartMeetingPrep(actorId, {
-      title: next.title,
-      runAtMin: next.min,
-    });
+    if (!next || next.min <= 0) return;
+    const boardActors = worldBoard.knownActors();
+    const fallback = primaryActor();
+    const actorIds = boardActors.length > 0 ? boardActors : fallback ? [fallback] : [];
+    for (const actorId of actorIds) {
+      goalBoard.maybeStartMeetingPrep(actorId, {
+        title: next.title,
+        runAtMin: next.min,
+      });
+    }
   }, 60_000);
   if (typeof meetingPrepTimer.unref === "function") meetingPrepTimer.unref();
   mappingExecutor.start();
@@ -5377,6 +5497,7 @@ export async function createAppServices(): Promise<AppServices> {
         }),
     },
     agentActivityStore,
+    auditTrailService,
     inboxService,
     infoHubService,
     upstreamSearchService,

@@ -14,7 +14,8 @@ import {
   selectRelevantTools,
 } from "./openai-compatible-tool-loop.js";
 import type { AgentStreamOptions, ToolExposureProfile } from "./types.js";
-import { estimateToolsSchemaTokens } from "../gateway/index.js";
+// 从 tool-search/catalog 具体模块导入而非 gateway/index 大桶——本模块被 abstract-chat-provider 引用，经桶文件会回连 providers/* 形成循环
+import { estimateToolsSchemaTokens } from "../tools/tool-search/catalog.js";
 
 export type ResolvedChatToolPlan = {
   visibleTools: ChatCompletionTool[];

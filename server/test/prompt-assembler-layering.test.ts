@@ -38,3 +38,22 @@ test("跨轮稳定层逐字节相等（prefix cache 前提）", () => {
   );
   assert.notEqual(t1.fullSystemPrompt, t2.fullSystemPrompt, "动态层随轮变化（否则断言无意义）");
 });
+
+// 2026-09-24 晨报 [RENDER_HINT:brief] 事故回归：展示形式协议只属于聊天面，
+// ephemeral 工具调用（简报润色/摘要/改写）的 system 不得携带协议。
+test("includeRenderProtocol=false 时不注入展示形式协议（ephemeral 工具调用）", () => {
+  const withMemory = assembleSystemPrompt("你是助理。", buildMemory(1), {
+    includeRenderProtocol: false,
+  });
+  assert.ok(
+    !withMemory.fullSystemPrompt.includes("RENDER_HINT"),
+    "带记忆上下文时协议也不得注入",
+  );
+  const ephemeral = assembleSystemPrompt("写一段今早的简报播报稿。", undefined, {
+    includeRenderProtocol: false,
+  });
+  assert.ok(!ephemeral.fullSystemPrompt.includes("RENDER_HINT"), "ephemeral 调用不带协议");
+  // 默认（聊天面）行为不变：协议仍在
+  const chatDefault = assembleSystemPrompt("写一段今早的简报播报稿。", undefined);
+  assert.ok(chatDefault.fullSystemPrompt.includes("RENDER_HINT"), "默认仍注入协议");
+});

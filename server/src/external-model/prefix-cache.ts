@@ -30,6 +30,12 @@ export type PreparePromptCachePlanArgs = {
   finalizeOptions?: FinalizeChatSystemPromptOpts;
   tools?: ChatCompletionTool[];
   variant?: string;
+  /**
+   * 是否注入展示形式协议（默认 true）。ephemeral 工具调用（简报润色/摘要/改写
+   * 等，输出由程序消费、无聊天渲染管线）传 false——协议进入这些调用只会诱导
+   * 模型输出 [RENDER_HINT:xxx]，而下游无剥除层，标记直透用户屏幕。
+   */
+  includeRenderProtocol?: boolean;
 };
 
 export type PreparedPromptCachePlan = {
@@ -122,11 +128,12 @@ function buildStableSystemPrompt(
   baseSystemPrompt: string,
   memory: AgentPromptMemoryContext | undefined,
   finalizeOptions: FinalizeChatSystemPromptOpts | undefined,
+  includeRenderProtocol: boolean,
 ): { fullSystemPrompt: string; stableSystemPrompt: string; dynamicSystemPrompt?: string } {
   // 单一出口：finalize（规则后缀）→ assemble（全局规则 + stable/dynamic 分层）一次完成。
   // 旧版在此处连调 finalize + Sections + buildLayeredSystemPrompt 三次重复渲染。
   const finalizedBaseSystem = finalizeChatSystemPrompt(baseSystemPrompt, finalizeOptions);
-  return assembleSystemPrompt(finalizedBaseSystem, memory);
+  return assembleSystemPrompt(finalizedBaseSystem, memory, { includeRenderProtocol });
 }
 
 function buildPromptCacheKey(args: {
@@ -159,6 +166,7 @@ export function preparePromptCachePlan(
     args.baseSystemPrompt,
     args.memory,
     args.finalizeOptions,
+    args.includeRenderProtocol !== false,
   );
 
   // P0-2 前缀稳定化：requestSystemMessages 只保留静态 system（stable）——

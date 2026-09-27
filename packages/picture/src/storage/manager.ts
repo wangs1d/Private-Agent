@@ -241,6 +241,14 @@ export class ImageStore {
     return asset;
   }
 
+  /** 写入视觉分析结果(照片墙贴墙管线;合并字段而非整体覆盖) */
+  async setAnalysis(assetId: string, analysis: Partial<ImageAsset['analysis']>): Promise<ImageAsset> {
+    const asset = this.require(assetId);
+    asset.analysis = { ...(asset.analysis ?? {}), ...analysis };
+    await this.persist();
+    return asset;
+  }
+
   /** 删除资产:移除文件、缩略图与索引记录 */
   async remove(assetId: string, options: { deleteFiles?: boolean } = {}): Promise<boolean> {
     const asset = this.index.assets[assetId];
@@ -254,6 +262,26 @@ export class ImageStore {
     }
     await this.persist();
     return true;
+  }
+
+  /**
+   * 恢复资产(回收站用):调用方负责先把文件放回 asset.filePath/thumbnails
+   * 记录的路径,这里只重建索引并补齐缺失的缩略图。
+   */
+  async restore(asset: ImageAsset): Promise<void> {
+    this.index.assets[asset.id] = asset;
+    for (const size of ['small', 'medium', 'large'] as ThumbnailSize[]) {
+      const p = asset.thumbnails?.[size];
+      if (!p || !existsSync(p)) {
+        try {
+          const generated = await this.thumbnails.generate(await fs.readFile(asset.filePath), asset.id, [size]);
+          asset.thumbnails = { ...(asset.thumbnails ?? {}), ...generated };
+        } catch {
+          // 源文件缺失时保留原记录,不阻塞恢复
+        }
+      }
+    }
+    await this.persist();
   }
 
   /** 清理:删除磁盘上未被索引引用的资产/缩略图文件 */

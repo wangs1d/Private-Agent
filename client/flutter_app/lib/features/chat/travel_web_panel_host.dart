@@ -80,11 +80,16 @@ class TravelWebPanelHost {
       );
 
       // 加载本机 server 页面（单一来源）。host 模式：数据由 Dart 桥 loadPlan
-      // 注入，页面不显示"未携带行程参数"空态。
+      // 注入，页面不显示"未携带行程参数"空态。_cb 时间戳穿透长缓存：
+      // panel.html 服务端声明 max-age=86400，不带穿透参数时页面更新
+      // （路线/标点逻辑修订）会被 WebView2 磁盘缓存压住最长一天。
       final Uri base = Uri.parse(ApiConfig.httpBase);
       final Uri pageUri = base.replace(
         path: "${base.path}/travel-map".replaceAll("//", "/"),
-        queryParameters: <String, String>{"host": "1"},
+        queryParameters: <String, String>{
+          "host": "1",
+          "_cb": DateTime.now().millisecondsSinceEpoch.toString(),
+        },
       );
       await webviewController.loadUrl(pageUri.toString());
 

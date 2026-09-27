@@ -124,6 +124,8 @@ export type HttpRouteDeps = {
   autonomySettings?: import("../../services/autonomy-settings-store.js").AutonomySettingsStore | null;
   /** 助手动态台账（右侧面板「助手动态」卡数据源） */
   agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
+  /** 行为审计时间线（GET /agent/audit-timeline；可选，未注入时该端点 503） */
+  auditTrailService?: import("../../proactivity/audit-timeline.js").AuditTrailService | null;
   /** 承诺板（主页「盯着」小节数据源；未启用时该小节为空） */
   commitmentBoard?: import("../../agentic-memory/commitment-board.js").CommitmentBoard | null;
   marketSignalService?: MarketSignalService;

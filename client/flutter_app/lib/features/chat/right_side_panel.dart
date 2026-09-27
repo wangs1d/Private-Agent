@@ -6,11 +6,8 @@ import "package:flutter/material.dart";
 import "../../core/models/schedule_models.dart";
 import "../../core/services/device_api_client.dart";
 import "../../core/services/right_panel_tool_preference.dart";
-import "../../core/services/schedule_floating_launcher.dart";
 import "../../core/services/schedule_preference.dart";
-import "../../core/theme/app_theme.dart";
 
-const Color _kAccentBlue = Color(0xFF18D6F3);
 
 /// 右侧快捷功能面板的固定宽度。
 /// 优化后收窄到 220px，减少视觉压迫感，让聊天区更开阔。
@@ -125,7 +122,6 @@ class RightSidePanel extends StatefulWidget {
 }
 
 class _RightSidePanelState extends State<RightSidePanel> {
-  bool _useDesktopFloating = false;
   /// 焦点卡 hover 态：描边增亮。
   bool _focusHover = false;
   /// 周期刷新：让 now 游标、「接下来 · X分钟后」倒计时随时间前进。
@@ -149,7 +145,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
       if (mounted) setState(() {});
     });
     // 主题切换时同步悬浮窗配色（窗口未创建时为 no-op）
-    AppThemeController.instance.addListener(_onAppThemeChanged);
     unawaited(_loadToolLayout());
     _refreshDeviceStatus();
     _devicePollTimer = Timer.periodic(
@@ -157,29 +152,12 @@ class _RightSidePanelState extends State<RightSidePanel> {
       (_) => _refreshDeviceStatus(),
     );
     _resolveScheduleFuture();
-    ScheduleFloatingLauncher.bindHandlers(
-      onCloseClicked: () {
-        if (mounted) {
-          setState(() {
-            _useDesktopFloating = false;
-          });
-          ScheduleFloatingLauncher.activeNotifier
-              .removeListener(_onScheduleWindowChanged);
-          SchedulePreference.setDisplayMode(ScheduleDisplayMode.embedded);
-        }
-      },
-    );
     _loadSchedulePreference();
   }
 
   @override
   void didUpdateWidget(covariant RightSidePanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 日程数据刷新（新 future）时，若桌面悬浮窗已开启，同步推送最新安排
-    if (_useDesktopFloating &&
-        oldWidget.scheduleFuture != widget.scheduleFuture) {
-      _pushScheduleToNativeWindow();
-    }
     if (oldWidget.scheduleFuture != widget.scheduleFuture) {
       _resolveScheduleFuture();
     }
@@ -203,15 +181,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
   void dispose() {
     _scheduleTicker?.cancel();
     _devicePollTimer?.cancel();
-    AppThemeController.instance.removeListener(_onAppThemeChanged);
-    ScheduleFloatingLauncher.activeNotifier
-        .removeListener(_onScheduleWindowChanged);
     super.dispose();
-  }
-
-  /// 主题切换 → 同步桌面悬浮窗配色（保持与 in-app 面板一致）。
-  void _onAppThemeChanged() {
-    ScheduleFloatingLauncher.syncAppTheme();
   }
 
   Future<void> _loadToolLayout() async {
@@ -244,94 +214,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
   Future<void> _loadSchedulePreference() async {
     final ScheduleDisplayMode mode = await SchedulePreference.getDisplayMode();
     debugPrint("[RightSidePanel] displayMode=$mode");
-    if (mounted) {
-      setState(() {
-        _useDesktopFloating = mode == ScheduleDisplayMode.desktopFloating;
-      });
-    }
-    if (mode == ScheduleDisplayMode.desktopFloating) {
-      await _launchDesktopScheduleWindow();
-    }
-  }
-
-  Future<void> _launchDesktopScheduleWindow() async {
-    final bool launched = await ScheduleFloatingLauncher.launch();
-    debugPrint("[RightSidePanel] floating launched=$launched");
-    ScheduleFloatingLauncher.activeNotifier
-        .addListener(_onScheduleWindowChanged);
-    if (launched) {
-      // 首次创建即按当前 App 主题取色（默认深色，浅色主题需先下发）
-      await ScheduleFloatingLauncher.syncAppTheme();
-      _pushScheduleToNativeWindow();
-    }
-  }
-
-  void _pushScheduleToNativeWindow() {
-    if (!mounted) return;
-    final Future<List<ScheduleEvent>>? future = widget.scheduleFuture;
-    // 悬浮窗按物理像素自绘，用宿主 DPR 把逻辑布局缩放到与 in-app 面板一致
-    final double dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
-    debugPrint("[RightSidePanel] float dpr=$dpr");
-    if (future == null) {
-      ScheduleFloatingLauncher.setSchedule(<ScheduleFloatingItem>[],
-          devicePixelRatio: dpr);
-      return;
-    }
-    future.then((List<ScheduleEvent> events) {
-      final DateTime now = DateTime.now();
-      final List<ScheduleEvent> sorted =
-          List<ScheduleEvent>.from(events)
-            ..sort((a, b) => a.startAt.compareTo(b.startAt));
-      final List<ScheduleFloatingItem> items = sorted
-          .map((e) => ScheduleFloatingItem(
-                id: e.id,
-                timeText:
-                    "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
-                title: e.shortTitle ?? simplifyScheduleTitle(e.title),
-                notes: (e.notes ?? "").trim(),
-                completed: !e.startAt.isAfter(now),
-              ))
-          .toList();
-      ScheduleFloatingLauncher.setSchedule(items, devicePixelRatio: dpr);
-    });
-  }
-
-  void _onScheduleWindowChanged() {
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<void> _closeDesktopScheduleWindow() async {
-    await ScheduleFloatingLauncher.close();
-    ScheduleFloatingLauncher.activeNotifier
-        .removeListener(_onScheduleWindowChanged);
-  }
-
-  Future<void> _onDesktopFloatingToggled(bool value) async {
-    if (value) {
-      final bool launched = await ScheduleFloatingLauncher.launch();
-      if (!mounted) return;
-      if (launched) {
-        setState(() {
-          _useDesktopFloating = true;
-        });
-        ScheduleFloatingLauncher.activeNotifier
-            .addListener(_onScheduleWindowChanged);
-        await ScheduleFloatingLauncher.syncAppTheme();
-        _pushScheduleToNativeWindow();
-      } else {
-        setState(() {});
-      }
-    } else {
-      await _closeDesktopScheduleWindow();
-      setState(() => _useDesktopFloating = false);
-    }
-    await SchedulePreference.setDisplayMode(
-      _useDesktopFloating
-          ? ScheduleDisplayMode.desktopFloating
-          : ScheduleDisplayMode.embedded,
-    );
   }
 
   @override
@@ -366,7 +248,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: <Widget>[
-                      if (!_useDesktopFloating) _buildScheduleSection(),
+                      _buildScheduleSection(),
                     ],
                   ),
                 ),
@@ -501,10 +383,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
           ),
           const SizedBox(width: 8),
         ],
-        _ScheduleModeCircleButton(
-          active: _useDesktopFloating,
-          onTap: () => _onDesktopFloatingToggled(!_useDesktopFloating),
-        ),
       ],
     );
   }
@@ -1712,51 +1590,6 @@ class _ToolButtonState extends State<_ToolButton> {
                   ],
                 ),
               ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ScheduleModeCircleButton extends StatelessWidget {
-  const _ScheduleModeCircleButton({
-    required this.active,
-    required this.onTap,
-  });
-
-  final bool active;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return Tooltip(
-      message: active ? "已开启桌面悬浮窗（点击关闭）" : "开启桌面独立悬浮窗",
-      child: Material(
-        color: Colors.transparent,
-        shape: CircleBorder(
-          side: BorderSide(
-            color: active ? _kAccentBlue : cs.outline.withValues(alpha: 0.5),
-            width: active ? 1.5 : 1,
-          ),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          customBorder: const CircleBorder(),
-          child: SizedBox(
-            width: 22,
-            height: 22,
-            child: Center(
-              child: active
-                  ? const Icon(Icons.check, size: 13, color: _kAccentBlue)
-                  : Icon(
-                      Icons.desktop_windows_outlined,
-                      size: 12,
-                      color: cs.onSurfaceVariant,
-                    ),
             ),
           ),
         ),

@@ -36,6 +36,20 @@ interface SphereAgentSceneProps {
   onShakeRequest?: (strength: number, durationMs: number) => void;
 }
 
+/**
+ * embed 模式的模型缩放覆盖：URL 查询参数 `?ms=<number>`（如
+ * `embed.html?wsOff=1&ms=1.8`）。默认仍取 EMBED_SCENE.modelScale，
+ * 供注册页等需要大尺寸展示的宿主放大球体（加法参数，不影响既有调用）。
+ */
+function readEmbedModelScaleOverride(): number | null {
+  if (typeof window === "undefined") return null;
+  const raw = new URLSearchParams(window.location.search).get("ms");
+  if (raw == null || raw.trim() === "") return null;
+  const v = Number(raw);
+  if (!Number.isFinite(v)) return null;
+  return Math.min(5, Math.max(0.1, v));
+}
+
 function Ground({ invisibleCollision }: { invisibleCollision?: boolean }) {
   if (!invisibleCollision) return null;
   return (
@@ -167,7 +181,7 @@ export function SphereAgentScene({
           autonomous={autonomous && !isOverlay}
           bodyPosition={isOverlay ? [...OVERLAY_SCENE.bodyPosition] : undefined}
           idleBodyMotion={!isOverlay}
-          modelScale={isOverlay ? OVERLAY_SCENE.modelScale : EMBED_SCENE.modelScale}
+          modelScale={isOverlay ? OVERLAY_SCENE.modelScale : (readEmbedModelScaleOverride() ?? EMBED_SCENE.modelScale)}
           motionBounds={isOverlay ? 0 : 1.15}
           hardMotionClamp={isEmbed}
           verticalStable={isOverlay}

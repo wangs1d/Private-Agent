@@ -47,6 +47,11 @@ flutter:
   assets:
     - assets/agent_avatars/
     - assets/fonts/
+    # 灵动岛专用字体（GDI 直读文件，见 windows/runner/embedded_font.h）
+    - assets/fonts/noto/NotoSansSC-Regular.otf
+    - assets/fonts/noto/NotoSansSC-Medium.otf
+    - assets/fonts/noto/NotoSansSC-Bold.otf
+    - assets/fonts/noto/LICENSE.txt
     # 旅游行程地图模块（内嵌 MapLibre GL JS 单文件页面）
     # MapLibre 本地化副本（装载时内联进 html，WebView 零 CDN 等待）
     # emotion-ball 小球表情动画（自包含宿主页，来源 aora-bot，见目录内 ATTRIBUTION.md）

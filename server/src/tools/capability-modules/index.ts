@@ -144,6 +144,12 @@ import {
   registerPictureModuleTools,
 } from "./picture/index.js";
 import type { PictureKit } from "@private-ai-agent/picture";
+import { buildGoalPlanningModule } from "./goal-planning/index.js";
+import { buildMemoryGovernanceModule } from "./memory-governance/index.js";
+import type { GoalPlanner } from "../../proactivity/goal-planner.js";
+import type { AuditTrailService } from "../../proactivity/audit-timeline.js";
+import type { InterestWatcher } from "../../proactivity/interest-watcher.js";
+import type { CommitmentBoard } from "../../agentic-memory/commitment-board.js";
 
 /**
  * 能力模块描述符：把一个能力域的所有挂载点打包成单一对象，
@@ -209,6 +215,19 @@ export interface CapabilityModuleDeps {
   safetyGuardService: SafetyGuardService;
   /** 图片能力套件(图库/美颜批图),存储根 data/pictures */
   pictureKit: PictureKit;
+  /**
+   * 计划推进服务（goal.plan.*，2026-09-24）：装配层晚绑定——本对象在
+   * GoalBoard/AgentCore 之前构造，字段在服务建成后再赋值（handler 调用时读取）。
+   */
+  goalPlanner?: GoalPlanner | null;
+  /** 行为审计时间线（activity.timeline）：同上晚绑定 */
+  auditTrailService?: AuditTrailService | null;
+  /** 兴趣池（memory.forget 联动清除）：晚绑定 */
+  interestWatcher?: InterestWatcher | null;
+  /** 承诺板（memory.forget 联动清除）：晚绑定 */
+  commitmentBoard?: CommitmentBoard | null;
+  /** 目标板（memory.forget 清理 plan/track 目标）：晚绑定 */
+  goalBoard?: import("../../proactivity/goal-board.js").GoalBoard | null;
 }
 
 /**
@@ -461,6 +480,11 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
         ],
       },
     },
+    // 计划推进（2026-09-24，对标 Muse 大目标模式）：goalPlanner 晚绑定，
+    // 未装配时 handler 如实返回未装配错误
+    buildGoalPlanningModule(deps),
+    // 记忆治理（定向遗忘 + 行为审计）：依赖全部可选，handler 逐项降级
+    buildMemoryGovernanceModule(deps),
   ];
 }
 

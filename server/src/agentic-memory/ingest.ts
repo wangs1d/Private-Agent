@@ -8,6 +8,7 @@ import {
 } from "./env.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 import { isEphemeralActorId, warnEphemeralActorMemoryBlocked } from "../agent/actor-id.js";
+import { gateLtmWrite } from "./ltm-write-gate.js";
 import {
   extractUnified,
   isMemoryUnifiedExtractEnabled,
@@ -120,7 +121,14 @@ export class AgenticMemoryIngestService {
     text: string,
     opts?: { highSignal?: boolean; context?: "main" | "notes" },
   ): Promise<void> {
-    const t = text.trim();
+    // v3 写入门：任务态/提醒回执/协议残留不入长期链路（含低信号承诺抽取——
+    // 任务快照里抽不出真实承诺，只产噪音）
+    const gateVerdict = gateLtmWrite(text, sourceId);
+    if (!gateVerdict.admit) {
+      console.log(`[ltm-gate] 拒绝 ingestText(${gateVerdict.reason}) source=${sourceId}: ${text.slice(0, 60)}`);
+      return;
+    }
+    const t = gateVerdict.cleaned;
     if (!t || t.length < 4) return;
 
     // 匿名身份治理：无稳定身份的对话不进长期记忆（共享桶 = 跨请求串台源）
@@ -284,7 +292,14 @@ export class AgenticMemoryIngestService {
           : [];
     const results: Mem0WrittenItem[] = [];
     for (const item of memories) {
-      const trimmed = item.length > 12_000 ? `${item.slice(0, 12_000)}...` : item;
+      // v3 写入门：任务态/一次性提醒/协议残留/回声体在入口即拒（此前靠生命周期
+      // 遗忘回收，实测 327 条里 41 条化石——出口收口后不再产生新污染）
+      const verdict = gateLtmWrite(item, sourceId);
+      if (!verdict.admit) {
+        console.log(`[ltm-gate] 拒绝 Mem0 写入(${verdict.reason}) source=${sourceId}: ${item.slice(0, 60)}`);
+        continue;
+      }
+      const trimmed = verdict.cleaned.length > 12_000 ? `${verdict.cleaned.slice(0, 12_000)}...` : verdict.cleaned;
       try {
         const addResult = (await this.memory.add([{ role: "user", content: trimmed }], {
           userId: actorId,
@@ -360,7 +375,12 @@ export class AgenticMemoryIngestService {
     highSignal: boolean,
     extraMetadata?: Record<string, unknown>,
   ): Promise<Mem0WrittenItem[]> {
-    const t = body.trim();
+    const gateVerdict = gateLtmWrite(body, sourceId);
+    if (!gateVerdict.admit) {
+      console.log(`[ltm-gate] 拒绝 Mem0 infer 写入(${gateVerdict.reason}) source=${sourceId}: ${body.slice(0, 60)}`);
+      return [];
+    }
+    const t = gateVerdict.cleaned;
     if (!t || t.length < 4) return [];
 
     if (isEphemeralActorId(actorId)) {

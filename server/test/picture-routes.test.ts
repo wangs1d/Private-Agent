@@ -51,16 +51,31 @@ test("picture 路由：DELETE 删除照片并清理文件,重复删除 404", asy
 
     const del = await app.inject({ method: "DELETE", url: `/picture/assets/${asset.id}` });
     assert.equal(del.statusCode, 200);
-    assert.deepEqual(del.json(), { ok: true, id: asset.id });
+    const delBody = del.json();
+    assert.equal(delBody.ok, true);
+    assert.equal(delBody.id, asset.id);
+    assert.ok(typeof delBody.trashId === "string" && delBody.trashId.length > 0, "删除应入回收站");
 
-    // 列表为空 + 索引/源文件/缩略图均已清理(缩略图目录本身保留是既有契约)
+    // 列表为空 + 源文件移入回收站（不再在 assets/ 目录）
     const after = await app.inject({ method: "GET", url: "/picture/assets" });
     assert.equal(after.json().total, 0);
     assert.equal(fs.existsSync(asset.filePath), false);
-    const thumbsDir = path.join(rootDir, "thumbs");
-    const remainingThumbs = fs.existsSync(thumbsDir) ? fs.readdirSync(thumbsDir) : [];
-    assert.deepEqual(remainingThumbs, []);
+    const trashDir = path.join(rootDir, "trash");
+    assert.ok(fs.existsSync(trashDir), "trash 目录应存在");
+    assert.ok(fs.readdirSync(trashDir).some((f) => f.includes(delBody.trashId)), "回收站内应有原图");
 
+    // 恢复 → 回到图库
+    const restore = await app.inject({
+      method: "POST",
+      url: "/picture/trash/restore",
+      payload: { ids: [delBody.trashId] },
+    });
+    assert.equal(restore.json().restored, 1);
+    const revived = await app.inject({ method: "GET", url: "/picture/assets" });
+    assert.equal(revived.json().total, 1);
+
+    // 再次删除（回回收站），重复删除 / 未知 id → 404
+    await app.inject({ method: "DELETE", url: `/picture/assets/${asset.id}` });
     const repeat = await app.inject({ method: "DELETE", url: `/picture/assets/${asset.id}` });
     assert.equal(repeat.statusCode, 404);
 

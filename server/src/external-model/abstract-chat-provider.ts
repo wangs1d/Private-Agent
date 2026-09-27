@@ -27,7 +27,10 @@ import {
   preparePromptCachePlan,
 } from "./prefix-cache.js";
 import { resolveChatToolPlanForStream } from "./resolve-chat-tools.js";
-import { prepareTools } from "../gateway/index.js";
+// 从 agent-gateway 具体模块导入而非 gateway/index 大桶——基类模块经桶文件
+// 会回连 resolve-provider → providers/*，形成 module-init 循环
+// （2026-09-25 冷启动 "Cannot access AbstractChatProvider before initialization"）。
+import { prepareTools } from "../gateway/agent-gateway.js";
 import { streamCompletionWithTools } from "./openai-compatible-tool-loop.js";
 import { recordLlmUsageByChars } from "../services/llm-token-audit.js";
 import type {

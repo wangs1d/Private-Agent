@@ -21,11 +21,16 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 import { resolveActorId } from "../agent/actor-id.js";
+import { redactCredentials } from "../security/redact.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 import type { ShoppingOrderService } from "./shopping-order-service.js";
+import type { OfficialPriceGateway } from "./shopping-platforms/official-price-source.js";
 import type { ProductSummary } from "./shopping-platforms/index.js";
 
 // ─────────────────────────── 类型 ───────────────────────────
+
+/** 报价来源：official_api=联盟 API（零用户操作）；browser=Playwright+用户 Cookie 兜底 */
+export type OfferSource = "official_api" | "browser";
 
 /** 单平台一条报价 */
 export interface CompareOffer {
@@ -35,6 +40,10 @@ export interface CompareOffer {
   shop?: string;
   url?: string;
   itemId?: string;
+  /** 数据来源（比价卡呈现须注明数据源与时效） */
+  source?: OfferSource;
+  /** 抓取时刻（ms） */
+  fetchedAt?: number;
 }
 
 /** 同款分组 */
@@ -81,10 +90,17 @@ export interface PriceWatchHit {
   priceCny: number;
   title: string;
   url?: string;
+  /** 命中价来源（official_api/browser） */
+  source?: OfferSource;
 }
 
 export interface ShoppingCompareServiceDeps {
   shoppingOrderService: ShoppingOrderService;
+  /**
+   * 官方联盟 API 比价网关（2026-09-24）：配置了凭据的平台（taobao/jd/pdd）官方源
+   * 优先——零用户 Cookie、服务器侧直查；未配置/失败时静默落 Playwright+Cookie 兜底。
+   */
+  officialPriceGateway?: OfficialPriceGateway;
   /**
    * Web 搜索（保险/服务类调研比价用）。可选：未注入时 research 返回明确错误。
    * 最小结构化接口（UpstreamSearchService.searchWeb），便于测试 mock。
@@ -164,6 +180,10 @@ const PRICE_HISTORY_MAX = 2000;
 export interface TaggedProduct {
   platform: string;
   product: ProductSummary;
+  /** 数据来源（official_api/browser，缺省 browser） */
+  source?: OfferSource;
+  /** 抓取时刻（ms） */
+  fetchedAt?: number;
 }
 
 /**
@@ -176,7 +196,7 @@ export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
   );
   const groups: Array<{ rep: ProductSummary; repNorm: string; repSpecs: Set<string>; offers: CompareOffer[]; confidence: number; exact: boolean }> = [];
 
-  for (const { platform, product: p } of sorted) {
+  for (const { platform, product: p, source, fetchedAt } of sorted) {
     const norm = normalizeTitle(p.title);
     const specs = new Set(extractSpecTokens(p.title));
     let placed = false;
@@ -186,7 +206,7 @@ export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
       const specsMatch = g.repSpecs.size > 0 && specs.size > 0 && [...g.repSpecs].every((s) => specs.has(s)) && [...specs].every((s) => g.repSpecs.has(s));
       if (specsMatch) sim = Math.max(sim, 0.7);
       if (sim >= SAME_PRODUCT_DICE_THRESHOLD) {
-        g.offers.push(toOffer(platform, p));
+        g.offers.push(toOffer(platform, p, source, fetchedAt));
         g.confidence = Math.max(g.confidence, sim);
         if (sim >= 0.99) g.exact = true;
         placed = true;
@@ -198,7 +218,7 @@ export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
         rep: p,
         repNorm: norm,
         repSpecs: specs,
-        offers: [toOffer(platform, p)],
+        offers: [toOffer(platform, p, source, fetchedAt)],
         confidence: 1,
         exact: true,
       });
@@ -217,7 +237,7 @@ export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
   });
 }
 
-function toOffer(platform: string, p: ProductSummary): CompareOffer {
+function toOffer(platform: string, p: ProductSummary, source?: OfferSource, fetchedAt?: number): CompareOffer {
   return {
     platform,
     title: p.title,
@@ -225,6 +245,8 @@ function toOffer(platform: string, p: ProductSummary): CompareOffer {
     shop: p.shop,
     url: p.url,
     itemId: p.itemId,
+    ...(source ? { source } : {}),
+    ...(fetchedAt ? { fetchedAt } : {}),
   };
 }
 
@@ -370,6 +392,42 @@ export class ShoppingCompareService {
 
   // ---- 跨平台比价（shopping.compare.prices 工具） ----
 
+  /**
+   * 单平台取报价（双通道，2026-09-24）：官方联盟 API 优先（零用户操作），
+   * 未配置凭据/官方失败时落 Playwright+用户 Cookie 兜底。来源与时效随报价返回。
+   */
+  private async fetchPlatformQuotes(
+    ctx: ToolContext,
+    platform: string,
+    query: string,
+    opts: { maxPrice?: number; sort?: "default" | "price_asc" | "price_desc" | "sales"; limit?: number } = {},
+  ): Promise<{ products: Array<ProductSummary & { __source: OfferSource }>; error?: string }> {
+    const limit = Math.min(Math.max(opts.limit ?? 5, 1), 10);
+    const gateway = this.deps.officialPriceGateway;
+    if (gateway?.isConfiguredFor(platform)) {
+      const official = await gateway.search(platform, query, limit);
+      if (official.ok && official.products.length > 0) {
+        return {
+          products: official.products.map((p) => ({ ...p, __source: "official_api" as const })),
+        };
+      }
+      // notConfigured 理论上不达（已 isConfiguredFor）；官方失败落兜底并保留原因
+      if (!official.ok && !official.notConfigured) {
+        console.log(`[ShoppingCompare] 官方源 ${platform} 失败，落浏览器兜底：${official.error ?? "?"}`);
+      }
+    }
+    const res = await this.deps.shoppingOrderService.searchProduct(ctx, platform, query, {
+      maxPrice: opts.maxPrice,
+      sort: opts.sort ?? "price_asc",
+      limit,
+    });
+    if (!res.ok) {
+      return { products: [], error: redactCredentials(String((res as { error?: string }).error ?? "未知错误")) };
+    }
+    const products = (res as { products?: ProductSummary[] }).products ?? [];
+    return { products: products.map((p) => ({ ...p, __source: "browser" as const })) };
+  }
+
   async comparePrices(
     ctx: ToolContext,
     query: string,
@@ -389,32 +447,35 @@ export class ShoppingCompareService {
       return { ok: false, error: `平台 ${unsupported.join("/")} 暂不支持。已实现：${supported.join("/")}` };
     }
 
-    // 并行搜各平台（单平台失败不拖垮整体）
+    // 并行取各平台报价（官方源优先/浏览器兜底在 fetchPlatformQuotes 内闭环；
+    // 单平台失败不拖垮整体）
     const settled = await Promise.allSettled(
-      requested.map(async (platform) => {
-        const res = await this.deps.shoppingOrderService.searchProduct(ctx, platform, q, {
-          maxPrice: opts.maxPrice,
-          sort: opts.sort ?? "price_asc",
-          limit: Math.min(Math.max(opts.limit ?? 5, 1), 10),
-        });
-        return { platform, res };
-      }),
+      requested.map(async (platform) => ({
+        platform,
+        quotes: await this.fetchPlatformQuotes(ctx, platform, q, opts),
+      })),
     );
 
     const tagged: TaggedProduct[] = [];
     const searchedPlatforms: string[] = [];
     const failedPlatforms: string[] = [];
+    /** 比价卡数据源说明（官方 API 平台单独注明：零 Cookie、服务器侧直查） */
+    const sourceNotes: string[] = [];
     for (const s of settled) {
       if (s.status !== "fulfilled") continue;
-      const { platform, res } = s.value;
-      if (res.ok) {
-        const products = (res as { products?: ProductSummary[] }).products ?? [];
-        if (products.length > 0) {
-          searchedPlatforms.push(platform);
-          for (const p of products) tagged.push({ platform, product: p });
+      const { platform, quotes } = s.value;
+      if (quotes.products.length > 0) {
+        searchedPlatforms.push(platform);
+        const fetchedAt = Date.now();
+        for (const p of quotes.products) {
+          tagged.push({ platform, product: p, source: p.__source, fetchedAt });
         }
-      } else {
-        failedPlatforms.push(`${platform}：${res.error}`);
+        const sources = [...new Set(quotes.products.map((p) => p.__source))];
+        if (sources.includes("official_api")) {
+          sourceNotes.push(`${platform}=官方API`);
+        }
+      } else if (quotes.error) {
+        failedPlatforms.push(`${platform}：${quotes.error}`);
       }
     }
 
@@ -440,9 +501,10 @@ export class ShoppingCompareService {
 
     const platformSummary = searchedPlatforms.join("/");
     const bestText = bestOffer?.priceCny != null ? `，最低 ¥${bestOffer.priceCny}（${bestOffer.platform}）` : "";
+    const sourceText = sourceNotes.length > 0 ? `；数据源：${sourceNotes.join("、")}，其余为浏览器抓取` : "";
     return {
       ok: true,
-      summary: `「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}`,
+      summary: `「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${sourceText}`,
       query: q,
       platforms: requested,
       searchedPlatforms,
@@ -533,19 +595,17 @@ export class ShoppingCompareService {
     return hit;
   }
 
-  /** 单条监控检查；到价且为新低价时回调 onPriceAlert。 */
+  /** 单条监控检查；到价且为新低价时回调 onPriceAlert。官方源优先（免 Cookie 直查）。 */
   async checkWatch(watch: PriceWatch, nowMs: number = this.clock()): Promise<boolean> {
     const ctx: ToolContext = { sessionId: "price-watch", userId: watch.actorId };
-    const res = await this.deps.shoppingOrderService.searchProduct(ctx, watch.platform, watch.query, {
+    const quotes = await this.fetchPlatformQuotes(ctx, watch.platform, watch.query, {
       sort: "price_asc",
       limit: 3,
     });
-    if (!res.ok) return false;
-    const products = (res as { products?: ProductSummary[] }).products ?? [];
-    if (products.length === 0) return false;
+    if (quotes.products.length === 0) return false;
 
     // 取与关键词规格最贴合的最低价（首个结果即可：已按价格升序请求）
-    const cheapest = products
+    const cheapest = quotes.products
       .filter((p) => p.price != null && p.price > 0)
       .sort((a, b) => (a.price ?? 0) - (b.price ?? 0))[0];
     if (!cheapest?.price) return false;
@@ -563,6 +623,7 @@ export class ShoppingCompareService {
           priceCny: cheapest.price,
           title: cheapest.title,
           url: cheapest.url,
+          source: cheapest.__source,
         });
       } catch (err) {
         console.log(`[ShoppingCompare] onPriceAlert 回调异常（忽略）: ${err}`);

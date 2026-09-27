@@ -1,0 +1,9 @@
+Noto Sans CJK SC (Simplified Chinese)
+--------------------------------------
+Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name
+"Source Han". This Font Software is licensed under the SIL Open Font License,
+Version 1.1 (OFL-1.1, https://openfontlicense.org).
+
+Used by the desktop dynamic-island native window (GDI font embedding via
+AddFontMemResourceEx). Files: NotoSansSC-Regular.otf / -Medium.otf / -Bold.otf,
+downloaded from https://github.com/notofonts/noto-cjk (Sans/OTF/SimplifiedChinese).

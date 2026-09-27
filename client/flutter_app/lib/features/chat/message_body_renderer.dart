@@ -48,6 +48,11 @@ Widget buildMessageBody(
   /// 「接下来你可以」接续建议点击回调（传入即作为新消息发送）。
   /// null 时不渲染建议行（未接线方/纯展示场景）。
   void Function(String prompt)? onFollowupTap,
+
+  /// travel_itinerary 卡不进 body（2026-09-25 用户定稿：卡片作为气泡外的
+  /// 独立第二条消息形态渲染，见 chat_page 消息行拆分）；调用方自行在气泡外
+  /// 渲染卡片。缺省 false=卡片照旧在 body 内（手机端/其他调用方行为不变）。
+  bool excludeTravelCard = false,
 }) {
   final Widget body = _buildAssistantBodyInner(
     context,
@@ -58,6 +63,7 @@ Widget buildMessageBody(
     onUserAction: onUserAction,
     typewriterRawText: typewriterRawText,
     typewriterCursor: typewriterCursor,
+    excludeTravelCard: excludeTravelCard,
   );
   if (isUser || onFollowupTap == null) return body;
   final List<String> followUps = message.followUpPrompts ?? const <String>[];
@@ -165,6 +171,7 @@ Widget _buildAssistantBodyInner(
       onUserAction,
   String? typewriterRawText,
   bool typewriterCursor = false,
+  bool excludeTravelCard = false,
 }) {
   if (isUser) {
     return Text(
@@ -195,6 +202,7 @@ Widget _buildAssistantBodyInner(
         cs,
         replyBlocks,
         onUserAction: onUserAction,
+        excludeTravelCard: excludeTravelCard,
       );
       if (body != null) return body;
     }
@@ -213,6 +221,7 @@ Widget _buildAssistantBodyInner(
       cs,
       message,
       onUserAction: onUserAction,
+      excludeTravelCard: excludeTravelCard,
     );
     if (body != null) return body;
   }
@@ -424,6 +433,7 @@ Widget? _buildReplyBlocksBody(
   ColorScheme cs,
   List<Map<String, dynamic>> replyBlocks, {
   _UserActionHandler? onUserAction,
+  bool excludeTravelCard = false,
 }) {
   final List<Widget> blockWidgets = <Widget>[];
   final TextStyle bodyStyle = AppTypography.assistantBody(
@@ -436,7 +446,8 @@ Widget? _buildReplyBlocksBody(
       final Map<String, dynamic> cardJson =
           block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
       final AgentResultData data = AgentResultData.fromJson(cardJson);
-      _appendCardWidget(blockWidgets, data, onUserAction);
+      _appendCardWidget(blockWidgets, cs, data, onUserAction,
+          excludeTravelCard: excludeTravelCard);
     } else if (type == "media") {
       final Widget? media = _mediaBlockWidget(context, cs, block);
       if (media != null) blockWidgets.add(media);
@@ -465,6 +476,7 @@ Widget? _buildUnifiedMediaCardBody(
   ColorScheme cs,
   ChatMessage message, {
   _UserActionHandler? onUserAction,
+  bool excludeTravelCard = false,
 }) {
   final List<Map<String, dynamic>>? renderBlocks = message.renderBlocks;
   final bool hasRenderBlocks = renderBlocks != null && renderBlocks.isNotEmpty;
@@ -494,7 +506,8 @@ Widget? _buildUnifiedMediaCardBody(
       // parseBlocks 里被静默跳过（防脏 JSON 漏进正文），纯正文段照常渲染。
       for (final AgentResultBlock seg in AgentResultParser.parseBlocks(text)) {
         if (seg.isCard) {
-          _appendCardWidget(blockWidgets, seg.data!, onUserAction);
+          _appendCardWidget(blockWidgets, cs, seg.data!, onUserAction,
+              excludeTravelCard: excludeTravelCard);
           continue;
         }
         // 剥模型自带的展示形态声明行（[RENDER_AS:xxx]/[RENDER_HINT:xxx]）：
@@ -539,21 +552,47 @@ Widget? _buildUnifiedMediaCardBody(
 /// 卡片块 → Widget（actions 非空渲染为带按钮的选择型卡片）；首位卡不加顶距。
 void _appendCardWidget(
   List<Widget> blockWidgets,
+  ColorScheme cs,
   AgentResultData data,
-  _UserActionHandler? onUserAction,
-) {
+  _UserActionHandler? onUserAction, {
+  bool excludeTravelCard = false,
+}) {
+  // 行程卡外移（2026-09-25 用户定稿）：调用方声明 excludeTravelCard 时，卡由
+  // 消息行在气泡外独立渲染（第二条消息形态），body 不再重复渲染。
+  if (excludeTravelCard && data.cardType == "travel_itinerary") return;
   final int idx = blockWidgets.length;
+  // 行程卡单独分段（2026-09-25 用户定稿）：travel_itinerary 是独立规划卡，
+  // 与介绍文字之间用「大间距 + 细分隔线」显式切开成新的一段（其余小卡维持
+  // 紧凑贴排）。
+  final Widget card = data.actions.isNotEmpty
+      ? AgentActionChoiceCard(
+          data: data,
+          onAction: onUserAction == null
+              ? null
+              : (AgentResultAction a) => onUserAction(a, cardData: data),
+        )
+      : AgentResultCard(data: data, onUserAction: onUserAction);
+  if (data.cardType == "travel_itinerary" && idx > 0) {
+    blockWidgets.add(
+      Padding(
+        padding: const EdgeInsets.only(top: AppTypography.space5),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Divider(height: 1, thickness: 0.6, color: cs.outlineVariant),
+            const SizedBox(height: AppTypography.space4),
+            card,
+          ],
+        ),
+      ),
+    );
+    return;
+  }
   blockWidgets.add(
     Padding(
       padding: EdgeInsets.only(top: idx == 0 ? 0 : AppTypography.space3),
-      child: data.actions.isNotEmpty
-          ? AgentActionChoiceCard(
-              data: data,
-              onAction: onUserAction == null
-                  ? null
-                  : (AgentResultAction a) => onUserAction(a, cardData: data),
-            )
-          : AgentResultCard(data: data, onUserAction: onUserAction),
+      child: card,
     ),
   );
 }

@@ -17,8 +17,8 @@ function fakeKit(
 
 const skills = createPictureBuiltinSkills({ pictureKit: fakeKit(() => ({ success: true })) });
 
-test("picture skill 家族：6 个定义全部通过元数据校验且名字唯一", () => {
-  assert.equal(skills.length, 6);
+test("picture skill 家族：9 个定义全部通过元数据校验且名字唯一", () => {
+  assert.equal(skills.length, 9);
   const names = skills.map((s) => s.metadata.name);
   assert.equal(new Set(names).size, names.length);
   for (const skill of skills) {
@@ -32,8 +32,11 @@ test("picture skill 家族：6 个定义全部通过元数据校验且名字唯�
       "picture.evaluate",
       "picture.gallery",
       "picture.generate",
+      "picture.housekeeping",
+      "picture.memories",
       "picture.process",
       "picture.store",
+      "picture.stylize",
     ],
   );
 });
@@ -42,7 +45,13 @@ test("picture skill 家族：kind 均为 builtin，写类 skill 声明 storage:w
   for (const skill of skills) {
     assert.equal(skill.metadata.kind, "builtin", skill.metadata.name);
   }
-  const writeSkills = new Set(["picture.generate", "picture.process", "picture.store"]);
+  const writeSkills = new Set([
+    "picture.generate",
+    "picture.process",
+    "picture.store",
+    "picture.stylize",
+    "picture.housekeeping",
+  ]);
   for (const skill of skills) {
     const hasWrite = skill.metadata.permissions.includes("storage:write");
     assert.equal(hasWrite, writeSkills.has(skill.metadata.name), skill.metadata.name);

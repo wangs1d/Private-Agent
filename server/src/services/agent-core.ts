@@ -187,6 +187,7 @@ import {
   buildLaneCoreTools,
   isStaticToolArchEnabled,
   isTaskLaneRouterFirst,
+  pickTravelPlanningTools,
   toolsMatchingCapabilityBeam,
 } from "../external-model/lane-tool-sets.js";
 import {
@@ -239,7 +240,8 @@ import {
   trimMediaCardsByTopic,
   type MediaCardItem,
 } from "./tool-result-processor.js";
-import { normalizeReplyCardLayout, buildReplyBlocks } from "./reply-envelope.js";
+import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
+import { shouldInjectTravelState } from "./travel-prompt-snapshot.js";
 import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
@@ -257,11 +259,11 @@ import {
 } from "../agent/dispatch-tag.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import {
+  MEMORY_EXPLICIT_RE,
   MEMORY_RECALL_HINT_RE,
   isAmbiguousFollowUpMessage,
-  shouldInjectMemorySummary,
 } from "../agent/memory-signal.js";
-import { shouldRecallLongTerm } from "../agent/recall-gate.js";
+import { DATE_DEIXIS_RE } from "../agent/recall-gate.js";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
@@ -700,10 +702,9 @@ export class AgentCore {
    * 判定当前轮是否"真正切换了话题"（STM 解析为 topic_switch，无任务延续/无指代）。
    * 命中时抑制长期记忆注入，避免旧话题/跨会话记忆串台。
    */
-  private isTopicSwitchTurn(sessionId: string, text: string): boolean {
-    if (shouldInjectMemorySummary(text) || MEMORY_RECALL_HINT_RE.test(text)) return false;
-    return this.shortTermMemoryGateway?.getTurnFocusKind(sessionId, text) === "topic_switch";
-  }
+  // v3 退役：isTopicSwitchTurn 曾是长期记忆注入的第三道闸（STM 焦点=topic_switch 即杀），
+  // 实测把白名单命中轮次也压掉（换措辞召回注入率 1/10 的元凶）。情节记忆不再无邀请
+  // 推送后该判定失去意义；防串台由「画像常驻 + 工具拉取 + 窄线索兜底」结构性承担。
 
   async handleUserMessage(
     actorId: string,
@@ -748,8 +749,6 @@ export class AgentCore {
     let cognitiveNeedsToolLoop = true;
     /** cognize 阶段 1 已召回的记忆条目；非空时 standard path 复用，避免重复 MemoryCortex.recall */
     let cognitiveRecallItems: MemoryRecallItem[] | undefined;
-    /** cognize 阶段 0.93 的 recall-gate 判定（门控单点化）；cognize 未运行时为 null，降级本地评估 */
-    let cognizeRecallGate: { trigger: boolean; reason: string } | null = null;
     /** 工作记忆摘要（注入 streamCompletion 的 prompt） */
     let cognitiveWorkingMemorySummary = "";
     /** cognize 阶段 1 情绪向量（透出给 runStandardLlmPath → promptContext.memory.emotionState） */
@@ -860,7 +859,7 @@ export class AgentCore {
       let brainCognition: import("../brain/types.js").CognitiveResult | null = null;
       // cognize 已与路由并行启动，此处仅等待结果
       brainCognition = await cognizePromise;
-      cognizeRecallGate = brainCognition?.recallGate ?? null;
+      // v3：cognize 的 recallGate 判定不再消费（读路径改窄线索单点，见下方 narrowMemoryCue）
 
       // 对话内推入后台感知底座：完全后台化——只采集对话内容，由 ProactivityHub
       // 后台零 LLM 规则判决定是否主动 speak/act，不进入对话 prompt，不阻塞主回复。
@@ -1018,29 +1017,28 @@ export class AgentCore {
     // 抑制长期记忆召回，避免把旧话题/跨会话记忆注入当前新话题（串台根治）。
     // 仅抑制长期记忆（narrativeRecall），当前会话的【最近对话回顾】/STM 上下文仍正常注入。
     //
-    // 召回门控（记忆架构重构 + 门控单点化）：长期记忆检索从「每轮默认」改为「白名单触发」
-    // （显式记忆线索 / 新会话开场 / 个人事实陈述 / 长会话指代消解失败升级）。
-    // cognize 阶段 0.93 已用完整输入（含 ambiguousFollowUp）评估过白名单，直接复用其判定；
-    // cognize 未运行（降级/后台路径）时才本地评估——消除同一轮多处独立判 gate 的漂移空间。
-    // 未触发时跳过长期检索，当天的问题由当日 journal 词法检索覆盖。
-    const recallGate =
-      cognizeRecallGate ??
-      shouldRecallLongTerm({
-        text,
-        threadMessageCount,
-        ambiguousFollowUp: isAmbiguousFollowUpMessage(text),
-      });
-    // 向量预筛（P0-4）：白名单未命中时对用户原文做一次廉价向量检索（无 LLM），
-    // top1 分数 ≥ 阈值即视为当前话题与既有长期记忆强相关，放行注入——
-    // 补纯 regex 白名单的漏召（agent 明明记得却"忘了你"）。
-    // 预筛失败/未注册返回 false（fail-closed，保持白名单行为）。
-    const semanticRecallHit = recallGate.trigger
-      ? false
-      : this.brainCenter
-        ? await this.brainCenter.semanticRecallPreScreen(actorId, text)
-        : false;
-    const gateTriggered = recallGate.trigger || semanticRecallHit;
-    const suppressNarrativeRecall = !gateTriggered || this.isTopicSwitchTurn(sessionId, text);
+    // v3 记忆架构读路径（三重闸退役）：长期记忆进上下文只剩三条有意的路——
+    //   1. 画像层常驻（memory_facts/preferences 无条件注入，prompt-context-builder）；
+    //   2. brain.recall 工具按需检索（chat 车道常驻，模型自主决定何时查记忆）；
+    //   3. 本处窄线索兜底：用户显式提及记忆（记得/上次/之前/昨天）或新会话开场时
+    //      系统代查情节记忆注入。
+    // v2 的向量预筛（semanticRecallPreScreen）与 isTopicSwitchTurn 话题抑制退役——
+    // 情节记忆不再无邀请推送，「系统擅自塞旧记忆」这个串台通道从结构上删除。
+    const narrowMemoryCue =
+      MEMORY_EXPLICIT_RE.test(text) ||
+      MEMORY_RECALL_HINT_RE.test(text) ||
+      META_CONVERSATION_RECALL_RE.test(text) ||
+      DATE_DEIXIS_RE.test(text);
+    const isNewSessionOpen = threadMessageCount >= 0 && threadMessageCount <= 1;
+    const recallGate = {
+      trigger: narrowMemoryCue || isNewSessionOpen,
+      reason: narrowMemoryCue ? ("memory_cue" as const) : ("new_session" as const),
+    };
+    const gateTriggered = recallGate.trigger;
+    const suppressNarrativeRecall = !gateTriggered;
+    // 向量预筛已随 v3 退役（每轮 embedding 调用既慢又把召回权从模型手里收走）；
+    // 保留占位常量供 orchestrate ctx 下游管道兼容。
+    const semanticRecallHit = false;
 
     // 当日对话日志检索：门控触发时并行扫今日 journal（零 embedding 词法检索，短期记忆）。
     // 只扫当天；过往日期已固化进长期记忆图，跨天指代由图谱/KV 召回兜底（见 recallGate）。
@@ -2427,10 +2425,18 @@ if (route.plane === "task") {
           ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
           ...(streamOpts.chatToolsExtra ?? []),
         ];
+        // 旅游域定向保底（2026-09-24 大理轮）：goal 命中旅游语义时把 travel
+        // 规划族提为常驻可见，其余工具仍走桥召回（可见集在 prepareToolsWithToolSearch
+        // 自动去重）。防的是预召回漏命中 + 模型不主动 discover 的双重漏召——
+        // 旅游是模型"自觉会写"的域，拿不到 schema 就凭常识自写行程，行程卡整卡漏发。
+        const travelPromoted = pickTravelPlanningTools(
+          corpus,
+          shouldInjectTravelState(text) || /去[^，。！？!?\s]{0,10}玩/.test(text),
+        );
         execStreamOpts = {
           ...streamOpts,
           toolExposureProfile: "explicit",
-          chatToolsBuiltin: [],
+          chatToolsBuiltin: travelPromoted,
           chatToolsExtra: corpus,
         };
       } else if (isStaticToolArchEnabled()) {
@@ -3035,7 +3041,11 @@ if (route.plane === "task") {
         /* 投递失败不影响任务执行 */
       }
     };
-    const pushDone = (finalText: string, mediaCards: MediaCardItem[] = []): void => {
+    const pushDone = (
+      finalText: string,
+      mediaCards: MediaCardItem[] = [],
+      followups: string[] = [],
+    ): void => {
       try {
         // 投递失败（用户离线：trySend false / registry 缺失）→ TaskOutbox 暂存，
         // 客户端重连（session.init）时重放——离线完成的任务结果不再静默丢失。
@@ -3063,14 +3073,27 @@ if (route.plane === "task") {
               ...(mediaCards.length > 0 ? { mediaCards } : {}),
               ...(renderBlocks.length > 0 ? { renderBlocks } : {}),
               ...(replyBlocks && replyBlocks.length > 0 ? { blocks: replyBlocks } : {}),
+              // 「接下来你可以」接续建议：任务轮与对话面同权随 done 下发成
+              // 可点胶囊（客户端 done 处理不区分 source，同样解析 followups）。
+              ...(followups.length > 0 ? { followups } : {}),
             },
           }),
         );
         if (!delivered) {
-          getTaskOutbox().enqueue(sessionId, { messageId, finalText, mediaCards });
+          getTaskOutbox().enqueue(sessionId, {
+            messageId,
+            finalText,
+            mediaCards,
+            ...(followups.length > 0 ? { followups } : {}),
+          });
         }
       } catch {
-        getTaskOutbox().enqueue(sessionId, { messageId, finalText, mediaCards });
+        getTaskOutbox().enqueue(sessionId, {
+          messageId,
+          finalText,
+          mediaCards,
+          ...(followups.length > 0 ? { followups } : {}),
+        });
       }
     };
 
@@ -3232,6 +3255,16 @@ if (route.plane === "task") {
           // （[RENDER_HINT:xxx]/[RENDER_AS:xxx]，否则原样透出到用户屏幕）、
           // 附行程卡、版式归一化——与 WS 对话路径同构。
           finalText = stripResidualRenderDeclarations(finalText);
+          // 「接下来你可以」接续建议剥离（2026-09-24 大理轮）：与 WS 对话面出口
+          // 同构（chat-user-message extractNextUpSuggestions）。任务面收尾此前
+          // 漏接这层——模型按 render 协议写在回复末尾的 [NEXT_UP_START] 块原样
+          // 透出到用户屏幕并随任务记录固化进对话历史。建议句改随 done 载荷
+          // 下发成可点胶囊；落库文本用剥后的 finalText，不再污染 LLM 上下文。
+          // 顺序铁律：先剥 NEXT_UP 再附行程卡——模型把建议块写在回复末尾，
+          // 行程卡附在它后面，若先附卡后剥离，extractNextUpSuggestions 从
+          // [NEXT_UP_START] 起整段截断会把尾部行程卡一并吃掉（真机复现实证）。
+          const nextUp = extractNextUpSuggestions(finalText);
+          finalText = nextUp.text;
           // 行程回执裁决与 WS 对话路径同构（resolveTravelReceipt）：捕获漏拍
           // （缓存重放/升级段边缘）时按冷层近窗回捞兜底。任务面执行可能在
           // 并发闸排队，窗口放宽到 10 分钟，目标/正文点名目的地优先。
@@ -3268,7 +3301,7 @@ if (route.plane === "task") {
           } catch {
             /* thread 并入失败不影响结果投递 */
           }
-          pushDone(finalText, mediaCards);
+          pushDone(finalText, mediaCards, nextUp.followups);
         } else {
           // 结构化失败回执（2026-09-19 P0-2）：执行跑完但没产出有效结果——
           // 带目标回显 + 下一步指引，且与成功路径同样并入对话 thread，

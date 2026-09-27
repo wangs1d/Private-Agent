@@ -27,10 +27,10 @@ export function registerAccountRoutes(app: FastifyInstance, deps: HttpRouteDeps)
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const { displayName } = parsed.data;
+    const { displayName, email } = parsed.data;
     const actorId = accountActorFromBody(parsed.data);
     try {
-      const account = await agentAccountService.register(actorId, displayName);
+      const account = await agentAccountService.register(actorId, displayName, email);
       await agentAccountService.markSetupComplete(actorId);
       return { ok: true, account };
     } catch (e) {

@@ -34,4 +34,16 @@ class AppAutoStart {
       return false;
     }
   }
+
+  /// 已启用时把 Run 键重写为当前 exe 路径（幂等）；未启用（值不存在）则不动，
+  /// 不替用户打开。
+  ///
+  /// Run 键记录的是路径而非版本，只有设置页开关会写它；部署/更新换目录后
+  /// 旧值就指向旧位置。每次启动重认领一次 = 最后运行的实例接管开机自启，
+  /// 新版一经运行自启即自动跟随。
+  static Future<void> reassert() async {
+    if (await isEnabled()) {
+      await setEnabled(true);
+    }
+  }
 }

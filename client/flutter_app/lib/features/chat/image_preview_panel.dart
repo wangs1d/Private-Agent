@@ -1,6 +1,7 @@
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/services/image_preview_launcher.dart";
 
 /// 图片预览面板左侧预留的空白侧栏宽度（仅占位留白，为后续侧边栏内容预留位置）。
 const double kImagePreviewSidebarWidth = 56.0;
@@ -96,13 +97,22 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
     return u.startsWith("/") ? "$base$u" : "$base/$u";
   }
 
+  /// 当前照片是否为图库资产（/picture/assets/{id}/...）；是则提取照片 id，
+  /// 供「在照片墙中查看」入口判断显隐与定位。
+  String? get _galleryPhotoId {
+    final Match? m =
+        RegExp(r"/picture/assets/([A-Za-z0-9_-]+)/").firstMatch(_currentUrl);
+    return m?.group(1);
+  }
+
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        // 左侧预留空白侧栏：仅占位留白，为后续侧边栏内容预留位置
+        // 左侧窄栏：图库照片时显示「照片墙查看」入口（3D 墙 flyToPhoto），
+        // 非图库图源（生成图等）保持纯占位留白
         Container(
           width: kImagePreviewSidebarWidth,
           decoration: BoxDecoration(
@@ -111,6 +121,23 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
               right: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
             ),
           ),
+          child: _galleryPhotoId == null
+              ? null
+              : Column(
+                  children: <Widget>[
+                    const SizedBox(height: 10),
+                    IconButton(
+                      tooltip: "在照片墙中查看",
+                      icon: Icon(
+                        Icons.view_in_ar_rounded,
+                        size: 20,
+                        color: cs.onSurfaceVariant,
+                      ),
+                      onPressed: () =>
+                          ImagePreviewLauncher.onOpenInWall?.call(_galleryPhotoId!),
+                    ),
+                  ],
+                ),
         ),
         Expanded(
           child: Column(

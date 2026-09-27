@@ -3,6 +3,11 @@ import type { PictureKit } from "@private-ai-agent/picture";
 import type { ToolHandler } from "../../tools/tool-registry.js";
 import type { SkillDefinition, SkillHandler } from "../types.js";
 import { createPictureGalleryHandler } from "../../tools/capability-modules/picture/handlers.js";
+import {
+  createPictureHousekeepingHandler,
+  createPictureMemoriesHandler,
+  createPictureStylizeHandler,
+} from "../../tools/capability-modules/photo/handlers.js";
 
 /**
  * 内置 Skill：图片能力套件（PictureKit）→ skill 库（进程内检索）。
@@ -19,6 +24,9 @@ import { createPictureGalleryHandler } from "../../tools/capability-modules/pict
  *   picture.analyze     图像解析：格式 / 尺寸 / EXIF / 色彩统计 / 自动标签
  *   picture.evaluate    照片质量评估打分（单张 / 批量 / 实时反馈）
  *   picture.store       图片存储管理：导入去重 / 查询 / 删除 / 清理
+ *   picture.stylize     照片风格化：撕纸海报 / 拍立得 / 黑白胶片 / 双色版画
+ *   picture.housekeeping 清理治理：连拍/截图/迷你图建议与确认删除
+ *   picture.memories    记忆回顾：近期事件簇聚合
  */
 
 type Deps = {
@@ -231,7 +239,92 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
     handler: async (input) => invokeKitTool(pictureKit, "image_store", input),
   };
 
-  return [gallery, generate, process, analyze, evaluate, store];
+  const stylize: SkillDefinition = {
+    metadata: {
+      name: "picture.stylize",
+      version: "1.0.0",
+      displayName: "照片风格化",
+      description:
+        "把图库里的照片变成另一种视觉风格（输出仍是图片，自动入库并贴上照片墙）。可用风格：poster_torn 撕纸海报（撕纸拼贴+纸张底纹+红色饰带+打字机标题）、polaroid 拍立得（白框+暖调褪色+手写签名）、noir 黑白胶片（高对比+颗粒+暗角）、print_duotone 双色版画（纸面双色强对比）。纯程序合成，零模型零网络。action=styles 查风格列表，action=apply 出图。",
+      kind: "builtin",
+      tags: ["picture", "stylize", "风格化", "海报", "撕纸", "拍立得", "黑白", "版画", "滤镜", "变成"],
+      icon: "🖼️",
+      parameters: [
+        {
+          name: "action",
+          type: "string",
+          required: false,
+          default: "apply",
+          enum: ["apply", "styles"],
+          description: "apply=生成风格化版本；styles=列出可用风格",
+        },
+        { name: "photoId", type: "string", required: false, description: "图库照片 id（apply 必填，picture.gallery 查得）" },
+        {
+          name: "style",
+          type: "string",
+          required: false,
+          enum: ["poster_torn", "polaroid", "noir", "print_duotone"],
+          description: "目标风格（apply 必填）",
+        },
+        { name: "title", type: "string", required: false, description: "画面上的标题文字（如海报名/签名），不传用照片描述" },
+      ],
+      outputSchema: { ok: "boolean", photo: "新生成的风格化照片（含缩略图/原图 URL）", styleLabel: "风格名" },
+      permissions: ["storage:read", "storage:write", "filesystem:read"],
+      timeoutMs: 60_000,
+    },
+    handler: createPictureStylizeHandler(pictureKit) as SkillHandler,
+  };
+
+  const housekeeping: SkillDefinition = {
+    metadata: {
+      name: "picture.housekeeping",
+      version: "1.0.0",
+      displayName: "图库清理治理",
+      description:
+        "分析图库给出清理建议（连拍簇、截图、迷你小图），用户逐类确认后执行删除。删除是破坏性操作：必须先 action=suggest 展示建议、用户明确同意后再以 action=remove&confirmed=true 执行。",
+      kind: "builtin",
+      tags: ["picture", "cleanup", "清理", "整理", "删除照片", "去重", "治理", "释放空间"],
+      icon: "🧹",
+      parameters: [
+        {
+          name: "action",
+          type: "string",
+          required: true,
+          enum: ["suggest", "remove"],
+          description: "suggest=出清理建议；remove=确认删除",
+        },
+        { name: "photoIds", type: "array", required: false, description: "要删除的照片 id 列表（remove）" },
+        { name: "confirmed", type: "boolean", required: false, description: "用户已明确同意删除后传 true（remove）" },
+      ],
+      outputSchema: { ok: "boolean", totalCandidates: "建议清理总数", removed: "已删除数" },
+      permissions: ["storage:read", "storage:write", "filesystem:write"],
+      timeoutMs: 60_000,
+    },
+    handler: createPictureHousekeepingHandler(pictureKit) as SkillHandler,
+  };
+
+  const memories: SkillDefinition = {
+    metadata: {
+      name: "picture.memories",
+      version: "1.0.0",
+      displayName: "照片记忆回顾",
+      description:
+        "把近期照片按事件聚合成「记忆」：默认回看最近 30 天，挑出照片最多的几段（时间/地点/代表照片与一句描述）。",
+      kind: "builtin",
+      tags: ["picture", "memories", "回忆", "记忆", "回顾", "这个月", "照片墙"],
+      icon: "🕯️",
+      parameters: [
+        { name: "days", type: "number", required: false, description: "回看窗口天数，默认 30" },
+        { name: "count", type: "number", required: false, description: "取几段记忆，默认 3" },
+      ],
+      outputSchema: { ok: "boolean", memories: "记忆段列表（含代表照片）", text: "一段可直读的汇总" },
+      permissions: ["storage:read"],
+      timeoutMs: 10_000,
+    },
+    handler: createPictureMemoriesHandler(pictureKit) as SkillHandler,
+  };
+
+  return [gallery, generate, process, analyze, evaluate, store, stylize, housekeeping, memories];
 }
 
 export function registerPictureBuiltinSkills(

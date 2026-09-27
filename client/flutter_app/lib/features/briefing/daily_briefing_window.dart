@@ -31,9 +31,12 @@ import "../../core/services/windows_webview_bootstrap.dart";
 //   postMessage {action:"close"}  → 销毁窗口退出进程
 //   postMessage {action:"drag"}   → startDragging（顶部问候区拖动）
 //   postMessage {action:"click"}  → 播报中=打断 / 空闲=重播
-//   postMessage {action:"expand", open:bool} → Dart 同步调整窗口高度
 // Dart → JS：executeScript 调 window.__setPlaying(posMs, durMs) /
 //   window.__setIdle(label) 驱动播报行形态。
+//
+// 2026-09-24 结构化行卡改版：卡面全部直出结构化字段（天气大字/穿衣一行/
+// 日程·待办·笔记·热搜·重要日子全量行），不再印口播稿（口播稿只进耳朵，
+// 点击卡片即 TTS）；无「展开详情」第二跳——私人管家简报一眼看全。
 // ═══════════════════════════════════════════════════════════════════
 
 /// 子进程窗口模式的环境变量名（值为载荷 JSON 文件路径）。
@@ -257,7 +260,7 @@ Future<void> runDailyBriefingWindow(String payloadPath) async {
   // 左侧圆角外留一条不透明残留带。
   const Color windowBg = Color(0xFF0A0B0E);
   final WindowOptions options = WindowOptions(
-    size: Size(kCardWidth, collapsedWindowHeight(payload)),
+    size: Size(kCardWidth, briefingWindowHeight(payload)),
     titleBarStyle: TitleBarStyle.hidden,
     backgroundColor: windowBg,
     title: "今日简报",
@@ -296,19 +299,169 @@ Future<void> _positionRightCenter() async {
   }
 }
 
-/// 收起态窗口高（逻辑像素）：与 buildBriefingHtml 的 CSS 布局 1:1 对应。
-double collapsedWindowHeight(DailyBriefingWindowPayload? payload) {
-  const double padTop = 20, greetH = 24, metaGap = 6, metaH = 17;
-  const double scriptGap = 15, lineH = 25, rowGap = 15, rowH = 22;
-  const double statsGap = 16, statsH = 22, btnGap = 16, btnH = 32;
-  const double padBottom = 18;
-  final int scriptLen = payload?.narrationText.trim().length ?? 0;
-  // 400 - 22*2 内边距 = 356px 内容宽，14px 中文 ≈ 25 字/行
-  final int lines = scriptLen == 0 ? 0 : max(1, (scriptLen / 25).ceil());
-  final double h = padTop + greetH + metaGap + metaH + scriptGap +
-      lines * lineH + (lines > 0 ? rowGap : 0) + rowH +
-      statsGap + statsH + btnGap + btnH + padBottom;
+/// 窗口高（逻辑像素）：与 buildBriefingHtml 的 CSS 布局 1:1 对应。
+///
+/// 2026-09-24 结构化行卡改版后所有行高在 CSS 里钉死（单行省略，不换行），
+/// 本函数按同一组常量精确累加——口播稿不再印上卡面，高度与文字长短无关；
+/// 唯一可变项是全空兜底时的口播稿块（按 25 字/行估算）。
+double briefingWindowHeight(DailyBriefingWindowPayload? payload) {
+  const double padTop = 20, padBottom = 18;
+  const double greetH = 24, metaGap = 5, metaH = 17;
+  const double weatherGap = 16, weatherH = 40;
+  const double outfitGap = 12, outfitH = 20;
+  const double secGap = 14, secLabelH = 15, rowH = 30;
+  const double doneGap = 4, doneH = 18;
+  const double statusGap = 14, statusPadTop = 12, statusH = 22;
+  const double scriptGap = 15, scriptLineH = 25;
+
+  final Map<String, dynamic>? briefing = payload?.briefing;
+  final _BriefingLayout layout = _BriefingLayout.of(briefing);
+
+  double h = padTop + greetH + metaGap + metaH;
+  // markdown 文档流（与 .md CSS 一一对应）：# 温度大字 → 天气副行 → 穿衣 → 板块
+  bool hasBlock = false;
+  final int sideLines = _weatherSideLineCount(layout);
+  if (layout.weatherBig.isNotEmpty) {
+    h += weatherGap + weatherH; // h1 温度大字
+    hasBlock = true;
+  }
+  if (sideLines > 0) {
+    h += (hasBlock ? 0 : weatherGap) + sideLines * 19;
+    hasBlock = true;
+  }
+  if (layout.outfit.isNotEmpty) {
+    h += (hasBlock ? outfitGap : weatherGap) + outfitH;
+    hasBlock = true;
+  }
+  int rowsOf(String key) {
+    final Object? raw = briefing?[key];
+    return raw is List ? raw.length : 0;
+  }
+
+  int todoPendingRows() => layout.todoPending.length;
+  // 今日日程 / 待办跟进 / 待复习笔记 / 兴趣热搜 / 近期重要日子（全量直出，无展开）
+  h += rowsOf("todaySchedule") > 0 ? secGap + secLabelH + rowsOf("todaySchedule") * rowH : 0;
+  h += todoPendingRows() > 0 ? secGap + secLabelH + todoPendingRows() * rowH : 0;
+  if (todoPendingRows() > 0 && layout.doneTodayCount > 0) h += doneGap + doneH;
+  h += rowsOf("pendingNotes") > 0 ? secGap + secLabelH + rowsOf("pendingNotes") * rowH : 0;
+  h += rowsOf("interestHits") > 0 ? secGap + secLabelH + rowsOf("interestHits") * rowH : 0;
+  h += rowsOf("upcomingImportantDays") > 0
+      ? secGap + secLabelH + rowsOf("upcomingImportantDays") * rowH
+      : 0;
+  // 全空兜底：口播稿印上卡面（正常版式下口播稿只进耳朵不进眼睛）
+  final String narration = payload?.narrationText.trim() ?? "";
+  final bool scriptFallback = briefing != null &&
+      !layout.hasWeather &&
+      layout.outfit.isEmpty &&
+      !layout.hasAnySection &&
+      narration.isNotEmpty;
+  if (scriptFallback) {
+    final int lines = max(1, (narration.length / 25).ceil());
+    h += scriptGap + lines * scriptLineH;
+  }
+  h += statusGap + statusPadTop + statusH + padBottom;
   return h;
+}
+
+/// 天气副行行数（条件/区间一行 + 温差或风况第二行）。
+int _weatherSideLineCount(_BriefingLayout layout) {
+  final bool hasSide = layout.weatherCondition.isNotEmpty ||
+      layout.weatherRange.isNotEmpty ||
+      layout.weatherSideBottom.isNotEmpty;
+  if (!hasSide) return 0;
+  return layout.weatherSideBottom.isEmpty ? 1 : 2;
+}
+
+/// 版式要素抽取（HTML 生成与高度计算共用同一份判定，防两端不一致）。
+class _BriefingLayout {
+  const _BriefingLayout({
+    required this.hasWeather,
+    required this.weatherBig,
+    required this.weatherCondition,
+    required this.weatherRange,
+    required this.weatherSideBottom,
+    required this.outfit,
+    required this.todoPending,
+    required this.doneTodayCount,
+    required this.hasAnySection,
+  });
+
+  final bool hasWeather;
+  final String weatherBig;
+  final String weatherCondition;
+  final String weatherRange;
+  final String weatherSideBottom;
+  final String outfit;
+  final List<String> todoPending;
+  final int doneTodayCount;
+  final bool hasAnySection;
+
+  static _BriefingLayout of(Map<String, dynamic>? briefing) {
+    final Object? rawWeather = briefing?["weather"];
+    final Map<String, dynamic>? weather =
+        rawWeather is Map ? rawWeather.cast<String, dynamic>() : null;
+    final num? temp = weather?["temperature"] as num?;
+    final String condition =
+        weather?["condition"]?.toString().trim() ?? "";
+    final bool hasWeather = weather != null && (temp != null || condition.isNotEmpty);
+    final String big = temp == null ? "" : "${temp.round()}°";
+    final num? maxC = weather?["maxC"] as num?;
+    final num? minC = weather?["minC"] as num?;
+    final String range = <String>[
+      if (maxC != null) "最高 ${maxC.round()}°",
+      if (minC != null) "最低 ${minC.round()}°",
+    ].join(" · ");
+    // 温差 ≥8° 提示一句（第二行）；无极值时退化为风况，再无则留空
+    final num? wind = weather?["windKmh"] as num?;
+    final String sideBottom = maxC != null && minC != null
+        ? ((maxC - minC).round() >= 8 ? "早晚温差大" : "")
+        : (wind != null ? "风速 ${wind.round()} km/h" : "");
+
+    final String outfitSuggestion =
+        briefing?["outfitTip"] is Map
+            ? ((briefing!["outfitTip"] as Map)["suggestion"]?.toString() ?? "")
+                .trim()
+            : "";
+
+    final List<String> pending = <String>[];
+    int doneCount = 0;
+    final Object? rawTodo = briefing?["todoFollowups"];
+    if (rawTodo is Map) {
+      final Object? rawPending = rawTodo["pending"];
+      if (rawPending is List) {
+        pending.addAll(rawPending
+            .map((Object? e) => e?.toString() ?? "")
+            .where((String s) => s.isNotEmpty));
+      }
+      final Object? rawDone = rawTodo["doneTodayCount"];
+      if (rawDone is num) doneCount = rawDone.round();
+    }
+
+    bool hasAnySection() {
+      bool nonEmpty(String key) {
+        final Object? raw = briefing?[key];
+        return raw is List && raw.isNotEmpty;
+      }
+
+      return nonEmpty("todaySchedule") ||
+          pending.isNotEmpty ||
+          nonEmpty("pendingNotes") ||
+          nonEmpty("interestHits") ||
+          nonEmpty("upcomingImportantDays");
+    }
+
+    return _BriefingLayout(
+      hasWeather: hasWeather,
+      weatherBig: big,
+      weatherCondition: condition,
+      weatherRange: range,
+      weatherSideBottom: sideBottom,
+      outfit: outfitSuggestion,
+      todoPending: pending,
+      doneTodayCount: doneCount,
+      hasAnySection: hasAnySection(),
+    );
+  }
 }
 
 Future<void> _deleteQuietly(String path) async {
@@ -432,62 +585,10 @@ class _DailyBriefingWindowAppState extends State<DailyBriefingWindowApp> {
         case "click":
           _onCardClicked();
           break;
-        case "expand":
-          await _syncWindowHeight(msg["open"] == true);
-          break;
       }
     } catch (_) {
       // ignore malformed messages
     }
-  }
-
-  /// 展开详情 → 窗口高度随之伸长，且保持底边固定（右下角悬浮锚定语义）。
-  Future<void> _syncWindowHeight(bool open) async {
-    try {
-      final Offset origin = await windowManager.getPosition();
-      final Size size = await windowManager.getSize();
-      final double collapsed = collapsedWindowHeight(_payload);
-      final double extra = open ? _detailExtraHeight() : 0;
-      final double newH = collapsed + extra;
-      if ((size.height - newH).abs() < 1) return;
-      await windowManager.setSize(Size(size.width, newH));
-      // setSize 以左上角为锚（SWP_NOMOVE），底边会向下伸出屏幕——
-      // 按高度差向上补偿，保持底边贴着任务栏上方。
-      await windowManager.setPosition(
-        Offset(origin.dx, origin.dy - (newH - size.height)),
-      );
-    } catch (_) {
-      // 窗口未就绪等场景忽略
-    }
-  }
-
-  double _detailExtraHeight() {
-    final Map<String, dynamic>? briefing = _payload?.briefing;
-    if (briefing == null) return 0;
-    int listLen(String key) {
-      final Object? raw = briefing[key];
-      return raw is List ? raw.length : 0;
-    }
-
-    int todoPendingCount() {
-      final Object? rawTodo = briefing["todoFollowups"];
-      if (rawTodo is! Map) return 0;
-      final Object? rawPending = rawTodo["pending"];
-      return rawPending is List ? rawPending.length : 0;
-    }
-
-    const double labelH = 30, rowH = 34, sectionGap = 10, padH = 20;
-    final double scheduleH = listLen("todaySchedule") > 0
-        ? labelH + min(listLen("todaySchedule"), 3) * rowH + sectionGap
-        : 0;
-    final double todosH = todoPendingCount() > 0
-        ? labelH + min(todoPendingCount(), 3) * rowH + sectionGap
-        : 0;
-    final double notesH = listLen("pendingNotes") > 0
-        ? labelH + min(listLen("pendingNotes"), 3) * rowH + sectionGap
-        : 0;
-    if (scheduleH + todosH + notesH <= 0) return 0;
-    return scheduleH + todosH + notesH + padH;
   }
 
   // ---- 语音播报 ----
@@ -636,21 +737,58 @@ String _highlightScript(String plainEscaped) {
   );
 }
 
-String _statsHtml(DailyBriefingCardContent content) {
-  if (content.stats.isEmpty) return "";
-  final StringBuffer buf = StringBuffer("<div class=\"stats\">");
-  for (final DailyBriefingStat stat in content.stats.take(3)) {
-    buf.write(
-      "<div class=\"stat\"><span class=\"n\">${stat.count}</span>"
-      "<span class=\"l\">${_esc(stat.label)}</span></div>",
-    );
-  }
-  buf.write("</div>");
-  return buf.toString();
+/// 天气状况 → emoji（按关键词匹配，未命中给中性图标）。
+String _conditionEmoji(String condition) {
+  if (condition.contains("雷")) return "⛈️";
+  if (condition.contains("雪")) return "❄️";
+  if (condition.contains("雨")) return "🌧️";
+  if (condition.contains("雾") || condition.contains("霾")) return "🌫️";
+  if (condition.contains("阴")) return "☁️";
+  if (condition.contains("云")) return "⛅";
+  if (condition.contains("晴")) return "☀️";
+  if (condition.contains("风")) return "🌬️";
+  return "🌤️";
 }
 
-String _detailHtml(Map<String, dynamic>? briefing) {
-  if (briefing == null) return "";
+/// 兴趣热搜行文案：「标题 · 平台」。
+String _interestHitText(Map<String, dynamic> item) {
+  final String title = item["title"]?.toString() ?? "";
+  final String platform = item["platform"]?.toString() ?? "";
+  return platform.isEmpty ? "**$title**" : "**$title** · $platform";
+}
+
+/// 重要日子行文案：「name的生日 · 还有 3 天」。
+String _importantDayText(Map<String, dynamic> item) {
+  final String name = item["name"]?.toString() ?? "";
+  final String type = item["type"]?.toString() ?? "";
+  final String typeLabel =
+      type == "anniversary" ? "纪念日" : type == "custom" ? "特殊日子" : "生日";
+  final Object? rawDays = item["daysUntil"];
+  final String when = rawDays is int
+      ? (rawDays == 0 ? "就是今天" : rawDays == 1 ? "明天" : "还有 $rawDays 天")
+      : "";
+  return "$name的$typeLabel${when.isEmpty ? "" : " · **$when**"}";
+}
+
+/// 把结构化简报组装成 markdown 文档（2026-09-25：卡面内容层 = markdown，
+/// 调内容只动这里，不碰 HTML/CSS）。固定顺序：# 温度大字 → 天气副行 →
+/// 穿衣 → 五板块（## 标题 + - 列表 + 完成数纯文本行）。
+String _composeBriefingMarkdown(
+    Map<String, dynamic>? briefing, _BriefingLayout layout) {
+  final StringBuffer buf = StringBuffer();
+  if (layout.hasWeather && layout.weatherBig.isNotEmpty) {
+    buf.writeln("# ${layout.weatherBig}");
+  }
+  final List<String> side = <String>[
+    if (layout.weatherCondition.isNotEmpty)
+      "${_conditionEmoji(layout.weatherCondition)} ${layout.weatherCondition}",
+    if (layout.weatherRange.isNotEmpty) layout.weatherRange,
+    if (layout.weatherSideBottom.isNotEmpty) layout.weatherSideBottom,
+  ];
+  if (side.isNotEmpty) buf.writeln(side.join(" · "));
+  if (layout.outfit.isNotEmpty) buf.writeln("**穿衣** ${layout.outfit}");
+  if (briefing == null) return buf.toString();
+
   List<Map<String, dynamic>> listOf(String key) {
     final Object? raw = briefing[key];
     if (raw is! List) return const <Map<String, dynamic>>[];
@@ -660,43 +798,116 @@ String _detailHtml(Map<String, dynamic>? briefing) {
         .toList();
   }
 
-  String section(String label, List<Map<String, dynamic>> items,
-      {required bool withTime}) {
-    if (items.isEmpty) return "";
-    final StringBuffer rows = StringBuffer();
-    for (final Map<String, dynamic> item in items.take(3)) {
-      final String time = withTime ? item["time"]?.toString() ?? "" : "";
-      final String title = _esc((item["title"] ?? item["name"] ?? "").toString());
-      final String timeHtml =
-          withTime ? "<span class=\"tm\">${_esc(time)}</span>" : "";
-      rows.write(
-        "<div class=\"row-item\">$timeHtml"
-        "<div class=\"body\"><div class=\"tt\">$title</div></div></div>",
-      );
+  final List<Map<String, dynamic>> schedule = listOf("todaySchedule");
+  if (schedule.isNotEmpty) {
+    buf.writeln("## 📅 今日日程");
+    for (final Map<String, dynamic> s in schedule) {
+      final String time = s["time"]?.toString() ?? "";
+      final String title = (s["title"] ?? "").toString();
+      buf.writeln(time.isEmpty ? "- $title" : "- **$time** $title");
     }
-    return "<div class=\"sec\">"
-        "<div class=\"sec-label\">$label</div>$rows</div>";
   }
 
-  List<Map<String, dynamic>> pendingTodos() {
-    final Object? rawTodo = briefing["todoFollowups"];
-    if (rawTodo is! Map) return const <Map<String, dynamic>>[];
-    final Object? rawPending = rawTodo["pending"];
-    if (rawPending is! List) return const <Map<String, dynamic>>[];
-    return rawPending
-        .map((Object? e) => <String, dynamic>{"title": e?.toString() ?? ""})
-        .where((Map<String, dynamic> m) => (m["title"] as String).isNotEmpty)
-        .toList();
+  if (layout.todoPending.isNotEmpty) {
+    buf.writeln("## ✅ 待办跟进");
+    for (final String pending in layout.todoPending) {
+      buf.writeln("- $pending");
+    }
+    if (layout.doneTodayCount > 0) {
+      buf.writeln("今天已完成 ${layout.doneTodayCount} 件");
+    }
   }
 
-  final String schedule = section("今日日程", listOf("todaySchedule"), withTime: true);
-  final String todos = section("待办跟进", pendingTodos(), withTime: false);
-  final String notes = section("待复习笔记", listOf("pendingNotes"), withTime: false);
-  if (schedule.isEmpty && todos.isEmpty && notes.isEmpty) return "";
-  return "<div id=\"detail\">$schedule$todos$notes</div>";
+  final List<Map<String, dynamic>> notes = listOf("pendingNotes");
+  if (notes.isNotEmpty) {
+    buf.writeln("## 📝 待复习笔记");
+    for (final Map<String, dynamic> n in notes) {
+      buf.writeln("- ${(n["title"] ?? "").toString()}");
+    }
+  }
+
+  final List<Map<String, dynamic>> hits = listOf("interestHits");
+  if (hits.isNotEmpty) {
+    buf.writeln("## 🔥 兴趣热搜");
+    for (final Map<String, dynamic> h in hits) {
+      buf.writeln("- ${_interestHitText(h)}");
+    }
+  }
+
+  final List<Map<String, dynamic>> days = listOf("upcomingImportantDays");
+  if (days.isNotEmpty) {
+    buf.writeln("## 🎉 近期重要日子");
+    for (final Map<String, dynamic> d in days) {
+      buf.writeln("- ${_importantDayText(d)}");
+    }
+  }
+
+  return buf.toString();
+}
+
+/// 极小 markdown 渲染器（卡面内容子集，零依赖）：
+/// `# / ##` 标题、`- ` 列表、`**加粗**`、空行分隔；其余行为纯文本段落。
+/// 先整体 HTML 转义再施加行内标记，杜绝内容注入。
+String _markdownToHtml(String md) {
+  final StringBuffer html = StringBuffer();
+  final List<String> listItems = <String>[];
+  // 行首加粗且为 HH:mm = 时间列（tm 蓝色定宽）；其余加粗 = 普通强调（白色），
+  // 如热搜标题、重要日子倒计时。
+  String renderLi(String item) {
+    final Match? m = RegExp(r"^<strong>(.*?)</strong>").firstMatch(item);
+    if (m == null) return item;
+    final String text = m.group(1) ?? "";
+    // 行首加粗且内容为 HH:mm 才算时间列（tm 蓝色定宽）；其余加粗按普通强调
+    final bool isTime = RegExp(r"^\d{1,2}:\d{2}$").hasMatch(text);
+    return isTime
+        ? "<strong class=\"tm\">$text</strong>${item.substring(m.end)}"
+        : item;
+  }
+
+  void flushList() {
+    if (listItems.isEmpty) return;
+    html.write("<ul>");
+    for (final String item in listItems) {
+      html.write("<li>${renderLi(item)}</li>");
+    }
+    html.write("</ul>");
+    listItems.clear();
+  }
+
+  for (final String rawLine in md.split("\n")) {
+    final String line = rawLine.trim();
+    if (line.isEmpty) {
+      flushList();
+    } else if (line.startsWith("## ")) {
+      flushList();
+      html.write("<h2>${_inlineMarkdown(_esc(line.substring(3).trim()))}</h2>");
+    } else if (line.startsWith("# ")) {
+      flushList();
+      html.write("<h1>${_inlineMarkdown(_esc(line.substring(2).trim()))}</h1>");
+    } else if (line.startsWith("- ")) {
+      listItems.add(_inlineMarkdown(_esc(line.substring(2).trim())));
+    } else {
+      flushList();
+      html.write("<p>${_inlineMarkdown(_esc(line))}</p>");
+    }
+  }
+  flushList();
+  return html.toString();
+}
+
+/// 行内标记：`**bold**` → strong（转义后的文本上做，安全）。
+String _inlineMarkdown(String escaped) {
+  return escaped.replaceAllMapped(
+    RegExp(r"\*\*(.+?)\*\*"),
+    (Match m) => "<strong>${m.group(1)}</strong>",
+  );
 }
 
 /// 生成简报卡片页面（与窗口同尺寸，透明背景 + 圆角卡片）。
+///
+/// 2026-09-24 结构化行卡版式：无「展开详情」，一眼看全；2026-09-25 起
+/// 卡面内容由 markdown 文档驱动（_composeBriefingMarkdown → _markdownToHtml），
+/// 口播稿只在全空兜底时上卡（正常路径口播稿只进 TTS 不进眼睛）。
 String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
   final DailyBriefingCardContent content = payload == null
       ? const DailyBriefingCardContent(
@@ -707,10 +918,23 @@ String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
           appellation: payload.appellation,
         );
   final Map<String, dynamic>? briefing = payload?.briefing;
+  final _BriefingLayout layout = _BriefingLayout.of(briefing);
 
-  final String scriptHtml = content.script.isEmpty
-      ? ""
-      : "<div class=\"script\">${_highlightScript(_esc(content.script))}</div>";
+  // meta 只放日期：天气升格为大字行，不再挤在 meta 里
+  final String metaLine = dailyBriefingDateLabel(DateTime.now());
+
+  final String narration = payload?.narrationText.trim() ?? "";
+  final bool scriptFallback = payload != null &&
+      !layout.hasWeather &&
+      layout.outfit.isEmpty &&
+      !layout.hasAnySection &&
+      narration.isNotEmpty;
+  final String scriptHtml = scriptFallback
+      ? "<div class=\"script\">${_highlightScript(_esc(narration))}</div>"
+      : "";
+
+  final String mdHtml =
+      _markdownToHtml(_composeBriefingMarkdown(briefing, layout));
 
   return """
 <!DOCTYPE html>
@@ -748,14 +972,38 @@ String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
   .close:hover { background: rgba(255,255,255,0.12); color: #eceff4; }
   .close svg { width: 16px; height: 16px; }
 
-  .greet .name { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
-  .greet .meta { margin-top: 5px; font-size: 12px; color: #8f97a3; letter-spacing: .2px; }
+  /* ── 行高钉死区（briefingWindowHeight 按同一组常量累加，改这里必须同步改 Dart）── */
+  .greet .name { font-size: 17px; font-weight: 600; line-height: 24px; letter-spacing: .3px; }
+  .greet .meta { margin-top: 5px; font-size: 12px; line-height: 17px; color: #8f97a3; letter-spacing: .2px; }
+
+  /* ── markdown 内容层样式 ── */
+  .md h1 { margin: 16px 0 0; height: 40px; line-height: 40px; font-size: 40px; font-weight: 600; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+  .md h1 + p { margin: 0; height: auto; font-size: 12px; line-height: 19px; color: #8f97a3; }
+  .md p { margin: 12px 0 0; height: 20px; line-height: 20px; font-size: 12.5px; color: #8f97a3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .md > p:first-child { margin-top: 16px; }
+  .md p strong { color: #ccd2db; font-weight: 600; margin-right: 6px; }
+  .md h2 { margin: 14px 0 0; height: 15px; line-height: 15px; display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: #8f97a3; letter-spacing: 2px; font-weight: 600; }
+  .md h2::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.06); }
+  .md ul { margin: 0; padding: 0; list-style: none; }
+  .md li { height: 30px; line-height: 30px; padding: 0 6px; border-radius: 10px; font-size: 13px; color: #eceff4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .md li:hover { background: rgba(255,255,255,.04); }
+  .md li strong { color: #eceff4; font-weight: 600; }
+  .md li strong.tm { color: #a8c8ff; display: inline-block; width: 42px; font-variant-numeric: tabular-nums; }
+  .md ul + p { margin: 4px 0 0; height: 18px; line-height: 18px; padding: 0 6px; font-size: 11.5px; color: #5c6370; }
 
   .script { margin-top: 15px; font-size: 14px; line-height: 25px; color: #ccd2db; letter-spacing: .2px; }
   .script .hl { color: #eceff4; font-weight: 600; }
-  .script .hl-amber { color: #f0c052; font-weight: 600; }
 
-  .wave-row { margin-top: 15px; display: flex; align-items: center; gap: 12px; height: 22px; }
+  /* 播报状态行：wave/idle 同盒同高（34 = 12 padding + 22），切换不跳动 */
+  .status {
+    margin-top: 14px; padding-top: 12px; height: 34px;
+    border-top: 1px solid rgba(255,255,255,.07);
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: #8f97a3; letter-spacing: 2px;
+  }
+  #row-idle { display: none; }
+  .status .ok { width: 5px; height: 5px; border-radius: 50%; background: #88bbff; box-shadow: 0 0 6px rgba(136,187,255,.8); flex-shrink: 0; }
+  .status .time { margin-left: auto; font-variant-numeric: tabular-nums; letter-spacing: 0; }
   .wave { display: flex; align-items: center; gap: 3px; height: 16px; }
   .wave i { width: 3px; border-radius: 2px; background: #88bbff; animation: bar 1s ease-in-out infinite; }
   .wave i:nth-child(1) { height: 6px; animation-delay: 0s; }
@@ -766,42 +1014,6 @@ String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
   .wave i:nth-child(6) { height: 7px; animation-delay: .75s; }
   .wave i:nth-child(7) { height: 11px; animation-delay: .9s; }
   @keyframes bar { 0%,100% { transform: scaleY(.4); opacity: .5; } 50% { transform: scaleY(1); opacity: 1; } }
-  .wave-row .label { font-size: 11px; color: #8f97a3; letter-spacing: 2px; }
-  .wave-row .time { margin-left: auto; font-size: 11px; color: #8f97a3; font-variant-numeric: tabular-nums; }
-
-  .idle-row {
-    margin-top: 15px; padding-top: 12px; height: 22px;
-    border-top: 1px solid rgba(255,255,255,.07);
-    display: none; align-items: center; gap: 8px;
-    font-size: 11px; color: #8f97a3; letter-spacing: 2px;
-  }
-  .idle-row .ok { width: 5px; height: 5px; border-radius: 50%; background: #88bbff; box-shadow: 0 0 6px rgba(136,187,255,.8); }
-
-  .stats { margin-top: 16px; display: flex; align-items: center; }
-  .stat { flex: 1; display: flex; align-items: baseline; gap: 7px; }
-  .stat + .stat { border-left: 1px solid rgba(255,255,255,.07); padding-left: 22px; }
-  .stat .n { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .stat .l { font-size: 11px; color: #8f97a3; letter-spacing: .5px; }
-
-  .foot { margin-top: 16px; }
-  .btn {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 12px; color: #ccd2db; letter-spacing: 1px;
-    padding: 8px 14px; border-radius: 9px; cursor: pointer; transition: all .15s;
-    background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.07);
-  }
-  .btn:hover { background: rgba(255,255,255,.09); color: #eceff4; }
-  .btn svg { width: 12px; height: 12px; transition: transform .2s; }
-  .btn.open svg { transform: rotate(180deg); }
-
-  #detail { display: none; margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.06); }
-  .sec { margin-top: 12px; }
-  .sec:first-child { margin-top: 0; }
-  .sec-label { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: #8f97a3; letter-spacing: 2px; font-weight: 600; }
-  .sec-label::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.06); }
-  .row-item { display: flex; align-items: center; gap: 10px; padding: 7px 6px; border-radius: 10px; }
-  .row-item .tm { width: 42px; font-size: 12.5px; font-weight: 600; color: #a8c8ff; font-variant-numeric: tabular-nums; flex-shrink: 0; }
-  .row-item .tt { font-size: 13px; color: #eceff4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
 <body>
@@ -813,29 +1025,19 @@ String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
   <div class="greet" id="dragzone">
     <div>
       <div class="name">${_esc(content.greeting)}</div>
-      <div class="meta">${_esc(content.meta)}</div>
+      <div class="meta">${_esc(metaLine)}</div>
     </div>
   </div>
 
+  <div class="md">$mdHtml</div>
   $scriptHtml
 
-  <div class="wave-row" id="row-wave">
+  <div class="status" id="row-wave">
     <div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-    <div class="label">语音播报中</div>
+    <div>语音播报中</div>
     <div class="time" id="tprog">00:00 / 00:00</div>
   </div>
-  <div class="idle-row" id="row-idle"><span class="ok"></span><span id="idle-label">已播报</span></div>
-
-  ${_statsHtml(content)}
-
-  <div class="foot">
-    <div class="btn" id="expand">
-      展开详情
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-    </div>
-  </div>
-
-  ${_detailHtml(briefing)}
+  <div class="status" id="row-idle"><span class="ok"></span><span id="idle-label">已播报</span></div>
 </div>
 
 <script>
@@ -849,22 +1051,13 @@ String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
   document.getElementById("close").addEventListener("click", function (e) {
     e.stopPropagation(); pai({ action: "close" });
   });
-  document.getElementById("expand").addEventListener("click", function (e) {
-    e.stopPropagation();
-    var d = document.getElementById("detail");
-    if (!d) return;
-    var open = d.style.display !== "block";
-    d.style.display = open ? "block" : "none";
-    this.classList.toggle("open", open);
-    pai({ action: "expand", open: open });
-  });
   // 整卡点击/拖拽判定（此前只绑 greet 区 pointerdown 直接进原生拖拽，
   // 拖拽循环吞掉 click，导致顶部点击不播报）：
   //   按下后位移 ≤6px 松开 = 点击 → 播报/停止/重播；
   //   位移超阈值 = 拖拽 → startDragging（原生接管，不再回吐 click）。
   var card = document.getElementById("card");
   var downX = 0, downY = 0, pressed = false, dragSent = false;
-  function onControl(t) { return !!(t && t.closest && t.closest("#close,#expand")); }
+  function onControl(t) { return !!(t && t.closest && t.closest("#close")); }
   card.addEventListener("pointerdown", function (e) {
     if (e.button !== 0 || onControl(e.target)) return;
     pressed = true; dragSent = false; downX = e.clientX; downY = e.clientY;
@@ -895,10 +1088,6 @@ String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
     document.getElementById("row-idle").style.display = "flex";
     document.getElementById("idle-label").textContent = label;
   };
-  // 无详情数据时隐藏「展开详情」（#detail 未生成）
-  if (!document.getElementById("detail")) {
-    document.getElementById("expand").style.display = "none";
-  }
 </script>
 </body>
 </html>

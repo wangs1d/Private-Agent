@@ -128,6 +128,18 @@ export interface CommitmentEvent {
 
 export type CommitmentNotifier = (event: CommitmentEvent) => void;
 
+/**
+ * 承诺 → 日程物化出口（装配层注入；程序层单向桥，日程侧失败只记日志不回传）。
+ * 分工定调：承诺板管召回与催办（梯度提前提醒/超时升级），日程只负责
+ * 「到点那一响」与展示面（今日安排/冲突检测/早报）——见 commitment-schedule-outlet.ts。
+ */
+export type CommitmentScheduleOutlet = {
+  /** active 且 deadline 有效时物化/改期（幂等）；返回 taskId，未物化返回 null。 */
+  upsertFromCommitment(record: CommitmentRecord): Promise<string | null>;
+  /** 承诺进入终态或撤掉期限时，撤下已物化的日程。 */
+  withdrawFromCommitment(record: CommitmentRecord): Promise<void>;
+};
+
 export interface CommitmentCreateInput {
   actorId: string;
   text: string;
@@ -275,6 +287,7 @@ export class CommitmentBoard {
   private readonly db: SqliteDatabase;
   private scanTimer: ReturnType<typeof setInterval> | null = null;
   private notifier: CommitmentNotifier | null = null;
+  private scheduleOutlet: CommitmentScheduleOutlet | null = null;
 
   constructor(
     db?: SqliteDatabase,
@@ -344,6 +357,11 @@ export class CommitmentBoard {
   /** 注入提醒/升级出口（装配层接 proactivity 投递；未注入时降级日志） */
   setNotifier(notifier: CommitmentNotifier | null): void {
     this.notifier = notifier;
+  }
+
+  /** 注入日程物化出口（装配层接 ScheduleTaskService；未注入时承诺不落日程，行为不变） */
+  setScheduleOutlet(outlet: CommitmentScheduleOutlet | null): void {
+    this.scheduleOutlet = outlet;
   }
 
   private emit(
@@ -419,6 +437,7 @@ export class CommitmentBoard {
     };
 
     this.insert(record);
+    this.syncScheduleOutlet(null, record);
     return record;
   }
 
@@ -762,6 +781,7 @@ export class CommitmentBoard {
   }
 
   private persist(record: CommitmentRecord): void {
+    const prev = this.get(record.id);
     this.db
       .prepare(
         `UPDATE commitments SET
@@ -796,6 +816,38 @@ export class CommitmentBoard {
         toJsonColumn(record.contact) ?? null,
         record.id,
       );
+    this.syncScheduleOutlet(prev, record);
+  }
+
+  /**
+   * 承诺状态/期限变化 → 同步日程物化出口（单向桥，失败只记日志）。
+   * persist 是全部状态流转的唯一写入口（含延期传播、扫描判 broken），在此挂钩
+   * 一处覆盖所有迁移；create() 的首次插入单独调本方法。
+   */
+  private syncScheduleOutlet(prev: CommitmentRecord | null, next: CommitmentRecord): void {
+    if (!this.scheduleOutlet) return;
+    const withdraw = (reason: string) => {
+      void this.scheduleOutlet!.withdrawFromCommitment(next).catch((err) => {
+        console.error(`[commitment-board] 日程撤下失败（忽略，${reason}）:`, err);
+      });
+    };
+    try {
+      if (next.status === "active") {
+        if (next.deadline) {
+          void this.scheduleOutlet.upsertFromCommitment(next).catch((err) => {
+            console.error("[commitment-board] 承诺物化日程失败（忽略）:", err);
+          });
+        } else if (prev && prev.status === "active") {
+          withdraw("active 撤掉期限");
+        }
+        return;
+      }
+      if (prev && prev.status === "active") {
+        withdraw(`状态 ${prev.status} → ${next.status}`);
+      }
+    } catch (err) {
+      console.error("[commitment-board] 日程物化出口异常（忽略）:", err);
+    }
   }
 
   // ------------------------------------------------------------

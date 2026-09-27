@@ -88,6 +88,11 @@ export class TaskHub {
   /** 提交序号：同毫秒提交时保证"最近任务"排序确定（startedAt 粒度不足） */
   private seq = 0;
   private changeListener: TaskHubChangeListener | null = null;
+  /**
+   * 附加监听器（2026-09-24）：单槽 changeListener 已被对话面回执占用，
+   * GoalPlanner 的计划步骤完成回调走这里——多播、互不挤占、异常各自兜底。
+   */
+  private readonly extraListeners = new Set<TaskHubChangeListener>();
   /** 进度广播节流记账（taskId → 上次广播时间与文本），setProgressThrottled 专用 */
   private readonly lastProgressNotify = new Map<string, { at: number; line: string }>();
   /** 可选落盘（enablePersistence）：null=纯内存（默认，测试友好） */
@@ -170,11 +175,28 @@ export class TaskHub {
     this.changeListener = listener;
   }
 
+  /** 追加多播监听器（GoalPlanner 步骤完成回调；返回退订函数） */
+  addExtraListener(listener: TaskHubChangeListener): () => void {
+    this.extraListeners.add(listener);
+    return () => this.extraListeners.delete(listener);
+  }
+
+  removeExtraListener(listener: TaskHubChangeListener): void {
+    this.extraListeners.delete(listener);
+  }
+
   private notify(record: TaskPlaneRecord, kind: TaskHubChangeListenerKind): void {
     try {
       this.changeListener?.(record, kind);
     } catch {
       /* 监听器异常不反噬任务记账 */
+    }
+    for (const listener of this.extraListeners) {
+      try {
+        listener(record, kind);
+      } catch {
+        /* 附加监听器异常各自兜底，不影响主链路 */
+      }
     }
   }
 

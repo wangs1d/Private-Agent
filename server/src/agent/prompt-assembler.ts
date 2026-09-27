@@ -262,6 +262,17 @@ export type AssembledSystemPrompt = {
   dynamicSystemPrompt?: string;
 };
 
+export type AssembleSystemPromptOpts = {
+  /**
+   * 是否注入展示形式协议（RENDER_PROTOCOL_PROMPT）。默认 true（聊天面，
+   * 模型声明的 [RENDER_HINT:xxx] 由聊天管线剥除并消费）。ephemeral 工具调用
+   * （简报润色/摘要/改写等，输出由程序消费、无渲染管线）必须关闭——协议一旦
+   * 进入这些调用的 system，模型会在输出里声明 [RENDER_HINT:xxx]，而下游没有
+   * 剥除层，标记会原样透到用户屏幕（2026-09-24 晨报 [RENDER_HINT:brief] 事故）。
+   */
+  includeRenderProtocol?: boolean;
+};
+
 /**
  * 完整组装（唯一出口）：baseSystem 在最前（缓存最优），全局规则紧随，
  * 然后稳定层、动态层。minimal/fast 的 overrideSys 同样走本函数——
@@ -270,17 +281,28 @@ export type AssembledSystemPrompt = {
 export function assembleSystemPrompt(
   finalizedBaseSystem: string,
   memory?: AgentPromptMemoryContext,
+  opts?: AssembleSystemPromptOpts,
 ): AssembledSystemPrompt {
+  const includeRenderProtocol = opts?.includeRenderProtocol !== false;
   const { stablePrefix, dynamicContext } = assembleLayeredSections(memory);
   const base = finalizedBaseSystem.trim();
   if (stablePrefix.length === 0 && dynamicContext.length === 0) {
-    // 无记忆上下文（minimal/fast）也必须携带展示形式协议——它是输出格式约定，
-    // 与记忆无关（L2 生成时结构化的唯一启用通道）。
-    const withProtocol = [base, RENDER_PROTOCOL_PROMPT].join("\n\n").trim();
+    // 无记忆上下文（minimal/fast）：聊天面仍必须携带展示形式协议——它是输出
+    // 格式约定，与记忆无关（L2 生成时结构化的唯一启用通道）。
+    const withProtocol = (
+      includeRenderProtocol ? [base, RENDER_PROTOCOL_PROMPT] : [base]
+    )
+      .join("\n\n")
+      .trim();
     return { fullSystemPrompt: withProtocol, stableSystemPrompt: withProtocol };
   }
   // 协议块置于全局规则之后、记忆稳定层之前：内容与轮次无关，前缀缓存友好。
-  const stableSystemPrompt = [base, GLOBAL_MEMORY_RULE, RENDER_PROTOCOL_PROMPT, ...stablePrefix]
+  const stableSystemPrompt = [
+    base,
+    GLOBAL_MEMORY_RULE,
+    ...(includeRenderProtocol ? [RENDER_PROTOCOL_PROMPT] : []),
+    ...stablePrefix,
+  ]
     .join("\n\n")
     .trim();
   const dynamicSystemPrompt = dynamicContext.join("\n\n").trim() || undefined;

@@ -3505,7 +3505,19 @@ export class PlanningService {
    */
   private async resolveDestinationCover(destName: string, center: Coordinates): Promise<string | undefined> {
     const cached = destinationCoverStore.get(destName);
-    if (cached) return cached.url;
+    if (cached) {
+      // 已是本机 assets 路径 → 直接用
+      if (cached.url.startsWith('/travel/media/assets/')) return cached.url;
+      // 存量远程 URL（wikimedia）在客户端网络常不可达（Flutter 不走系统代理）
+      // → 迁移落盘为本机路径；迁移失败才回退远程原 URL
+      const migrated = await travelMediaStore.saveRemoteAsset(`dest-cover-${destName}`, cached.url);
+      if (migrated) {
+        destinationCoverStore.set(destName, { url: migrated, source: cached.source });
+        console.log(`[ImageSearch] 目的地封面「${destName}」: 远程封面已落盘本地 (${migrated})`);
+        return migrated;
+      }
+      return cached.url;
+    }
     const t0 = Date.now();
     const remaining = () => PlanningService.COVER_DEADLINE_MS - (Date.now() - t0);
     try {
@@ -3515,18 +3527,22 @@ export class PlanningService {
       const p18 = lead ? null : await this.raceDeadline(this.wikidataLeadImage(destName), remaining());
       const curated = lead ?? p18 ?? undefined;
       if (curated) {
-        destinationCoverStore.set(destName, { url: curated, source: 'wikipedia-lead' });
-        console.log(`[ImageSearch] 目的地封面「${destName}」: 百科主图 (${Date.now() - t0}ms)`);
-        return curated;
+        const local = await travelMediaStore.saveRemoteAsset(`dest-cover-${destName}`, curated);
+        const url = local ?? curated;
+        destinationCoverStore.set(destName, { url, source: 'wikipedia-lead' });
+        console.log(`[ImageSearch] 目的地封面「${destName}」: 百科主图 ${local ? '(已落盘本地)' : '(远程)'} (${Date.now() - t0}ms)`);
+        return url;
       }
       // 3. 地理锚定实拍 + Commons 文本搜索（现有宽松链，两段网络调用）
       if (remaining() <= 500) return undefined;
       const images = (await this.raceDeadline(this.fetchDestinationCover(destName, center), remaining())) ?? [];
       const first = images[0];
       if (first) {
-        destinationCoverStore.set(destName, { url: first, source: 'wikimedia' });
-        console.log(`[ImageSearch] 目的地封面「${destName}」: wikimedia 兜底 (${Date.now() - t0}ms)`);
-        return first;
+        const local = await travelMediaStore.saveRemoteAsset(`dest-cover-${destName}`, first);
+        const url = local ?? first;
+        destinationCoverStore.set(destName, { url, source: 'wikimedia' });
+        console.log(`[ImageSearch] 目的地封面「${destName}」: wikimedia 兜底 ${local ? '(已落盘本地)' : '(远程)'} (${Date.now() - t0}ms)`);
+        return url;
       }
       return undefined;
     } catch (err) {

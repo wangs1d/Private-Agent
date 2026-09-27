@@ -1,5 +1,5 @@
 import "dart:async";
-import "dart:convert" show jsonDecode;
+import "dart:convert" show jsonDecode, jsonEncode;
 import "dart:typed_data";
 
 import "package:file_picker/file_picker.dart";
@@ -29,6 +29,8 @@ class _Photo {
   _Photo.fromJson(Map<String, dynamic> json)
       : id = json["id"] as String,
         fileName = (json["fileName"] as String?) ?? "",
+        fileSize = (json["fileSize"] as num?)?.toInt(),
+        takenAt = json["takenAt"] as String?,
         tags = ((json["tags"] as List<dynamic>?) ?? const <dynamic>[])
             .map((e) => e.toString())
             .toList(growable: false),
@@ -37,6 +39,8 @@ class _Photo {
 
   final String id;
   final String fileName;
+  final int? fileSize;
+  final String? takenAt;
   final List<String> tags;
   final String thumbnailUrl;
   final String imageUrl;
@@ -50,6 +54,11 @@ class _GalleryPageState extends State<GalleryPage> {
   bool _hasMore = true;
   int _page = 0;
   String? _error;
+
+  /// 多选模式（长按进入）：选中集合 + 批量删除/收藏
+  bool _selectMode = false;
+  final Set<String> _selectedIds = <String>{};
+  bool _batchBusy = false;
 
   @override
   void initState() {
@@ -180,7 +189,12 @@ class _GalleryPageState extends State<GalleryPage> {
         // 单张失败不影响其余
       }
     }
-    messenger.showSnackBar(SnackBar(content: Text("已上传 $success/${result.files.length} 张")));
+    messenger.showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 4),
+        content: Text("已上传 $success/${result.files.length} 张"),
+      ),
+    );
     await _refresh();
   }
 
@@ -193,7 +207,7 @@ class _GalleryPageState extends State<GalleryPage> {
       context: context,
       builder: (BuildContext dialogContext) => AlertDialog(
         title: const Text("删除照片"),
-        content: Text("确定删除「$displayName」吗？删除后不可恢复。"),
+        content: Text("确定删除「$displayName」吗？照片将移入回收站，30 天内可恢复。"),
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
@@ -216,21 +230,207 @@ class _GalleryPageState extends State<GalleryPage> {
           .timeout(const Duration(seconds: 15));
       final Map<String, dynamic> body = _decodeBody(response);
       if (response.statusCode == 200 && body["ok"] == true) {
-        messenger.showSnackBar(
-          SnackBar(content: Text("已删除「$displayName」")),
-        );
+        final String? trashId = body["trashId"] as String?;
         navigator.pop(); // 关闭大图/详情
         await _refresh();
-      } else {
-        messenger.showSnackBar(
+        messenger.hideCurrentSnackBar();
+        _showAutoSnackbar(
+          messenger,
           SnackBar(
+            duration: const Duration(seconds: 5),
+            content: Text("已移入回收站「$displayName」"),
+            action: trashId == null
+                ? null
+                : SnackBarAction(
+                    label: "撤销",
+                    onPressed: () => _restoreTrash(<String>[trashId]),
+                  ),
+          ),
+        );
+      } else {
+        _showAutoSnackbar(
+          messenger,
+          SnackBar(
+            duration: const Duration(seconds: 4),
             content:
                 Text("删除失败：${body["reason"] ?? body["error"] ?? response.statusCode}"),
           ),
         );
       }
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text("删除失败：$e")));
+      _showAutoSnackbar(
+        messenger,
+        SnackBar(duration: const Duration(seconds: 4), content: Text("删除失败：$e")),
+      );
+    }
+  }
+
+  /// 展示几秒后自动消失的反馈条。
+  /// SnackBar 在鼠标悬停时会暂停内置倒计时（会一直占位），
+  /// 这里用定时器到点强制 close 兜底，保证"响应几秒钟就行"。
+  void _showAutoSnackbar(ScaffoldMessengerState messenger, SnackBar bar) {
+    final ScaffoldFeatureController<SnackBar, SnackBarClosedReason> controller =
+        messenger.showSnackBar(bar);
+    Timer(bar.duration + const Duration(milliseconds: 500), controller.close);
+  }
+
+  /// 从回收站批量恢复（删除后的「撤销」通道）
+  Future<void> _restoreTrash(List<String> trashIds) async {
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    try {
+      final http.Response response = await http
+          .post(
+            _uri("/picture/trash/restore"),
+            headers: const <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{"ids": trashIds}),
+          )
+          .timeout(const Duration(seconds: 15));
+      final Map<String, dynamic> body = _decodeBody(response);
+      _showAutoSnackbar(
+        messenger,
+        SnackBar(
+          duration: const Duration(seconds: 4),
+          content: Text(body["restored"] != null ? "已恢复 ${body["restored"]} 张" : "恢复完成"),
+        ),
+      );
+      await _refresh();
+    } catch (e) {
+      _showAutoSnackbar(
+        messenger,
+        SnackBar(duration: const Duration(seconds: 4), content: Text("恢复失败：$e")),
+      );
+    }
+  }
+
+  // ──────────────────────────── 多选与批量操作 ────────────────────────────
+
+  void _enterSelectMode([String? photoId]) {
+    setState(() {
+      _selectMode = true;
+      if (photoId != null) _selectedIds.add(photoId);
+    });
+  }
+
+  void _exitSelectMode() {
+    setState(() {
+      _selectMode = false;
+      _selectedIds.clear();
+    });
+  }
+
+  void _toggleSelected(String photoId) {
+    setState(() {
+      if (!_selectedIds.remove(photoId)) _selectedIds.add(photoId);
+    });
+  }
+
+  List<_Photo> get _selectedPhotos =>
+      _photos.where((p) => _selectedIds.contains(p.id)).toList(growable: false);
+
+  String _formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024) return "${(bytes / 1024 / 1024).toStringAsFixed(1)} MB";
+    if (bytes >= 1024) return "${(bytes / 1024).toStringAsFixed(0)} KB";
+    return "$bytes B";
+  }
+
+  int get _selectedBytes => _selectedPhotos
+      .fold(0, (sum, p) => sum + (p.fileSize ?? 0));
+
+  Future<void> _batchFavorite() async {
+    if (_batchBusy || _selectedIds.isEmpty) return;
+    setState(() => _batchBusy = true);
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    try {
+      await http
+          .post(
+            _uri("/picture/assets/batch-tag"),
+            headers: const <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{"ids": _selectedIds.toList(), "tag": "收藏"}),
+          )
+          .timeout(const Duration(seconds: 20));
+      _showAutoSnackbar(
+        messenger,
+        SnackBar(
+          duration: const Duration(seconds: 4),
+          content: Text("已收藏 ${_selectedIds.length} 张"),
+        ),
+      );
+      _exitSelectMode();
+      await _refresh();
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text("收藏失败：$e")));
+    } finally {
+      if (mounted) setState(() => _batchBusy = false);
+    }
+  }
+
+  Future<void> _batchDelete() async {
+    if (_batchBusy || _selectedIds.isEmpty) return;
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    final int count = _selectedIds.length;
+    final int bytes = _selectedBytes;
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text("批量删除"),
+        content: Text(
+          "确定删除选中的 $count 张照片吗？"
+          "${bytes > 0 ? "将释放约 ${_formatBytes(bytes)}。" : ""}\n照片将移入回收站，30 天内可恢复。",
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text("取消"),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(dialogContext).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text("删除"),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() => _batchBusy = true);
+    try {
+      final http.Response response = await http
+          .post(
+            _uri("/picture/assets/batch-delete"),
+            headers: const <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{"ids": _selectedIds.toList()}),
+          )
+          .timeout(const Duration(seconds: 30));
+      final Map<String, dynamic> body = _decodeBody(response);
+      final int removed = (body["removed"] as num?)?.toInt() ?? 0;
+      final List<String> trashIds = ((body["trashIds"] as List<dynamic>?) ?? const <dynamic>[])
+          .map((e) => e.toString())
+          .where((e) => e.isNotEmpty)
+          .toList();
+      _exitSelectMode();
+      await _refresh();
+      messenger.hideCurrentSnackBar();
+      _showAutoSnackbar(
+        messenger,
+        SnackBar(
+          duration: const Duration(seconds: 5),
+          content: Text("已删除 $removed 张（回收站保留 30 天）"),
+          action: trashIds.isEmpty
+              ? null
+              : SnackBarAction(
+                  label: "撤销",
+                  onPressed: () => _restoreTrash(trashIds),
+                ),
+        ),
+      );
+    } catch (e) {
+      _showAutoSnackbar(
+        messenger,
+        SnackBar(duration: const Duration(seconds: 4), content: Text("批量删除失败：$e")),
+      );
+    } finally {
+      if (mounted) setState(() => _batchBusy = false);
     }
   }
 
@@ -290,21 +490,25 @@ class _GalleryPageState extends State<GalleryPage> {
     final ColorScheme cs = Theme.of(context).colorScheme;
     if (widget.embedded) {
       return Scaffold(
-        floatingActionButton: FloatingActionButton.extended(
-          onPressed: _uploadImages,
-          icon: const Icon(Icons.upload_outlined),
-          label: const Text("上传"),
-        ),
+        floatingActionButton: _selectMode
+            ? null
+            : FloatingActionButton.extended(
+                onPressed: _uploadImages,
+                icon: const Icon(Icons.upload_outlined),
+                label: const Text("上传"),
+              ),
         body: _buildBody(cs),
       );
     }
     return Scaffold(
       appBar: AppBar(title: const Text("图库")),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _uploadImages,
-        icon: const Icon(Icons.upload_outlined),
-        label: const Text("上传"),
-      ),
+      floatingActionButton: _selectMode
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: _uploadImages,
+              icon: const Icon(Icons.upload_outlined),
+              label: const Text("上传"),
+            ),
       body: _buildBody(cs),
     );
   }
@@ -342,28 +546,135 @@ class _GalleryPageState extends State<GalleryPage> {
         ),
       );
     }
-    return RefreshIndicator(
-      onRefresh: _refresh,
-      child: GridView.builder(
-        controller: _scrollController,
-        padding: const EdgeInsets.fromLTRB(8, 8, 8, 96),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3,
-          mainAxisSpacing: 4,
-          crossAxisSpacing: 4,
+    return Stack(
+      children: <Widget>[
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            _buildSelectHeader(cs),
+            Expanded(
+              child: RefreshIndicator(
+                onRefresh: _refresh,
+                child: GridView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
+                  // 密度：按可用宽度自适应（每格 ≤112px），照片不再一格占 1/3 屏
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 112,
+                    mainAxisSpacing: 4,
+                    crossAxisSpacing: 4,
+                  ),
+                  itemCount: _photos.length + (_hasMore ? 1 : 0),
+                  itemBuilder: (BuildContext context, int index) {
+                    if (index >= _photos.length) {
+                      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+                    }
+                    final _Photo photo = _photos[index];
+                    return _PhotoTile(
+                      photo: photo,
+                      httpBase: ApiConfig.httpBase,
+                      selectMode: _selectMode,
+                      selected: _selectedIds.contains(photo.id),
+                      onTap: () => _selectMode
+                          ? _toggleSelected(photo.id)
+                          : _openPhotoDetail(photo),
+                      onLongPress: () => _enterSelectMode(photo.id),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
         ),
-        itemCount: _photos.length + (_hasMore ? 1 : 0),
-        itemBuilder: (BuildContext context, int index) {
-          if (index >= _photos.length) {
-            return const Center(child: CircularProgressIndicator(strokeWidth: 2));
-          }
-          final _Photo photo = _photos[index];
-          return _PhotoTile(
-            photo: photo,
-            httpBase: ApiConfig.httpBase,
-            onTap: () => _openPhotoDetail(photo),
-          );
-        },
+        if (_selectMode && _selectedIds.isNotEmpty)
+          Positioned(left: 0, right: 0, bottom: 0, child: _buildBatchBar(cs)),
+      ],
+    );
+  }
+
+  /// 多选模式顶栏：进入/退出、全选、已选计数
+  Widget _buildSelectHeader(ColorScheme cs) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+      child: Row(
+        children: <Widget>[
+          if (_selectMode) ...<Widget>[
+            TextButton(
+              onPressed: _batchBusy ? null : _exitSelectMode,
+              child: const Text("取消"),
+            ),
+            const SizedBox(width: 4),
+            TextButton(
+              onPressed: _batchBusy
+                  ? null
+                  : () => setState(() {
+                        if (_selectedIds.length == _photos.length) {
+                          _selectedIds.clear();
+                        } else {
+                          _selectedIds.addAll(_photos.map((p) => p.id));
+                        }
+                        setState(() {});
+                      }),
+              child: Text(
+                _selectedIds.length == _photos.length ? "取消全选" : "全选",
+              ),
+            ),
+            const Spacer(),
+            Text(
+              "已选 ${_selectedIds.length}",
+              style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant),
+            ),
+          ] else
+            const Spacer(),
+          TextButton.icon(
+            onPressed: () => _selectMode ? _exitSelectMode() : _enterSelectMode(),
+            icon: Icon(
+              _selectMode ? Icons.close : Icons.checklist_rounded,
+              size: 18,
+            ),
+            label: Text(_selectMode ? "退出多选" : "多选"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 底部批量操作条：收藏 / 删除（带数量与释放空间估算）
+  Widget _buildBatchBar(ColorScheme cs) {
+    return Material(
+      color: cs.surface,
+      elevation: 8,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  "已选 ${_selectedIds.length} 张"
+                  "${_selectedBytes > 0 ? " · ${_formatBytes(_selectedBytes)}" : ""}",
+                  style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: _batchBusy ? null : _batchFavorite,
+                icon: const Icon(Icons.favorite_border_rounded, size: 18),
+                label: const Text("收藏"),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: cs.errorContainer,
+                  foregroundColor: cs.onErrorContainer,
+                ),
+                onPressed: _batchBusy ? null : _batchDelete,
+                icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                label: const Text("删除"),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -374,16 +685,24 @@ class _PhotoTile extends StatelessWidget {
     required this.photo,
     required this.httpBase,
     required this.onTap,
+    this.selectMode = false,
+    this.selected = false,
+    this.onLongPress,
   });
 
   final _Photo photo;
   final String httpBase;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+  final bool selectMode;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
     return GestureDetector(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Stack(
         fit: StackFit.expand,
         children: <Widget>[
@@ -395,6 +714,29 @@ class _PhotoTile extends StatelessWidget {
               child: Center(child: Icon(Icons.broken_image_outlined)),
             ),
           ),
+          // 多选态：选中罩层 + 右上角勾选圈
+          if (selectMode && selected)
+            ColoredBox(color: cs.onSurface.withValues(alpha: 0.35)),
+          if (selectMode)
+            Positioned(
+              right: 5,
+              top: 5,
+              child: Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: selected ? cs.primary : cs.surface.withValues(alpha: 0.85),
+                  border: Border.all(
+                    color: selected ? cs.primary : cs.outline,
+                    width: 1.4,
+                  ),
+                ),
+                child: selected
+                    ? Icon(Icons.check_rounded, size: 14, color: cs.onPrimary)
+                    : null,
+              ),
+            ),
         ],
       ),
     );

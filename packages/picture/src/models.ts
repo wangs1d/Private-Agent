@@ -108,6 +108,26 @@ export interface ImageAsset {
   /** 尺寸名 -> 缩略图路径 */
   thumbnails?: Record<string, string>;
   createdAt: string;
+  /**
+   * 视觉理解分析结果(照片墙贴墙管线写入,可选):
+   * place = 从画面线索推断的地点;caption = 一句氛围短句;scene = 场景类型。
+   */
+  analysis?: ImageAssetAnalysis | null;
+}
+
+/** 资产视觉分析结果(VLM 批量看图产出,全部可选——宁缺勿错) */
+export interface ImageAssetAnalysis {
+  /** 画面推断的地点(如「大理古城」),推断不了为 null */
+  place?: string | null;
+  /** 一句氛围短句(与聊天媒体卡 caption 同风格) */
+  caption?: string | null;
+  /** 场景类型(室内/室外/城市/自然/聚会/截图…) */
+  scene?: string | null;
+  /** 分析完成时间 ISO */
+  analyzedAt?: string | null;
+  /** GPS 经纬度(EXIF 存在时补记,便于未来地图视图) */
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 export interface ImageStats {

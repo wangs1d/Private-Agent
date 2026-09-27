@@ -35,6 +35,9 @@ import "travel_web_panel_host.dart";
 /// 行程窗口模式的环境变量名（值为信箱目录路径）。
 const String kTravelPlanWindowEnv = "PAI_TRAVEL_PLAN_MAILBOX";
 
+/// 预热模式环境变量（值"1"=以隐藏态拉起，等首个 reveal 载荷再显窗）。
+const String kTravelPlanWindowHiddenEnv = "PAI_TRAVEL_PLAN_HIDDEN";
+
 /// 主应用进程 PID 的环境变量名（子进程守护用）。
 const String kTravelPlanParentPidEnv = "PAI_TRAVEL_PLAN_PARENT_PID";
 
@@ -42,15 +45,25 @@ const String kTravelPlanParentPidEnv = "PAI_TRAVEL_PLAN_PARENT_PID";
 const Size kTravelPlanWindowSize = Size(1120, 760);
 
 /// 行程窗口载荷：卡片数据 + 打开时刻的主题变体。
+///
+/// [reveal]=false 的载荷是预热注入（窗口保持隐藏）；true 才驱动显窗。
 class TravelPlanWindowPayload {
-  const TravelPlanWindowPayload({required this.card, required this.theme});
+  const TravelPlanWindowPayload({
+    required this.card,
+    required this.theme,
+    this.reveal = true,
+  });
 
   final AgentResultData card;
   final AppThemeVariant theme;
 
+  /// 是否随载荷显窗（预热载荷为 false）。
+  final bool reveal;
+
   String encode() => jsonEncode(<String, dynamic>{
         "version": 1,
         "theme": theme.name,
+        "reveal": reveal,
         "card": card.toJson(),
       });
 
@@ -66,9 +79,11 @@ class TravelPlanWindowPayload {
         (AppThemeVariant v) => v.name == rawTheme,
         orElse: () => AppThemeVariant.dark,
       );
+      final Object? rawReveal = decoded["reveal"];
       return TravelPlanWindowPayload(
         card: AgentResultData.fromJson(rawCard),
         theme: theme,
+        reveal: rawReveal is bool ? rawReveal : true,
       );
     } catch (_) {
       return null;
@@ -95,7 +110,14 @@ class TravelPlanWindowLauncher {
 
   /// 尝试在独立系统窗口中打开行程规划；成功返回 true。
   /// 失败（非 Windows / spawn 失败）时由调用方退回窗口内展示。
-  static Future<bool> open(AgentResultData data) async {
+  static Future<bool> open(AgentResultData data) => _deliver(data, reveal: true);
+
+  /// 预热（2026-09-25）：把行程载荷提前注入规划窗口，但不下发显示指令——
+  /// 常驻进程存活时只换载数据；未拉起时以隐藏态 spawn（WebView/页面/地图
+  /// 照常就绪）。用户随后点「打开行程规划」时零等待直接前置。
+  static Future<bool> warm(AgentResultData data) => _deliver(data, reveal: false);
+
+  static Future<bool> _deliver(AgentResultData data, {required bool reveal}) async {
     if (!Platform.isWindows) return false;
     try {
       final Directory dir = mailboxDir();
@@ -109,6 +131,7 @@ class TravelPlanWindowLauncher {
         TravelPlanWindowPayload(
           card: data,
           theme: AppThemeController.instance.value,
+          reveal: reveal,
         ).encode(),
         flush: true,
       );
@@ -131,10 +154,11 @@ class TravelPlanWindowLauncher {
         );
       }
 
-      // 3. 常驻进程存活 → 直接复用（子进程自行换载并前置窗口）
+      // 3. 常驻进程存活 → 直接复用（子进程自行换载；reveal 载荷顺带前置窗口）
       if (await _isCurrentAlive()) return true;
 
-      // 4. 无存活进程 → spawn。父 PID 一并下发供守护自毁。
+      // 4. 无存活进程 → spawn。预热载荷以隐藏态拉起（窗口不抢焦点不弹屏）。
+      //    父 PID 一并下发供守护自毁。
       final Process process = await Process.start(
         Platform.resolvedExecutable,
         const <String>[],
@@ -142,6 +166,7 @@ class TravelPlanWindowLauncher {
           ...Platform.environment,
           kTravelPlanWindowEnv: dir.path,
           kTravelPlanParentPidEnv: pid.toString(),
+          if (!reveal) kTravelPlanWindowHiddenEnv: "1",
         },
       );
       // 排空子进程 stdout/stderr：debug 构建日志量大，管道塞满会卡死子进程
@@ -202,6 +227,9 @@ Future<void> runTravelPlanWindow(String mailboxDirPath) async {
     // 保留系统标题栏：拖动 / 最小化 / 最大化 / 关闭(X) 全部交给系统默认行为
   );
   await windowManager.waitUntilReadyToShow(options, () async {
+    // 预热拉起：窗口保持隐藏（进程与共享 WebView 照常就绪），等首个
+    // reveal 载荷经 _revealIfNeeded 显窗——用户点卡片按钮时零等待前置。
+    if (Platform.environment[kTravelPlanWindowHiddenEnv] == "1") return;
     await windowManager.show();
     // 默认最大化（全屏）打开：规划完成自动弹出时即大屏沉浸浏览；
     // 用户可随时经标题栏还原为小窗（与主窗口并排）
@@ -291,15 +319,27 @@ class TravelPlanWindowCoordinator extends ChangeNotifier {
     }
   }
 
-  /// 窗口处于隐藏态（上次被"关闭"）时收到新行程 → 重新前置。
+  /// 窗口处于隐藏态（上次被"关闭"/预热拉起）时收到 reveal 载荷 → 前置窗口。
+  /// 预热载荷（reveal=false）只换载数据，不打扰用户当前屏幕。
   Future<void> _revealIfNeeded() async {
     try {
+      if (_payload != null && !_payload!.reveal) return;
       if (!await windowManager.isVisible()) {
         await windowManager.show();
         await windowManager.focus();
+        // 预热拉起的窗口从未走过初始最大化：首次 reveal 补齐同等体验
+        if (!_everShown) {
+          _everShown = true;
+          try {
+            await windowManager.maximize();
+          } catch (_) {/* 最大化失败退回默认尺寸 */}
+        }
       }
     } catch (_) {/* 窗口尚未初始化时忽略：初始 show 流程负责 */}
   }
+
+  /// 首次 reveal 前是否已显过窗（预热拉起的首个 reveal 补最大化）。
+  bool _everShown = false;
 
   /// 「关闭」= 隐藏窗口保活进程（重开零等待）。
   Future<void> hide() async {

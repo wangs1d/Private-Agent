@@ -15,10 +15,6 @@ import {
   isMemoryReinforcementEnabled,
   resolveOpenAiApiKey,
 } from "./env.js";
-import {
-  resolvePrimaryLlmClientConfig,
-  bypassChatRequestExtras,
-} from "../external-model/resolve-provider.js";
 import type { MemoryReinforcementStore } from "./memory-reinforcement.js";
 
 interface Mem0MemoryItem {
@@ -399,6 +395,12 @@ export class AgenticMemoryLifecycleService {
     const now = Date.now();
     if (now - this.llmReviewLastAt < getMemoryLlmReviewIntervalHours() * 3_600_000) return 0;
 
+    // 惰性导入：本模块经 capability-modules/memory-governance 被工具环静态引用，
+    // 静态引 resolve-provider 会构成 resolve-provider → providers → abstract-chat-provider
+    // 的 module-init 循环（2026-09-25 冷启动崩溃）。
+    const { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } = await import(
+      "../external-model/resolve-provider.js"
+    );
     const llmConfig = resolvePrimaryLlmClientConfig();
     const apiKey = resolveOpenAiApiKey();
     if (!llmConfig || !apiKey) return 0;

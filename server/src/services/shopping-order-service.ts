@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 
 import { resolveActorId } from "../agent/actor-id.js";
+import { redactCredentials } from "../security/redact.js";
 import type { AuditService } from "./audit-service.js";
 import type { AlipayBotService } from "./alipay-bot-service.js";
 import type { BrowserSessionService } from "./browser-session-service.js";
@@ -256,7 +257,7 @@ export class ShoppingOrderService {
       const message = err instanceof Error ? err.message : String(err);
       return {
         ok: false,
-        error: `搜索失败：${message}${message.includes("Executable doesn't exist") ? "（请在 server 目录执行: npx playwright install chromium）" : ""}`,
+        error: redactCredentials(`搜索失败：${message}${message.includes("Executable doesn't exist") ? "（请在 server 目录执行: npx playwright install chromium）" : ""}`),
         retryable: /timeout|navigation/i.test(message),
       };
     } finally {
@@ -430,7 +431,7 @@ export class ShoppingOrderService {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: `走到结算页失败：${message}`, retryable: /timeout|navigation/i.test(message) };
+      return { ok: false, error: redactCredentials(`走到结算页失败：${message}`), retryable: /timeout|navigation/i.test(message) };
     }
     // 注意：阶段一不关闭 browser，由 session.close() 在阶段二/过期时关闭
   }
@@ -573,7 +574,7 @@ export class ShoppingOrderService {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: `提交订单失败：${message}`, retryable: /timeout|navigation/i.test(message) };
+      return { ok: false, error: redactCredentials(`提交订单失败：${message}`), retryable: /timeout|navigation/i.test(message) };
     }
   }
 

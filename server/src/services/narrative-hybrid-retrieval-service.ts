@@ -1,5 +1,6 @@
 import { Bm25LiteIndex } from "../agent/retrieval/bm25-lite.js";
 import { reciprocalRankFusion } from "../agent/retrieval/rrf.js";
+import { gateLtmWrite } from "../agentic-memory/ltm-write-gate.js";
 import {
   fetchOpenAiCompatibleEmbedding,
   fetchOpenAiCompatibleEmbeddings,
@@ -166,7 +167,14 @@ export class NarrativeHybridRetrievalService {
     source: string,
     opts?: { skipVector?: boolean },
   ): Promise<void> {
-    const t = text.replace(/\s+/g, " ").trim();
+    // v3 写入门：任务态（evolution:observe/活跃目标）、回声体、一次性提醒
+    // 在叙事库入口即拒（277 条里 48 条化石的根因收口）
+    const verdict = gateLtmWrite(text, source);
+    if (!verdict.admit) {
+      console.log(`[ltm-gate] 拒绝 narrative 写入(${verdict.reason}) source=${source}: ${text.slice(0, 60)}`);
+      return;
+    }
+    const t = verdict.cleaned;
     if (!t || t.length < 4) return;
     const baseId = `${actorId}:${source}:${Date.now().toString(36)}:${(this.seq++).toString(36)}`;
     const chunks = splitNarrativeChunks(t, this.chunkChars, this.chunkOverlap).filter(

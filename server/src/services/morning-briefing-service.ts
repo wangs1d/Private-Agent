@@ -234,32 +234,33 @@ function buildOutfitTip(weather: MorningBriefingWeather | null): MorningBriefing
   if (typeof temp !== "number" || !Number.isFinite(temp)) {
     return null;
   }
+  // 一句话说完（2026-09-24 用户定调：穿衣建议不需要那么多，简洁即可）
   if (temp >= 30) {
     return {
-      suggestion: "建议穿轻薄透气的夏装，外出注意防晒补水。",
+      suggestion: "轻薄夏装，注意防晒。",
       reason: "今天体感偏热。",
     };
   }
   if (temp >= 22) {
     return {
-      suggestion: "短袖或薄款上衣就比较合适，早晚可备一件薄外套。",
-      reason: "温度整体比较舒适。",
+      suggestion: "短袖就行，早晚备件薄外套。",
+      reason: "温度比较舒适。",
     };
   }
   if (temp >= 15) {
     return {
-      suggestion: "建议长袖加薄外套，通勤时会更从容。",
+      suggestion: "长袖加件薄外套。",
       reason: "今天稍微有点凉。",
     };
   }
   if (temp >= 8) {
     return {
-      suggestion: "建议穿上外套或针织层，早晚注意保暖。",
+      suggestion: "穿上外套，早晚保暖。",
       reason: "气温偏凉。",
     };
   }
   return {
-    suggestion: "建议厚外套或保暖层一起穿，出门别忘了护颈保暖。",
+    suggestion: "厚外套穿上，注意保暖。",
     reason: "今天明显偏冷。",
   };
 }
@@ -350,14 +351,15 @@ const TODO_FOLLOWUPS_MAX = 3;/** 单条未完成事项的展示截断长度 */
 const TODO_FOLLOWUPS_ITEM_MAX_CHARS = 30;
 
 /**
- * 剥掉记忆槽位行的元信息前缀（「[时间戳] [话题] 」×2 段），只留正文。
- * 没有前缀的行原样返回。
+ * 剥掉记忆槽位行头部连续的内部标签（[时间戳][topic:…][fast-path][decay]
+ * [语义类][Agent 承诺/结论]…），只留正文。标签层数不固定，循环剥到头。
  */
 function stripMemoryLineMeta(line: string): string {
-  return line
-    .replace(/^\[[^\]]*\]\s*/, "")
-    .replace(/^\[[^\]]*\]\s*/, "")
-    .trim();
+  let text = line.trim();
+  while (/^\[[^\]]*\]\s*/.test(text)) {
+    text = text.replace(/^\[[^\]]*\]\s*/, "");
+  }
+  return text.trim();
 }
 
 function formatTodoFollowupsBit(todo: MorningBriefingTodoFollowups): string {
@@ -446,13 +448,14 @@ export function buildNarrationPrompt(briefing: MorningBriefing): string {
     buildNarrationFacts(briefing),
     "",
     "要求：",
-    "1. 口语、自然、有点温度，可以贴合内容带一句贴心话（比如下雨记得带伞、晚上有聚餐少喝点）。",
+    "1. 口语、自然，像熟人随口聊；可贴合材料内容带半句贴心话（比如下雨记得带伞）。",
     "2. 禁止官方腔和播音腔：不要「为您播报」「请注意」「以下是今日」这类词。",
     "3. 不要问候语、不要日期星期（卡片抬头已有）；直接从内容说起。",
     "4. 时间一律原样保留 HH:mm 写法（如 09:30）。",
-    "5. 材料里没有的板块不要提；材料为空就轻松地打个招呼说今天没什么安排。",
-    "6. 全文 60~140 字，1~4 句。",
-    "7. 直接输出播报稿正文，不要引号、前缀或任何解释。",
+    "5. 只说材料里有的板块；材料为空就轻松地说今天没什么安排。",
+    "6. 禁止空话和客套收尾：不许出现「祝你今天顺利」「我随时在这儿」「想起来喊我一声」「有事随时找我」这类句子；也不许模糊地提「你之前交代的事」「我一直给你留着」——要提待办就说出材料里的具体事项，没有具体事项就一个字都不提。",
+    "7. 篇幅由内容决定：有几条说几句，宁短勿凑，全文不超过 140 字，1~4 句。",
+    "8. 直接输出播报稿正文，不要引号、前缀或任何解释。",
   ].join("\n");
 }
 
@@ -555,6 +558,7 @@ export class MorningBriefingService {
    * 播报稿口语润色（单次小 LLM 调用）：输入确定性事实材料，输出有温度的
    * 口语稿。失败/输出为空/中文字数超 200（预算失控视为不可信）→ 返回 null，
    * 调用方回退确定性模板（composeNarration），绝不阻塞简报。
+   * 2026-09-24：不再给短稿补「祝你今天顺利」垫尾——篇幅由内容定，宁短勿凑。
    */
   private async polishNarration(briefing: MorningBriefing): Promise<string | null> {
     const llmComplete = this.deps.llmComplete;
@@ -564,7 +568,6 @@ export class MorningBriefingService {
       if (!text) return null;
       const cn = countChineseChars(text);
       if (cn > 200) return null;
-      if (cn < 80) return `${text} 祝你今天顺利。`;
       return text;
     } catch (err) {
       console.log(`[MorningBriefing] 播报稿 LLM 润色失败（回退模板）: ${err}`);
@@ -700,6 +703,10 @@ export class MorningBriefingService {
       return raw
         .split("\n")
         .filter(Boolean)
+        // fast-path 写入时决策为 decay 的行 = 判定为临时/易衰减内容，
+        // 不作为「待办」呈给用户（2026-09-24：此前剥不净标签还截断成乱码，
+        // 正是播报稿含糊提「之前交代的事」的诱因）。
+        .filter((line) => !line.includes("[fast-path][decay]"))
         .slice(-TODO_FOLLOWUPS_MAX)
         .reverse()
         .map((line) => stripMemoryLineMeta(line).slice(0, TODO_FOLLOWUPS_ITEM_MAX_CHARS))
@@ -961,14 +968,11 @@ export class MorningBriefingService {
       parts.push("今天日程空空的，可以轻松点过。");
     }
 
-    parts.push("祝你今天顺利。");
-
+    // 2026-09-24 用户定调：没有事情就到这儿为止——不再追加「祝你今天顺利」
+    // 「我随时在这儿」这类客套垫话，说完事实即收；仅保留超长截断防播报失控。
     let text = parts.join("").trim();
     if (countChineseChars(text) > 150) {
       text = `${text.slice(0, 149).trimEnd()}…`;
-    }
-    if (countChineseChars(text) < 80) {
-      text = `${text} 我随时在这儿，有需要随时叫我。`;
     }
     return text;
   }

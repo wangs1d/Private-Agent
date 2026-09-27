@@ -15,6 +15,7 @@ import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
 import {
   normalizeReplyCardLayout,
   stripRenderHintDeclarations,
+  extractNextUpSuggestions,
 } from "../../services/reply-envelope.js";
 import { stripResidualRenderDeclarations } from "../../services/tool-result-processor.js";
 
@@ -289,6 +290,14 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
             );
           },
         });
+        // 出口收口（与 WS 对话路径同构）：剥模型声明的 RENDER_HINT/RENDER_AS
+        // 残留 + 卡片版式归一化 + NEXT_UP 接续建议块剥离（2026-09-24 补：此路径
+        // 此前漏接 extractNextUpSuggestions，建议块会原样透出到用户屏幕）。
+        const replyFinalText = extractNextUpSuggestions(
+          normalizeReplyCardLayout(
+            stripResidualRenderDeclarations(stripRenderHintDeclarations(reply0.text)),
+          ),
+        ).text;
         wsConnectionRegistry.trySend(
           actorKey,
           JSON.stringify({
@@ -297,13 +306,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
               sessionId: actorKey,
               messageId: assistantMessageId,
               traceId: messageId,
-              // 出口收口（与 WS 对话路径同构）：剥模型声明的 RENDER_HINT/RENDER_AS
-              // 残留 + 卡片版式归一化，声明标记绝不透出到用户屏幕。
-              finalText: normalizeReplyCardLayout(
-                stripResidualRenderDeclarations(
-                  stripRenderHintDeclarations(reply0.text),
-                ),
-              ),
+              finalText: replyFinalText,
               toolCalls: reply0.toolName ? [reply0.toolName] : [],
               source: "chat.message_edit",
             },

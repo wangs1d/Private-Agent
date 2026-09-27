@@ -527,19 +527,23 @@ export class PromptContextBuilder {
       memoryKeys.length > 0
     ) {
       // 拆人设/动态记忆：persona/values/abilities 属稳定人设 L3 人格层，始终注入；
-      // memory_facts/preferences 等"用户档案/动态记忆"仅门控命中时注入。
+      // v3 记忆架构：memory_facts/preferences 是「画像层」（关于用户是谁的当前事实，
+      // 与话题无关、不会串台）→ 常驻注入；memory_summary/commitments/open_loops/
+      // session_recap 是「情节/待办层」→ 仅召回线索命中（新会话/显式记忆 cue）时注入。
       const STABLE_MEMORY_KEYS = new Set(["persona", "values", "abilities"]);
-      const LONG_TERM_MEMORY_KEYS = new Set([
+      const PROFILE_MEMORY_KEYS = new Set(["memory_facts", "memory_preferences"]);
+      const EPISODIC_MEMORY_KEYS = new Set([
         "memory_summary",
         "memory_current_mission",
-        "memory_preferences",
-        "memory_facts",
         "memory_commitments",
         "memory_open_loops",
         "session_recap",
       ]);
       const snapshotKeys = memoryKeys.filter(
-        (key) => STABLE_MEMORY_KEYS.has(key) || (longTermEnabled && LONG_TERM_MEMORY_KEYS.has(key)),
+        (key) =>
+          STABLE_MEMORY_KEYS.has(key) ||
+          PROFILE_MEMORY_KEYS.has(key) ||
+          (longTermEnabled && EPISODIC_MEMORY_KEYS.has(key)),
       );
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, snapshotKeys);
       fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined);

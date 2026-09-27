@@ -1,15 +1,18 @@
 // 目标板与预执行（GoalBoard + ReadyTray）—— 五层主动性架构 L4 的落地。
 //
-// 两类目标：
+// 三类目标：
 //  - track：跟踪型（盯某件事直到状态变化）—— commitment-board / interest-watch
 //    等现有服务保持独立，本板负责跨类型的统一台账与生命周期
 //  - preexec：预执行型（后台把"用户接下来大概率要的东西"提前备好）——
 //    完成后进 ReadyTray，经 goal 信号流 → goal_ready 评估器 → 仲裁挑时机投递。
 //    这是"用户还没开口，东西已经在了"的哇时刻来源。
+//  - plan：计划推进型（2026-09-24，对标 Muse 大目标模式）——长期目标拆步、
+//    逐步派后台任务推进、随生活变化重排。步骤状态机在 GoalPlanner
+//    （proactivity/goal-planner.ts），本板只管台账与生命周期。
 //
 // 旗舰预执行场景：
 //  1. 晨间简报 —— 见 evaluators/morning_brief（数据全本地，即时拼接）
-//  2. 会前准备包 —— 本模块 maybeStartMeetingPrep：会议前 25-40min 后台
+//  2. 会前准备包 —— 本模块 maybeStartMeetingPrep：会议前 20-40min 后台
 //     召回相关记忆/待办，备好材料包（异步，完成后进托盘）
 //  3. 承诺守约链 —— 见 evaluators/commitment_chain（ask_first 代催，管道确认回流）
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -20,8 +23,8 @@ export type GoalStatus = "watching" | "preparing" | "ready" | "done" | "expired"
 export type GoalRecord = {
   goalId: string;
   actorId: string;
-  /** track=盯一件事；preexec=后台提前备一件事 */
-  kind: "track" | "preexec";
+  /** track=盯一件事；preexec=后台提前备一件事；plan=长期目标拆步推进 */
+  kind: "track" | "preexec" | "plan";
   /** 场景类型（morning_brief / meeting_prep / commitment_chain / custom） */
   type: string;
   title: string;
@@ -32,6 +35,8 @@ export type GoalRecord = {
   payload?: Record<string, unknown>;
   /** 保质期：ready 后未投递到该时刻作废 */
   expiresAt?: number;
+  /** 进度心跳序号（plan 步骤级进展用；feeder fingerprint 带上它防被去重吞掉） */
+  rev?: number;
 };
 
 export type GoalBoardDeps = {
@@ -99,6 +104,33 @@ export class GoalBoard {
     this.persist();
   }
 
+  /** 按 id 取单条（GoalPlanner / 审计时间线用） */
+  get(goalId: string): GoalRecord | null {
+    return this.goals.get(goalId) ?? null;
+  }
+
+  /**
+   * 进度心跳（plan 步骤级进展）：不改状态，rev+1 并补发一次 goal 信号——
+   * feeder 的 fingerprint 由装配层带 rev 组成，同状态的中间进展不再被去重吞掉。
+   */
+  markReadyTouch(goalId: string): void {
+    const goal = this.goals.get(goalId);
+    if (!goal) return;
+    goal.rev = (goal.rev ?? 0) + 1;
+    this.persist();
+    this.deps.emitGoal(goal);
+  }
+
+  /** 移除目标（memory.forget 定向遗忘用；actorId 给出时校验归属） */
+  remove(goalId: string, actorId?: string): boolean {
+    const goal = this.goals.get(goalId);
+    if (!goal) return false;
+    if (actorId && goal.actorId !== actorId) return false;
+    this.goals.delete(goalId);
+    this.persist();
+    return true;
+  }
+
   /** ReadyTray：status=ready 且未过期的目标（晨间简报/心跳回顾拼接展示） */
   readyTray(): GoalRecord[] {
     const now = this.nowFn();
@@ -127,12 +159,14 @@ export class GoalBoard {
   }
 
   /**
-   * 旗舰场景 2：会前准备包。下一个会议在 25-40 分钟内且该会议尚未备过 →
+   * 旗舰场景 2：会前准备包。下一个会议在 20-40 分钟内且该会议尚未备过 →
    * 建 preexec 目标，后台召回相关记忆/材料，完成后 markReady 进托盘。
-   * 幂等：同一 runAt 只备一次（内存去重，重启后会议散场自然失效）。
+   * 窗口下限 20min（原 25）：日程传感器 5min 轮询粒度下，15min 宽的窗口
+   * 常因边界取整整轮错过（2026-09-24 E2E 实证 goal_ready 历史零触发），
+   * 20min 宽保证至少 4 个采样点命中。幂等：同一 runAt 只备一次。
    */
   maybeStartMeetingPrep(actorId: string, meeting: { title: string; runAtMin: number; runAt?: number }): GoalRecord | null {
-    if (meeting.runAtMin < 25 || meeting.runAtMin > 40) return null;
+    if (meeting.runAtMin < 20 || meeting.runAtMin > 40) return null;
     const prepKey = `meeting_prep:${meeting.runAt ?? meeting.title}`;
     for (const g of this.goals.values()) {
       if (g.type === "meeting_prep" && g.payload?.prepKey === prepKey) return null;

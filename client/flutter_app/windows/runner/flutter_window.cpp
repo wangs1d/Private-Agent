@@ -135,15 +135,15 @@ bool FlutterWindow::OnCreate() {
         HandleOutgoingCallMethodCall(call, std::move(result));
       });
 
-  // 独立今日安排悬浮窗 MethodChannel —— pai/schedule_floating
-  schedule_floating_channel_ = std::make_unique<
+  // 桌面顶部灵动岛 MethodChannel —— pai/dynamic_island
+  dynamic_island_channel_ = std::make_unique<
       flutter::MethodChannel<flutter::EncodableValue>>(
-      flutter_controller_->engine()->messenger(), "pai/schedule_floating",
+      flutter_controller_->engine()->messenger(), "pai/dynamic_island",
       &flutter::StandardMethodCodec::GetInstance());
 
-  schedule_floating_channel_->SetMethodCallHandler(
+  dynamic_island_channel_->SetMethodCallHandler(
       [this](const auto& call, auto result) {
-        HandleScheduleFloatingMethodCall(call, std::move(result));
+        HandleDynamicIslandMethodCall(call, std::move(result));
       });
 
   // 今日简报窗口辅助通道 —— pai/daily_briefing（子进程也运行本 runner，
@@ -294,6 +294,24 @@ bool GetEncodableBool(const flutter::EncodableMap* args,
   if (it == args->end() || it->second.IsNull()) return fallback;
   if (const auto* value = std::get_if<bool>(&it->second)) {
     return *value;
+  }
+  return fallback;
+}
+
+double GetEncodableDouble(const flutter::EncodableMap* args,
+                          const char* key,
+                          double fallback) {
+  if (!args) return fallback;
+  auto it = args->find(flutter::EncodableValue(key));
+  if (it == args->end() || it->second.IsNull()) return fallback;
+  if (const auto* value = std::get_if<double>(&it->second)) {
+    return *value;
+  }
+  if (const auto* value = std::get_if<int32_t>(&it->second)) {
+    return static_cast<double>(*value);
+  }
+  if (const auto* value = std::get_if<int64_t>(&it->second)) {
+    return static_cast<double>(*value);
   }
   return fallback;
 }
@@ -813,165 +831,139 @@ void FlutterWindow::ReportGlassNotifyEvent(const std::string& id,
       "onEvent", std::make_unique<flutter::EncodableValue>(payload));
 }
 
-void FlutterWindow::HandleScheduleFloatingMethodCall(
+void FlutterWindow::HandleDynamicIslandMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   const std::string& method = call.method_name();
+  const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
 
   if (method == "create") {
-    if (!schedule_floating_window_) {
-      schedule_floating_window_ = std::make_unique<ScheduleFloatingWindow>();
-      schedule_floating_window_->SetEventCallback(
-          [this](ScheduleFloatingWindow::EventType type,
+    if (!dynamic_island_window_) {
+      dynamic_island_window_ = std::make_unique<DynamicIslandWindow>();
+      dynamic_island_window_->SetEventCallback(
+          [this](DynamicIslandWindow::EventType type,
                  const std::string& payload) {
             std::string event_name;
             switch (type) {
-              case ScheduleFloatingWindow::EventType::kCloseClicked:
-                event_name = "close"; break;
-              case ScheduleFloatingWindow::EventType::kCollapseChanged:
-                event_name = "collapseChanged"; break;
+              case DynamicIslandWindow::EventType::kExpandedChanged:
+                event_name = "expandedChanged"; break;
+              case DynamicIslandWindow::EventType::kAction:
+                event_name = "action"; break;
+              case DynamicIslandWindow::EventType::kTapped:
+                event_name = "tapped"; break;
             }
-            if (schedule_floating_channel_) {
+            if (dynamic_island_channel_) {
               flutter::EncodableMap pl;
               pl[flutter::EncodableValue("event")] =
                   flutter::EncodableValue(event_name);
               pl[flutter::EncodableValue("payload")] =
                   flutter::EncodableValue(payload);
-              schedule_floating_channel_->InvokeMethod(
+              dynamic_island_channel_->InvokeMethod(
                   "onNativeEvent",
                   std::make_unique<flutter::EncodableValue>(pl));
             }
           });
     }
-    const bool ok = schedule_floating_window_->Create();
+    const bool ok = dynamic_island_window_->Create();
     result->Success(flutter::EncodableValue(ok));
     return;
   }
 
   if (method == "destroy") {
-    schedule_floating_window_.reset();
+    dynamic_island_window_.reset();
     result->Success(flutter::EncodableValue(true));
     return;
   }
 
-  if (method == "show") {
-    if (!schedule_floating_window_) {
-      result->Success(flutter::EncodableValue(false));
-      return;
-    }
-    schedule_floating_window_->Show();
-    result->Success(flutter::EncodableValue(true));
-    return;
-  }
-
-  if (method == "hide") {
-    if (schedule_floating_window_) schedule_floating_window_->Hide();
-    result->Success(flutter::EncodableValue(true));
-    return;
-  }
-
-  if (method == "setOnTop") {
-    bool on_top = true;
-    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      on_top = GetEncodableBool(args, "onTop", true);
-    }
-    if (schedule_floating_window_) schedule_floating_window_->SetOnTop(on_top);
-    result->Success(flutter::EncodableValue(true));
-    return;
-  }
-
-  if (method == "setBounds") {
-    int x = 200, y = 200, w = 280, h = 420;
-    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      x = GetEncodableInt(args, "x", x);
-      y = GetEncodableInt(args, "y", y);
-      w = GetEncodableInt(args, "width", w);
-      h = GetEncodableInt(args, "height", h);
-    }
-    if (schedule_floating_window_) {
-      schedule_floating_window_->SetBounds(x, y, w, h);
+  if (method == "setVisible") {
+    const bool vis = GetEncodableBool(args, "visible", true);
+    if (dynamic_island_window_) {
+      if (vis) {
+        dynamic_island_window_->Show();
+      } else {
+        dynamic_island_window_->Hide();
+      }
     }
     result->Success(flutter::EncodableValue(true));
     return;
   }
 
-  if (method == "getBounds") {
-    if (!schedule_floating_window_) {
-      result->Success(flutter::EncodableValue(flutter::EncodableMap{}));
-      return;
+  if (method == "present") {
+    DynamicIslandWindow::Entry e;
+    if (args != nullptr) {
+      e.id = GetEncodableString(args, "id", "");
+      e.title = GetEncodableString(args, "title", "");
+      e.trailing = GetEncodableString(args, "trailing", "");
+      e.kind = static_cast<DynamicIslandWindow::Kind>(
+          GetEncodableInt(args, "kind", 0));
+      e.progress = GetEncodableDouble(args, "progress", -1.0);
+      e.spinning = GetEncodableBool(args, "spinning", false);
     }
-    RECT r = schedule_floating_window_->GetBounds();
-    flutter::EncodableMap m;
-    m[flutter::EncodableValue("x")] =
-        flutter::EncodableValue(static_cast<int>(r.left));
-    m[flutter::EncodableValue("y")] =
-        flutter::EncodableValue(static_cast<int>(r.top));
-    m[flutter::EncodableValue("width")] =
-        flutter::EncodableValue(static_cast<int>(r.right - r.left));
-    m[flutter::EncodableValue("height")] =
-        flutter::EncodableValue(static_cast<int>(r.bottom - r.top));
-    result->Success(flutter::EncodableValue(m));
-    return;
-  }
-
-  if (method == "setCollapsed") {
-    bool collapsed = false;
-    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      collapsed = GetEncodableBool(args, "collapsed", false);
-    }
-    if (schedule_floating_window_) {
-      schedule_floating_window_->SetCollapsed(collapsed);
+    if (dynamic_island_window_) {
+      dynamic_island_window_->SetEntry(e);
     }
     result->Success(flutter::EncodableValue(true));
     return;
   }
 
-  if (method == "setTheme") {
-    // 同步 in-app 主题到悬浮窗配色（true=深色 / false=暖色浅色）
-    bool dark = true;
-    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      dark = GetEncodableBool(args, "dark", true);
-    }
-    if (schedule_floating_window_) {
-      schedule_floating_window_->SetTheme(dark);
-    }
+  if (method == "clearEntry") {
+    if (dynamic_island_window_) dynamic_island_window_->ClearEntry();
     result->Success(flutter::EncodableValue(true));
     return;
   }
 
-  if (method == "setSchedule") {
-    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      // DPR 缩放先行：SetSchedule 里会按新系数重算窗口高度
-      const auto dpr_it = args->find(flutter::EncodableValue("devicePixelRatio"));
-      if (schedule_floating_window_ && dpr_it != args->end()) {
-        if (auto* dpr = std::get_if<double>(&dpr_it->second)) {
-          schedule_floating_window_->SetDpiScale(*dpr);
-        } else if (auto* dpr_int = std::get_if<int32_t>(&dpr_it->second)) {
-          schedule_floating_window_->SetDpiScale(
-              static_cast<double>(*dpr_int));
+  if (method == "setAgenda") {
+    std::vector<DynamicIslandWindow::AgendaItem> items;
+    if (args != nullptr) {
+      auto it = args->find(flutter::EncodableValue("items"));
+      if (it != args->end()) {
+        if (const auto* list = std::get_if<flutter::EncodableList>(&it->second)) {
+          for (const auto& elem : *list) {
+            if (const auto* m = std::get_if<flutter::EncodableMap>(&elem)) {
+              DynamicIslandWindow::AgendaItem item;
+              item.time_text = GetEncodableString(m, "time", "");
+              item.title = GetEncodableString(m, "title", "");
+              item.hint = GetEncodableString(m, "hint", "");
+              item.completed = GetEncodableBool(m, "completed", false);
+              items.push_back(item);
+            }
+          }
         }
       }
-      auto items_it = args->find(flutter::EncodableValue("items"));
-      auto* list = (items_it != args->end())
-                       ? std::get_if<flutter::EncodableList>(&items_it->second)
-                       : nullptr;
-      std::vector<ScheduleFloatingWindow::ScheduleItem> items;
-      if (list) {
-        for (const auto& item : *list) {
-          auto* m = std::get_if<flutter::EncodableMap>(&item);
-          if (!m) continue;
-          ScheduleFloatingWindow::ScheduleItem s;
-          s.id = GetEncodableString(m, "id", "");
-          s.time_text = GetEncodableString(m, "timeText", "");
-          s.title = GetEncodableString(m, "title", "");
-          s.notes = GetEncodableString(m, "notes", "");
-          s.completed = GetEncodableBool(m, "completed", false);
-          items.push_back(std::move(s));
-        }
-      }
-      if (schedule_floating_window_) {
-        schedule_floating_window_->SetSchedule(std::move(items));
-      }
+    }
+    if (dynamic_island_window_) {
+      dynamic_island_window_->SetAgenda(std::move(items));
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setExpanded") {
+    const bool expanded = GetEncodableBool(args, "expanded", false);
+    if (dynamic_island_window_) {
+      dynamic_island_window_->SetExpanded(expanded);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "attention") {
+    const std::string title = GetEncodableString(args, "title", "");
+    const std::string trailing = GetEncodableString(args, "trailing", "");
+    if (dynamic_island_window_) {
+      dynamic_island_window_->StartAttention(title, trailing);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setDpi") {
+    double dpi = 1.0;
+    if (args != nullptr) {
+      dpi = GetEncodableDouble(args, "dpi", 1.0);
+    }
+    if (dynamic_island_window_) {
+      dynamic_island_window_->SetDpiScale(dpi);
     }
     result->Success(flutter::EncodableValue(true));
     return;
@@ -979,6 +971,7 @@ void FlutterWindow::HandleScheduleFloatingMethodCall(
 
   result->NotImplemented();
 }
+
 
 void FlutterWindow::HandleDailyBriefingMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,

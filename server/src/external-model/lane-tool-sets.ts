@@ -236,6 +236,33 @@ export function buildLaneCoreTools(
 }
 
 /**
+ * 任务面 router-first 旅游域定向保底（2026-09-24 大理轮）。
+ *
+ * router-first 下任务轮可见集只剩 tool_discover/tool_call 桥，travel.* 规划族
+ * 退进 BM25 延迟目录——意图预召回（top-1≥0.5、600ms 超时静默）漏命中且模型
+ * 不主动 discover 时整轮漏召：模型凭常识自写行程，travel_itinerary 行程卡
+ * 随之整卡漏发。这里定义提为常驻可见的规划族（编辑/回查类跟随轮操作不提，
+ * 仍走 discover）；goal 命中旅游语义时由 agent-core 调 pickTravelPlanningTools 提升。
+ */
+export const TRAVEL_PLANNING_PROMOTED_NAMES: ReadonlySet<string> = new Set([
+  "travel.plan-itinerary",
+  "travel.search-poi",
+  "travel.destination-info",
+  "travel.compute-route",
+]);
+
+/** 从语料中取旅游规划族工具（goal 未命中旅游语义时返回空，不提升）。 */
+export function pickTravelPlanningTools(
+  corpus: ChatCompletionTool[],
+  goalHit: boolean,
+): ChatCompletionTool[] {
+  if (!goalHit) return [];
+  return corpus.filter(
+    (d) => d.type === "function" && TRAVEL_PLANNING_PROMOTED_NAMES.has(d.function?.name ?? ""),
+  );
+}
+
+/**
  * 能力束 → 工具名/命名空间前缀映射（Tier-2 确定性增量注入）。
  * 由路由层 TurnPlan.capabilities 驱动——同一声明恒同一集合，属于"路由决策
  * 的确定性投影"，不是按 userText 关键词的每轮重算。自 resolve-chat-tools

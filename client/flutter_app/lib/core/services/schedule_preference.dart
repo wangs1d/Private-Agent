@@ -5,12 +5,13 @@ import "package:flutter/foundation.dart";
 import "package:path_provider/path_provider.dart";
 
 /// 日程显示模式偏好
+///
+/// 历史：曾有 desktopFloating（独立悬浮窗）模式，2026-09-25 随悬浮窗
+/// 移除而删除，其职责由桌面顶部灵动岛承担。旧偏好文件里的
+/// "desktopFloating" 值读取时按 embedded 处理。
 enum ScheduleDisplayMode {
   /// 应用内嵌（默认）— 日程显示在应用侧边栏/浮动面板中
   embedded,
-
-  /// 桌面独立悬浮窗 — 通过 Electron 启动独立桌面窗口
-  desktopFloating,
 }
 
 /// 用户日程显示偏好持久化
@@ -32,15 +33,8 @@ class SchedulePreference {
         return ScheduleDisplayMode.embedded; // 默认值
       }
 
-      final String raw = await prefFile.readAsString();
-      final Map<String, dynamic> json = jsonDecode(raw) as Map<String, dynamic>;
-      final String? modeStr = json["displayMode"] as String?;
-
-      if (modeStr == "desktopFloating") {
-        _cachedMode = ScheduleDisplayMode.desktopFloating;
-      } else {
-        _cachedMode = ScheduleDisplayMode.embedded;
-      }
+      // 旧值 "desktopFloating" 随悬浮窗移除，回落到 embedded。
+      _cachedMode = ScheduleDisplayMode.embedded;
     } catch (e) {
       debugPrint("[SchedulePref] read failed: $e");
       _cachedMode = ScheduleDisplayMode.embedded;
@@ -61,9 +55,7 @@ class SchedulePreference {
       }
 
       final Map<String, String> json = <String, String>{
-        "displayMode": mode == ScheduleDisplayMode.desktopFloating
-            ? "desktopFloating"
-            : "embedded",
+        "displayMode": "embedded",
         "updatedAt": DateTime.now().toIso8601String(),
       };
 
@@ -80,9 +72,6 @@ class SchedulePreference {
   static Future<void> reset() async {
     await setDisplayMode(ScheduleDisplayMode.embedded);
   }
-
-  /// 是否为桌面悬浮窗模式
-  static bool get isDesktopFloating => _cachedMode == ScheduleDisplayMode.desktopFloating;
 
   /// 获取偏好文件路径
   static Future<File> _getPrefFile() async {

@@ -81,6 +81,9 @@ export const accountRegisterBodySchema = z
     userId: z.string().optional(),
     sessionId: z.string().optional(),
     displayName: z.string().min(1).max(120),
+    // 注册界面的邮箱（可选）：落在账号名单（后台 /api/admin/users 已展示）。
+    // 格式校验在 agentAccountService.register 内做（与邮箱验证码注册同闸）。
+    email: z.string().optional(),
   })
   .superRefine(accountActorRefine);
 

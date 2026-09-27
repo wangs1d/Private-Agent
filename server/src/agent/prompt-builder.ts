@@ -544,21 +544,23 @@ export function sliceMemoryEntriesToPromptContext(
   }
   // memory_current_mission 不再产出 promptMemory.memoryCurrentMission 字段：
   // prompt-assembler 从不渲染它（死路），KV mission 经 taskContext 一路注入生效。
-  // #4 补齐相关度门槛：memory_facts / memory_preferences 与 commitments/open_loops 一致，
-  // 仅在相关度 ≥ 0.3 时才注入（避免"用户档案"里的旧事实每轮无脑进当前上下文）。
+  // v3 记忆架构：memory_facts / memory_preferences 是「画像层」，常驻注入、
+  // 不做话题相关度过滤——画像讲的是"用户是谁"，与当前话题无关，注入不构成串台
+  // （Letta core block / ChatGPT relevant-memories 同款设计）。
+  // 上限收紧：画像块是每轮固定开销，只保留最新最有信息量的行。
   const memoryPreferences = sortAndTruncateMemoryLines(
     str(entries["memory_preferences"]),
-    400,
-    3,
-    userQuery,
-    { minRelevance: 0.3, fallbackOnEmpty: false },
+    500,
+    6,
+    undefined,
+    { fallbackOnEmpty: false },
   );
   const memoryFacts = sortAndTruncateMemoryLines(
     str(entries["memory_facts"]),
-    400,
-    3,
-    userQuery,
-    { minRelevance: 0.3, fallbackOnEmpty: false },
+    500,
+    6,
+    undefined,
+    { fallbackOnEmpty: false },
   );
   // 「待兑现承诺 / 未完成事项」默认仅在 topic 相关时才注入 prompt；
   // 计算得分低于 0.45 的行直接丢弃（与用户当前话题弱相关就别让 LLM 主动提）。

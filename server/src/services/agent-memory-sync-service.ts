@@ -3,6 +3,7 @@ import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
 
 import { formatMemoryTopicTag, inferMemoryTopic } from "../agent/memory-topic.js";
+import { gateLtmWrite } from "../agentic-memory/ltm-write-gate.js";
 import {
   areLinesConflicting,
   dedupeMemoryLines,
@@ -140,7 +141,14 @@ export class AgentMemorySyncService {
   }
 
   appendMemorySummaryLine(actorId: string, line: string, topicHint?: string): void {
-    void this.enqueueActorWrite(actorId, () => this.doAppendStructuredMemoryLine(actorId, line, topicHint));
+    // v3 写入门：KV 记忆字段与 Mem0/叙事同门——一次性提醒回执、任务态快照、
+    // 协议残留进 memory_summary 就是化石（「01:00 准时喊你」×4 的根因收口）
+    const verdict = gateLtmWrite(line, "kv:summary");
+    if (!verdict.admit) {
+      console.log(`[ltm-gate] 拒绝 KV 写入(${verdict.reason}): ${line.slice(0, 60)}`);
+      return;
+    }
+    void this.enqueueActorWrite(actorId, () => this.doAppendStructuredMemoryLine(actorId, verdict.cleaned, topicHint));
   }
 
   /**
