@@ -1,7 +1,7 @@
 import "dart:async";
 import "dart:convert";
 
-import "package:flutter/foundation.dart" show debugPrint;
+import "package:flutter/foundation.dart" show debugPrint, kDebugMode;
 import "package:http/http.dart" as http;
 import "package:package_info_plus/package_info_plus.dart";
 
@@ -60,6 +60,28 @@ class ClientUpdateCheckResult {
 final http.Client _updateHttpClient = http.Client();
 
 Future<ClientUpdateCheckResult?> checkClientUpdate() async {
+  // 本机开发构建（Debug flavor）不走发版版本门禁（用户约定 2026-09-28）：
+  // 本机跑的永远视为最新，不被公网 manifest 的 latest/minVersion 提醒或强锁。
+  // 发给用户的安装包（Release flavor）不受影响，照常比对。
+  if (kDebugMode) {
+    try {
+      final PackageInfo info = await PackageInfo.fromPlatform();
+      return ClientUpdateCheckResult(
+        status: ClientUpdateStatus.upToDate,
+        manifest: const ClientManifest(
+          latest: "",
+          minVersion: "",
+          url: "",
+          notes: "",
+          channel: "byok",
+        ),
+        localVersion: info.version,
+      );
+    } catch (e) {
+      debugPrint("[update-check] debug build read local version failed: $e");
+      return null;
+    }
+  }
   try {
     final http.Response res = await _updateHttpClient
         .get(Uri.parse("${ApiConfig.updateManifestUrl}/api/client/manifest"))
