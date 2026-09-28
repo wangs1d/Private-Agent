@@ -29,6 +29,7 @@ import {
   ProactiveOutboundMessageService,
   type ProactiveOutboundChannel,
 } from "../services/proactive-outbound-message-service.js";
+import { stripProtocolMarkersForDirectOut } from "../services/reply-envelope.js";
 
 const PROACTIVE_SYSTEM_PROMPT = `你察觉到了一件事，需要主动联系用户。
 
@@ -277,6 +278,11 @@ export function createProactiveOutreachExecutor(
       console.log(`[ProactiveOutreach] LLM 输出异常，使用模板兜底`);
       message = buildFallbackMessage(signal);
     }
+
+    // 2.4 渲染协议标记剥离：主动外呼是 ephemeralTurn:false 的非聊天直出出口
+    //     （协议提示词有注入，为线程召回），出口必须确定性剥掉模型可能复述的
+    //     RENDER_HINT / NEXT_UP / 结构化卡 JSON，避免协议标记原样推给用户。
+    message = stripProtocolMarkersForDirectOut(message);
 
     // 2.5 Stage 4 Task 2：输出安全过滤——检测话术中的敏感信息并替换为 [REDACTED]。
     //     brainCenter 未注册时原文本透传（checkOutputSafety 内部已降级）。

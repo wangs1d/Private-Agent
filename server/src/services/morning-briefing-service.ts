@@ -22,6 +22,7 @@ import { fetchHotRankings } from "./hot-rankings.js";
 import { normalizeFp } from "../proactivity/interest-watcher.js";
 import { resolvePoliteAppellation } from "./user-personalization/appellation.js";
 import { fetchIPLocation } from "./ip-geolocation.js";
+import { stripProtocolMarkersForDirectOut } from "./reply-envelope.js";
 import type { UserPreferences } from "../routes/http/user-preferences.js";
 
 export interface MorningBriefingWeather {
@@ -459,11 +460,14 @@ export function buildNarrationPrompt(briefing: MorningBriefing): string {
   ].join("\n");
 }
 
-/** 清洗 LLM 输出：去围栏/引号/换行，只留正文一行 */
+/** 清洗 LLM 输出：去围栏/引号/换行，只留正文一行；协议标记确定性剥除 */
 export function sanitizeNarrationText(raw: string): string {
   let text = (raw ?? "").trim();
   const fenced = text.match(/```(?:[a-z]*)?\s*([\s\S]*?)```/i);
   if (fenced) text = fenced[1].trim();
+  // 直出出口收口：简报润色是绕过聊天管线的 LLM 出口，不能只靠
+  // ephemeralTurn 不注入协议的单点防御（2026-09-24 晨报泄漏教训）。
+  text = stripProtocolMarkersForDirectOut(text);
   text = text.replace(/\s*\n+\s*/g, " ").trim();
   // 去掉成对包裹引号
   text = text.replace(/^[「"'“”]+/, "").replace(/[」"'“”]+$/, "").trim();

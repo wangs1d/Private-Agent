@@ -420,3 +420,37 @@ function blockToPlainText(rawJson: string): string {
   }
   return parts.join("\n");
 }
+
+/**
+ * 非聊天直出出口的确定性收口（2026-09-28）。
+ *
+ * 简报润色、主动外呼话术等绕过聊天管线（processAssistantText / stream guard）
+ * 的 LLM 出口，必须在出口处自带协议标记剥离——不能只靠「ephemeralTurn 不注入
+ * 协议」的单点防御（2026-09-24 晨报 [RENDER_HINT:brief] 泄漏教训）；主动外呼
+ * 更是 ephemeralTurn:false、协议有注入，输出此前零剥离。
+ *
+ * 剥离内容（与聊天面同口径）：
+ *  - [RENDER_HINT:xxx] / [RENDER_AS:xxx] 声明；
+ *  - [NEXT_UP_*] 建议块（含残缺块；直出通道没有 chips 载体，剥掉不转建议）；
+ *  - [AGENT_RESULT_CARD_*] / [IMAGE_RESULT_*] / [DATA_BRIEF_*] / [VIDEO_MEDIA_*] /
+ *    [CHAT_MEDIA_*] / [CONTENT_SUMMARY_V2_*] 结构化块整块丢弃（直出通道没有
+ *    渲染者，残 JSON 只会漏到用户屏幕）。
+ */
+export function stripProtocolMarkersForDirectOut(text: string): string {
+  let out = stripRenderHintDeclarations(text ?? "");
+  out = out.replace(/\[RENDER_AS:[A-Za-z_]+\]/g, "");
+  out = extractNextUpSuggestions(out).text;
+  for (const name of [
+    "AGENT_RESULT_CARD",
+    "IMAGE_RESULT",
+    "DATA_BRIEF",
+    "VIDEO_MEDIA",
+    "CHAT_MEDIA",
+    "CONTENT_SUMMARY_V2",
+  ] as const) {
+    out = out
+      .replace(new RegExp(`\\[${name}_START\\][\\s\\S]*?\\[${name}_END\\]`, "g"), "")
+      .replace(new RegExp(`\\[${name}_(?:START|END)\\]`, "g"), "");
+  }
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
