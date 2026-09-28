@@ -19,6 +19,9 @@ delete process.env.ADMIN_UPLOAD_TOKEN;
 process.env.FEEDBACK_DB = path.join(tmpDir, "feedback.db");
 process.env.PAYMENT_LEDGER_DB = path.join(tmpDir, "payment", "orders.db");
 process.env.AGENT_ACCOUNTS_FILE = path.join(tmpDir, "agent-accounts.json");
+// 隔离管理员凭据库：本机 data/admin-auth.db 已设置过管理员时
+// hasAdminCredential()=true，未配置 token 的用例会 401 而非 503（环境耦合失败）。
+process.env.ADMIN_AUTH_DB = path.join(tmpDir, "admin-auth.db");
 
 const { registerFeedbackRoutes, feedbackStatusCounts } = await import(
   "../src/routes/http/feedback.js"
@@ -53,10 +56,19 @@ function buildApp(): ReturnType<typeof Fastify> {
 const adminHeaders = { "x-admin-token": TEST_TOKEN };
 
 test("ADMIN_UPLOAD_TOKEN 未配置时管理接口返回 503", async () => {
-  const app = buildApp();
-  const res = await app.inject({ method: "GET", url: "/api/admin/overview" });
-  assert.equal(res.statusCode, 503);
-  await app.close();
+  // 顶层 delete 不可靠：import 链上的模块会从本机 .env 把 ADMIN_UPLOAD_TOKEN
+  // 重新灌回 process.env。用例内显式置空串（trim 后为空 = 未配置），请求前生效。
+  const prevToken = process.env.ADMIN_UPLOAD_TOKEN;
+  process.env.ADMIN_UPLOAD_TOKEN = "";
+  try {
+    const app = buildApp();
+    const res = await app.inject({ method: "GET", url: "/api/admin/overview" });
+    assert.equal(res.statusCode, 503);
+    await app.close();
+  } finally {
+    if (prevToken === undefined) delete process.env.ADMIN_UPLOAD_TOKEN;
+    else process.env.ADMIN_UPLOAD_TOKEN = prevToken;
+  }
 });
 
 test("配置 token 后：错误 token 401、正确 token 200", async () => {

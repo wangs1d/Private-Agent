@@ -55,6 +55,7 @@ import { registerVoiceRealtimeRoutes } from "./voice-realtime.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerFeedbackRoutes } from "./feedback.js";
 import { registerAdminAuthRoutes } from "./admin-session-auth.js";
+import { installAdminConsoleLoopbackGate } from "./admin-console-gate.js";
 import { registerAdminConsoleRoutes } from "./admin-console.js";
 import { registerAdminInboxRoutes } from "./admin-inbox.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
@@ -88,6 +89,9 @@ export type { HttpRouteDeps } from "./types.js";
  * 按子域注册 HTTP 路由：系统、聊天（主域）、钱包、世界、Agent 协作、账号。
  */
 export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
+  // 管理后台回环门禁必须最先安装：onRequest hook 只对之后注册的路由生效。
+  // /admin 页面与全部 /api/admin/* 默认仅本机（SSH 隧道）可达，公网一律 404。
+  installAdminConsoleLoopbackGate(app);
   const worldRouteDeps = deps as unknown as Parameters<typeof registerWorldRoutes>[1];
 
   registerSystemRoutes(app, deps);
