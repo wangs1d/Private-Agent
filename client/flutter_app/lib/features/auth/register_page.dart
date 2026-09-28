@@ -3,6 +3,7 @@ import "dart:convert";
 import "dart:developer" as developer;
 import "dart:io";
 import "dart:math" as math;
+import "dart:ui" show ImageFilter;
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
@@ -20,7 +21,8 @@ import "../../widgets/app_window_titlebar.dart";
 /// 左列按扣子桌面端版式：大标题在顶、底部问候 + 「立即登录」按钮，
 /// 不再放表单——点击按钮后跳系统浏览器到控制面登录页（/accounts/web），
 /// 网页完成注册/登录后经本机回环地址把邮箱回连给本页（见 [_startWebAuth]）。
-/// 右侧仍为机器人形象面板（CustomPainter 手绘的暗色球体 + 发光眼睛）。
+/// 右侧为展示面板（C 案定稿：织物侧光背景图 + 真实对话样例玻璃卡，
+/// 设计稿见 design-preview/register-redesign/preview.html）。
 ///
 /// 集成约定：页面自身不依赖任何全局服务，登录结果通过
 /// [RegisterPage.onAuthenticated] 回调外抛（null 时走 1.2s 模拟延迟，
@@ -145,8 +147,6 @@ class _RegisterPageState extends State<RegisterPage> {
   static const Color textSecondary = Color(0xFF9B9B9B);
   static const Color textMuted = Color(0xFF6B6B6B);
   static const Color errorRed = Color(0xFFF2604E);
-  static const Color pillDark = Color(0xFF1F1F1F);
-  static const Color pillBorder = Color(0xFF303030);
 
   static final RegExp _emailRe = RegExp(r"^[^\s@]+@[^\s@]+\.[^\s@]+$");
 
@@ -375,7 +375,7 @@ class _RegisterPageState extends State<RegisterPage> {
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: <Widget>[
                                   Expanded(flex: 47, child: _buildFormColumn()),
-                                  Expanded(flex: 53, child: _buildRobotPanel()),
+                                  Expanded(flex: 53, child: _buildShowcasePanel()),
                                 ],
                               ),
                       ),
@@ -561,72 +561,55 @@ class _RegisterPageState extends State<RegisterPage> {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 右侧机器人面板
+  // 右侧展示面板（C 案：织物侧光背景 + 对话样例玻璃卡）
   // ═══════════════════════════════════════════════════════════
 
-  Widget _buildRobotPanel() {
+  Widget _buildShowcasePanel() {
     return Padding(
       padding: const EdgeInsets.all(20),
-      child: Container(
-        decoration: BoxDecoration(
-          color: panelBg,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: cardBorder),
-        ),
-        child: LayoutBuilder(
-          builder: (BuildContext context, BoxConstraints c) {
-            // DG2 机器人头为纯 UI 复刻（CustomPainter，无服务依赖），
-            // 大小按设计稿比例：约占面板宽度 2/3，垂直略偏上给台词留位。
-            final double headSize = (c.maxWidth * 0.66).clamp(300.0, 420.0);
-            return Stack(
-              fit: StackFit.expand,
-              children: <Widget>[
-                // 球体为暗色高光材质，背后垫一圈径向微光增强轮廓对比。
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      center: const Alignment(0, -0.15),
-                      radius: 0.55,
-                      colors: <Color>[
-                        Colors.white.withValues(alpha: 0.07),
-                        Colors.white.withValues(alpha: 0.02),
-                        Colors.transparent,
-                      ],
-                      stops: const <double>[0, 0.5, 1],
-                    ),
-                  ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            // 图片加载前的兜底底色
+            const ColoredBox(color: panelBg),
+            // 背景图 cover + 轻降饱和与亮度（对齐 preview.html grayscale(.2) brightness(.96)）
+            ColorFiltered(
+              colorFilter: const ColorFilter.matrix(<double>[
+                0.809, 0.137, 0.014, 0, 0, //
+                0.041, 0.905, 0.014, 0, 0, //
+                0.041, 0.137, 0.782, 0, 0, //
+                0, 0, 0, 1, 0,
+              ]),
+              child: Image.asset(
+                "assets/register/register_bg_fabric.jpg",
+                fit: BoxFit.cover,
+              ),
+            ),
+            // 纵向压暗托住卡内文字对比（preview .shade 渐变）
+            const DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: <Color>[
+                    Color(0x14000000),
+                    Color(0x00000000),
+                    Color(0x5E000000),
+                  ],
+                  stops: <double>[0, 0.42, 1],
                 ),
-                Center(
-                  child: Padding(
-                    padding: const EdgeInsets.only(bottom: 96),
-                    child: SizedBox(
-                      width: headSize,
-                      height: headSize,
-                      child: const _RobotHead(),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 24,
-                  child: Column(
-                    children: const <Widget>[
-                      _DelayedAppear(
-                        delay: Duration(milliseconds: 500),
-                        child: _SpeechBubble(text: "嗨，等你挺久了。"),
-                      ),
-                      SizedBox(height: 14),
-                      _DelayedAppear(
-                        delay: Duration(milliseconds: 1000),
-                        child: _SpeechBubble(text: "你的麻烦事，我全包了。"),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            );
-          },
+              ),
+            ),
+            // 对话样例玻璃卡（面板内居中，宽 78% 对齐设计稿 76%）
+            Center(
+              child: FractionallySizedBox(
+                widthFactor: 0.78,
+                child: const _ShowcaseChatCard(),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -639,35 +622,8 @@ class _WebAuthCancelled implements Exception {
 }
 
 // ═══════════════════════════════════════════════════════════
-// 气泡与入场动画
+// 入场动画
 // ═══════════════════════════════════════════════════════════
-
-class _SpeechBubble extends StatelessWidget {
-  final String text;
-
-  const _SpeechBubble({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-      decoration: BoxDecoration(
-        color: _RegisterPageState.pillDark,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _RegisterPageState.pillBorder),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-          fontFamily: AppTheme.appFontFamily,
-          fontSize: 14,
-          height: 1.4,
-          color: _RegisterPageState.textPrimary,
-        ),
-      ),
-    );
-  }
-}
 
 /// 延迟入场：透明度 + 轻微上浮，用于机器人台词先后出现。
 class _DelayedAppear extends StatefulWidget {
@@ -707,241 +663,207 @@ class _DelayedAppearState extends State<_DelayedAppear> {
   }
 }
 // ═══════════════════════════════════════════════════════════
-// DG2 机器人头（纯 UI 复刻，无服务依赖）
+// 对话样例玻璃卡（C 案：磨砂玻璃 + 四条真实感消息 + 呼吸状态药丸）
+// 样例文案与 preview.html 定稿一致：展示「管家真的在替你做事」。
 // ═══════════════════════════════════════════════════════════
 
-/// 按 agent-sphere-avatar 的 DG2.obj 真实比例复刻的机器人头：
-/// 头球直径 10，两侧耳盘直径 7.1（71%）、各凸出头壳 5.7%、位于正中高度
-/// （数据来自 obj 顶点簇分析）。纯 CustomPainter 绘制，零外部资源。
-class _RobotHead extends StatefulWidget {
-  const _RobotHead();
+class _ShowcaseChatCard extends StatefulWidget {
+  const _ShowcaseChatCard();
 
   @override
-  State<_RobotHead> createState() => _RobotHeadState();
+  State<_ShowcaseChatCard> createState() => _ShowcaseChatCardState();
 }
 
-class _RobotHeadState extends State<_RobotHead>
+class _ShowcaseChatCardState extends State<_ShowcaseChatCard>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _breath = AnimationController(
+  late final AnimationController _pulse = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 3600),
+    duration: const Duration(milliseconds: 2200),
   )..repeat(reverse: true);
 
   @override
   void dispose() {
-    _breath.dispose();
+    _pulse.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+          decoration: BoxDecoration(
+            color: const Color(0xB80E0E0E),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.09)),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.45),
+                blurRadius: 44,
+                offset: const Offset(0, 18),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const _DelayedAppear(
+                delay: Duration(milliseconds: 350),
+                child: _ShowcaseBubble(
+                  fromUser: true,
+                  text: "明早 7 点叫我起床，顺便把今天的安排过一遍。",
+                ),
+              ),
+              const _DelayedAppear(
+                delay: Duration(milliseconds: 650),
+                child: _ShowcaseBubble(
+                  fromUser: false,
+                  text: "已设好 7:00 提醒。今天有 3 件事：9:30 项目评审、14:00 牙医、20:00 健身。评审要用的资料，我昨晚已经帮你整理好了。",
+                ),
+              ),
+              const _DelayedAppear(
+                delay: Duration(milliseconds: 1000),
+                child: _ShowcaseBubble(
+                  fromUser: true,
+                  text: "盯着那台空气炸锅，降到 300 以内就告诉我。",
+                ),
+              ),
+              const _DelayedAppear(
+                delay: Duration(milliseconds: 1300),
+                child: _ShowcaseBubble(
+                  fromUser: false,
+                  text: "在盯。现价 349，近 30 天最低 289，降到 300 以内我会第一时间提醒你。",
+                ),
+              ),
+              const SizedBox(height: 14),
+              _DelayedAppear(
+                delay: const Duration(milliseconds: 1750),
+                child: _buildPulsePill(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 状态药丸：呼吸脉冲圆点 + 「正在后台盯价格…」。
+  Widget _buildPulsePill() {
     return AnimatedBuilder(
-      animation: _breath,
+      animation: _pulse,
       builder: (BuildContext context, Widget? _) {
-        // 眼睛辉光呼吸：0.72 ~ 1.0，缓慢往复
-        final double glow =
-            0.72 + 0.28 * Curves.easeInOut.transform(_breath.value);
-        return CustomPaint(
-          painter: _RobotHeadPainter(glow: glow),
-          size: Size.infinite,
+        final double t = Curves.easeInOut.transform(_pulse.value);
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.05),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color.lerp(
+                      const Color(0xFF57C89A), const Color(0xFF8CF2C6), t)!,
+                  boxShadow: <BoxShadow>[
+                    BoxShadow(
+                      color: Color.lerp(
+                          const Color(0x3357C89A), const Color(0x668CF2C6), t)!,
+                      blurRadius: 3 + 6 * t,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                "正在后台盯价格…",
+                style: TextStyle(
+                  fontFamily: AppTheme.appFontFamily,
+                  fontSize: 12,
+                  color: _RegisterPageState.textSecondary,
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
   }
 }
 
-class _RobotHeadPainter extends CustomPainter {
-  /// 眼睛辉光强度（0~1，呼吸动画驱动）。
-  final double glow;
+/// 单条样例消息：AI 在左（白球头像 + 半透白泡），
+/// 用户在右（深灰头像 + 白底泡）。
+class _ShowcaseBubble extends StatelessWidget {
+  final bool fromUser;
+  final String text;
 
-  _RobotHeadPainter({required this.glow});
+  const _ShowcaseBubble({required this.fromUser, required this.text});
 
   @override
-  void paint(Canvas canvas, Size size) {
-    final double w = size.width;
-    final double h = size.height;
-    final Offset c = Offset(w / 2, h * 0.5);
-    final double headR = math.min(w, h) * 0.5 * 0.96;
-
-    // ── 两侧耳盘（DG2：直径 0.71×头径，凸出 5.7%，画在头壳后面）──
-    final double earR = headR * 0.355;
-    final double earDx = headR * 0.775;
-    for (final int sign in const <int>[-1, 1]) {
-      final Offset ec = c.translate(sign * earDx, 0);
-      final Rect earRect = Rect.fromCircle(center: ec, radius: earR);
-      canvas.drawCircle(
-        ec,
-        earR,
-        Paint()
-          ..shader = RadialGradient(
-            center: const Alignment(-0.3, -0.3),
-            radius: 1.1,
-            colors: <Color>[
-              const Color(0xFF3E4450),
-              const Color(0xFF181C23),
-              const Color(0xFF07080C),
-            ],
-            stops: const <double>[0, 0.55, 1],
-          ).createShader(earRect),
-      );
-      // 耳盘外缘冷光弧
-      canvas.drawArc(
-        earRect.deflate(earR * 0.08),
-        _deg(sign > 0 ? -80 : 160),
-        _deg(100),
-        false,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = earR * 0.07
-          ..strokeCap = StrokeCap.round
-          ..color = const Color(0x249FB6D0),
-      );
-    }
-
-    // ── 头壳球体：左上冷光 → 深黑，暗色金属质感 ──
-    final Rect headRect = Rect.fromCircle(center: c, radius: headR);
-    canvas.drawCircle(
-      c,
-      headR,
-      Paint()
-        ..shader = RadialGradient(
-          focal: const Alignment(-0.42, -0.48),
-          focalRadius: 0.12,
-          radius: 1.02,
-          colors: const <Color>[
-            Color(0xFF4A5262),
-            Color(0xFF1B202A),
-            Color(0xFF06070B),
-          ],
-          stops: const <double>[0, 0.5, 1],
-        ).createShader(headRect),
+  Widget build(BuildContext context) {
+    final Widget avatar = Container(
+      width: 26,
+      height: 26,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: fromUser ? const Color(0xFF353535) : Colors.white,
+        boxShadow: fromUser
+            ? null
+            : <BoxShadow>[
+                BoxShadow(
+                  color: Colors.white.withValues(alpha: 0.32),
+                  blurRadius: 10,
+                  spreadRadius: 1,
+                ),
+              ],
+      ),
     );
-    // 头壳左上边缘高光弧
-    canvas.drawArc(
-      headRect.deflate(headR * 0.045),
-      _deg(-152),
-      _deg(64),
-      false,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = headR * 0.045
-        ..strokeCap = StrokeCap.round
-        ..color = const Color(0x3DAFC4DE),
+    final Widget bubble = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      constraints: const BoxConstraints(maxWidth: 320),
+      decoration: BoxDecoration(
+        color: fromUser
+            ? const Color(0xFFF2F2F2)
+            : Colors.white.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontFamily: AppTheme.appFontFamily,
+          fontSize: 12.5,
+          height: 1.45,
+          color: fromUser ? const Color(0xFF0A0A0A) : const Color(0xFFF2F2F2),
+        ),
+      ),
     );
-    // 右下青色环境反光（呼吸同步）
-    canvas.drawArc(
-      headRect.deflate(headR * 0.06),
-      _deg(28),
-      _deg(48),
-      false,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = headR * 0.05
-        ..strokeCap = StrokeCap.round
-        ..color = Color.lerp(
-            const Color(0x0A5FE8FF), const Color(0x2E5FE8FF), glow)!,
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        mainAxisAlignment:
+            fromUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: fromUser
+            ? <Widget>[
+                Flexible(child: bubble),
+                const SizedBox(width: 10),
+                avatar,
+              ]
+            : <Widget>[
+                avatar,
+                const SizedBox(width: 10),
+                Flexible(child: bubble),
+              ],
+      ),
     );
-
-    // ── 面部玻璃穹顶：近黑 + 顶部斜向高光 ──
-    final double faceR = headR * 0.80;
-    final Rect faceRect = Rect.fromCircle(center: c.translate(0, headR * 0.02), radius: faceR);
-    canvas.drawCircle(
-      faceRect.center,
-      faceR,
-      Paint()
-        ..shader = RadialGradient(
-          center: const Alignment(-0.3, -0.35),
-          radius: 1.15,
-          colors: const <Color>[
-            Color(0xFF11161E),
-            Color(0xFF05070C),
-            Color(0xFF020305),
-          ],
-          stops: const <double>[0, 0.55, 1],
-        ).createShader(faceRect),
-    );
-    // 玻璃斜向高光（两道，右上 → 左下）
-    canvas.drawArc(
-      faceRect.deflate(faceR * 0.07),
-      _deg(-168),
-      _deg(52),
-      false,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = faceR * 0.085
-        ..strokeCap = StrokeCap.round
-        ..color = const Color(0x16FFFFFF),
-    );
-    canvas.drawArc(
-      faceRect.deflate(faceR * 0.15),
-      _deg(-102),
-      _deg(26),
-      false,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = faceR * 0.05
-        ..strokeCap = StrokeCap.round
-        ..color = const Color(0x0DFFFFFF),
-    );
-
-    // ── 眼睛：两道 ∩ 形发光弧（青色，呼吸辉光）──
-    final double eyeDx = faceR * 0.42;
-    final double eyeDy = faceR * 0.06;
-    final double eyeR = faceR * 0.21;
-    final double eyeStroke = faceR * 0.115;
-
-    // 眼下穹顶青色余晖（大而淡）
-    canvas.drawCircle(
-      c.translate(0, faceR * 0.30),
-      faceR * 0.5,
-      Paint()
-        ..color = Color.lerp(
-            const Color(0x005FE8FF), const Color(0x165FE8FF), glow)!
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 24),
-    );
-
-    for (final int sign in const <int>[-1, 1]) {
-      final Offset eyeC = c.translate(sign * eyeDx, eyeDy);
-      final Rect eyeRect = Rect.fromCircle(center: eyeC, radius: eyeR);
-
-      // 外层辉光（模糊放大）
-      canvas.drawArc(
-        eyeRect,
-        _deg(196),
-        _deg(148),
-        false,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = eyeStroke * (1.0 + 1.1 * glow)
-          ..strokeCap = StrokeCap.round
-          ..color = Color.lerp(
-              const Color(0x335FE8FF), const Color(0xA65FE8FF), glow)!
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
-      );
-      // 实体弧（青色渐变，上亮下深）
-      canvas.drawArc(
-        eyeRect,
-        _deg(198),
-        _deg(144),
-        false,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = eyeStroke
-          ..strokeCap = StrokeCap.round
-          ..shader = LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: <Color>[
-              Color.lerp(const Color(0xFF9FF3FF), const Color(0xFFD9FBFF), glow)!,
-              const Color(0xFF2FC9EC),
-            ],
-          ).createShader(eyeRect),
-      );
-    }
   }
-
-  static double _deg(double d) => d * math.pi / 180;
-
-  @override
-  bool shouldRepaint(_RobotHeadPainter oldDelegate) => oldDelegate.glow != glow;
 }
