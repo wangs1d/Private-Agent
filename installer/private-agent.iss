@@ -3,7 +3,7 @@
 ; AppId 固定不变：覆盖安装/升级检测/卸载全靠它，永不可改。
 
 #ifndef AppVersion
-#define AppVersion "0.2.0"
+#define AppVersion "0.1.0"
 #endif
 
 ; staging 目录由打包脚本经 /DStage 传入（默认短路径 E:\PAStage，避开深路径上限）

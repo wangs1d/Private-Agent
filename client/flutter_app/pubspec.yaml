@@ -1,7 +1,7 @@
 name: private_ai_agent
 description: Private AI agent MVP client
 publish_to: "none"
-version: 0.2.1+3
+version: 0.1.0+4
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -56,6 +56,8 @@ flutter:
     # MapLibre 本地化副本（装载时内联进 html，WebView 零 CDN 等待）
     # emotion-ball 小球表情动画（自包含宿主页，来源 aora-bot，见目录内 ATTRIBUTION.md）
     - assets/emotion_ball/
+    # 注册页右侧展示面板背景（C 案：织物侧光，design-preview/register-redesign/）
+    - assets/register/
     # 共用浏览器注入运行时（framework-free JS，见 docs/shared-browser-architecture.md）
     - assets/shared_browser/
   fonts:

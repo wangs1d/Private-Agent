@@ -3,10 +3,10 @@
 .SYNOPSIS
   一键产出 Windows 安装包：客户端构建 → server dist → staging 组装 → Inno 编译。
 .EXAMPLE
-  .\build-installer.ps1 -Version 0.2.0 -UpdateManifestUrl http://47.98.122.29:3000
+  .\build-installer.ps1 -Version 0.1.0 -UpdateManifestUrl http://47.98.122.29:3000
 #>
 param(
-  [string]$Version = "0.2.0",
+  [string]$Version = "0.1.0",
   # 版本控制面（ECS manifest），byok 形态 chat 仍走本地 runtime
   [string]$UpdateManifestUrl = "http://47.98.122.29:3000",
   # 控制面（管理后台所在服务器）：反馈/站内信等运营数据走这里。
