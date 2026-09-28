@@ -451,9 +451,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   String? _accountEmail;
   bool _sessionLoaded = false;
 
-  /// 是否正在播放进场动画
-  final bool _showBootAnimation = true;
-  bool _bootAnimDone = false;   // 开场动画是否已播完
+  /// N 开场动画武装位：只在大门放行后播放——已登录冷启动（读盘有会话）
+  /// 或注册/登录完成首次切入主界面时置位。未登录停在注册页期间绝不播放。
+  bool _playBootAnimation = false;
+  bool _bootAnimDone = false;   // 开场动画是否已播完（每次武装前重置）
 
   /// Agent是否正在处理中（用于显示响应状态指示器)
   bool _isAgentProcessing = false;
@@ -4630,7 +4631,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   @override
   Widget build(BuildContext context) {
     final Widget app = _buildApp();
-    final bool hideBoot = _bootAnimDone && _isInitialized;
+    // N 动画只在武装后覆盖：播完且 init 完成才收层；未武装（未登录）整段不出现，
+    // 注册页从第一帧起直接可见。
+    final bool hideBoot =
+        !_playBootAnimation || (_bootAnimDone && _isInitialized);
     // 根部 Stack（boot 动画覆盖层）位于 MaterialApp 之上，须自带 Directionality，
     // 否则启动即抛 "No Directionality widget found"（alignment 依赖文本方向）。
     return Directionality(
@@ -4732,9 +4736,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     return ValueListenableBuilder<AppThemeVariant>(
       valueListenable: AppThemeController.instance,
       builder: (BuildContext _, AppThemeVariant variant, __) {
-        // 同步 Windows 标题栏颜色跟随主题
+        // 同步 Windows 标题栏颜色跟随主题（N 动画覆盖期间恒为深色）
         unawaited(WindowsTitleBarTheme.setDarkMode(
-          _showBootAnimation || variant == AppThemeVariant.dark,
+          (_playBootAnimation && !_bootAnimDone) ||
+              variant == AppThemeVariant.dark,
         ));
         return MaterialApp(
           navigatorKey: _rootNavigatorKey,
@@ -4952,24 +4957,31 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     FeedbackDialog.show(navCtx);
   }
 
-  /// 读本机账号会话：已注册直接进主界面，否则停在注册页门禁。
+  /// 读本机账号会话：已注册（冷启动）武装 N 开场动画后进主界面；
+  /// 未注册直接亮注册页，不播开场动画。
   Future<void> _loadAccountSession() async {
     await AccountSessionStore.instance.load();
     if (!mounted) return;
     setState(() {
       _accountEmail = AccountSessionStore.instance.email;
       _sessionLoaded = true;
+      _playBootAnimation = _accountEmail != null;
     });
   }
 
   /// 网页登录回连：落盘会话 → 切入主界面。
   /// 注册/登录本身已在 /accounts/web 网页端对控制面完成（幂等），
   /// 这里只负责本机登录态；落盘成功前门禁不放行，抛错由注册页捕获展示。
+  /// 首次切入主界面武装一次 N 开场动画（重登录时重置播完标记）。
   Future<void> _completeWebAuth(String email) async {
     final String mail = email.trim();
     await AccountSessionStore.instance.save(mail);
     if (!mounted) return;
-    setState(() => _accountEmail = mail);
+    setState(() {
+      _accountEmail = mail;
+      _playBootAnimation = true;
+      _bootAnimDone = false;
+    });
   }
 
   /// 用户菜单「我的设备」:与对话框构成双面板分栏
