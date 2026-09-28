@@ -31,6 +31,27 @@ export type BudgetStatus = {
   level: "none" | "warn" | "exceeded";
 };
 
+/**
+ * 告警出口（2026-09-28 上线护栏）：阈值命中（warn/exceeded 各一次）时回调。
+ * budget-guard 本身零 DI，装配处注入（如站内信通知）；不设置则仅 console 告警。
+ */
+export type BudgetAlertSink = (status: BudgetStatus) => void;
+
+let alertSink: BudgetAlertSink | null = null;
+
+export function setBudgetAlertSink(sink: BudgetAlertSink | null): void {
+  alertSink = sink;
+}
+
+function fireAlertSink(status: BudgetStatus): void {
+  if (!alertSink) return;
+  try {
+    alertSink(status);
+  } catch {
+    // 告警出口故障不影响记账主流程
+  }
+}
+
 const SESSION_LIMIT = envTokens("AGENT_LLM_BUDGET_SESSION_TOKENS", 500_000);
 const DAILY_LIMIT = envTokens("AGENT_LLM_BUDGET_DAILY_TOKENS", 2_000_000);
 const MAX_SESSIONS = 500;
@@ -82,23 +103,27 @@ export function recordBudgetUsage(input: {
       const oldest = sessionBuckets.keys().next().value;
       if (oldest !== undefined) {
         sessionBuckets.delete(oldest);
-        warnedKeys.delete(`session:${oldest}`);
+        warnedKeys.delete(`session:warn:${oldest}`);
+        warnedKeys.delete(`session:exceeded:${oldest}`);
       }
     }
     const level = classifyLevel(used, SESSION_LIMIT);
-    if (level !== "none" && !warnedKeys.has(`session:${sessionKey}`)) {
-      warnedKeys.add(`session:${sessionKey}`);
-      if (level === "warn") {
-        console.warn(
-          `[BudgetGuard] 会话 token 达 ${Math.round((used / SESSION_LIMIT) * 100)}%（${used}/${SESSION_LIMIT}）session=${sessionKey}`,
-        );
-      } else {
-        console.warn(
-          `[BudgetGuard] 会话 token 超限（${used}/${SESSION_LIMIT}），重活派发将被拒 session=${sessionKey}`,
-        );
-      }
-    }
     if (level !== "none") {
+      // 每 key 每档（warn/exceeded）只告警一次：80% 提示一次、100% 再提示一次
+      const warnKey = `session:${level}:${sessionKey}`;
+      if (!warnedKeys.has(warnKey)) {
+        warnedKeys.add(warnKey);
+        if (level === "warn") {
+          console.warn(
+            `[BudgetGuard] 会话 token 达 ${Math.round((used / SESSION_LIMIT) * 100)}%（${used}/${SESSION_LIMIT}）session=${sessionKey}`,
+          );
+        } else {
+          console.warn(
+            `[BudgetGuard] 会话 token 超限（${used}/${SESSION_LIMIT}），重活派发将被拒 session=${sessionKey}`,
+          );
+        }
+        fireAlertSink({ scope: "session", key: sessionKey, usedTokens: used, limitTokens: SESSION_LIMIT, level });
+      }
       hit.push({ scope: "session", key: sessionKey, usedTokens: used, limitTokens: SESSION_LIMIT, level });
     }
   }
@@ -110,17 +135,20 @@ export function recordBudgetUsage(input: {
       const oldest = dailyBuckets.keys().next().value;
       if (oldest !== undefined) {
         dailyBuckets.delete(oldest);
-        warnedKeys.delete(`daily:${oldest}`);
+        warnedKeys.delete(`daily:warn:${oldest}`);
+        warnedKeys.delete(`daily:exceeded:${oldest}`);
       }
     }
     const level = classifyLevel(used, DAILY_LIMIT);
-    if (level !== "none" && !warnedKeys.has(`daily:${dailyKey}`)) {
-      warnedKeys.add(`daily:${dailyKey}`);
-      console.warn(
-        `[BudgetGuard] 单日 token ${level === "exceeded" ? "超限" : "达告警线"}（${used}/${DAILY_LIMIT}）actor=${dailyKey}`,
-      );
-    }
     if (level !== "none") {
+      const warnKey = `daily:${level}:${dailyKey}`;
+      if (!warnedKeys.has(warnKey)) {
+        warnedKeys.add(warnKey);
+        console.warn(
+          `[BudgetGuard] 单日 token ${level === "exceeded" ? "超限" : "达告警线"}（${used}/${DAILY_LIMIT}）actor=${dailyKey}`,
+        );
+        fireAlertSink({ scope: "daily", key: dailyKey, usedTokens: used, limitTokens: DAILY_LIMIT, level });
+      }
       hit.push({ scope: "daily", key: dailyKey, usedTokens: used, limitTokens: DAILY_LIMIT, level });
     }
   }

@@ -443,6 +443,7 @@ import {
 } from "../services/user-personalization/emotion-tone.js";
 import { runPlanExecuteLoop, type PlanExecuteLoopResult } from "../agent/plan-execute-loop.js";
 import { InboxService } from "../services/inbox-service.js";
+import { setBudgetAlertSink } from "../services/llm-budget-guard.js";
 import { ProactiveContactPolicyService } from "../services/proactive-contact-policy.js";
 import { setCapabilityCortex } from "../agent/agent-capabilities.js";
 // 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）+ 统一主动性管道
@@ -4963,6 +4964,21 @@ export async function createAppServices(): Promise<AppServices> {
     rootDir: join(process.cwd(), "data", "inbox"),
     wsRegistry: wsConnectionRegistry,
   });
+  // LLM 预算告警出口（上线护栏）：阈值命中（80% warn / 100% exceeded 各一次）
+  // 发站内信给指定管理员 actor；未配置 AGENT_LLM_BUDGET_ALERT_ACTOR 则仅 console。
+  const budgetAlertActor = process.env.AGENT_LLM_BUDGET_ALERT_ACTOR?.trim();
+  if (budgetAlertActor) {
+    setBudgetAlertSink((status) => {
+      void inboxService
+        .send({
+          actorId: budgetAlertActor,
+          title: `LLM 预算${status.level === "exceeded" ? "超限" : "告警"}`,
+          body: `${status.scope === "daily" ? "单用户单日" : "会话"}维度 ${status.key} 已用 ${status.usedTokens}/${status.limitTokens} tokens，请检查用量是否异常。`,
+          importance: "high",
+        })
+        .catch(() => {});
+    });
+  }
   // 电话代办结果回执的必达通道（晚绑定：inboxService 构造晚于 coordinator）
   phoneCallCoordinator.setInbox({
     send: (input) => inboxService.send(input),
