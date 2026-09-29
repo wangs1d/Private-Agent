@@ -23,15 +23,16 @@
 | 00:58–01:08 | 情绪曲线 · 六阶段 + 双峰值 + 全程 ≤ 1 分钟护栏 | §10.1 + §10.5 |
 
 语音说明：解说为男声（CosyVoice2 alex），产品台词为女声（CosyVoice2 bella，
-即演示所选路径），由 `server/src/services/voice-dialogue/adapters/siliconflow-tts-adapter.ts`
-同一 TTS 服务合成。
+即演示所选路径）。注：当时经硅基流动 TTS 合成，该通道已退役（2026-09-30），
+现由 `server/src/services/tts-service.ts`（MiniMax 优先）提供，再生成需按
+MiniMax 音色目录（female-shaonv / presenter_female 等）重新选声。
 
 ## 再生成方式（如需改分镜/文案）
 
 构建脚本在临时目录，核心输入为 `player_template.html`（canvas 确定性时间轴，
 `window.__seek(t)` 可渲染任意时刻）。流程：
 
-1. TTS 台词 → `audio/*.mp3`（硅基流动，密钥在 `server/.env`）
+1. TTS 台词 → `audio/*.mp3`（TtsService / MiniMax，密钥在 `.env.local`）
 2. ffmpeg 按时间表 `adelay + amix` → `mix.m4a`（67.6s）
 3. 音频 base64 注入模板 → `storyboard.html`
 4. Playwright(Edge headless) 按 30fps 逐帧截图 → ffmpeg 合成 MP4

@@ -29,7 +29,7 @@
 |---|---|---|
 | 已有入场动画 overlay，挂在 main.dart 顶层 Stack 末尾，但**每次启动都播**，无首次判断 | `main.dart:4448`、`lib/core/presentation/entrance_animation.dart` | 挂载点现成；需新增"仅首次"标记与分流 |
 | 本地 KV：`getPreference / savePreference`（单 JSON 文件） | `lib/core/db/isar_local_history_store.dart:789` | 首次标记、声音性别、管家名字的落点 |
-| 服务端 TTS 适配器**已内置带 gender 的音色目录**（alex 男 / bella 女等），但 `TtsService.synthesizeMp3*` 不接受 voiceId，用户不可配 | `server/src/services/voice-dialogue/adapters/siliconflow-tts-adapter.ts:21`、`server/src/services/tts-service.ts` | 选声页的"服务端已有一半能力"，需打通 voiceId 透传 |
+| 服务端 TTS 适配器**已内置带 gender 的音色目录**（female-shaonv 少女 / female-yujie 御姐 / presenter_female 主持人等），但 `TtsService.synthesizeMp3*` 不接受 voiceId，用户不可配 | `server/src/services/voice-dialogue/adapters/minimax-tts-adapter.ts`、`server/src/services/tts-service.ts` | 选声页的"服务端已有一半能力"，需打通 voiceId 透传 |
 | 客户端播放：`tts_player.dart` 单例（audioplayers），Windows 走临时文件 | `lib/core/services/tts_player.dart` | 问候语直接复用；需加预合成缓存 |
 | 情感球 = WebView2 加载 `host.html` 字符串注入，Dart→JS 单向 | `lib/features/chat/emotion_ball_view_io.dart` | 开场动画结尾要与它做"交接"视觉衔接 |
 | 无 lottie/rive/svg 依赖，现有动画全部手写 AnimationController | `pubspec.yaml`、`entrance_animation.dart` | 技术选型倾向纯 Dart CustomPainter |

@@ -45,7 +45,7 @@ LLM 路由硬规则（写入各工具 description 与 `phone-call-skills.ts`，i
 | 端侧电话桥 | `client/flutter_app/android/.../PhoneBridgePlugin.kt`（channel `pai/phone_bridge`，`dial`）+ `DialConfirmActivity.kt`（CALL_PHONE 运行时权限 + ACTION_CALL） | 新增"受控外呼 + 采音 + 播放"方法 |
 | 拨号安全护栏 | `server/src/tools/phone-bridge-tools.ts:37`（`normalizeDialNumber` 紧急号码守卫）、`:47-59`（按轮去重） | 直接复用 |
 | 拨打前确认令 | `server/src/agent/agent-access-mode.ts:151-199`（远程拨号必须先向用户确认的产品规则） | 继承并强化为确认卡 |
-| 全双工语音管线 | `server/src/services/voice-duplex/` + `server/src/ws/voice-duplex-route.ts`（base64 PCM JSON 帧）；ASR `services/funasr-auto-starter.ts`；TTS `services/tts-service.ts`（SiliconFlow→OpenAI 兜底） | 通话音频帧格式与 VAD/打断逻辑直接照搬 |
+| 全双工语音管线 | `server/src/services/voice-duplex/` + `server/src/ws/voice-duplex-route.ts`（base64 PCM JSON 帧）；ASR `services/funasr-auto-starter.ts`；TTS `services/tts-service.ts`（MiniMax→OpenAI 兜底） | 通话音频帧格式与 VAD/打断逻辑直接照搬 |
 | 通话 UI | `client/flutter_app/lib/core/services/phone_call_session.dart`（ChangeNotifier：phase/transcript/agentTalking）+ `lib/core/presentation/phone_call_page.dart`；Win32 浮窗 `windows/runner/flutter_window.cpp:85-119` | 扩展出呼（outbound agent-driven）模式 |
 | 事件协议 | `packages/agent-protocol/src/events.ts`（已有 `agent.phone.*`、`phone.bridge.*`、`device.*`） | 新增 `phone_call.*` 事件族 |
 | 后台长任务面 | `server/src/tools/task-dispatch-tool.ts` + `services/agent-task-orchestrator.ts`（`chat.task_update`，state `awaiting_input`，结果以新消息回流） | 分钟级通话挂在任务面，不占工具循环 |
@@ -181,7 +181,7 @@ class PhoneCallCoordinator {
 ```
 对端声音 → 手机扬声器 → 手机麦克风(RECORD_AUDIO, AEC 开) 
    → PhoneBridgePlugin 采音 → WS phone_call.audio 上行 
-   → FunASR 流式转写 → LLM(通话策略提示词 + 转写窗口) → TTS(SiliconFlow)
+   → FunASR 流式转写 → LLM(通话策略提示词 + 转写窗口) → TTS(MiniMax)
    → PCM 下行 → 手机扬声器播放 → 对端听到
 ```
 
