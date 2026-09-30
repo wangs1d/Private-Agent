@@ -1,8 +1,13 @@
-﻿import "package:flutter/material.dart";
 import "dart:async";
+import "dart:typed_data";
 
-import "../../core/services/multimodal_recognition_service.dart";
+import "package:flutter/material.dart";
 
+import "../../core/services/mic_clip_recorder.dart";
+import "../../core/services/model_api_tester.dart";
+
+/// 声纹注册页（真实录音版）：3 次 × 4s PCM16 16k 采集 →
+/// 服务端本地 ONNX 说话人引擎注册。语音对话/控制只响应录入声纹的人。
 class VoiceprintRegistrationPage extends StatefulWidget {
   const VoiceprintRegistrationPage({
     super.key,
@@ -18,103 +23,114 @@ class VoiceprintRegistrationPage extends StatefulWidget {
 }
 
 class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage> {
-  final MultimodalRecognitionService _recognitionService = MultimodalRecognitionService();
-  
+  final MicClipRecorder _recorder = MicClipRecorder();
+  final List<Uint8List> _clips = <Uint8List>[];
+
   bool _isRecording = false;
-  int _recordingCount = 0;
-  final List<List<List<double>>> _audioSamples = []; // List<样本<List<帧<List<double>>>>>
   bool _isRegistering = false;
-  String _statusText = '准备录制';
   double _progress = 0.0;
+  String _statusText = "点击麦克风开始";
+  double _recordElapsed = 0;
+  Timer? _recordTimer;
+  static const Duration _clipDuration = Duration(seconds: 4);
+
+  static const List<String> _prompts = <String>[
+    "随便说一句你日常会说的话",
+    "例如：明天早上八点叫我起床",
+    "最后一句，像平时聊天一样自然",
+  ];
 
   @override
-  void initState() {
-    super.initState();
-    _initializeService();
-  }
-
-  Future<void> _initializeService() async {
-    await _recognitionService.initialize(userId: widget.userId);
+  void dispose() {
+    _recordTimer?.cancel();
+    _recorder.dispose();
+    super.dispose();
   }
 
   Future<void> _startRecording() async {
+    if (_isRecording || _isRegistering) return;
+    final bool ok = await _recorder.start();
+    if (!ok) {
+      setState(() => _statusText = "无法访问麦克风，请检查系统权限");
+      return;
+    }
     setState(() {
       _isRecording = true;
-      _statusText = '正在录制...请说话';
+      _recordElapsed = 0;
+      _statusText = _prompts[_clips.length.clamp(0, 2)];
     });
-
-    // 模拟录音3秒
-    await Future.delayed(const Duration(seconds: 3));
-
-    // 模拟生成音频样本数据（实际应用中需要从麦克风获取真实音频数据）
-    final sample = _generateMockAudioSample();
-    
-    setState(() {
-      _isRecording = false;
-      _recordingCount++;
-      _audioSamples.add(sample);
-      _progress = _recordingCount / 3.0; // 需要录制3次
-      _statusText = '录制完成 $_recordingCount/3';
+    const Duration tickDur = Duration(milliseconds: 100);
+    _recordTimer?.cancel();
+    _recordTimer = Timer.periodic(tickDur, (Timer t) {
+      _recordElapsed += tickDur.inMilliseconds / 1000;
+      if (_recordElapsed >= _clipDuration.inMilliseconds / 1000) {
+        unawaited(_finishRecording());
+      } else if (mounted) {
+        setState(() {});
+      }
     });
-
-    if (_recordingCount >= 3) {
-      _registerVoiceprint();
-    }
   }
 
-  List<List<double>> _generateMockAudioSample() {
-    // 模拟音频特征数据（实际应用中需要使用真实的音频处理库提取MFCC等特征）
-    final sample = <List<double>>[];
-    for (int i = 0; i < 13; i++) {
-      final frame = <double>[];
-      for (int j = 0; j < 20; j++) {
-        frame.add((i * 20 + j).toDouble() * 0.1);
-      }
-      sample.add(frame);
+  Future<void> _finishRecording() async {
+    _recordTimer?.cancel();
+    _recordTimer = null;
+    final Uint8List clip = await _recorder.stop();
+    if (!mounted) return;
+    if (clip.length < 16000) {
+      setState(() {
+        _isRecording = false;
+        _statusText = "录音太短，请重新点击并说满一句话";
+      });
+      return;
     }
-    return sample;
+    setState(() {
+      _isRecording = false;
+      _clips.add(clip);
+      _progress = _clips.length / 3.0;
+      _statusText = "录制完成 ${_clips.length}/3";
+    });
+    if (_clips.length >= 3) {
+      unawaited(_registerVoiceprint());
+    }
   }
 
   Future<void> _registerVoiceprint() async {
     setState(() {
       _isRegistering = true;
-      _statusText = '正在注册声纹...';
+      _statusText = "正在注册声纹…";
     });
-
     try {
-      // 将所有样本的第一个帧合并（简化处理）
-      final mergedSamples = <List<double>>[];
-      for (final sample in _audioSamples) {
-        if (sample.isNotEmpty) {
-          mergedSamples.addAll(sample);
-        }
+      final Map<String, dynamic> res = await VoiceprintApi.register(_clips);
+      if (!mounted) return;
+      setState(() => _isRegistering = false);
+      if (res["ok"] == true) {
+        setState(() => _statusText = "声纹注册成功");
+        Future<void>.delayed(const Duration(milliseconds: 900), () {
+          if (mounted) widget.onRegistrationComplete();
+        });
+      } else {
+        setState(() {
+          _statusText = res["error"]?.toString() ?? "注册失败，请重试";
+          _clips.clear();
+          _progress = 0;
+        });
       }
-      
-      final success = await _recognitionService.registerVoiceprint(
-        userId: widget.userId,
-        audioSamples: mergedSamples,
-      );
-
-      setState(() {
-        _isRegistering = false;
-        if (success) {
-          _statusText = '声纹注册成功！';
-          Future.delayed(const Duration(seconds: 1), () {
-            widget.onRegistrationComplete();
-          });
-        } else {
-          _statusText = '声纹注册失败，请重试';
-          _recordingCount = 0;
-          _audioSamples.clear();
-          _progress = 0.0;
-        }
-      });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _isRegistering = false;
-        _statusText = '注册出错: $e';
+        _statusText = "声纹服务不可达：$e";
       });
     }
+  }
+
+  void _reset() {
+    if (_isRecording || _isRegistering) return;
+    setState(() {
+      _clips.clear();
+      _progress = 0;
+      _statusText = "已重置，点击麦克风开始";
+    });
   }
 
   @override
@@ -130,118 +146,105 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
           icon: const Icon(Icons.arrow_back, color: Colors.white),
           onPressed: () => Navigator.of(context).pop(),
         ),
-        title: const Text(
-          '声纹注册',
-          style: TextStyle(color: Colors.white),
-        ),
+        title: const Text("声纹注册", style: TextStyle(color: Colors.white)),
+        actions: <Widget>[
+          if (_clips.isNotEmpty && !_isRecording && !_isRegistering)
+            TextButton(
+              onPressed: _reset,
+              child: const Text("重录", style: TextStyle(color: Colors.white54, fontSize: 13)),
+            ),
+        ],
       ),
       body: Padding(
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // 进度指示器
+          children: <Widget>[
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.1),
+                color: Colors.white.withValues(alpha: 0.06),
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Column(
-                children: [
+                children: <Widget>[
                   Text(
-                    '$_recordingCount/3',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 48,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    "${_clips.length}/3",
+                    style: const TextStyle(color: Colors.white, fontSize: 44, fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 14),
                   LinearProgressIndicator(
                     value: _progress,
-                    backgroundColor: Colors.white.withValues(alpha: 0.2),
-                    valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
-                    minHeight: 8,
+                    backgroundColor: Colors.white.withValues(alpha: 0.15),
+                    valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                    minHeight: 3,
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 14),
                   Text(
-                    _statusText,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.8),
-                      fontSize: 16,
-                    ),
+                    _isRecording
+                        ? "正在聆听… ${(_clipDuration.inMilliseconds / 1000 - _recordElapsed).ceil()}s"
+                        : _statusText,
+                    style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 15, height: 1.5),
                     textAlign: TextAlign.center,
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 40),
-
-            // 录制按钮
-            GestureDetector(
-              onTap: _isRecording || _isRegistering ? null : _startRecording,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                width: _isRecording ? 100 : 80,
-                height: _isRecording ? 100 : 80,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _isRecording
-                      ? Colors.red.withValues(alpha: 0.8)
-                      : _isRegistering
-                          ? Colors.grey.withValues(alpha: 0.5)
-                          : cs.primary.withValues(alpha: 0.8),
-                  boxShadow: [
-                    BoxShadow(
-                      color: _isRecording
-                          ? Colors.red.withValues(alpha: 0.4)
-                          : cs.primary.withValues(alpha: 0.3),
-                      blurRadius: _isRecording ? 30 : 20,
-                      spreadRadius: _isRecording ? 5 : 2,
+            ValueListenableBuilder<double>(
+              valueListenable: _recorder.level,
+              builder: (BuildContext context, double level, _) {
+                final double pulse = _isRecording ? 1.0 + level * 0.2 : 1.0;
+                return GestureDetector(
+                  onTap: _isRecording ? _finishRecording : (_isRegistering ? null : _startRecording),
+                  child: AnimatedScale(
+                    scale: pulse,
+                    duration: const Duration(milliseconds: 120),
+                    child: Container(
+                      width: 88,
+                      height: 88,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _isRecording
+                            ? Colors.white
+                            : _isRegistering
+                                ? Colors.white.withValues(alpha: 0.2)
+                                : cs.primary.withValues(alpha: 0.85),
+                        boxShadow: <BoxShadow>[
+                          BoxShadow(
+                            color: Colors.white.withValues(alpha: _isRecording ? 0.35 : 0.12),
+                            blurRadius: _isRecording ? 28 : 16,
+                          ),
+                        ],
+                      ),
+                      child: Icon(
+                        _isRecording ? Icons.stop_rounded : Icons.mic_none,
+                        color: _isRecording ? Colors.black : Colors.white,
+                        size: 36,
+                      ),
                     ),
-                  ],
-                ),
-                child: Icon(
-                  _isRecording ? Icons.mic : Icons.mic_none,
-                  color: Colors.white,
-                  size: 40,
-                ),
-              ),
+                  ),
+                );
+              },
             ),
             const SizedBox(height: 24),
-
-            // 说明文字
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.05),
+                color: Colors.white.withValues(alpha: 0.04),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.1),
-                ),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
               ),
               child: Column(
-                children: [
-                  const Text(
-                    '注册说明',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
+                children: <Widget>[
+                  const Text("注册说明", style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 10),
                   Text(
-                    '1. 点击麦克风按钮开始录制\n'
-                    '2. 每次录制约3秒，请清晰说话\n'
-                    '3. 需要完成3次录制\n'
-                    '4. 建议使用不同的语句进行录制',
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.7),
-                      fontSize: 14,
-                      height: 1.6,
-                    ),
+                    "1. 点击麦克风按钮开始录制\n"
+                    "2. 每次录制约 4 秒，请自然说话\n"
+                    "3. 完成 3 次录制后自动注册\n"
+                    "4. 注册后，语音对话与控制只响应你的声音",
+                    style: TextStyle(color: Colors.white.withValues(alpha: 0.65), fontSize: 13.5, height: 1.7),
                   ),
                 ],
               ),

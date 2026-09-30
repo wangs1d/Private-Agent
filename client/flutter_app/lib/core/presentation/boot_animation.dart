@@ -73,6 +73,9 @@ class _BootAnimationState extends State<BootAnimation>
   }
 }
 
+/// N 字标轮廓路径（32 单位盒，中心在 16,16）：开场动画与首启向导共用。
+Path buildNMarkOutlinePath() => _BootPainter._markPath;
+
 class _BootPainter extends CustomPainter {
   _BootPainter({required this.t});
 

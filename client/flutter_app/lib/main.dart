@@ -65,6 +65,7 @@ import "features/help/feedback_dialog.dart";
 import "features/browser/browser_page.dart";
 import "features/gallery/gallery_workbench_page.dart";
 import "features/gallery/gallery_wall_host.dart";
+import "features/onboarding/onboarding_flow.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
 import "features/chat/agent_profile_page.dart";
@@ -243,6 +244,23 @@ void _writeCrashLog(String tag, Object error, StackTrace stack) {
 /// 与 [NextbotChatLayout] 内部 `_dividerWidth` 保持一致。
 const double _kSidePanelDividerWidth = 8.0;
 
+// ===== 真·分绿泡（2026-09-28）：气泡拆分消息 id 工具 =====
+//
+// 服务端 BubbleTracker 给每个气泡分配独立 messageId：`assistant-<traceId>-b<N>`。
+// 刻意避开历史垫词气泡的 `interim-` 保留前缀（bootstrap 去重按该前缀剔除旧垫词条）。
+
+final RegExp _bubbleMessageIdPattern = RegExp(r"^assistant-(.+)-b(\d+)$");
+
+/// 是否为分泡消息 id（assistant-<traceId>-bN）。
+bool _isBubbleMessageId(String messageId) =>
+    _bubbleMessageIdPattern.hasMatch(messageId);
+
+/// 从分泡消息 id 提取轮次 traceId；非分泡 id 返回 null。
+String? _bubbleTraceOf(String messageId) {
+  final Match? m = _bubbleMessageIdPattern.firstMatch(messageId);
+  return m?.group(1);
+}
+
 class PrivateAiApp extends StatefulWidget {
   const PrivateAiApp({super.key});
 
@@ -393,25 +411,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 设置页「去申领」站内号码：回到聊天页并预填申领话术，由用户发送后
-  /// Agent 调 phone.ensure_my_number 办理（点=只填入，不自动发送）。
-  void _focusChatInputWithText(String text) {
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx != null && navCtx.mounted) {
-      Navigator.of(navCtx).popUntil((Route<dynamic> r) => r.isFirst);
-    }
-    _closeRightPanel();
-    if (_tabIndex != 0) {
-      setState(() => _tabIndex = 0);
-    }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _inputController.text = text;
-      _inputController.selection = TextSelection.collapsed(offset: text.length);
-      _inputFocusNode.requestFocus();
-    });
-  }
-
   /// 加载持久化的分栏比例。
   void _loadSplitRatio() {
     SplitRatioPreference.load().then((double r) {
@@ -455,6 +454,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 或注册/登录完成首次切入主界面时置位。未登录停在注册页期间绝不播放。
   bool _playBootAnimation = false;
   bool _bootAnimDone = false;   // 开场动画是否已播完（每次武装前重置）
+
+  /// 首启配置向导：登录后未完成 onboarding 时顶在主界面之前（进度条开机
+  /// 动画 + 称呼/agent 名/声纹/模型四步）。完成标记按账号存偏好
+  /// （`onboarding.completedV1.<email>`），未完成时冷启动自动重入。
+  bool _needsOnboarding = false;
+  bool _onboardingDone = false;
+  // 向导专用（与注册门禁同款隔离理由：禁止与主应用共享 GlobalKey）
+  final GlobalKey<NavigatorState> _onboardingNavigatorKey =
+      GlobalKey<NavigatorState>();
 
   /// Agent是否正在处理中（用于显示响应状态指示器)
   bool _isAgentProcessing = false;
@@ -589,6 +597,35 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           "ok": true,
         }));
       });
+      // 检查更新直调：force=1 跳过会话缓存强查一次。响应带 status 与
+      // elapsedMs——缓存命中路径应稳定在个位毫秒（零网络往返）。
+      developer.registerExtension("ext.pai.debug.checkUpdate", (
+        String method,
+        Map<String, String> parameters,
+      ) async {
+        final Stopwatch sw = Stopwatch()..start();
+        final ClientUpdateCheckResult? result =
+            await checkClientUpdate(forceRefresh: parameters["force"] == "1");
+        sw.stop();
+        return developer.ServiceExtensionResponse.result(jsonEncode(<String, dynamic>{
+          "status": result?.status.name,
+          "localVersion": result?.localVersion,
+          "elapsedMs": sw.elapsedMilliseconds,
+        }));
+      });
+      // 分绿泡真机取证直调：走真实 _sendMessage 链路（真实 WS → 服务端分段 →
+      // 真实气泡渲染），脚本侧再 PrintWindow 截图取证。
+      developer.registerExtension("ext.pai.debug.sendChat", (
+        String method,
+        Map<String, String> parameters,
+      ) async {
+        final String text = parameters["text"] ?? "在吗";
+        unawaited(_sendMessage(text: text));
+        return developer.ServiceExtensionResponse.result(jsonEncode(<String, dynamic>{
+          "ok": true,
+          "sent": text,
+        }));
+      });
     }
     // 共用浏览器桥：浏览器宿主经本 ws 回传 browser.bridge.result（jobId 配对）
     SharedBrowserHost.instance.bindSend(_ws.sendEvent);
@@ -597,29 +634,34 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // accept  : 用户点了接听 → 拉起主窗 + 等待 call_connecting
     // decline : 用户点了挂断 → 停 TTS + 关窗 + 清状态
     // timeout : 振铃超时（默认 30s）
-    IncomingCallLauncher.bindHandlers(
-      onAccept: _handleNativeCallAccept,
-      onDecline: _handleNativeCallDecline,
-      onTimeout: _handleNativeCallTimeout,
-    );
-    // 手机端全屏通话页：会话动作钩子（语义与桌面原生悬浮窗回调一致）
-    PhoneCallSession.instance
-      ..transport = _ws.sendEvent
-      ..onAccept = _handleNativeCallAccept
-      ..onDecline = _handleNativeCallDecline
-      ..onHangup = _handlePhonePageHangup
-      ..onTimeout = _handleNativeCallTimeout;
+    // 版本闸（开源版剔除虚拟电话）：以下通话窗口绑定与通话会话钩子全部跳过
+    if (!ApiConfig.isOssEdition) {
+      IncomingCallLauncher.bindHandlers(
+        onAccept: _handleNativeCallAccept,
+        onDecline: _handleNativeCallDecline,
+        onTimeout: _handleNativeCallTimeout,
+      );
+      // 手机端全屏通话页：会话动作钩子（语义与桌面原生悬浮窗回调一致）
+      PhoneCallSession.instance
+        ..transport = _ws.sendEvent
+        ..onAccept = _handleNativeCallAccept
+        ..onDecline = _handleNativeCallDecline
+        ..onHangup = _handlePhonePageHangup
+        ..onTimeout = _handleNativeCallTimeout;
+    }
     // 加载持久化的分栏比例
     _loadSplitRatio();
     // 桌面端独立"通话中"窗口事件绑定
     // hangup       : 用户点了挂断
     // muteToggle   : 用户点了静音，参数 newMuted
     // speakerToggle: 用户点了免提，参数 newOn
-    ConnectedCallLauncher.bindHandlers(
-      onHangUp: _handleConnectedHangup,
-      onMuteToggle: _handleMuteToggle,
-      onSpeakerToggle: _handleSpeakerToggle,
-    );
+    if (!ApiConfig.isOssEdition) {
+      ConnectedCallLauncher.bindHandlers(
+        onHangUp: _handleConnectedHangup,
+        onMuteToggle: _handleMuteToggle,
+        onSpeakerToggle: _handleSpeakerToggle,
+      );
+    }
     DesktopNotificationLauncher.bindHandlers(
       onConfirm: _handleDesktopNotificationConfirm,
       onDismiss: _handleDesktopNotificationDismiss,
@@ -632,18 +674,23 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         MobileBriefingLauncher.payloads.listen((String payload) {
       unawaited(_openBriefingFromPayload(payload));
     });
-    OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
+    if (!ApiConfig.isOssEdition) {
+      OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
+    }
     // 右侧双栏「图片预览」面板：媒体卡点击 → 打开右栏大图
     ImagePreviewLauncher.setHandler(_openImagePreview);
-    // 预览面板「在照片墙中查看」：切图库 tab + 3D 墙飞到该照片
+    // 预览面板「在照片墙中查看」：全屏打开图库 + 3D 墙飞到该照片
     ImagePreviewLauncher.onOpenInWall = (String photoId) {
-      _selectTab(1);
+      _openGalleryPanel();
       unawaited(GalleryWallHost.instance.flyToPhoto(photoId));
     };
     // 右侧双栏「内容详情」面板：详情卡（长内容折叠卡）点击 → 右栏继续展示
     ContentSummaryLauncher.setHandler(_openContentSummaryPanel);
     // 「行程规划」独立界面：行程卡点击 / autoOpen → 全屏路由打开
-    TravelPlanLauncher.setHandler(_openTravelPlanPanel);
+    // 版本闸：开源版剔除旅游家族，入口不注册
+    if (!ApiConfig.isOssEdition) {
+      TravelPlanLauncher.setHandler(_openTravelPlanPanel);
+    }
     // 注意：主进程不再预加载共享行程 WebView（TravelWebPanelHost.preload）。
     // 预加载会让 WebView2 在启动时就创建内部顶层窗口，该窗口曾滞留屏幕上
     // 成为透明"幽灵窗"，拦截其他应用的点击；现改为真实使用时懒加载——
@@ -727,8 +774,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
 
     // 手机桥接（phone.dial 等）：存储就绪后恢复开关并按需连接桥接 WS。
-    // 仅 Android 真机有意义；默认开启，可在设置页关闭。
-    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    // 仅 Android 真机有意义；默认开启，可在设置页关闭。开源版剔除该能力。
+    if (!ApiConfig.isOssEdition &&
+        !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.android) {
       PhoneBridgeService.instance.bindPreferences(
         read: _store.getPreference,
         write: _store.savePreference,
@@ -830,6 +879,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final bool isContentDup = last != null &&
           last.role == "assistant" &&
           isAssistant &&
+          // 真·分绿泡：同轮两个分泡恰好同文（如「好。」「好。」连发）是刻意
+          // 形态，不视为历史重复渲染，跳过去重（重载后双泡必须都保留）。
+          !(_bubbleTraceOf(last.messageId) != null &&
+              _bubbleTraceOf(last.messageId) == _bubbleTraceOf(m.messageId)) &&
           last.text.trim() == mText;
       if (isContentDup) {
         contentDuplicateMessageIds.add(m.messageId);
@@ -848,13 +901,57 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
     }
 
+    // 真·分绿泡塌缩残留自愈（2026-09-28）：塌缩轮（finalTextReplacesStream）
+    // 在流式阶段已把分泡逐条落盘，旧版本塌缩只删内存不删盘 → 重载后
+    // "已流分泡 + 塌缩单泡"同框（真机取证：「问了两遍/怕我跑了？」+「对，
+    // 就是这周末10月3、4号。」并存）。气泡轮的 chunk 全部带 -bN 后缀，
+    // assistant-$traceId 只会由塌缩/兜底路径创建——故"同 trace 既有分泡
+    // 又有 assistant-$traceId"即塌缩残留 → 删分泡、保塌缩泡。
+    final Map<String, List<ChatMessage>> bubblesByTrace =
+        <String, List<ChatMessage>>{};
+    for (final ChatMessage m in contentDedupedMessages) {
+      final String? t = _bubbleTraceOf(m.messageId);
+      if (t != null) {
+        (bubblesByTrace[t] ??= <ChatMessage>[]).add(m);
+      }
+    }
+    final Set<String> staleBubbleIds = <String>{};
+    if (bubblesByTrace.isNotEmpty) {
+      for (final ChatMessage m in contentDedupedMessages) {
+        if (m.role != "assistant") continue;
+        if (!m.messageId.startsWith("assistant-")) continue;
+        if (_isBubbleMessageId(m.messageId)) continue;
+        final List<ChatMessage>? stale =
+            bubblesByTrace[m.messageId.substring("assistant-".length)];
+        if (stale != null) {
+          for (final ChatMessage b in stale) {
+            staleBubbleIds.add(b.messageId);
+          }
+        }
+      }
+    }
+    final List<ChatMessage> healedMessages = staleBubbleIds.isEmpty
+        ? contentDedupedMessages
+        : contentDedupedMessages
+            .where((m) => !staleBubbleIds.contains(m.messageId))
+            .toList();
+    for (final String messageId in staleBubbleIds) {
+      try {
+        await _store.deleteMessage(messageId);
+        debugPrint(
+            "[chat] bubble heal: cleaned stale streamed bubble $messageId");
+      } catch (e) {
+        debugPrint("[chat] bubble heal cleanup failed for $messageId: $e");
+      }
+    }
+
     final List<AgentRelayMessage> cachedRelay =
         await _store.listRelayInbound(ApiConfig.effectiveActorId);
 
     final bool? visionConsent = await _store.getVisionCameraConsent();
 
     setState(() {
-      _messages.addAll(contentDedupedMessages);
+      _messages.addAll(healedMessages);
       // 关键：从缓存恢复后必须重建 assistant 消息索引，
       // 否则后续 chat.assistant_chunk / chat.assistant_done 事件按 messageId
       // 去重时找不到记录，会把同一条 agent 消息重复入列表，造成「同一条回复渲染两次」。
@@ -916,8 +1013,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
     _ws.connect();
     _startMessagePolling();
-    // 控制面账号自注册：把安装身份补进管理后台的收件人列表，
-    // 否则后台「全体用户」群发站内信时不会包含本机（fire-and-forget）。
+    // 控制面账号自注册：把当前登录身份（登录邮箱优先）补进管理后台的
+    // 收件人列表，否则后台「全体用户」群发站内信时不会包含本机
+    // （fire-and-forget；未登录时内部跳过，登录后由 _completeWebAuth 补注册）。
     unawaited(ControlPlaneAccount.ensureRegistered());
     unawaited(_consumePendingMobileBriefingLaunch());
     unawaited(_ensureAndroidNotificationPermission());
@@ -1574,6 +1672,49 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   .where((e) => e.isNotEmpty)
                   .toList()
               : null;
+          // 真·分绿泡对账数组（2026-09-28）：服务端各气泡的 id+定稿文本。
+          // 带该字段的轮次按泡收口（不走单泡 finalText 替换逻辑）。
+          final List<Map<String, dynamic>>? bubblesFromPayload =
+              payload["bubbles"] is List
+                  ? (payload["bubbles"] as List)
+                      .whereType<Map<String, dynamic>>()
+                      .toList()
+                  : null;
+          final bool collapseToSingle =
+              payload["finalTextReplacesStream"] == true;
+
+          // 真·分绿泡收口：出口重写/自检重跑让最终文本与已流文本分叉时
+          // （finalTextReplacesStream），整轮塌缩——删本轮所有分泡，落一条
+          // assistant-$traceId 单泡承载 finalText，避免新旧两版拼接。
+          if (collapseToSingle &&
+              bubblesFromPayload != null &&
+              bubblesFromPayload.isNotEmpty) {
+            await _collapseBubblesToFinal(
+              bubbleIds: bubblesFromPayload
+                  .map((b) => b["id"]?.toString() ?? "")
+                  .where((id) => id.isNotEmpty)
+                  .toList(),
+              traceId: doneTraceId ?? "",
+              finalText: resolvedText,
+              playUrl: playUrl,
+              mediaCards: mediaCardsFromPayload,
+              renderBlocks: renderBlocksFromPayload,
+              replyBlocks: replyBlocksFromPayload,
+              followUps: followUpsFromPayload,
+            );
+          } else if (bubblesFromPayload != null &&
+              bubblesFromPayload.isNotEmpty) {
+            // 正常分泡收口：逐泡以服务端定稿文本为准定稿（含漏收 chunk 的补建），
+            // 卡片/建议/playUrl 挂末泡（服务端收口链的附着目标）。
+            await _reconcileBubblesOnDone(
+              bubbles: bubblesFromPayload,
+              mediaCards: mediaCardsFromPayload,
+              renderBlocks: renderBlocksFromPayload,
+              replyBlocks: replyBlocksFromPayload,
+              followUps: followUpsFromPayload,
+              playUrl: playUrl,
+            );
+          } else {
           final int? idx = _messageIndexById(messageId);
           if (idx != null) {
             // 默认保留流式阶段已经显示出来的正文，避免 done 到来时整段闪烁替换；
@@ -1582,8 +1723,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             setState(() {
               final ChatMessage previous = _messages[idx];
               final String currentText = previous.text;
-              final String nextText = _shouldReplaceAssistantTextOnDone(
-                      currentText, resolvedText)
+              // 服务端分歧裁决信号（2026-09-28 放流配套）：出口重写/自检重跑/
+              // 确定性收口让最终文本与已流文本分叉时，finalText 整段替换流式
+              // 气泡，避免新旧两版拼接（服务端已跳过残差补推）。
+              final bool serverSaysReplace =
+                  payload["finalTextReplacesStream"] == true;
+              final String nextText = (serverSaysReplace ||
+                      _shouldReplaceAssistantTextOnDone(currentText, resolvedText))
                   ? resolvedText
                   : currentText;
               final String? existingPlayUrl = previous.playUrl;
@@ -1631,17 +1777,21 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             });
             await _store.saveMessage(finalMessage);
           }
+          } // 真·分绿泡：单泡兜底 else 分支收口
           // 行程卡预热/自动展开（2026-09-25）：本轮产出 travel_itinerary 卡即把
           // 载荷预注入规划窗口（常驻进程换载或隐藏拉起），用户点「打开行程规划」
           // 时窗口与地图已就绪零等待；带 autoOpen 的卡照旧直接弹出独立界面。
-          final AgentResultParseResult doneParsed =
-              AgentResultParser.parse(resolvedText);
-          final AgentResultData? doneCard = doneParsed.data;
-          if (doneCard != null && doneCard.cardType == "travel_itinerary") {
-            if (doneCard.autoOpen) {
-              _openTravelPlanPanel(doneCard);
-            } else {
-              unawaited(TravelPlanWindowLauncher.warm(doneCard));
+          // 版本闸：开源版剔除旅游家族
+          if (!ApiConfig.isOssEdition) {
+            final AgentResultParseResult doneParsed =
+                AgentResultParser.parse(resolvedText);
+            final AgentResultData? doneCard = doneParsed.data;
+            if (doneCard != null && doneCard.cardType == "travel_itinerary") {
+              if (doneCard.autoOpen) {
+                _openTravelPlanPanel(doneCard);
+              } else {
+                unawaited(TravelPlanWindowLauncher.warm(doneCard));
+              }
             }
           }
           unawaited(_loadAgentProfile());
@@ -1860,7 +2010,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             );
           }
         }
-        if (type == "agent.phone.ringing_start") {
+        if (!ApiConfig.isOssEdition && type == "agent.phone.ringing_start") {
           if (!mounted) return;
           final String ringStyle =
               payload["ringStyle"]?.toString() ?? "reminder";
@@ -1913,7 +2063,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         // 设计：接通后不弹任何嵌入式 UI，改用独立的 Win32 "通话中"窗口
         // （仿电脑微信电话：头像 + 名称 + 计时 + 静音/免提/挂断）。
         // TTS 音频在后台播；头像呼吸光晕随 TTS 播放节奏。
-        if (type == "agent.phone.call_connecting") {
+        if (!ApiConfig.isOssEdition && type == "agent.phone.call_connecting") {
           final String callerLabel =
               PhoneCallController.resolveCallerLabel(payload);
           final String connectingCallId =
@@ -2064,7 +2214,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
         // ====== Legacy 来电事件（agent.phone.incoming）—— 无前摇直接来电 ======
         // 与 ringing_start 统一走原生悬浮窗，不再使用嵌入式 Flutter dialog
-        if (type == "agent.phone.incoming") {
+        if (!ApiConfig.isOssEdition && type == "agent.phone.incoming") {
           final String direction = payload["direction"]?.toString() ?? "";
           final String ringStyle = payload["ringStyle"]?.toString() ?? "peer";
           final bool userActionRequired = payload["userActionRequired"] == true;
@@ -2118,7 +2268,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }
 
         // ====== 通话中 Agent 语音回应（voice_reply）—— 双向交互的多轮播报 ======
-        if (type == "agent.phone.voice_reply") {
+        if (!ApiConfig.isOssEdition && type == "agent.phone.voice_reply") {
           final String vrTranscript = payload["transcript"]?.toString() ?? "";
           if (!mounted) return;
           PhoneCallSession.instance.appendAgentVoice(transcriptText: vrTranscript);
@@ -2143,7 +2293,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "morning.briefing") {
           await _handleMorningBriefingEvent(payload);
         }
-        if (type == "agent.phone.call_status") {
+        if (!ApiConfig.isOssEdition && type == "agent.phone.call_status") {
           final String status = payload["status"]?.toString() ?? "unknown";
           final String toActorId = payload["toActorId"]?.toString() ?? "";
           final String? fromPhone = payload["fromPhone"]?.toString();
@@ -2426,6 +2576,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         );
       });
     } else {
+      // 真·分绿泡：新泡开=旧泡完。同一轮的上一个分泡此刻定稿（打字机收尾、
+      // 光标消失），新泡从头逐字展示——模拟真人连发几条消息的观感。
+      // 普通单泡消息无 bN 后缀，不触发此逻辑。
+      final String? bubbleTrace = _bubbleTraceOf(messageId);
+      if (bubbleTrace != null) {
+        _finalizeStreamingBubblesOfTrace(bubbleTrace, exceptId: messageId);
+      }
       // 新建一条 assistant 消息入列表（streaming=true：渲染层从头做打字机效果，
       // 等 chat.assistant_done 重建消息时该标志自动回落为 false）
       final ChatMessage newMsg = ChatMessage(
@@ -2444,6 +2601,220 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         debugPrint("[chat] chunk saveMessage failed: $e");
       }));
     }
+  }
+
+  /// 把同一轮（同 traceId）的所有流式中的分泡消息定稿（streaming=false）。
+  /// 用于：新泡开启时收尾上一泡；done/超时收口时收尾全部泡。
+  /// 保留除 streaming 外的全部字段，不动文本内容。
+  void _finalizeStreamingBubblesOfTrace(String trace, {String? exceptId}) {
+    final List<ChatMessage> finalizedToSave = <ChatMessage>[];
+    setState(() {
+      for (int i = 0; i < _messages.length; i++) {
+        final ChatMessage m = _messages[i];
+        if (!m.streaming) continue;
+        if (exceptId != null && m.messageId == exceptId) continue;
+        if (_bubbleTraceOf(m.messageId) != trace) continue;
+        final ChatMessage settled = ChatMessage(
+          messageId: m.messageId,
+          sessionId: m.sessionId,
+          role: m.role,
+          text: m.text,
+          timestamp: m.timestamp,
+          attachmentImageCount: m.attachmentImageCount,
+          playUrl: m.playUrl,
+          attachments: m.attachments,
+          contentType: m.contentType,
+          durationMs: m.durationMs,
+          waveform: m.waveform,
+          mediaCards: m.mediaCards,
+          renderBlocks: m.renderBlocks,
+          replyBlocks: m.replyBlocks,
+          followUpPrompts: m.followUpPrompts,
+          // streaming 不带 → false：打字机定稿、光标消失
+        );
+        _messages[i] = settled;
+        finalizedToSave.add(settled);
+      }
+    });
+    for (final ChatMessage m in finalizedToSave) {
+      unawaited(_store.saveMessage(m).catchError((Object e) {
+        debugPrint("[chat] bubble finalize saveMessage failed: $e");
+      }));
+    }
+  }
+
+  /// 真·分绿泡 done 收口：逐泡以服务端对账数组（id+定稿文本）为准定稿。
+  ///
+  /// - 每泡 streaming=false 定稿；服务端文本非空时以其为准（与 chunk 流同源，
+  ///   兜住客户端漏收/少收的增量）。
+  /// - 客户端没收到某泡的 chunk（WS 抖动）时按对账补建。
+  /// - 卡片类附着全部挂末泡（服务端确定性收口链的附着目标）：
+  ///   mediaCards/replyBlocks/followups/playUrl → 末泡；多泡时 renderBlocks /
+  ///   replyBlocks 只保留非 text 块（text 块按全文切分，挂末泡会整段复读）。
+  Future<void> _reconcileBubblesOnDone({
+    required List<Map<String, dynamic>> bubbles,
+    required List<Map<String, dynamic>>? mediaCards,
+    required List<Map<String, dynamic>>? renderBlocks,
+    required List<Map<String, dynamic>>? replyBlocks,
+    required List<String>? followUps,
+    required String? playUrl,
+  }) async {
+    final bool multiBubble = bubbles.length > 1;
+    // 多泡时块序列只留卡片/媒体块；单泡（整轮一泡）块即全文视图，原样挂。
+    List<Map<String, dynamic>>? lastReplyBlocks = replyBlocks;
+    if (multiBubble && replyBlocks != null) {
+      final List<Map<String, dynamic>> cardOnly = replyBlocks
+          .where((b) => b["type"]?.toString() != "text")
+          .toList();
+      lastReplyBlocks = cardOnly.isEmpty ? null : cardOnly;
+    }
+    List<Map<String, dynamic>>? lastRenderBlocks = renderBlocks;
+    if (multiBubble && renderBlocks != null) {
+      final List<Map<String, dynamic>> mediaOnly = renderBlocks
+          .where((b) => b["type"]?.toString() != "text")
+          .toList();
+      lastRenderBlocks = mediaOnly.isEmpty ? null : mediaOnly;
+    }
+    final List<ChatMessage> toSave = <ChatMessage>[];
+    for (int i = 0; i < bubbles.length; i++) {
+      final Map<String, dynamic> b = bubbles[i];
+      final String id = b["id"]?.toString() ?? "";
+      if (id.isEmpty) continue;
+      final bool isLast = i == bubbles.length - 1;
+      final String serverText =
+          _sanitizeAssistantVisibleText(b["text"]?.toString() ?? "");
+      final int? idx = _messageIndexById(id);
+      if (idx != null && idx < _messages.length) {
+        setState(() {
+          final ChatMessage previous = _messages[idx];
+          _messages[idx] = ChatMessage(
+            messageId: previous.messageId,
+            sessionId: previous.sessionId,
+            role: previous.role,
+            text: serverText.isNotEmpty ? serverText : previous.text,
+            timestamp: previous.timestamp,
+            attachmentImageCount: previous.attachmentImageCount,
+            playUrl: isLast ? (playUrl ?? previous.playUrl) : previous.playUrl,
+            attachments: previous.attachments,
+            contentType: previous.contentType,
+            durationMs: previous.durationMs,
+            waveform: previous.waveform,
+            mediaCards: isLast
+                ? (mediaCards ?? previous.mediaCards)
+                : previous.mediaCards,
+            renderBlocks: isLast ? lastRenderBlocks : previous.renderBlocks,
+            replyBlocks: isLast ? lastReplyBlocks : previous.replyBlocks,
+            followUpPrompts: isLast ? followUps : previous.followUpPrompts,
+            // streaming 不带 → false：定稿
+          );
+        });
+        toSave.add(_messages[idx]);
+      } else {
+        // 客户端漏收该泡 chunk：按服务端对账补建（含卡片附着）
+        final ChatMessage rebuilt = ChatMessage(
+          messageId: id,
+          sessionId: ApiConfig.effectiveActorId,
+          role: "assistant",
+          text: serverText,
+          timestamp: DateTime.now(),
+          playUrl: isLast ? playUrl : null,
+          mediaCards: isLast ? mediaCards : null,
+          renderBlocks: isLast ? lastRenderBlocks : null,
+          replyBlocks: isLast ? lastReplyBlocks : null,
+          followUpPrompts: isLast ? followUps : null,
+        );
+        setState(() {
+          _messages.add(rebuilt);
+          _assistantMessageIndexById[id] = _messages.length - 1;
+        });
+        toSave.add(rebuilt);
+      }
+    }
+    for (final ChatMessage m in toSave) {
+      await _store.saveMessage(m);
+    }
+  }
+
+  /// 真·分绿泡塌缩收口（finalTextReplacesStream）：出口重写/自检重跑让最终
+  /// 文本与已流文本分叉时，删除本轮所有分泡，落一条 assistant-<traceId> 单泡
+  /// 承载 finalText——避免"已流旧版分泡 + 重写新版"两版拼接。
+  Future<void> _collapseBubblesToFinal({
+    required List<String> bubbleIds,
+    required String traceId,
+    required String finalText,
+    required String? playUrl,
+    required List<Map<String, dynamic>>? mediaCards,
+    required List<Map<String, dynamic>>? renderBlocks,
+    required List<Map<String, dynamic>>? replyBlocks,
+    required List<String>? followUps,
+  }) async {
+    final List<String> removedIds = <String>[];
+    setState(() {
+      _messages.removeWhere((m) {
+        final bool hit = bubbleIds.contains(m.messageId) ||
+            (traceId.isNotEmpty && _bubbleTraceOf(m.messageId) == traceId);
+        if (hit) {
+          _assistantMessageIndexById.remove(m.messageId);
+          removedIds.add(m.messageId);
+        }
+        return hit;
+      });
+    });
+    // 关键：流式阶段每泡已即时落盘（Isar 按 messageId upsert），塌缩必须同步
+    // 删盘，否则重载后已塌缩的泡会诈尸回来（内存删了盘上还在）。
+    for (final String id in removedIds) {
+      try {
+        await _store.deleteMessage(id);
+      } catch (e) {
+        debugPrint("[chat] bubble collapse deleteMessage failed: $e");
+      }
+    }
+    final String collapsedId = traceId.isNotEmpty
+        ? "assistant-$traceId"
+        : "assistant-final-${DateTime.now().microsecondsSinceEpoch}";
+    final int? existingIdx = _messageIndexById(collapsedId);
+    final ChatMessage collapsed;
+    if (existingIdx != null && existingIdx < _messages.length) {
+      final ChatMessage previous = _messages[existingIdx];
+      collapsed = ChatMessage(
+        messageId: previous.messageId,
+        sessionId: previous.sessionId,
+        role: previous.role,
+        text: finalText,
+        timestamp: previous.timestamp,
+        attachmentImageCount: previous.attachmentImageCount,
+        playUrl: playUrl ?? previous.playUrl,
+        attachments: previous.attachments,
+        contentType: previous.contentType,
+        durationMs: previous.durationMs,
+        waveform: previous.waveform,
+        mediaCards: mediaCards ?? previous.mediaCards,
+        renderBlocks: renderBlocks,
+        replyBlocks: replyBlocks,
+        followUpPrompts: followUps,
+      );
+      setState(() {
+        _messages[existingIdx] = collapsed;
+      });
+    } else {
+      collapsed = ChatMessage(
+        messageId: collapsedId,
+        sessionId: ApiConfig.effectiveActorId,
+        role: "assistant",
+        text: finalText,
+        timestamp: DateTime.now(),
+        playUrl: playUrl,
+        mediaCards: mediaCards,
+        renderBlocks: renderBlocks,
+        replyBlocks: replyBlocks,
+        followUpPrompts: followUps,
+      );
+      setState(() {
+        _messages.add(collapsed);
+        _assistantMessageIndexById[collapsedId] = _messages.length - 1;
+      });
+    }
+    await _store.saveMessage(collapsed);
   }
 
   void _flushAssistantChunks() {
@@ -2776,11 +3147,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final Map<String, dynamic> payload = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
       "active": active,
+      "userId": ApiConfig.effectiveActorId,
     };
-    final String uid = ApiConfig.userId.trim();
-    if (uid.isNotEmpty) {
-      payload["userId"] = uid;
-    }
     _ws.sendEvent("chat.agent_processing_ui", payload);
   }
 
@@ -2813,13 +3181,29 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 清掉，否则迟到的 chunk 会看到 _isAgentProcessing=false 但 traceId 还在，
     // 重新把思考气泡点亮。
     final String? userMessageId = ChatTurnController.instance.activeTraceId;
+    // 真·分绿泡：本轮已推出过分泡时，超时不另开"assistant-$traceId"单泡
+    // （分泡正文已实时入列），只把挂着的 streaming 泡定稿，防打字机光标常亮。
+    String? lastBubbleOfTrace;
+    if (userMessageId != null) {
+      for (final ChatMessage m in _messages.reversed) {
+        if (_bubbleTraceOf(m.messageId) == userMessageId) {
+          lastBubbleOfTrace = m.messageId;
+          break;
+        }
+      }
+      if (lastBubbleOfTrace != null) {
+        _finalizeStreamingBubblesOfTrace(userMessageId);
+      }
+    }
     ChatTurnController.instance.activeTraceId = null;
     _flushAssistantChunks();
     final String assistantMessageId = userMessageId != null
         ? "assistant-$userMessageId"
         : "assistant-timeout-${DateTime.now().microsecondsSinceEpoch}";
     const String fallbackText = "抱歉，等待回复超时，请稍后重试";
-    final int? idx = _messageIndexById(assistantMessageId);
+    final int? idx = lastBubbleOfTrace != null
+        ? _messageIndexById(lastBubbleOfTrace)
+        : _messageIndexById(assistantMessageId);
     if (idx != null) {
       setState(() {
         final ChatMessage previous = _messages[idx];
@@ -2835,10 +3219,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             mediaCards: previous.mediaCards,
             renderBlocks: previous.renderBlocks,
             pendingMediaCards: previous.pendingMediaCards,
+            streaming: false,
           );
         }
       });
-    } else if (wasProcessing || userMessageId != null) {
+    } else if ((wasProcessing || userMessageId != null) &&
+        lastBubbleOfTrace == null) {
       // 新语义：流式期间 chunk 没进列表，超时分支是 agent 文本能进列表的唯一入口。
       // 优先用 _pendingAssistantChunkText 里已经缓冲到的部分流式片段作为兜底文
       // 本；如果缓冲是空的（连一个 chunk 都没收到），才用纯兜底文案。
@@ -3002,10 +3388,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       if (AccessCredentialStore.instance.token != null)
         "token": AccessCredentialStore.instance.token,
     };
-    final String uid = ApiConfig.userId.trim();
-    if (uid.isNotEmpty) {
-      sessionInit["userId"] = uid;
-    }
+    // 身份绑定：登录邮箱覆盖（未登录回落 USER_ID/sessionId）。
+    // 无条件携带 userId——服务端 resolveActorId 以 userId 为准，
+    // 这是按账号隔离记忆/世界/配额的第一闸。
+    sessionInit["userId"] = ApiConfig.effectiveActorId;
     _ws.sendEvent("session.init", sessionInit);
   }
 
@@ -3103,9 +3489,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       userMsg["visionFrames"] =
           attachmentFrames.map((VisionWireFrame f) => f.toJson()).toList();
     }
-    if (ApiConfig.userId.trim().isNotEmpty) {
-      userMsg["userId"] = ApiConfig.userId.trim();
-    }
+    // 与 session.init 同源：登录邮箱优先，消息落在本账号车道
+    userMsg["userId"] = ApiConfig.effectiveActorId;
 
     // 位置不再随每条消息实时拉取（避免每次发消息都走 GPS + 逆地理）。
     // 改为按需：Agent 需要位置（如 weather.get_local 工具）时服务端下发
@@ -3221,8 +3606,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       cardItems: cardData.items
           .map((AgentResultItem it) => it.text)
           .toList(growable: false),
-      userId:
-          ApiConfig.userId.trim().isNotEmpty ? ApiConfig.userId.trim() : null,
+      userId: ApiConfig.effectiveActorId,
     );
     if (!sent) {
       _queuedUserMessageIds.remove(actionMessageId);
@@ -3380,11 +3764,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 图库入口（右面板工具格「图库」）：切到一级图库 tab。
-  /// 2026-09-25 起图库从右面板升级为一级 tab（3D 照片墙 + 2D 管理视图），
-  /// 窄栏放不下照片墙，也收掉双入口。
+  /// 常用工具「图库」入口：全屏路由打开图库工作台（3D 照片墙 + 2D 管理视图）。
+  /// 2026-09-29 起图库退出一级 tab（侧栏只留「对话」）：右面板窄栏放不下
+  /// 照片墙，改走全屏路由，页内返回按钮退出。
   void _openGalleryPanel() {
-    _selectTab(1);
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    unawaited(GalleryWorkbenchPage.show(navCtx));
   }
 
   /// 常用工具「浏览器」入口：打开用户与 Agent 共用的内嵌浏览器面板。
@@ -4673,6 +5059,22 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
+  /// 首启向导门禁：独立 MaterialApp（同注册门禁的隔离理由）。
+  Widget _buildOnboardingGate() {
+    return MaterialApp(
+      navigatorKey: _onboardingNavigatorKey,
+      title: "",
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.of(AppThemeVariant.dark).copyWith(
+        scaffoldBackgroundColor: Colors.black,
+      ),
+      home: OnboardingFlow(
+        onComplete: _completeOnboarding,
+        writePreference: _store.savePreference,
+      ),
+    );
+  }
+
   Widget _buildLoadingApp() {
     return ValueListenableBuilder<AppThemeVariant>(
       valueListenable: AppThemeController.instance,
@@ -4726,6 +5128,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
     if (_accountEmail == null) {
       return _buildRegisterGate();
+    }
+    // 首启向导：动画+四步配置顶在主界面之前；重量级初始化照常后台跑，
+    // 向导动画本身就是 init 等待屏（完成即 _isInitialized，无闪屏）。
+    if (_needsOnboarding && !_onboardingDone) {
+      return _buildOnboardingGate();
     }
     // 如果还未初始化，显示加载界面
     if (!_isInitialized) {
@@ -4783,10 +5190,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                           onCheckUpdate: _checkForUpdateManually,
                           onOpenUserMenuFeedback: _openUserMenuFeedback,
                           onOpenDevices: _openDevicesPage,
-                          onEnterPureVoiceMode: () {
-                            unawaited(
-                                PureVoiceModeController.instance.enter());
-                          },
                           userName: _accountEmail?.split("@").first ?? "king",
                           onLogout: _logout,
                         ),
@@ -4938,10 +5341,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (navCtx == null || !navCtx.mounted) return;
     Navigator.of(navCtx).push<void>(
       MaterialPageRoute<void>(
-        builder: (BuildContext ctx) => SettingsPage(
-          onClaimNumberViaChat: () =>
-              _focusChatInputWithText("帮我申请虚拟号码"),
-        ),
+        builder: (BuildContext ctx) => const SettingsPage(),
       ),
     );
   }
@@ -4959,28 +5359,75 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 读本机账号会话：已注册（冷启动）武装 N 开场动画后进主界面；
   /// 未注册直接亮注册页，不播开场动画。
+  /// 登录邮箱同步写进 [ApiConfig.runtimeUserId]——WS/HTTP/本地存储的
+  /// 身份全链以邮箱为准，不同账号数据互不串台。
   Future<void> _loadAccountSession() async {
     await AccountSessionStore.instance.load();
+    ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
+    if (!mounted) return;
+    final bool pending = await _isOnboardingPending();
     if (!mounted) return;
     setState(() {
       _accountEmail = AccountSessionStore.instance.email;
       _sessionLoaded = true;
-      _playBootAnimation = _accountEmail != null;
+      // 向导未完成：首启序列（进度条动画+四步）顶替 N 开场动画
+      _needsOnboarding = _accountEmail != null && pending;
+      _playBootAnimation = _accountEmail != null && !pending;
     });
+  }
+
+  /// 向导完成标记（按账号分键；读盘前 store 可能未 init，等待其就绪）
+  Future<bool> _isOnboardingPending() async {
+    final String? email = _accountEmail ?? AccountSessionStore.instance.email;
+    if (email == null) return false;
+    try {
+      await _store.init();
+    } catch (_) {/* 未就绪按未完成处理 */}
+    final dynamic done = await _store.getPreference("onboarding.completedV1.$email");
+    return done != true;
   }
 
   /// 网页登录回连：落盘会话 → 切入主界面。
   /// 注册/登录本身已在 /accounts/web 网页端对控制面完成（幂等），
   /// 这里只负责本机登录态；落盘成功前门禁不放行，抛错由注册页捕获展示。
-  /// 首次切入主界面武装一次 N 开场动画（重登录时重置播完标记）。
+  /// 登录身份先写进 [ApiConfig.runtimeUserId] 再切界面，保证切入主界面
+  /// 后所有请求立刻带上本账号身份。另外向控制面补一次账号自注册（幂等）：
+  /// 防网页注册落在别处/失败时后台用户列表缺行。首次切入主界面武装一次
+  /// N 开场动画（重登录时重置播完标记）。
   Future<void> _completeWebAuth(String email) async {
     final String mail = email.trim();
     await AccountSessionStore.instance.save(mail);
+    ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
+    unawaited(ControlPlaneAccount.ensureRegistered());
+    final bool pending = await _isOnboardingPending();
     if (!mounted) return;
     setState(() {
       _accountEmail = mail;
-      _playBootAnimation = true;
+      _needsOnboarding = pending;
+      // 首次登录走向导自己的进度条开机动画；老账号照常 N 光扫
+      _playBootAnimation = !pending;
       _bootAnimDone = false;
+    });
+  }
+
+  /// 向导完成：按账号落完成标记，切入主界面（N 光扫不再补播，
+  /// 向导的进度条动画就是本次开场）。
+  Future<void> _completeOnboarding() async {
+    final String? email = _accountEmail;
+    if (email != null) {
+      try {
+        await _store.savePreference("onboarding.completedV1.$email", true);
+        await _store.savePreference("onboarding.completedV1", true);
+      } catch (e) {
+        debugPrint("[Onboarding] 完成标记落盘失败（下次启动将重入向导）: $e");
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _onboardingDone = true;
+      _needsOnboarding = false;
+      _playBootAnimation = false;
+      _bootAnimDone = true;
     });
   }
 
@@ -5028,9 +5475,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 退出登录本体：清本地会话回到注册页（确认框之后/调试直调共用）。
+  /// 登录身份覆盖同步撤销：后续请求回落默认身份，不残留上一账号。
   /// 控制面账号行保留（同邮箱重新注册幂等），本机登录态即刻失效。
   Future<void> _performLogout() async {
     await AccountSessionStore.instance.clear();
+    ApiConfig.runtimeUserId = null;
     if (!mounted) return;
     setState(() => _accountEmail = null);
   }
@@ -5758,11 +6207,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 根级 Tab 栈：0=对话，1=图库（3D 照片墙 + 2D 管理视图，见
-  /// GalleryWorkbenchPage），2=钱包 dialog 占位（栈里不挂载）。
+  /// 根级 Tab 栈：0=对话，1=钱包 dialog 占位（栈里不挂载）。
   ///
-  /// 注：IndexedStack 会构建全部子项 —— GalleryWorkbenchPage 内部用
-  /// 「首次激活才挂载」闸挡住 WebView 提前创建（幽灵窗铁律）。
+  /// 注：图库已于 2026-09-29 退出一级 tab，改为常用工具入口的全屏路由
+  /// （见 GalleryWorkbenchPage.show），不再挂在本栈里。
   Widget _buildTabStack() {
     return Builder(
       builder: (BuildContext context) {
@@ -5770,7 +6218,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           index: _tabIndex,
           children: <Widget>[
             _buildChatPage(context),
-            GalleryWorkbenchPage(visible: _tabIndex == 1),
             const SizedBox.shrink(),
           ],
         );

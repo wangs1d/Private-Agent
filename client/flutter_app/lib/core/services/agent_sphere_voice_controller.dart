@@ -7,6 +7,10 @@ import "agent_sphere_mood_bridge.dart";
 import "multimodal_recognition_service.dart";
 import "voice_command_processor.dart";
 import "voice_wake_service.dart";
+import "dart:typed_data";
+
+import "mic_clip_recorder.dart";
+import "model_api_tester.dart" show VoiceprintApi;
 import "voiceprint_service.dart";
 
 /// 3D Agent 语音交互状态（唤醒 + 声纹 ASR）
@@ -91,6 +95,9 @@ class AgentSphereVoiceController {
     } catch (e) {
       debugPrint("[AgentSphereVoice] init failed: $e");
     }
+
+    // 声纹注册态以服务端为准（向导/设置页录入后跨进程持久）
+    unawaited(_refreshVoiceprintRegistration());
 
     if (_s.wakeEnabled) {
       await startWakeListening();
@@ -204,6 +211,72 @@ class AgentSphereVoiceController {
 
     unawaited(_stopWakeListening());
 
+    // 真声纹闸：先录一小段验证说话人，非录入者不进入聆听（即不响应）。
+    // 通过后才走既有聆听流（识别文本 → 响应），验证由服务端本地 ONNX 引擎完成。
+    unawaited(_verifySpeakerThenListen(fromWake: fromWake));
+  }
+
+  /// 服务端声纹状态回填（bootstrap 与注册完成回调后调用）。
+  Future<void> _refreshVoiceprintRegistration() async {
+    try {
+      final Map<String, dynamic> status = await VoiceprintApi.status();
+      if (status["registered"] == true && !_s.isVoiceprintRegistered) {
+        markVoiceprintRegistered();
+      }
+    } catch (_) {/* 本地 runtime 未就绪时静默 */}
+  }
+
+  Future<void> _verifySpeakerThenListen({required bool fromWake}) async {
+    _emit(_s.copyWith(
+      statusText: fromWake ? "已唤醒 · 验证声纹中…" : "验证声纹中…",
+      verificationStatus: "请自然地说一句话",
+    ));
+    AgentSphereMoodBridge.instance.listening(caption: "声纹验证");
+
+    final MicClipRecorder recorder = MicClipRecorder();
+    String failReason;
+    try {
+      final bool started = await recorder.start();
+      if (!started) {
+        failReason = "无法访问麦克风";
+      } else {
+        await Future<void>.delayed(const Duration(milliseconds: 2600));
+        final Uint8List clip = await recorder.stop();
+        if (clip.length < 16000) {
+          failReason = "没有听清，请再试";
+        } else {
+          final Map<String, dynamic> res = await VoiceprintApi.verify(clip);
+          if (res["ok"] == true && res["match"] == true) {
+            _emit(_s.copyWith(
+              statusText: "验证通过",
+              verificationStatus: "✓ 声纹匹配",
+            ));
+            _beginVoiceprintListening(fromWake: fromWake);
+            return;
+          }
+          failReason = res["ok"] == true
+              ? "✗ 非授权用户"
+              : (res["error"]?.toString() ?? "声纹服务不可用");
+        }
+      }
+    } catch (e) {
+      failReason = "声纹验证失败：$e";
+    } finally {
+      recorder.dispose();
+    }
+
+    _emit(_s.copyWith(
+      statusText: "声纹未通过",
+      verificationStatus: failReason,
+      isSpeaking: false,
+    ));
+    AgentSphereMoodBridge.instance.alert(caption: "声纹未通过");
+    if (_s.wakeEnabled) {
+      unawaited(startWakeListening());
+    }
+  }
+
+  void _beginVoiceprintListening({required bool fromWake}) {
     try {
       final Stream<VoiceprintEvent>? stream = _recognitionService.startVoiceprintListening(
         onResult: (String text) {

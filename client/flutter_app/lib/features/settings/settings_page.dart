@@ -1,33 +1,30 @@
 import "dart:async";
-import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
-import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
-import "../../core/services/access_auth_api.dart";
 import "../../core/services/app_auto_start.dart";
+import "../../core/services/local_runtime_config.dart";
+import "../../core/services/local_runtime_manager.dart";
+import "../../core/services/model_api_tester.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
 import "../../core/theme/app_theme.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
-enum _SettingsSection { general, phoneNumber, phoneBridge }
+enum _SettingsSection { general, model, phoneBridge }
 
 /// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
 /// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
 ///
 /// 分区：
-///  - 站内号码：虚拟电话号码申领/查看（跳转聊天由 Agent 办理）
 ///  - 通用（仅 Windows）：开机自动启动（本地注册表，不依赖服务器）
 ///  - 手机桥接（仅 Android）：Agent 远程访问本机 / 消息捕捉 / 定位回传
+/// （「它眼里的你」2026-09-30 迁往 Agent 主页。）
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key, this.onClaimNumberViaChat});
-
-  /// 「申领站内号码」点击回调：跳回聊天页并预填申领话术（由 Agent 办理）。
-  final VoidCallback? onClaimNumberViaChat;
+  const SettingsPage({super.key});
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -48,12 +45,16 @@ class _SettingsPageState extends State<SettingsPage> {
   int _captureQueueSize = 0;
   bool _captureLoading = true;
 
-  // —— 站内号码（虚拟电话） ——
-  bool _phoneLoading = true;
-  bool _phoneClaimed = false;
-  String _phoneNumber = "";
-  String _phoneError = "";
-  bool _phoneReleasing = false;
+  // —— 模型与声纹分区 ——
+  final TextEditingController _modelKeyCtrl = TextEditingController();
+  final TextEditingController _modelBaseCtrl = TextEditingController();
+  ModelApiTestResult? _modelTestResult;
+  bool _modelTesting = false;
+  bool _modelSaving = false;
+  String? _modelSaveMsg;
+  bool _obscureModelKey = true;
+  Map<String, dynamic>? _vpStatus;
+  bool _vpClearing = false;
 
   @override
   void initState() {
@@ -63,7 +64,8 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     _loadLocalDeviceSettings();
     _refreshCaptureState();
-    _loadPhoneStatus();
+    _loadModelConfig();
+    _refreshVoiceprintStatus();
   }
 
   /// 加载 Windows 本机设置：开机自启（注册表）。
@@ -132,16 +134,19 @@ class _SettingsPageState extends State<SettingsPage> {
     final Color bg = AppPalette.resolveSidebarPanel(
       AppThemeController.instance.value,
     );
-    final bool showPhoneBridge =
-        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+    // 版本闸：手机桥接为内测独占能力，开源版（PAI_EDITION=oss）不出现该分区
+    final bool showPhoneBridge = !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.android &&
+        !ApiConfig.isOssEdition;
     final List<(_SettingsSection, IconData, String)> sections = <(
       _SettingsSection,
       IconData,
       String
     )>[
-      (_SettingsSection.phoneNumber, Icons.call_outlined, "站内号码"),
       if (_isWindows)
         (_SettingsSection.general, Icons.tune_outlined, "通用"),
+      if (_isWindows)
+        (_SettingsSection.model, Icons.graphic_eq_outlined, "模型与声纹"),
       if (showPhoneBridge)
         (_SettingsSection.phoneBridge, Icons.smartphone_outlined, "手机桥接"),
     ];
@@ -243,12 +248,12 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildSectionContent() {
     final String title = switch (_section) {
       _SettingsSection.general => "通用",
-      _SettingsSection.phoneNumber => "站内号码",
+      _SettingsSection.model => "模型与声纹",
       _SettingsSection.phoneBridge => "手机桥接",
     };
     final Widget card = switch (_section) {
       _SettingsSection.general => _buildGeneralCard(),
-      _SettingsSection.phoneNumber => _buildPhoneNumberCard(),
+      _SettingsSection.model => _buildModelSection(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
     };
     return SingleChildScrollView(
@@ -273,6 +278,234 @@ class _SettingsPageState extends State<SettingsPage> {
               card,
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------------ //
+  // 模型与声纹
+  // ------------------------------------------------------------------ //
+
+  Future<void> _loadModelConfig() async {
+    final Map<String, String> cfg = LocalRuntimeConfig.readSync();
+    _modelKeyCtrl.text = cfg["OPENAI_API_KEY"] ?? "";
+    _modelBaseCtrl.text = cfg["OPENAI_BASE_URL"] ?? "";
+  }
+
+  Future<void> _refreshVoiceprintStatus() async {
+    final Map<String, dynamic> status = await VoiceprintApi.status();
+    if (!mounted) return;
+    setState(() => _vpStatus = status);
+  }
+
+  Future<void> _saveModelConfig() async {
+    if (_modelSaving) return;
+    final String key = _modelKeyCtrl.text.trim();
+    if (key.isEmpty) {
+      setState(() => _modelSaveMsg = "API Key 不能为空");
+      return;
+    }
+    setState(() {
+      _modelSaving = true;
+      _modelSaveMsg = null;
+    });
+    try {
+      final Map<String, String> cfg = LocalRuntimeConfig.readSync();
+      cfg["OPENAI_API_KEY"] = key;
+      final String base = _modelBaseCtrl.text.trim();
+      if (base.isNotEmpty) {
+        cfg["OPENAI_BASE_URL"] = base;
+      } else {
+        cfg.remove("OPENAI_BASE_URL");
+      }
+      LocalRuntimeConfig.write(cfg);
+      if (!kIsWeb && LocalRuntimeManager.isBundled) {
+        await LocalRuntimeManager.restart().timeout(const Duration(seconds: 30));
+      }
+      if (!mounted) return;
+      setState(() => _modelSaveMsg = "已保存并生效");
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _modelSaveMsg = "保存失败：$e");
+    } finally {
+      if (mounted) setState(() => _modelSaving = false);
+    }
+  }
+
+  Future<void> _runModelTest() async {
+    if (_modelTesting) return;
+    setState(() {
+      _modelTesting = true;
+      _modelTestResult = null;
+    });
+    final ModelApiTestResult result = await ModelApiTester.test(_modelBaseCtrl.text, _modelKeyCtrl.text);
+    if (!mounted) return;
+    setState(() {
+      _modelTesting = false;
+      _modelTestResult = result;
+    });
+  }
+
+  Future<void> _clearVoiceprint() async {
+    if (_vpClearing) return;
+    setState(() => _vpClearing = true);
+    final bool ok = await VoiceprintApi.unregister();
+    if (!mounted) return;
+    setState(() => _vpClearing = false);
+    await _refreshVoiceprintStatus();
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text(ok ? "声纹已清除" : "清除失败（本地 runtime 不可达？）"), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  Widget _buildModelSection() {
+    return Column(
+      children: <Widget>[
+        _buildModelCard(),
+        const SizedBox(height: 16),
+        _buildVoiceprintCard(),
+      ],
+    );
+  }
+
+  Widget _buildModelCard() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.memory_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("模型服务", style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                Text(
+                  LocalRuntimeConfig.hasApiKey ? "已配置" : "未配置",
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              "对话模型 API Key（OpenAI 兼容，如 DeepSeek）。仅保存在本机，保存后自动重启本地引擎生效。",
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _modelKeyCtrl,
+              obscureText: _obscureModelKey,
+              style: const TextStyle(fontSize: 13),
+              decoration: InputDecoration(
+                labelText: "API Key",
+                hintText: "sk-…",
+                isDense: true,
+                suffixIcon: IconButton(
+                  icon: Icon(_obscureModelKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18),
+                  onPressed: () => setState(() => _obscureModelKey = !_obscureModelKey),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _modelBaseCtrl,
+              style: const TextStyle(fontSize: 13),
+              decoration: const InputDecoration(
+                labelText: "API Base URL",
+                hintText: "https://api.deepseek.com/v1",
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: <Widget>[
+                OutlinedButton(
+                  onPressed: _modelTesting ? null : _runModelTest,
+                  child: _modelTesting
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text("测试连接", style: TextStyle(fontSize: 13)),
+                ),
+                const SizedBox(width: 12),
+                FilledButton(
+                  onPressed: _modelSaving ? null : _saveModelConfig,
+                  child: _modelSaving
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text("保存并生效", style: TextStyle(fontSize: 13)),
+                ),
+                if (_modelSaveMsg != null) ...<Widget>[
+                  const SizedBox(width: 12),
+                  Expanded(child: Text(_modelSaveMsg!, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis)),
+                ],
+              ],
+            ),
+            if (_modelTestResult != null) ...<Widget>[
+              const SizedBox(height: 10),
+              Row(
+                children: <Widget>[
+                  Icon(
+                    _modelTestResult!.ok ? Icons.check_circle_outline : Icons.error_outline_outlined,
+                    size: 16,
+                    color: _modelTestResult!.ok ? cs.primary : Theme.of(context).colorScheme.error,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(_modelTestResult!.summary, style: const TextStyle(fontSize: 12.5), overflow: TextOverflow.ellipsis),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVoiceprintCard() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final bool registered = _vpStatus?["registered"] == true;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.graphic_eq_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("声纹", style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                Text(
+                  registered ? "已录入" : "未录入",
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              registered
+                  ? "语音对话与语音控制只响应你录入的声音。清除后需重新录入。"
+                  : "录入声纹后，语音对话与控制只响应你的声音。可在语音模式里触发注册引导。",
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: <Widget>[
+                OutlinedButton(
+                  onPressed: _vpClearing ? null : (registered ? _clearVoiceprint : _refreshVoiceprintStatus),
+                  child: _vpClearing
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                      : Text(registered ? "清除声纹" : "刷新状态", style: const TextStyle(fontSize: 13)),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );
@@ -421,189 +654,6 @@ class _SettingsPageState extends State<SettingsPage> {
         _listenerEnabled = false;
       });
     }
-  }
-
-  // ------------------------------------------------------------------ //
-  // 站内号码（虚拟电话）
-  // ------------------------------------------------------------------ //
-
-  static const Duration _phoneHttpTimeout = Duration(seconds: 10);
-
-  /// 查询当前用户是否已申领站内号码（GET /phone/me）。
-  Future<void> _loadPhoneStatus() async {
-    try {
-      final Uri uri = Uri.parse("${ApiConfig.httpBase}/phone/me").replace(
-        queryParameters: <String, String>{
-          "userId": ApiConfig.effectiveActorId,
-        },
-      );
-      final http.Response res = await http
-          .get(
-            uri,
-            headers: <String, String>{
-              "Content-Type": "application/json",
-              ...AccessCredentialStore.instance.authHeaders,
-            },
-          )
-          .timeout(_phoneHttpTimeout);
-      final Map<String, dynamic> data =
-          jsonDecode(res.body) as Map<String, dynamic>;
-      if (!mounted) return;
-      if (res.statusCode != 200 || data["ok"] != true) {
-        setState(() {
-          _phoneLoading = false;
-          _phoneError = data["error"]?.toString() ?? "加载失败";
-        });
-        return;
-      }
-      setState(() {
-        _phoneLoading = false;
-        _phoneError = "";
-        _phoneClaimed = data["claimed"] == true;
-        _phoneNumber = data["virtualPhone"]?.toString() ?? "";
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _phoneLoading = false;
-        _phoneError = "网络异常，无法获取号码状态";
-      });
-    }
-  }
-
-  /// 释放站内号码（DELETE /phone/me），号码回池；释放后可重新申领。
-  Future<void> _releaseNumber() async {
-    if (_phoneReleasing) return;
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) => AlertDialog(
-        title: const Text("释放站内号码"),
-        content: Text("释放后 $_phoneNumber 将不再属于你，他人申领可能占用该号；通话记录不受影响。确定释放？"),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text("取消"),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text("释放"),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    setState(() => _phoneReleasing = true);
-    try {
-      final Uri uri = Uri.parse("${ApiConfig.httpBase}/phone/me").replace(
-        queryParameters: <String, String>{
-          "userId": ApiConfig.effectiveActorId,
-        },
-      );
-      final http.Response res = await http
-          .delete(
-            uri,
-            headers: <String, String>{
-              "Content-Type": "application/json",
-              ...AccessCredentialStore.instance.authHeaders,
-            },
-          )
-          .timeout(_phoneHttpTimeout);
-      final Map<String, dynamic> data =
-          jsonDecode(res.body) as Map<String, dynamic>;
-      if (!mounted) return;
-      if (res.statusCode == 200 && data["ok"] == true) {
-        _snack("已释放号码 $_phoneNumber");
-        setState(() {
-          _phoneClaimed = false;
-          _phoneNumber = "";
-        });
-      } else {
-        _snack(data["error"]?.toString() ?? "释放失败，请重试");
-      }
-    } catch (_) {
-      if (mounted) _snack("网络异常，释放失败");
-    } finally {
-      if (mounted) setState(() => _phoneReleasing = false);
-    }
-  }
-
-  /// 站内号码卡：申领走对话（Agent 办理），已申领展示号码并支持释放。
-  Widget _buildPhoneNumberCard() {
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                const Icon(Icons.call_outlined, size: 18),
-                const SizedBox(width: 8),
-                Text("站内号码", style: Theme.of(context).textTheme.titleMedium),
-              ],
-            ),
-            const SizedBox(height: 4),
-            const Text(
-              "6 位站内号码是你的虚拟电话号：申领后 Agent 才能呼出虚拟电话（语音提醒/通话），"
-              "也是你在站内电话网络的注册凭证。App 内呼叫 Agent 无需号码。",
-              style: TextStyle(fontSize: 12.5),
-            ),
-            const SizedBox(height: 8),
-            if (_phoneLoading)
-              const ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text("正在获取号码状态…"),
-                dense: true,
-              )
-            else if (_phoneError.isNotEmpty)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                title: Text(_phoneError),
-                trailing: TextButton(
-                  onPressed: () {
-                    setState(() => _phoneLoading = true);
-                    _loadPhoneStatus();
-                  },
-                  child: const Text("重试"),
-                ),
-              )
-            else if (_phoneClaimed) ...<Widget>[
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                leading: const Icon(Icons.confirmation_number_outlined),
-                title: Text(
-                  _phoneNumber,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 2,
-                  ),
-                ),
-                subtitle: const Text("已注册 · 申领后可使用虚拟电话呼出"),
-                trailing: TextButton(
-                  onPressed: _phoneReleasing ? null : _releaseNumber,
-                  child: const Text("释放"),
-                ),
-              ),
-            ] else
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                leading: const Icon(Icons.info_outline),
-                title: const Text("尚未申领"),
-                subtitle: const Text("申领后即可使用虚拟电话服务"),
-                trailing: FilledButton(
-                  onPressed: widget.onClaimNumberViaChat,
-                  child: const Text("去申领"),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
   }
 
   // ------------------------------------------------------------------ //
