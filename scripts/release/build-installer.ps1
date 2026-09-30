@@ -14,20 +14,30 @@ param(
   [string]$ControlPlaneUrl = "http://47.98.122.29:3000",
   # staging 根目录：刻意用短路径，避开 node_modules 深路径 260 字符上限
   [string]$StageRootPath = "E:\PAStage",
+  # 发行版本：internal=内测版（默认，能力全量，AppId/文件名同历史）；oss=开源版
+  # （GitHub 发行）：烤 PAI_EDITION=oss、runtime\.env 写 NEXTBOT_EDITION=oss、
+  # 独立 AppId 与 Nextbot-Setup-OSS.exe 文件名、跳过 travel-knowledge 种子。
+  [ValidateSet('internal', 'oss')]
+  [string]$Edition = "internal",
   [switch]$SkipClientBuild,
   [switch]$SkipServerBuild
 )
 $ErrorActionPreference = 'Stop'
+# 开源版默认不烤云端控制面（GitHub 发行不依赖 ECS）；确要烤请显式传参
+if ($Edition -eq 'oss') {
+  if (-not $PSBoundParameters.ContainsKey('UpdateManifestUrl')) { $UpdateManifestUrl = '' }
+  if (-not $PSBoundParameters.ContainsKey('ControlPlaneUrl')) { $ControlPlaneUrl = '' }
+}
 $Repo = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $StageRoot = $StageRootPath
 $FlutterApp = Join-Path $Repo 'client\flutter_app'
 $StageApp = Join-Path $StageRoot 'app'
 $StageRuntime = Join-Path $StageRoot 'runtime'
 
-Write-Host '== [1/5] 客户端 release 构建（烤入 UPDATE_MANIFEST_URL + CONTROL_PLANE_URL）=='
+Write-Host '== [1/5] 客户端 release 构建（烤入 PAI_EDITION + UPDATE_MANIFEST_URL + CONTROL_PLANE_URL）=='
 if (-not $SkipClientBuild) {
   Push-Location $FlutterApp
-  & flutter build windows --release --dart-define "UPDATE_MANIFEST_URL=$UpdateManifestUrl" --dart-define "CONTROL_PLANE_URL=$ControlPlaneUrl"
+  & flutter build windows --release --dart-define "PAI_EDITION=$Edition" --dart-define "UPDATE_MANIFEST_URL=$UpdateManifestUrl" --dart-define "CONTROL_PLANE_URL=$ControlPlaneUrl"
   if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'flutter build failed' }
   Pop-Location
 }
@@ -99,16 +109,64 @@ if (Test-Path (Join-Path $Repo 'server\node_modules')) {
   if ($LASTEXITCODE -ne 0) { throw 'server node_modules tar copy failed' }
 }
 
-# 3.7 旅行知识种子数据（68KB）：travel 技能的离线底座（poi/坐标/目的地/国内关键词）。
+# 3.6.5 本地向量引擎原生库裁剪：onnxruntime-node 随包带全平台二进制
+# （darwin/linux/win32 × arm64/x64），捆绑版只跑 Windows x64，其余全删
+# （省 ~150MB staging，安装包体积同步受益）。bin 下按 napi-vN 版本目录逐个裁。
+foreach ($ortBin in (Join-Path $StageRuntime 'node_modules\onnxruntime-node\bin'),
+                    (Join-Path $StageRuntime 'dist\node_modules\onnxruntime-node\bin')) {
+  if (Test-Path $ortBin) {
+    foreach ($napi in Get-ChildItem $ortBin -Directory) {
+      Get-ChildItem $napi.FullName -Directory | Where-Object { $_.Name -ne 'win32' } | Remove-Item -Recurse -Force
+      $winDir = Join-Path $napi.FullName 'win32'
+      if (Test-Path $winDir) {
+        Get-ChildItem $winDir -Directory | Where-Object { $_.Name -ne 'x64' } | Remove-Item -Recurse -Force
+      }
+    }
+  }
+}
+
+# 3.7 本地内置向量引擎模型资产（零配置记忆底座）：bge-small-zh-v1.5 int8 ONNX
+# （~24MB，512 维）。dev 在 server\models\bge-small-zh-v1.5，捆绑为 runtime\models\
+# bge-small-zh-v1.5——引擎按模块相对路径解析（dist/agentic-memory/local-embedding
+# 上三级即 runtime 根），与 load-server-env 的 serverRoot 口径一致。
+Copy-Item (Join-Path $Repo 'server\models\bge-small-zh-v1.5') (Join-Path $StageRuntime 'models\bge-small-zh-v1.5') -Recurse -Force
+
+# 3.7.1 说话人向量模型（声纹底座）：wespeaker cnceleb_resnet34 ONNX（~26MB，256 维）。
+# 与 bge 同目录约定（runtime\models\speaker-cnceleb-resnet34）。
+Copy-Item (Join-Path $Repo 'server\models\speaker-cnceleb-resnet34') (Join-Path $StageRuntime 'models\speaker-cnceleb-resnet34') -Recurse -Force
+
+# 3.8 旅行知识种子数据（68KB）：travel 技能的离线底座（poi/坐标/目的地/国内关键词）。
 # 知识库读 cwd\data\travel-knowledge，捆绑 runtime 的 cwd 就是 runtime 目录，路径正好对上；
-# 拷在冒烟之前，让门禁实跑时顺带验证真实加载。
-Copy-Item (Join-Path $Repo 'server\data\travel-knowledge') (Join-Path $StageRuntime 'data\travel-knowledge') -Recurse -Force
+# 拷在冒烟之前，让门禁实跑时顺带验证真实加载。开源版剔除 travel 家族，种子一并跳过。
+if ($Edition -ne 'oss') {
+  Copy-Item (Join-Path $Repo 'server\data\travel-knowledge') (Join-Path $StageRuntime 'data\travel-knowledge') -Recurse -Force
+}
+
+# 3.9 开源版差异注入：runtime\.env 声明 NEXTBOT_EDITION=oss（服务端版本闸的唯一
+# 开关，loadServerEnv 从 runtime 根读 .env）+ 独立发行清单 client-manifest.oss.json
+# （客户端以 ?edition=oss 拉取；url 留空 = 开源版自分发，不弹指向 ECS 的升级提示）。
+if ($Edition -eq 'oss') {
+  Set-Content -Path (Join-Path $StageRuntime '.env') -Value "NEXTBOT_EDITION=oss" -Encoding ascii
+  $ossManifest = [ordered]@{
+    latest     = $Version
+    minVersion = $Version
+    url        = ''
+    notes      = "Open Source Edition $Version"
+    channel    = 'byok'
+  }
+  # 注意 PowerShell 5.1 的 utf8 带 BOM，Node JSON.parse 会炸，故用 ascii（内容全 ASCII）
+  $ossManifest | ConvertTo-Json | Set-Content -Path (Join-Path $StageRuntime 'config\client-manifest.oss.json') -Encoding ascii
+}
 
 Write-Host '== [4/5] 校验关键文件 =='
 foreach ($f in (Join-Path $StageApp 'private_ai_agent.exe'),
                (Join-Path $StageRuntime 'node.exe'),
                (Join-Path $StageRuntime 'dist\index.js'),
                (Join-Path $StageRuntime 'node_modules\@private-ai-agent\agent-world\dist'),
+               (Join-Path $StageRuntime 'node_modules\onnxruntime-node\bin\napi-v6\win32\x64'),
+               (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\model_quantized.onnx'),
+               (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\vocab.txt'),
+               (Join-Path $StageRuntime 'models\speaker-cnceleb-resnet34\cnceleb_resnet34.onnx'),
                (Join-Path $StageRuntime 'package.json')) {
   if (-not (Test-Path $f)) { throw "staging 缺少关键文件: $f" }
 }
@@ -137,18 +195,25 @@ $smokePort = 3199  # 避开开发常驻的 3000；被占用会超时失败，属
 $smokeLog = Join-Path $StageRoot 'runtime-smoke.log'
 $env:PORT = "$smokePort"
 $env:FUNASR_AUTO_START = '0'
+# 冒烟必须走零配置路径：清掉开发 shell 可能残留的远端 Embedding 变量，
+# 否则本地向量引擎不点亮，上面的 [local-embedding] 断言会假失败。
+# 再放一个占位对话 key（过 OpenAI SDK 构造，冒烟不发真实对话请求），
+# 让 agentic-memory 运行时能在冒烟环境完整装配。
+Remove-Item Env:OPENAI_API_KEY, Env:OPENAI_BASE_URL, Env:AGENT_EMBEDDING_API_KEY, Env:AGENT_EMBEDDING_BASE_URL, Env:OPENAI_EMBEDDINGS_URL -ErrorAction SilentlyContinue
+$env:OPENAI_API_KEY = 'sk-smoke-0000000000000000000'
 $smokeProc = Start-Process -FilePath (Join-Path $StageRuntime 'node.exe') `
   -ArgumentList 'dist\index.js' -WorkingDirectory $StageRuntime `
   -WindowStyle Hidden -PassThru `
   -RedirectStandardOutput $smokeLog -RedirectStandardError "$smokeLog.err"
 Remove-Item Env:PORT, Env:FUNASR_AUTO_START -ErrorAction SilentlyContinue
 $ready = $false
+$smokeManifestUri = "http://127.0.0.1:$smokePort/api/client/manifest"
+if ($Edition -eq 'oss') { $smokeManifestUri = "$smokeManifestUri?edition=oss" }
 foreach ($i in 1..50) {
   Start-Sleep -Milliseconds 800
   if ($smokeProc.HasExited) { break }
   try {
-    $res = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 `
-      -Uri "http://127.0.0.1:$smokePort/api/client/manifest"
+    $res = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri $smokeManifestUri
     if ($res.StatusCode -eq 200) { $ready = $true; break }
   } catch {}
 }
@@ -160,9 +225,35 @@ if (-not $ready) {
   Get-Content "$smokeLog.err" -Tail 40 -ErrorAction SilentlyContinue
   throw 'runtime 启动冒烟失败：捆绑布局下服务未通过健康检查'
 }
+# 零配置记忆底座断言：捆绑冒烟环境无任何远端 Embedding 配置，内置向量引擎
+# 必须自动点亮——模型资产/原生库/解析路径任何一环断了都会在这里暴露。
+$smokeTextAll = (Get-Content $smokeLog -Raw -ErrorAction SilentlyContinue) + (Get-Content "$smokeLog.err" -Raw -ErrorAction SilentlyContinue)
+if (-not $smokeTextAll.Contains('[local-embedding]')) {
+  Write-Host '--- 冒烟 stdout（尾部）---'
+  Get-Content $smokeLog -Tail 40 -ErrorAction SilentlyContinue
+  throw '捆绑门禁失败：冒烟日志未出现 [local-embedding] 横幅，本地向量引擎未随包点亮（检查 models 资产与 onnxruntime-node 裁剪）'
+}
+if ($smokeTextAll.Contains('内置向量引擎不可用')) {
+  throw '捆绑门禁失败：本地向量引擎装载失败（模型缺失或 ONNX 会话创建异常），详见冒烟日志'
+}
+if (-not $smokeTextAll.Contains('Mem0 OSS runtime ready')) {
+  Write-Host '--- 冒烟 stdout（尾部）---'
+  Get-Content $smokeLog -Tail 40 -ErrorAction SilentlyContinue
+  throw '捆绑门禁失败：agentic-memory 运行时未就绪（零配置记忆底座未装配成功），详见冒烟日志'
+}
+# 开源版加一道版本闸生效断言：启动横幅必须打出 NEXTBOT_EDITION=oss
+# （证明 runtime\.env 被 loadServerEnv 真实加载，capability-modules/路由/技能闸全链生效）
+if ($Edition -eq 'oss') {
+  $smokeText = (Get-Content $smokeLog -Raw -ErrorAction SilentlyContinue) + (Get-Content "$smokeLog.err" -Raw -ErrorAction SilentlyContinue)
+  if (-not $smokeText.Contains('NEXTBOT_EDITION=oss')) {
+    Write-Host '--- 冒烟 stdout（尾部）---'
+    Get-Content $smokeLog -Tail 40 -ErrorAction SilentlyContinue
+    throw '开源版门禁失败：冒烟日志未出现 [edition] NEXTBOT_EDITION=oss 横幅，版本闸未生效'
+  }
+}
 Remove-Item $smokeLog, "$smokeLog.err" -Force -ErrorAction SilentlyContinue
 # 清掉冒烟实跑产生的运行期垃圾（poi-cache、持久化文件、日志），但保留 3.7 拷入的
-# travel-knowledge 种子数据——那是随包分发的资产，不是运行期产物
+# travel-knowledge 种子数据——那是随包分发的资产，不是运行期产物（开源版无此项）
 $dataDir = Join-Path $StageRuntime 'data'
 foreach ($child in Get-ChildItem $dataDir -ErrorAction SilentlyContinue) {
   if ($child.Name -ne 'travel-knowledge') {
@@ -172,7 +263,7 @@ foreach ($child in Get-ChildItem $dataDir -ErrorAction SilentlyContinue) {
 foreach ($dir in 'logs') {
   Remove-Item (Join-Path $StageRuntime $dir) -Recurse -Force -ErrorAction SilentlyContinue
 }
-if (-not (Test-Path (Join-Path $dataDir 'travel-knowledge\poi-db.json'))) {
+if ($Edition -ne 'oss' -and -not (Test-Path (Join-Path $dataDir 'travel-knowledge\poi-db.json'))) {
   throw 'staging 缺少 travel-knowledge 种子数据'
 }
 Write-Host 'runtime 启动冒烟通过' -ForegroundColor Green
@@ -181,10 +272,11 @@ Write-Host '== [5/5] Inno 编译 =='
 $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Users\Administrator\AppData\Local\Programs\Inno Setup 6\ISCC.exe') |
   Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw '未找到 ISCC.exe，请安装 Inno Setup 6' }
-& $iscc (Join-Path $Repo 'installer\private-agent.iss') "/DAppVersion=$Version" "/DStage=$StageRoot"
+& $iscc (Join-Path $Repo 'installer\private-agent.iss') "/DAppVersion=$Version" "/DStage=$StageRoot" "/DEdition=$Edition"
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
 
-$out = Join-Path $Repo "windows_dist\installer\Nextbot-Setup.exe"
+$setupName = if ($Edition -eq 'oss') { 'Nextbot-Setup-OSS.exe' } else { 'Nextbot-Setup.exe' }
+$out = Join-Path $Repo "windows_dist\installer\$setupName"
 Write-Host ''
 Write-Host "安装包产出: $out" -ForegroundColor Green
 Write-Host ("大小: {0:N1} MB" -f ((Get-Item $out).Length / 1MB))

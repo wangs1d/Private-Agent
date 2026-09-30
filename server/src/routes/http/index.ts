@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
-import { registerAccountRoutes } from "./accounts.js";
+import { registerAccountRoutes, isEmailOtpEnforced } from "./accounts.js";
 import { registerAccountWebRoutes } from "./accounts-web.js";
 import { registerFinanceIngestRoutes } from "./finance-ingest.js";
 import { registerAgentCollaborationRoutes } from "./agent.js";
@@ -26,7 +26,7 @@ import {
   registerWorldSocialRoutes,
 } from "@private-ai-agent/agent-world";
 import { registerChatWeb } from "./chat-web.js";
-import { isAgentWorldSocialEnabled } from "../../config/env.js";
+import { isAgentWorldSocialEnabled, isOssEdition } from "../../config/env.js";
 import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
 import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
 import { registerWechatClawRoutes } from "./wechat-claw.js";
@@ -48,10 +48,12 @@ import { registerProactivityPipelineRoutes, registerAutonomyRoutes } from "./pro
 import { registerCapabilityReadinessRoutes } from "./capability-readiness.js";
 import { registerChatSuggestionRoutes } from "./chat-suggestions.js";
 import { registerMemoryCrudRoutes } from "./memory-crud.js";
+import { registerProfileManageRoutes } from "./profile-manage.js";
 import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerVoiceRealtimeRoutes } from "./voice-realtime.js";
+import { registerVoiceprintRoutes } from "./voiceprint.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerFeedbackRoutes } from "./feedback.js";
 import { registerAdminAuthRoutes } from "./admin-session-auth.js";
@@ -102,13 +104,16 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerScheduleRoutes(app, deps);
   registerWeatherRoutes(app, deps);
   registerGeoRoutes(app);
-  registerTravelMediaRoutes(app, deps);
-  // 行程路由域（编辑/搜索/预订/分享；travelPlanningService 未装配时端点返回 503）
-  registerTravelPlanRoutes(app, deps);
-  // 行程规划浏览器页面（行程卡 → 系统浏览器打开；见 travel-map.ts）
-  registerTravelMapRoutes(app);
-  registerPoiDetailsRoute(app);
-  registerPhoneRoutes(app, deps);
+  // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：旅游全家桶（媒体/行程/地图）+ 虚拟电话
+  if (!isOssEdition()) {
+    registerTravelMediaRoutes(app, deps);
+    // 行程路由域（编辑/搜索/预订/分享；travelPlanningService 未装配时端点返回 503）
+    registerTravelPlanRoutes(app, deps);
+    // 行程规划浏览器页面（行程卡 → 系统浏览器打开；见 travel-map.ts）
+    registerTravelMapRoutes(app);
+    registerPoiDetailsRoute(app);
+    registerPhoneRoutes(app, deps);
+  }
   registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);
   registerWalletRoutes(app, deps);
@@ -123,9 +128,13 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerChatWeb(app);
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
-  registerAccountWebRoutes(app);
+  // 网页登录页按 OTP 闸状态渲染验证码步骤（SMTP 凭据齐备即自动收紧）
+  registerAccountWebRoutes(app, { otpEnabled: isEmailOtpEnforced(deps) });
   registerFinanceIngestRoutes(app, deps);
-  registerFriendRoutes(app, deps);
+  // 好友社交（agent.link.* 的 HTTP 面；开源版剔除）
+  if (!isOssEdition()) {
+    registerFriendRoutes(app, deps);
+  }
   registerVoiceMessageRoutes(app, {
     voiceMessageService: deps.voiceMessageService,
     voiceCapabilityService: deps.voiceCapabilityService,
@@ -149,8 +158,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     agentMemorySyncService: deps.agentMemorySyncService,
   });
   registerBrowserSessionRoutes(app, deps);
-  registerPhoneBridgeRoutes(app, { phoneBridgeCoordinator: deps.phoneBridgeCoordinator });
-  registerPhoneBridgeCaptureRoutes(app);
+  // 手机桥接（拨真实手机/短信/定位捕捉；内测独占，开源版剔除）
+  if (!isOssEdition()) {
+    registerPhoneBridgeRoutes(app, { phoneBridgeCoordinator: deps.phoneBridgeCoordinator });
+    registerPhoneBridgeCaptureRoutes(app);
+  }
   registerMultiAgentMonitorRoutes(app, {
     runtime: deps.runtime,
     scheduleTaskService: deps.scheduleTaskService,
@@ -244,6 +256,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 聊天推荐项（「为你推荐」，联查能力就绪状态后抽样）
   registerChatSuggestionRoutes(app);
   registerMemoryCrudRoutes(app);
+  registerProfileManageRoutes(app);
+  // 声纹注册/验证（首启向导 + 语音对话说话人闸；引擎本地 ONNX，缺失时优雅降级）
+  registerVoiceprintRoutes(app);
   registerPaymentGuardrailRoutes(app);
   registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore, auditTrailService: deps.auditTrailService });
   registerBriefingTestRoutes(app, {
