@@ -11,6 +11,7 @@ import "dart:typed_data";
 
 import "mic_clip_recorder.dart";
 import "model_api_tester.dart" show VoiceprintApi;
+import "voice_duplex_service.dart";
 import "voiceprint_service.dart";
 
 /// 3D Agent 语音交互状态（唤醒 + 声纹 ASR）
@@ -251,6 +252,11 @@ class AgentSphereVoiceController {
               statusText: "验证通过",
               verificationStatus: "✓ 声纹匹配",
             ));
+            // 向实时语音通道上报一次性说话人令牌（服务端放行本连接对话帧）
+            final String? token = res["speakerToken"]?.toString();
+            if (token != null && token.isNotEmpty) {
+              VoiceDuplexService.instance.sendSpeakerVerify(token);
+            }
             _beginVoiceprintListening(fromWake: fromWake);
             return;
           }

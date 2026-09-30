@@ -67,6 +67,7 @@ class VoiceDuplexService {
   /// minimax-realtime 引擎。
   Future<bool> start({
     String? sessionId,
+    String? actorId,
     Duration timeout = const Duration(seconds: 6),
   }) async {
     await stop();
@@ -83,6 +84,8 @@ class VoiceDuplexService {
       channel.sink.add(jsonEncode(<String, dynamic>{
         "type": "session.start",
         if (sessionId != null && sessionId.isNotEmpty) "sessionId": sessionId,
+        // 声纹闸：声明身份；该身份已注册声纹时服务端要求 speaker.verify 后才受理对话
+        if (actorId != null && actorId.isNotEmpty) "actorId": actorId,
       }));
       final bool ok = await _readyCompleter!.future.timeout(
         timeout,
@@ -97,6 +100,16 @@ class VoiceDuplexService {
       await stop();
       return false;
     }
+  }
+
+  /// 声纹验证通过后上报一次性说话人令牌（服务端放行本连接的对话帧）。
+  void sendSpeakerVerify(String token) {
+    final WebSocketChannel? channel = _channel;
+    if (channel == null) return;
+    channel.sink.add(jsonEncode(<String, dynamic>{
+      "type": "speaker.verify",
+      "token": token,
+    }));
   }
 
   /// 发送一轮文本对话（纯语音模式：本地识别文本 → 语音回流）。

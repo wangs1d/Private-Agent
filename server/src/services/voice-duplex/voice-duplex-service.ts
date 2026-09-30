@@ -4,6 +4,7 @@ import type { MiniMaxRealtimeService } from "../voice-dialogue/minimax-realtime-
 import { DuplexVoiceSession } from "./duplex-session.js";
 import { MinimaxDuplexSession } from "./minimax-duplex-session.js";
 import { parseClientMessage, type DuplexServerMessage } from "./protocol.js";
+import { getVoiceprintService } from "../voice/voiceprint-service.js";
 
 /**
  * 全双工实时语音 —— 会话管理 + WS 接入层（抽象层主体）。
@@ -11,7 +12,7 @@ import { parseClientMessage, type DuplexServerMessage } from "./protocol.js";
  * 职责：
  *   - 一条 WS 连接 = 一个 DuplexVoiceSession（连接关闭即销毁）
  *   - ASR/TTS/LLM provider 从 VoiceDialogueService 注册表解析
- *     （FunASR 流式 ASR + SiliconFlow/OpenAI TTS + OpenAI 流式 LLM）
+ *     （FunASR 流式 ASR + MiniMax/OpenAI TTS + OpenAI 流式 LLM）
  *   - LLM 流优先 chatStream；provider 未实现时回退一次性 chat
  *     （把整段文本作为一个 delta 下发，管线其余部分不变）
  *
@@ -81,6 +82,10 @@ export class VoiceDuplexService {
     };
 
     let session: AnyDuplexSession | null = null;
+    // 声纹闸（连接级状态）：会话声明了已注册声纹的 actorId 时，必须先通过
+    // 说话人验证（speaker.verify 带一次性令牌）才允许对话帧，防绕过客户端闸。
+    // 未声明 actorId（如电话通话路径）或该身份未注册声纹 → 不设闸（向后兼容）。
+    let speaker: { actorId: string; needsVerification: boolean; verified: boolean } | null = null;
     socket.on("message", (data: unknown) => {
       const raw = typeof data === "string" ? data : data instanceof Buffer ? data.toString("utf8") : String(data ?? "");
       const msg = parseClientMessage(raw);
@@ -95,6 +100,30 @@ export class VoiceDuplexService {
         }
         session = this.createSession(sink, msg.systemPrompt);
         this.sessions.set(socket, session);
+        const actorId = msg.actorId?.trim();
+        speaker =
+          actorId && getVoiceprintService().status(actorId).registered
+            ? { actorId, needsVerification: true, verified: false }
+            : null;
+      }
+      if (msg.type === "speaker.verify") {
+        const ok = speaker !== null && getVoiceprintService().consumeToken(msg.token, speaker.actorId);
+        if (speaker) speaker.verified = ok;
+        if (!ok) {
+          sink({ type: "error", message: "声纹验证失败：令牌无效或身份不匹配", recoverable: false });
+          socket.close(4003, "speaker_unverified");
+          return;
+        }
+        return;
+      }
+      if (
+        speaker?.needsVerification &&
+        !speaker.verified &&
+        (msg.type === "text.turn" || msg.type === "audio.chunk")
+      ) {
+        sink({ type: "error", message: "声纹未验证：请先通过说话人验证", recoverable: false });
+        socket.close(4003, "speaker_unverified");
+        return;
       }
       if (session) {
         void session.handle(msg).catch((err) => {

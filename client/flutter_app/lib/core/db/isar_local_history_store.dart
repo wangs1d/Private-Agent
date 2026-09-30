@@ -70,9 +70,18 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     return File("${dir.path}${Platform.pathSeparator}private_ai_agent_store.json");
   }
 
+  /// 并发安全的初始化：共享同一个 in-flight future。旧的
+  /// 「if (_storageFile != null) return」闸存在竞态窗口——首个 init 已解析出
+  /// 存储文件但 readAsString 仍未完成时，并发调用会 early-return 拿到
+  /// 未装载的空偏好表（首启向导完成标记读不回的真因）。
+  Future<void>? _initPromise;
+
   @override
-  Future<void> init() async {
-    if (_storageFile != null) return;
+  Future<void> init() {
+    return _initPromise ??= _doInit();
+  }
+
+  Future<void> _doInit() async {
 
     // Web 平台不支持文件系统，使用内存存储
     if (kIsWeb) {

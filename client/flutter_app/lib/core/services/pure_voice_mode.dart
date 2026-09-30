@@ -9,6 +9,7 @@ import "briefing_tts_api.dart";
 import "desktop_notification_launcher.dart";
 import "tts_player.dart";
 import "voice_duplex_service.dart";
+import "../config/api_config.dart";
 
 /// 纯语音模式阶段（岛条目跟随该阶段而非自由映射状态文案）。
 enum PureVoicePhase { ambient, thinking, speaking }
@@ -105,7 +106,9 @@ class PureVoiceModeController {
 
     // MiniMax 实时语音通道：连上后对话改走 text.turn → 语音整轮回流。
     // 麦克风仍归本地唤醒/声纹/识别；连不上静默回落聊天链路。
-    final bool duplexOk = await VoiceDuplexService.instance.start();
+    final bool duplexOk = await VoiceDuplexService.instance.start(
+      actorId: ApiConfig.effectiveActorId,
+    );
     if (duplexOk) {
       _duplexActive = true;
       _wireDuplexCallbacks();

@@ -311,7 +311,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _modelSaveMsg = null;
     });
     try {
-      final Map<String, String> cfg = LocalRuntimeConfig.readSync();
+      final Map<String, String> cfg = Map.of(LocalRuntimeConfig.readSync()); // readSync 返回不可变 map，须拷贝后改
       cfg["OPENAI_API_KEY"] = key;
       final String base = _modelBaseCtrl.text.trim();
       if (base.isNotEmpty) {

@@ -1,6 +1,11 @@
 import type { FastifyInstance } from "fastify";
 
 import { resolveActorId } from "../../agent/actor-id.js";
+
+/** 身份解析：显式 actorId 优先（向导/探针），其次 userId/sessionId（正式客户端）。 */
+function resolveRouteActor(parts: { actorId?: string; userId?: string; sessionId?: string }): string {
+  return parts.actorId?.trim() || resolveActorId({ userId: parts.userId, sessionId: parts.sessionId ?? "" });
+}
 import { getVoiceprintService } from "../../services/voice/voiceprint-service.js";
 
 /**
@@ -19,8 +24,8 @@ export function registerVoiceprintRoutes(app: FastifyInstance): void {
 
   app.post("/api/voice/voiceprint/register", async (request, reply) => {
     const body = request.body as { userId?: string; sessionId?: string; samples?: unknown };
-    const actorId = resolveActorId({ userId: body?.userId, sessionId: body?.sessionId ?? "" });
-    if (!actorId) return reply.code(400).send({ ok: false, error: "userId/sessionId required" });
+    const actorId = resolveRouteActor(body ?? {});
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId/userId/sessionId required" });
     if (!Array.isArray(body?.samples) || body.samples.length === 0) {
       return reply.code(400).send({ ok: false, error: "samples required（PCM16 base64 数组）" });
     }
@@ -42,8 +47,8 @@ export function registerVoiceprintRoutes(app: FastifyInstance): void {
 
   app.post("/api/voice/voiceprint/verify", async (request, reply) => {
     const body = request.body as { userId?: string; sessionId?: string; audioBase64?: string };
-    const actorId = resolveActorId({ userId: body?.userId, sessionId: body?.sessionId ?? "" });
-    if (!actorId) return reply.code(400).send({ ok: false, error: "userId/sessionId required" });
+    const actorId = resolveRouteActor(body ?? {});
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId/userId/sessionId required" });
     if (typeof body?.audioBase64 !== "string" || body.audioBase64.length === 0) {
       return reply.code(400).send({ ok: false, error: "audioBase64 required" });
     }
@@ -58,8 +63,7 @@ export function registerVoiceprintRoutes(app: FastifyInstance): void {
 
   app.get("/api/voice/voiceprint/status", async (request) => {
     const query = request.query as { actorId?: string; userId?: string; sessionId?: string };
-    const actorId = resolveActorId({ userId: query.userId, sessionId: query.sessionId ?? "" })
-      || (query.actorId ?? "").trim();
+    const actorId = resolveRouteActor(query);
     if (!actorId) return { ok: true, registered: false, engineReady: await service.isEngineReady() };
     const status = service.status(actorId);
     return { ok: true, ...status, engineReady: await service.isEngineReady() };
@@ -67,8 +71,8 @@ export function registerVoiceprintRoutes(app: FastifyInstance): void {
 
   app.delete("/api/voice/voiceprint", async (request, reply) => {
     const query = request.query as { actorId?: string; userId?: string; sessionId?: string };
-    const actorId = resolveActorId({ userId: query.userId, sessionId: query.sessionId ?? "" });
-    if (!actorId) return reply.code(400).send({ ok: false, error: "userId/sessionId required" });
+    const actorId = resolveRouteActor(query);
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId/userId/sessionId required" });
     const removed = service.unregister(actorId);
     return { ok: true, removed };
   });
