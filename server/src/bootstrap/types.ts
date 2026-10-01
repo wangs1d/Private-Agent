@@ -35,6 +35,7 @@ import type { VoiceMessageService } from "../services/voice-message-service.js";
 import type { ImageGenerationService } from "../services/image-generation-service.js";
 import type { FileProcessingService } from "../services/file-processing-service.js";
 import type { EmailSmsService } from "../services/email-sms-service.js";
+import type { EmailOtpService } from "../services/email-otp-service.js";
 import type { MediaMusicService } from "../services/media-music-service.js";
 import type { HealthFitnessService } from "../services/health-fitness-service.js";
 import type { FinanceDeepService } from "../services/finance-deep-service.js";
@@ -108,6 +109,8 @@ export type AppServices = {
   fileProcessingService: FileProcessingService;
   /** 邮件/短信主动发送服务（email.send / sms.send，凭证从环境变量读取） */
   emailSmsService: EmailSmsService;
+  /** 邮箱所有权验证码（OTP）：注册/登录闸用，凭据复用 emailSmsService 的 OUTBOUND_SMTP_* */
+  emailOtpService: EmailOtpService;
   /** 媒体音乐服务（media.search / media.play / pause / resume / stop / now_playing） */
   mediaMusicService: MediaMusicService;
   /** 健康/运动数据服务（health.log_metric / get_metrics / get_summary / set_goal / get_goals / import_data） */

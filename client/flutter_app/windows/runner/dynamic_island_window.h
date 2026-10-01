@@ -66,6 +66,13 @@ class DynamicIslandWindow {
     int state = 0;  // 0=进行中 1=成功 2=失败
   };
 
+  /// 岛旁挂件点开的独立消息卡里的一行（与应用内隔离，不开主窗）。
+  struct MessageRow {
+    std::string title;    // utf8
+    std::string preview;  // utf8
+    int unread = 0;
+  };
+
   enum class EventType {
     kExpandedChanged,  // payload: "true"/"false"（进入展开 / 回到胶囊）
     kAction,           // 展开卡快捷按钮，payload = 按钮文案
@@ -85,6 +92,8 @@ class DynamicIslandWindow {
   void Show();
   void Hide();
   bool IsVisible() const;
+  /// 窗口是否仍存活（句柄有效且未被外部销毁）；Dart 看门狗 ping 用。
+  bool IsAlive() const;
 
   void SetEntry(const Entry& entry);   // 空标题 = 回到待机态
   void ClearEntry();
@@ -94,7 +103,12 @@ class DynamicIslandWindow {
   /// 三级目标态（用户点击逐级下行：胶囊→hover→展开；收起逐级回退）。
   void SetStage(Stage stage);
   void SetAgentSteps(std::vector<AgentStep> steps);
-  void SetAmbient(int unread_count, bool agent_active, const std::string& agent_status);
+  void SetAmbient(int unread_count, bool agent_active,
+                  const std::string& agent_status, int messages_unread = 0);
+  /// 岛旁挂件的独立消息卡数据（最近会话预览行）。
+  void SetMessagesPreview(std::vector<MessageRow> rows);
+  /// 展开/收起独立消息卡；展开时发 kAction("打开消息") 让 Dart 标已读。
+  void ToggleMessages();
   /// 纯语音模式标志（对话全语音免点击）：开启后胶囊态悬停自动 glance
   /// 环境行，无需点击进 hover。
   void SetVoiceTalkMode(bool enabled);
@@ -120,6 +134,10 @@ class DynamicIslandWindow {
   static constexpr int kBtnRowH = 42;        // 快捷按钮行高
   static constexpr int kHoverDotPitch = 20;  // hover 导航点间距（逻辑 px）
   static constexpr UINT kIslandWheelMsg = WM_APP + 0x49;  // 滚轮钩子 -> 窗口
+  // 全屏抑制检查心跳（id=3，窗口存活期间常开）：与动画心跳（id=1）解耦。
+  // busy 隐藏岛时会停动画心跳省 CPU，恢复检查不能跟它同生死——
+  // 否则退出全屏后没有任何代码再把岛唤回（曾死锁：岛一去不回）。
+  static constexpr UINT kSuppressTimerId = 3;
   // attention 提醒动画：整体放大倍数与各阶段时长（秒）。
   // 1.6 系数 ≈ 底座加粗加大后渲染出来仍是「最初小胶囊的 2 倍」观感
   // （用户多轮反馈锚定的绝对大小，勿再上调到 2.0）。
@@ -179,9 +197,14 @@ class DynamicIslandWindow {
   int ambient_unread_ = 0;
   bool agent_active_ = false;
   std::string agent_status_;  // utf8，hover「任务」页状态行
+  int messages_unread_ = 0;   // 消息聚合未读：岛旁挂件数据源
   bool voice_talk_mode_ = false;  // 纯语音模式：对话全语音（悬停自动 glance）
   std::vector<RECT> button_rects_;  // 展开卡快捷按钮区（物理像素，命中测试用）
   std::vector<RECT> hover_dot_rects_;  // hover 导航点命中区（物理像素）
+  RECT messages_badge_rect_ = {};  // 岛旁消息挂件命中区（物理像素；空=未展示）
+  std::vector<MessageRow> message_rows_;  // 独立消息卡预览行
+  bool messages_open_ = false;  // 独立消息卡展开中
+  RECT messages_card_rect_ = {};  // 独立消息卡命中区（物理像素；空=未展示）
 
   // 动画相位（秒）
   double now_s_ = 0.0;          // 累计时间（呼吸/活点用）

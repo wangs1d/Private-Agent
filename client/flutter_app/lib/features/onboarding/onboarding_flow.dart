@@ -636,7 +636,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
         children: <Widget>[
           _darkField(
             controller: _appellationCtrl,
-            hint: "比如：老板、老王、小林…",
+            hint: "1-12 个字",
             autofocus: true,
             onChanged: (_) => setState(() {}),
           ),
@@ -656,20 +656,11 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       step: 2,
       title: "给我取个名字吧",
       subtitle: _currentAgentName == null
-          ? "你现在叫它什么，它以后就是什么。也可以从下面挑一个。"
+          ? "你想叫它什么都行，它以后就一直叫这个。"
           : "它现在叫「$_currentAgentName」，你可以保留，或换一个新的。",
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              for (final String name in <String>["晨昏线", "小夜灯", "北极星", "阿澈"])
-                _suggestionChip(name, () => setState(() => _agentNameCtrl.text = name)),
-            ],
-          ),
-          const SizedBox(height: 16),
           _darkField(
             controller: _agentNameCtrl,
             hint: "给它起个名字（1-12 字）",
@@ -1002,15 +993,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.5))),
       ),
       onChanged: onChanged,
-    );
-  }
-
-  Widget _suggestionChip(String label, VoidCallback onTap) {
-    return ActionChip(
-      backgroundColor: cardBg,
-      side: const BorderSide(color: cardBorder),
-      label: Text(label, style: const TextStyle(color: textSecondary, fontSize: 12.5)),
-      onPressed: onTap,
     );
   }
 

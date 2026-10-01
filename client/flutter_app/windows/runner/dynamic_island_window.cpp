@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <string>
 #include <tuple>
@@ -24,6 +25,16 @@
 #pragma comment(lib, "winmm.lib")
 
 namespace {
+
+// ── 岛窗口生死日志 ──
+// stderr 已被 main.cpp 重定向到 pai_app_stderr.log（追加写）。
+// 取证「谁在销毁岛窗口」：外部 WM_CLOSE 与直接 DestroyWindow 的路径不同。
+void IslandLifecycleLog(HWND hwnd, const wchar_t* event) {
+  fwprintf(stderr, L"[DynamicIsland] %ls hwnd=0x%p tick=%llu\n", event, hwnd,
+           static_cast<unsigned long long>(GetTickCount64()));
+  fflush(stderr);
+}
+
 
 // ── GDI+ 进程级初始化 ──
 ULONG_PTR g_gdiplus_token = 0;
@@ -54,7 +65,11 @@ HFONT CachedIslandFont(const wchar_t* family, int size, int weight,
 }
 
 HFONT MakeIslandFont(int size, int weight, bool strike = false) {
-  return CachedIslandFont(IslandFontFamily(), size, weight, strike);
+  // 字重路由：基础族只有 Regular/Bold 两面，<600 的请求会掉回 Regular；
+  // Medium 是独立族名，须显式点名（probe-island-fonts-final.ps1 实证）。
+  const wchar_t* family =
+      weight < 600 ? IslandFontFamilyMedium() : IslandFontFamily();
+  return CachedIslandFont(family, size, weight, strike);
 }
 
 // 状态图标专用：Segoe MDL2 Assets 字形不在 MiSans 里，必须独立字族。
@@ -111,6 +126,9 @@ void DrawCrossMark(Gdiplus::Graphics& g, float cx, float cy, float s,
 
 const wchar_t* kActionLabels[] = {L"创建日程", L"打开简报", L"静音"};
 constexpr int kActionCount = 3;
+
+// 岛旁独立消息卡最多预览行数（超出部分不展示，数据源按最近排序）。
+constexpr int kMaxMessageRows = 5;
 
 double EaseOutCubic(double t) { return 1.0 - std::pow(1.0 - t, 3.0); }
 
@@ -202,6 +220,10 @@ bool DynamicIslandWindow::IsVisible() const {
   return visible_ && !suppressed_by_fullscreen_;
 }
 
+bool DynamicIslandWindow::IsAlive() const {
+  return window_handle_ != nullptr && IsWindow(window_handle_) != FALSE;
+}
+
 std::wstring DynamicIslandWindow::Utf8ToWide(const std::string& s) const {
   if (s.empty()) return L"";
   int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
@@ -229,7 +251,12 @@ void DynamicIslandWindow::EnsureClassRegistered() {
 
 bool DynamicIslandWindow::Create() {
   EnsureGdiplusIsland();
-  if (window_handle_ != nullptr) return true;
+  if (window_handle_ != nullptr) {
+    if (IsWindow(window_handle_)) return true;
+    // 悬空句柄：窗口曾被外部销毁而成员未同步，归零后走重建（自愈）。
+    IslandLifecycleLog(window_handle_, L"create-stale-handle");
+    window_handle_ = nullptr;
+  }
   EnsureClassRegistered();
   const DWORD ex_style =
       WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
@@ -237,13 +264,22 @@ bool DynamicIslandWindow::Create() {
       ex_style, kClassName, L"", WS_POPUP, 0, 0, S(kWindowW), S(kWindowH),
       nullptr, nullptr, GetModuleHandle(nullptr), this);
   if (window_handle_ == nullptr) return false;
+  IslandLifecycleLog(window_handle_, L"created");
   const UINT dpi = GetDpiForWindow(window_handle_);
   if (dpi != 0) dpi_scale_ = static_cast<double>(dpi) / USER_DEFAULT_SCREEN_DPI;
   PositionAtTopCenter();
   Render();
-  // 心跳计时器随即启动：待机呼吸灯/全屏抑制检查都依赖它。
+  // Create 即落屏（PositionAtTopCenter 带 SWP_SHOWWINDOW），标志必须对齐
+  // 真实状态——否则全屏抑制的恢复分支被 visible_=false 卡死：忙碌结束后
+  // 岛再也不出现（2026-09-28「灵动岛自己消失」终局根因，黑匣子实证：
+  // 创建后第 2 秒 suppress-tick busy=0 suppressed=0 visible=0）。
+  visible_ = true;
+  // 动画心跳随即启动：待机呼吸灯依赖它。
   // （真实数据版待机不再有 present/Show 调用，若不在此启动则呼吸冻结。）
   StartAnimTimer();
+  // 全屏抑制检查走独立常开心跳（kSuppressTimerId）：busy 分支会停动画心跳，
+  // 恢复检查必须独立存活，否则退出全屏后岛再也不出现。
+  SetTimer(window_handle_, kSuppressTimerId, 2000, nullptr);
   return true;
 }
 
@@ -318,11 +354,34 @@ void DynamicIslandWindow::SetAgentSteps(std::vector<AgentStep> steps) {
 }
 
 void DynamicIslandWindow::SetAmbient(int unread_count, bool agent_active,
-                                     const std::string& agent_status) {
+                                     const std::string& agent_status,
+                                     int messages_unread) {
   ambient_unread_ = unread_count;
   agent_active_ = agent_active;
   agent_status_ = agent_status;
+  messages_unread_ = messages_unread;
   if (window_handle_ != nullptr) Render();
+}
+
+void DynamicIslandWindow::SetMessagesPreview(std::vector<MessageRow> rows) {
+  if (rows.size() > static_cast<size_t>(kMaxMessageRows)) {
+    rows.erase(rows.begin() + kMaxMessageRows, rows.end());
+  }
+  message_rows_ = std::move(rows);
+  if (window_handle_ != nullptr) Render();
+}
+
+void DynamicIslandWindow::ToggleMessages() {
+  messages_open_ = !messages_open_;
+  if (window_handle_ != nullptr) Render();
+  if (messages_open_) {
+    // 通知 Dart「已在岛上查看」：标全部已读 → 挂件隐藏，新消息再露出。
+    const wchar_t* label = L"打开消息";
+    char utf8[64] = {};
+    WideCharToMultiByte(CP_UTF8, 0, label, -1, utf8, sizeof(utf8), nullptr,
+                        nullptr);
+    FireEvent(EventType::kAction, utf8);
+  }
 }
 
 void DynamicIslandWindow::SetVoiceTalkMode(bool enabled) {
@@ -460,21 +519,30 @@ void DynamicIslandWindow::UpdateAnimations() {
   const double raw = Clamp01((now_s_ - morph_start_s_) / morph_duration_s_);
   morph_ = morph_from_ + (target - morph_from_) * EaseOutCubic(raw);
   if (raw >= 1.0) morph_active_ = false;
-  // 约每 2 秒做一次前台全屏检查。
-  static ULONGLONG last_check = 0;
-  if (now - last_check >= 2000) {
-    last_check = now;
-    UpdateFullscreenSuppression();
-  }
   if (window_handle_ != nullptr) Render();
 }
 
+// 由 kSuppressTimerId 常开心跳驱动（与动画心跳无关，窗口存活期间一直跑）。
+// 注意：窗口定时器随窗口同死——窗口被销毁后本心跳也随之消失，
+// 「窗口失活后的重建」由 Dart 侧看门狗（周期 ping）负责，不在这里。
 void DynamicIslandWindow::UpdateFullscreenSuppression() {
   QUERY_USER_NOTIFICATION_STATE state;
   if (FAILED(SHQueryUserNotificationState(&state))) return;
   const bool busy = state == QUNS_RUNNING_D3D_FULL_SCREEN ||
                     state == QUNS_PRESENTATION_MODE || state == QUNS_BUSY;
+  // 取证日志：每 ~150s 一次心跳证明本心跳活着；转向时必记（含 visible_ 快照）。
+  static int tick_count = 0;
+  const bool heartbeat = (++tick_count % 75) == 1;
+  if (heartbeat) {
+    wchar_t hb[128];
+    _snwprintf_s(hb, _countof(hb), _TRUNCATE,
+                 L"suppress-tick busy=%d suppressed=%d visible=%d", busy ? 1 : 0,
+                 suppressed_by_fullscreen_ ? 1 : 0, visible_ ? 1 : 0);
+    IslandLifecycleLog(window_handle_, hb);
+  }
   if (busy == suppressed_by_fullscreen_) return;
+  IslandLifecycleLog(window_handle_,
+                     busy ? L"suppress-on" : L"suppress-off");
   suppressed_by_fullscreen_ = busy;
   if (window_handle_ == nullptr) return;
   if (busy) {
@@ -893,17 +961,18 @@ void DynamicIslandWindow::Render() {
           } else if (entry_.kind == DynamicIslandWindow::Kind::kInbox) {
             DrawMailIcon(g, x + m_icon.Width / 2.0f, icon_cy, 13.0f * s,
                          10.0f * s);
-          } else {
-            Gdiplus::SolidBrush icon_brush(
-                Gdiplus::Color(ea * 190 / 255, 255, 255, 255));
+            } else {
+              Gdiplus::SolidBrush icon_brush(
+                  Gdiplus::Color(ea * 215 / 255, 255, 255, 255));
             g.DrawString(glyph, -1, &icon_font,
                          Gdiplus::PointF(x, header_cy - m_icon.Height / 2.0f),
                          &icon_brush);
           }
         }
         x += icon_block;
-        Gdiplus::SolidBrush title_brush(
-            Gdiplus::Color(ea * 236 / 255, 236, 236));
+        // 标题满白（纯黑胶囊上对比拉满；原 236 灰 + 三参 Color 让 R 通道
+        // 背着 alpha——淡入淡出中段会泛青）。
+        Gdiplus::SolidBrush title_brush(Gdiplus::Color(ea, 255, 255, 255));
         g.DrawString(title.c_str(), -1, &title_font,
                      Gdiplus::PointF(x, header_cy - m_title.Height / 2.0f),
                      &title_brush);
@@ -917,8 +986,10 @@ void DynamicIslandWindow::Render() {
                              255, 255, 255));
           g.FillEllipse(&dot_brush, x, header_cy - dot_r, dot_r * 2, dot_r * 2);
         } else if (!trailing.empty()) {
+          // 尾注数字（「N 条未读」「25 分钟后」）加深：2026-10-01 用户反馈
+          // 文字偏淡，150→220。
           Gdiplus::SolidBrush trail_brush(
-              Gdiplus::Color(ea * 107 / 255, 255, 255, 255));
+              Gdiplus::Color(ea * 220 / 255, 255, 255, 255));
           g.DrawString(trailing.c_str(), -1, &trail_font,
                        Gdiplus::PointF(x, header_cy - m_trail.Height / 2.0f),
                        &trail_brush);
@@ -992,7 +1063,7 @@ void DynamicIslandWindow::Render() {
       g.MeasureString(fitted.c_str(), -1, &line_font, Gdiplus::PointF(0, 0),
                       &m_line);
       Gdiplus::SolidBrush line_brush(
-          Gdiplus::Color(static_cast<BYTE>(ha * 62 / 100), 255, 255, 255));
+          Gdiplus::Color(static_cast<BYTE>(ha * 90 / 100), 255, 255, 255));
       g.DrawString(fitted.c_str(), -1, &line_font,
                    Gdiplus::PointF(line_x, dot_cy - m_line.Height / 2.0f),
                    &line_brush);
@@ -1012,7 +1083,7 @@ void DynamicIslandWindow::Render() {
       Gdiplus::Font label_font(mem_dc, MakeIslandFont(S(13), 700));
       const std::wstring label = L"接下来";
       Gdiplus::SolidBrush label_brush(
-          Gdiplus::Color(static_cast<BYTE>(fade * 38 / 100), 255, 255, 255));
+          Gdiplus::Color(static_cast<BYTE>(fade * 70 / 100), 255, 255, 255));
       g.DrawString(label.c_str(), -1, &label_font,
                    Gdiplus::PointF(cap_x + pad, y), &label_brush);
       y += 20.0f * s;
@@ -1033,11 +1104,11 @@ void DynamicIslandWindow::Render() {
           g.MeasureString(time_w.c_str(), -1, &time_font,
                           Gdiplus::PointF(0, 0), &m_t);
           Gdiplus::SolidBrush time_brush(Gdiplus::Color(
-              static_cast<BYTE>(fade * (is_near ? 55 : 30) / 100), 255, 255, 255));
+              static_cast<BYTE>(fade * (is_near ? 85 : 36) / 100), 255, 255, 255));
           g.DrawString(time_w.c_str(), -1, &time_font,
                        Gdiplus::PointF(cap_x + pad, y), &time_brush);
           Gdiplus::SolidBrush title_brush(Gdiplus::Color(
-              static_cast<BYTE>(fade * (is_near ? 92 : 38) / 100), 255, 255, 255));
+              static_cast<BYTE>(fade * (is_near ? 100 : 44) / 100), 255, 255, 255));
           g.DrawString(title_w.c_str(), -1, is_near ? &title_font : &done_font,
                        Gdiplus::PointF(cap_x + pad + m_t.Width + 10.0f * s, y),
                        &title_brush);
@@ -1046,7 +1117,7 @@ void DynamicIslandWindow::Render() {
             g.MeasureString(hint_w.c_str(), -1, &hint_font,
                             Gdiplus::PointF(0, 0), &m_hint);
             Gdiplus::SolidBrush hint_brush(Gdiplus::Color(
-                static_cast<BYTE>(fade * 28 / 100), 255, 255, 255));
+                static_cast<BYTE>(fade * 62 / 100), 255, 255, 255));
             g.DrawString(
                 hint_w.c_str(), -1, &hint_font,
                 Gdiplus::PointF(cap_x + cur_w - pad - m_hint.Width, y),
@@ -1069,7 +1140,7 @@ void DynamicIslandWindow::Render() {
 
         Gdiplus::Font step_label_font(mem_dc, MakeIslandFont(S(13), 700));
         Gdiplus::SolidBrush step_label_brush(
-            Gdiplus::Color(static_cast<BYTE>(fade * 38 / 100), 255, 255, 255));
+            Gdiplus::Color(static_cast<BYTE>(fade * 70 / 100), 255, 255, 255));
         g.DrawString(L"任务动态", -1, &step_label_font,
                      Gdiplus::PointF(cap_x + pad, y), &step_label_brush);
         y += 20.0f * s;
@@ -1093,7 +1164,7 @@ void DynamicIslandWindow::Render() {
               g, Utf8ToWide(st.label), step_font,
               cur_w - pad * 2 - 16.0f * s);
           Gdiplus::SolidBrush step_brush(
-              Gdiplus::Color(static_cast<BYTE>(fade * 55 / 100), 255, 255, 255));
+              Gdiplus::Color(static_cast<BYTE>(fade * 88 / 100), 255, 255, 255));
           g.DrawString(step_text.c_str(), -1, &step_font,
                        Gdiplus::PointF(cap_x + pad + 14.0f * s, y),
                        &step_brush);
@@ -1119,7 +1190,7 @@ void DynamicIslandWindow::Render() {
           RoundedPath(&btn_path, Gdiplus::RectF(bx, y, btn_w, btn_h), 8.0f * s);
           g.FillPath(&btn_hover, &btn_path);
         }
-        const BYTE a = static_cast<BYTE>(fade * (hov ? 92 : 52) / 100);
+        const BYTE a = static_cast<BYTE>(fade * (hov ? 100 : 85) / 100);
         Gdiplus::SolidBrush btn_brush(Gdiplus::Color(a, 255, 255, 255));
         g.DrawString(kActionLabels[i], -1, &btn_font,
                      Gdiplus::PointF(bx + 10.0f * s, y + (btn_h - m_btn.Height) / 2.0f),
@@ -1132,6 +1203,125 @@ void DynamicIslandWindow::Render() {
     }
 
     g.ResetClip();
+
+    // ── 岛旁消息挂件：贴胶囊右缘的小药丸（信封 + 未读数）。
+    // 不参与条目仲裁：待机/内容态都挂；随 morph 进展开卡淡出（信息已在卡上）。
+    // 命中区存物理像素，WM_LBUTTONDOWN 直接开消息面板（走 kAction 事件）。
+    messages_badge_rect_ = {0, 0, 0, 0};
+    if (messages_unread_ > 0) {
+      const BYTE ba =
+          static_cast<BYTE>(255.0f * Clamp01(1.0f - (mf - 1.0f)));
+      if (ba > 5) {
+        wchar_t cnt[16];
+        _snwprintf_s(cnt, _countof(cnt), _TRUNCATE, L"%d",
+                     messages_unread_ > 99 ? 99 : messages_unread_);
+        if (messages_unread_ > 99) wcscat_s(cnt, L"+");
+        Gdiplus::Font cnt_font(mem_dc, MakeIslandFont(S(13), 600));
+        Gdiplus::RectF m_cnt;
+        g.MeasureString(cnt, -1, &cnt_font, Gdiplus::PointF(0, 0), &m_cnt);
+        const float bh = 24.0f * s;
+        const float bgap = 8.0f * s;
+        const float bpad = 9.0f * s;
+        const float icon_w = 13.0f * s;
+        const float text_gap = 5.0f * s;
+        const float bw = bpad + icon_w + text_gap + m_cnt.Width + bpad;
+        const float bx0 = cap_x + cur_w + bgap;
+        const float by0 = cap_y + (cur_h - bh) / 2.0f;
+        Gdiplus::GraphicsPath bp;
+        RoundedPath(&bp, Gdiplus::RectF(bx0, by0, bw, bh), bh / 2.0f);
+        Gdiplus::SolidBrush bg_brush(Gdiplus::Color(ba, 16, 16, 18));
+        Gdiplus::Pen b_rim(Gdiplus::Color(
+            static_cast<BYTE>(ba * 22 / 100), 255, 255, 255), 1.0f * s);
+        g.FillPath(&bg_brush, &bp);
+        g.DrawPath(&b_rim, &bp);
+        DrawMailIcon(g, bx0 + bpad + icon_w / 2.0f, by0 + bh / 2.0f,
+                     icon_w, icon_w * 0.72f);
+        Gdiplus::SolidBrush cnt_brush(Gdiplus::Color(
+            static_cast<BYTE>(ba * 100 / 100), 255, 130, 120));
+        g.DrawString(cnt, -1, &cnt_font,
+                     Gdiplus::PointF(bx0 + bpad + icon_w + text_gap,
+                                     by0 + (bh - m_cnt.Height) / 2.0f),
+                     &cnt_brush);
+        messages_badge_rect_ = {static_cast<LONG>(bx0),
+                                static_cast<LONG>(by0),
+                                static_cast<LONG>(bx0 + bw),
+                                static_cast<LONG>(by0 + bh)};
+      }
+    }
+
+    // ── 岛旁独立消息卡：点挂件展开的查看层（与应用内隔离，不开主窗）。
+    // 展开时 Dart 收到「打开消息」把未读全部标已读 → 挂件隐藏，新消息再露出。
+    messages_card_rect_ = {0, 0, 0, 0};
+    if (messages_open_) {
+      const float row_h = 40.0f * s;
+      const float head_h = 34.0f * s;
+      const float pad_c = 12.0f * s;
+      const float cw = 340.0f * s;
+      const float chh = head_h +
+                        (message_rows_.empty() ? row_h
+                                               : message_rows_.size() * row_h) +
+                        pad_c;
+      const float cx0 = (phys_w - cw) / 2.0f;
+      const float cy0 = cap_y + cur_h + 8.0f * s;
+      Gdiplus::GraphicsPath cp;
+      RoundedPath(&cp, Gdiplus::RectF(cx0, cy0, cw, chh), 16.0f * s);
+      Gdiplus::SolidBrush c_brush(Gdiplus::Color(242, 10, 10, 12));
+      Gdiplus::Pen c_rim(Gdiplus::Color(46, 255, 255, 255), 1.0f * s);
+      g.FillPath(&c_brush, &cp);
+      g.DrawPath(&c_rim, &cp);
+
+      float ty = cy0 + 8.0f * s;
+      {
+        Gdiplus::Font head_font(mem_dc, MakeIslandFont(S(13), 700));
+        Gdiplus::SolidBrush head_brush(Gdiplus::Color(153, 255, 255, 255));
+        g.DrawString(L"消息", -1, &head_font, Gdiplus::PointF(cx0 + pad_c, ty),
+                     &head_brush);
+      }
+      ty += head_h;
+      if (message_rows_.empty()) {
+        Gdiplus::Font empty_font(mem_dc, MakeIslandFont(S(13), 500));
+        Gdiplus::SolidBrush empty_brush(Gdiplus::Color(90, 255, 255, 255));
+        g.DrawString(L"暂无消息", -1, &empty_font,
+                     Gdiplus::PointF(cx0 + pad_c, ty + 3.0f * s),
+                     &empty_brush);
+      }
+      for (const MessageRow& row : message_rows_) {
+        const float iy = ty + 3.0f * s;
+        Gdiplus::Font t_font(mem_dc, MakeIslandFont(S(13), 600));
+        Gdiplus::SolidBrush t_brush(Gdiplus::Color(224, 255, 255, 255));
+        const std::wstring title = Utf8ToWide(row.title);
+        const float t_max = cw - pad_c * 2 - 34.0f * s;
+        const std::wstring fitted_t = FitText(g, title, t_font, t_max);
+        g.DrawString(fitted_t.c_str(), -1, &t_font,
+                     Gdiplus::PointF(cx0 + pad_c, iy), &t_brush);
+        Gdiplus::Font p_font(mem_dc, MakeIslandFont(S(12), 400));
+        Gdiplus::SolidBrush p_brush(Gdiplus::Color(112, 255, 255, 255));
+        const std::wstring preview = Utf8ToWide(row.preview);
+        const float p_max =
+            cw - pad_c * 2 - (row.unread > 0 ? 44.0f : 22.0f) * s;
+        const std::wstring fitted_p = FitText(g, preview, p_font, p_max);
+        g.DrawString(fitted_p.c_str(), -1, &p_font,
+                     Gdiplus::PointF(cx0 + pad_c, iy + 17.0f * s), &p_brush);
+        if (row.unread > 0) {
+          wchar_t uc[16];
+          _snwprintf_s(uc, _countof(uc), _TRUNCATE, L"%d",
+                       row.unread > 99 ? 99 : row.unread);
+          if (row.unread > 99) wcscat_s(uc, L"+");
+          Gdiplus::Font u_font(mem_dc, MakeIslandFont(S(11), 600));
+          Gdiplus::RectF m_u;
+          g.MeasureString(uc, -1, &u_font, Gdiplus::PointF(0, 0), &m_u);
+          Gdiplus::SolidBrush u_brush(Gdiplus::Color(235, 255, 130, 120));
+          g.DrawString(uc, -1, &u_font,
+                       Gdiplus::PointF(cx0 + cw - pad_c - m_u.Width - 2.0f * s,
+                                       iy + 3.0f * s),
+                       &u_brush);
+        }
+        ty += row_h;
+      }
+      messages_card_rect_ = {static_cast<LONG>(cx0), static_cast<LONG>(cy0),
+                             static_cast<LONG>(cx0 + cw),
+                             static_cast<LONG>(cy0 + chh)};
+    }
   }
 
   // GDI+ 写入的是 straight alpha；UpdateLayeredWindow 需要 premultiplied。
@@ -1217,6 +1407,8 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
     case WM_TIMER:
       if (wparam == 1) {
         UpdateAnimations();
+      } else if (wparam == kSuppressTimerId) {
+        UpdateFullscreenSuppression();
       } else if (wparam == 2) {
         KillTimer(hwnd, 2);
         if (!hovering_ && attention_start_s_ < 0) {
@@ -1240,6 +1432,22 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
       if (IsMorphing()) return 0;
       const int cx = GET_X_LPARAM(lparam);
       const int cy = GET_Y_LPARAM(lparam);
+      // 岛旁消息挂件：点击展开独立消息卡（不唤起主窗口，与应用内隔离）。
+      if (messages_unread_ > 0 &&
+          messages_badge_rect_.right > messages_badge_rect_.left &&
+          cx >= messages_badge_rect_.left &&
+          cx <= messages_badge_rect_.right &&
+          cy >= messages_badge_rect_.top &&
+          cy <= messages_badge_rect_.bottom) {
+        ToggleMessages();
+        return 0;
+      }
+      // 消息卡展开中：点卡外任意处收起（吞掉本次，避免误触分级展开）。
+      if (messages_open_) {
+        messages_open_ = false;
+        if (window_handle_ != nullptr) Render();
+        return 0;
+      }
       const int btn = HoverButtonAt(cx, cy);
       if (btn >= 0) {
         char utf8[128] = {};
@@ -1339,10 +1547,21 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
       PositionAtTopCenter();
       Render();
       return 0;
+    case WM_CLOSE:
+      // HUD 不响应关闭请求：外部 WM_CLOSE 走 DefWindowProc 会直接销毁岛，
+      // 一旦销毁（此前悬空句柄还会让 create 空转返回 true）便「自己消失」。
+      IslandLifecycleLog(hwnd, L"wm-close-swallowed");
+      return 0;
     case WM_DESTROY:
+      IslandLifecycleLog(hwnd, L"wm-destroy");
       StopAnimTimer();
       hovering_ = false;
       UpdateWheelHook();
+      return 0;
+    case WM_NCDESTROY:
+      // 句柄即将失效：立即归零，杜绝悬空句柄让后续 create 全部空转。
+      IslandLifecycleLog(hwnd, L"wm-ncdestroy");
+      window_handle_ = nullptr;
       return 0;
     default:
       break;

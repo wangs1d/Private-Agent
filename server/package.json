@@ -47,6 +47,7 @@
     "mammoth": "^1.8.0",
     "mem0ai": "^3.0.3",
     "nodemailer": "^6.10.1",
+    "onnxruntime-node": "^1.30.0",
     "openai": "^6.34.0",
     "pdf-parse": "^1.1.1",
     "playwright": "^1.60.0",

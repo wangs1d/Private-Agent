@@ -60,7 +60,7 @@ export interface VoiceSpeakResult {
   voiceId?: string;
   /** 是否成功推送到用户 WS。 */
   pushed?: boolean;
-  /** TTS 提供商（siliconflow / openai / none）。 */
+  /** TTS 提供商（minimax / openai / none）。 */
   provider?: string;
   /** 失败原因。 */
   error?: string;
@@ -92,7 +92,7 @@ export interface VoiceCapabilityInfo {
   /** TTS 是否可用（至少一个 provider 已配置）。 */
   ttsEnabled: boolean;
   /** 当前 TTS 提供商。 */
-  ttsProvider: "siliconflow" | "openai" | "none";
+  ttsProvider: "minimax" | "openai" | "none";
   /** ASR 是否可用。 */
   asrEnabled: boolean;
   /** 已注册的语音对话 provider 列表。 */

@@ -1735,17 +1735,10 @@ export class BrainCenter {
       }
     }
 
-    // === 阶段 3.6.1 — 用户画像聚合（P0-1）===
-    // 观察本轮对话：轮次进入持久化队列；每轮由轻量 LLM 结构化抽取
-    // （ADD/UPDATE/DELETE）确定性更新 USER_PROFILE.md；
-    // 每 N 轮触发 LLM 深度画像合成（异步，不阻塞响应）。
-    if (this.userProfileAggregator) {
-      try {
-        this.userProfileAggregator.observeTurn(actorId, query, cognitive.response ?? "");
-      } catch (err) {
-        console.log(`[BrainCenter] 画像聚合观察失败（忽略）: ${err}`);
-      }
-    }
+    // === 阶段 3.6.1 — 用户画像聚合（已迁出）===
+    // 2026-09-29：observeTurn 迁至 turn-lifecycle.finalizeTurn——原位传
+    // cognitive.response（DecisionHub 路径恒空串），画像只见用户半边；
+    // finalizeTurn 拿真实助手全文，且任务面轮次也开始喂画像。
 
     // === 阶段 3.6.2 — 记忆隐式反馈检测（P1-3）===
     // 从对话形态（纠正/认同/重复提问/换话题）检测上一轮召回记忆的相关性信号，

@@ -56,4 +56,47 @@ export const MEMORY_GOVERNANCE_CHAT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "profile.update",
+      description:
+        "更新你的用户画像档案（说话算话的「记」）：用户明确表达关于自身的稳定事实并期待你记住时调用" +
+        "（如「记一下我叫 X」「我喜欢 Y」「我换工作了，现在做 Z」「我猫不吃鱼，记着」）。" +
+        "调用成功后向用户明确复述记了什么（「记下了：……」），说到做到。" +
+        "规则：只记稳定事实（身份/关系/职业/长期偏好/宠物/重要日期），一次性情绪和临时安排不记；" +
+        "用户纠正旧信息时用 UPDATE 并给 match 定位旧行，别 ADD 出重复条目；" +
+        "敏感类目（疾病病史/心理健康/恋爱婚姻矛盾/收入负债/身份证件）必须先在对话里向用户复述并得到明确同意，" +
+        "才能带 confirmed=true 调用；未确认就调用会被拒绝。",
+      parameters: {
+        type: "object",
+        properties: {
+          op: {
+            type: "string",
+            enum: ["ADD", "UPDATE", "DELETE"],
+            description: "ADD=新增一条；UPDATE=改写旧行（给 match 定位）；DELETE=删除旧行（用户要求忘掉某条画像时）",
+          },
+          section: {
+            type: "string",
+            enum: ["basic", "interest", "communication", "note"],
+            description: "目标分区：basic=基本信息（称呼/所在地/职业/重要日期）；interest=兴趣与习惯；communication=沟通偏好；note=备注（宠物/关系等其他长期事项）",
+          },
+          line: {
+            type: "string",
+            description: "ADD/UPDATE 的新内容，一行，不带「- 」前缀；字段式写法更稳（如「称呼：林晚秋」「妈妈的生日：5月20日」）",
+          },
+          match: {
+            type: "string",
+            description: "UPDATE/DELETE 定位旧行的关键词（旧行里出现过的词，如「UI设计师」）",
+          },
+          confirmed: {
+            type: "boolean",
+            description: "敏感类目（健康/婚恋矛盾/财务/证件）必须在对话中获得用户明确同意后才置 true；普通事实直接省略",
+          },
+        },
+        required: ["op", "section"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];

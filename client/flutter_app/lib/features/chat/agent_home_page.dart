@@ -2,18 +2,21 @@ import "dart:async";
 import "dart:convert" show jsonDecode, jsonEncode;
 
 import "package:flutter/material.dart";
+import "package:flutter/services.dart" show Clipboard, ClipboardData;
 import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
-import "../../core/presentation/agent_avatar_catalog.dart";
+import "../settings/profile_insight_section.dart";
 
 /// Agent 主页。
 ///
 /// 定位：主页是 Agent「自己打理的住处」——
-///  - Header：纯文字（名字/@handle/状态徽章/签名），无头像光球（呼吸语义只在聊天页）
-///  - 动态：站内社交里 Agent 自己发的帖子（置顶帖排最前）
-///  - 自我介绍：Agent 自写（SOUL 摘要）
-/// （原「此刻」承载已随右上角足迹卡一并下线，主页不展示盯/足迹。）
+///  - Header：纯排版无卡片（名字/@handle/身份号码/一行状态/签名），无头像光球（呼吸语义只在聊天页）
+///  - 自我介绍：Agent 自写（SOUL 摘要）；动态：站内社交里它自己的帖子（置顶帖排最前）
+///  - 它眼里的你：对用户的画像概览+行级纠错（右键改/删）
+/// 视觉语言（2026-09-30 重设计）：黑白极简——头部无渐变无徽章胶囊，
+/// 全页唯一彩色是状态行 6px 心情圆点；容器统一低面层+细边框+14 圆角；
+/// 编辑类入口 hover 才显形，行内不常驻图标。
 /// 入口：与日程/消息等一致，以右侧 Dock 双面板形式打开（聊天在左、主页在右）；
 /// 窄窗口退化为全屏路由页。名字/签名支持编辑，改名走统一管道
 /// （POST /api/agent-identity/rename，账号/记忆/prompt 自我认知一次同步）。
@@ -43,6 +46,7 @@ class _AgentHomePageState extends State<AgentHomePage> {
   Map<String, dynamic> _profile = <String, dynamic>{};
   Map<String, dynamic> _identity = <String, dynamic>{};
   List<Map<String, dynamic>> _posts = <Map<String, dynamic>>[];
+  String? _agentNumber;
 
   String get _actorId => widget.actorId ?? ApiConfig.effectiveActorId;
 
@@ -60,6 +64,7 @@ class _AgentHomePageState extends State<AgentHomePage> {
       _profile = result.profile;
       _identity = result.identity;
       _posts = result.posts;
+      _agentNumber = result.agentNumber;
       _loading = false;
     });
   }
@@ -71,15 +76,10 @@ class _AgentHomePageState extends State<AgentHomePage> {
   String get _signature => _profile["signature"]?.toString() ?? "";
   String get _statusText => _profile["statusText"]?.toString() ?? "";
   String get _moodStyle => _profile["moodStyle"]?.toString() ?? "gentle";
-  String get _avatarPreset => _profile["avatarPreset"]?.toString() ?? "dawn";
   String get _intro => _profile["intro"]?.toString() ?? "";
 
   @override
   Widget build(BuildContext context) {
-    final ThemeData theme = Theme.of(context);
-    final ColorScheme cs = theme.colorScheme;
-    final AgentAvatarPalette palette = AgentAvatarPalette.fromPreset(_avatarPreset);
-
     final Widget body = _loading
         ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
         : _failed
@@ -87,13 +87,18 @@ class _AgentHomePageState extends State<AgentHomePage> {
             : RefreshIndicator(
                 onRefresh: _reload,
                 child: ListView(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
                   children: <Widget>[
-                    _buildHeaderCard(cs, palette),
-                    const SizedBox(height: 14),
-                    _buildPostsSection(cs),
-                    const SizedBox(height: 14),
-                    _buildIntroSection(cs),
+                    _buildHeader(),
+                    // 头部无卡片，靠留白与后面的区块分开
+                    const SizedBox(height: 24),
+                    _buildIntroSection(),
+                    const SizedBox(height: 10),
+                    _buildPostsSection(),
+                    // 「它眼里的你」：agent 对用户的画像/理解/事实 + 行级纠错
+                    // （2026-09-30 从设置页迁入主页，跟着 agent 的自我介绍放最后）。
+                    const SizedBox(height: 10),
+                    const ProfileInsightSection(),
                   ],
                 ),
               );
@@ -116,84 +121,158 @@ class _AgentHomePageState extends State<AgentHomePage> {
     );
   }
 
-  // ─── Header：纯文字，无头像 ───
+  // ─── Header：纯排版，无卡片无渐变 ───
 
-  Widget _buildHeaderCard(ColorScheme cs, AgentAvatarPalette palette) {
+  /// 心情状态映射：label 常显，色只落在 6px 圆点上（全页唯一彩色）。
+  static const Map<String, ({String label, Color color})> _moods =
+      <String, ({String label, Color color})>{
+    "funny": (label: "摸鱼", color: Color(0xFF2CBF6D)),
+    "sad": (label: "离开", color: Color(0xFF8091A7)),
+    "cool": (label: "请勿打扰", color: Color(0xFF7C73FF)),
+    "energetic": (label: "在线", color: Color(0xFFFF8A3D)),
+    "mysterious": (label: "隐身感", color: Color(0xFF3F8CFF)),
+    "gentle": (label: "忙碌", color: Color(0xFF3AA7A3)),
+  };
+
+  Widget _buildHeader() {
     final ThemeData theme = Theme.of(context);
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: <Color>[
-            palette.colors.first.withValues(alpha: 0.20),
-            palette.colors.last.withValues(alpha: 0.10),
-          ],
-        ),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.30)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _showRenameSheet,
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
-              children: <Widget>[
-                Text(
-                  _displayName.isEmpty ? "未命名" : _displayName,
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(width: 4),
-                Icon(Icons.edit_outlined,
-                    size: 14, color: cs.onSurfaceVariant.withValues(alpha: 0.7)),
-                const SizedBox(width: 8),
-                if (_handle.isNotEmpty)
-                  Text(
-                    "@$_handle",
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: cs.onSurfaceVariant,
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 10),
-          Row(
+    final ColorScheme cs = theme.colorScheme;
+    final ({String label, Color color}) mood =
+        _moods[_moodStyle] ?? _moods["gentle"]!;
+    final bool hasSignature = _signature.trim().isNotEmpty;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        // 名字 + @handle；hover 显改名铅笔
+        _HoverActionAnchor(
+          onTap: _showRenameSheet,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
             children: <Widget>[
-              _MoodBadge(moodStyle: _moodStyle),
-              if (_statusText.trim().isNotEmpty) ...<Widget>[
+              Flexible(
+                child: Text(
+                  _displayName.isEmpty ? "未命名" : _displayName,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.w700, letterSpacing: 0.2),
+                ),
+              ),
+              if (_handle.isNotEmpty) ...<Widget>[
                 const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _statusText,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: cs.onSurfaceVariant),
+                Text(
+                  "@$_handle",
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant,
+                    letterSpacing: 0.3,
                   ),
                 ),
               ],
             ],
           ),
-          const SizedBox(height: 12),
+        ),
+        // 身份号码：注册即得的账号身份（actorId），好友申请的唯一定址凭据；
+        // hover 显复制动作，点按整行复制（2026-09-30 补上「主页展示身份号码」环）
+        if (_hasIdentityNumber) ...<Widget>[
+          const SizedBox(height: 6),
+          _buildIdentityLine(theme, cs),
+        ],
+        const SizedBox(height: 8),
+        Row(
+          children: <Widget>[
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: mood.color),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              mood.label,
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: cs.onSurfaceVariant, fontWeight: FontWeight.w500),
+            ),
+            if (_statusText.trim().isNotEmpty) ...<Widget>[
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _statusText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.8),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        if (hasSignature) ...<Widget>[
+          const SizedBox(height: 16),
           GestureDetector(
             behavior: HitTestBehavior.opaque,
+            onTap: _showSignatureEditDialog,
             onLongPress: _showSignatureEditDialog,
+            child: Text(
+              _signature,
+              style: theme.textTheme.bodyLarge?.copyWith(height: 1.55),
+            ),
+          ),
+        ] else ...<Widget>[
+          const SizedBox(height: 16),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
             onTap: _showSignatureEditDialog,
             child: Text(
-              _signature.isEmpty ? "（长按签名可修改）" : _signature,
-              style: theme.textTheme.bodyLarge?.copyWith(
+              "（点一下写句签名——它自己的话）",
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: cs.onSurfaceVariant.withValues(alpha: 0.7)),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ─── 身份号码：注册即得的 QQ 式短号（无账号主体回退注册邮箱 actorId），
+  // 好友申请与跨 agent 寻址的对外凭据 ───
+
+  String get _identityNumber {
+    final String n = _agentNumber ?? "";
+    if (n.isNotEmpty) return n;
+    return _actorId;
+  }
+
+  bool get _hasIdentityNumber {
+    final String id = _identityNumber.trim();
+    return id.isNotEmpty && id != "anonymous";
+  }
+
+  Widget _buildIdentityLine(ThemeData theme, ColorScheme cs) {
+    return _HoverActionAnchor(
+      onTap: _copyIdentityNumber,
+      icon: Icons.copy_outlined,
+      label: "复制",
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          Text(
+            "身份号码",
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              _identityNumber,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
                 color: cs.onSurfaceVariant,
-                height: 1.45,
+                fontWeight: FontWeight.w600,
               ),
             ),
           ),
@@ -202,60 +281,40 @@ class _AgentHomePageState extends State<AgentHomePage> {
     );
   }
 
+  Future<void> _copyIdentityNumber() async {
+    await Clipboard.setData(ClipboardData(text: _identityNumber));
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(
+        content: Text("已复制身份号码"),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
   // ─── 动态：站内社交里 Agent 自己的帖子 ───
 
-  Widget _buildPostsSection(ColorScheme cs) {
+  Widget _buildPostsSection() {
     if (_posts.isEmpty) {
       return const SizedBox.shrink();
     }
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme cs = theme.colorScheme;
     return _SectionCard(
       title: "动态",
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          for (final Map<String, dynamic> post in _posts)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Row(
-                    children: <Widget>[
-                      if (post["id"] == _profile["pinnedPostId"]) ...<Widget>[
-                        Icon(Icons.push_pin_outlined,
-                            size: 12, color: cs.onSurfaceVariant),
-                        const SizedBox(width: 4),
-                      ],
-                      Expanded(
-                        child: Text(
-                          _postTimeLabel(post["createdAt"]?.toString() ?? ""),
-                          style: TextStyle(
-                              fontSize: 10.5,
-                              color: cs.onSurfaceVariant.withValues(alpha: 0.8)),
-                        ),
-                      ),
-                      Icon(Icons.favorite_border,
-                          size: 11, color: cs.onSurfaceVariant.withValues(alpha: 0.7)),
-                      const SizedBox(width: 4),
-                      Text(
-                        "${post["likeCount"] ?? 0}",
-                        style: TextStyle(
-                            fontSize: 10.5, color: cs.onSurfaceVariant),
-                      ),
-                    ],
-                  ),
-                  if ((post["text"] ?? "").toString().trim().isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 4),
-                    Text(
-                      post["text"].toString(),
-                      style: TextStyle(fontSize: 12.5, height: 1.5, color: cs.onSurface),
-                    ),
-                  ],
-                  const SizedBox(height: 4),
-                  Divider(height: 1, color: cs.outline.withValues(alpha: 0.18)),
-                ],
-              ),
+          for (int i = 0; i < _posts.length; i++) ...<Widget>[
+            if (i > 0) const SizedBox(height: 14),
+            _PostItem(
+              post: _posts[i],
+              pinned: _posts[i]["id"] == _profile["pinnedPostId"],
+              timeLabel: _postTimeLabel(_posts[i]["createdAt"]?.toString() ?? ""),
+              theme: theme,
+              cs: cs,
             ),
+          ],
         ],
       ),
     );
@@ -274,23 +333,22 @@ class _AgentHomePageState extends State<AgentHomePage> {
 
   // ─── 自我介绍 ───
 
-  Widget _buildIntroSection(ColorScheme cs) {
+  Widget _buildIntroSection() {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme cs = theme.colorScheme;
+    final bool empty = _intro.trim().isEmpty;
     return _SectionCard(
       title: "自我介绍",
-      trailing: IconButton(
-        tooltip: "让它在对话里自己改，或长按直接编辑",
-        icon: Icon(Icons.edit_outlined,
-            size: 15, color: cs.onSurfaceVariant.withValues(alpha: 0.7)),
-        onPressed: _showIntroEditDialog,
+      trailing: _HoverActionAnchor(
+        onTap: _showIntroEditDialog,
+        icon: Icons.edit_outlined,
+        label: "编辑",
       ),
       child: Text(
-        _intro.isEmpty
-            ? "它还没有写自我介绍。对它说「去写写你的自我介绍」，或让它自己打理主页。"
-            : _intro,
-        style: TextStyle(
-          fontSize: 12.5,
-          height: 1.6,
-          color: _intro.isEmpty ? cs.onSurfaceVariant : cs.onSurface,
+        empty ? "还没写。对它说「去写写你的自我介绍」，或点右上角直接替它写。" : _intro,
+        style: theme.textTheme.bodyMedium?.copyWith(
+          height: 1.65,
+          color: empty ? cs.onSurfaceVariant : cs.onSurface,
         ),
       ),
     );
@@ -476,6 +534,13 @@ class _AgentHomePageState extends State<AgentHomePage> {
 // 区块容器与小部件
 // ═══════════════════════════════════════════════════════════
 
+/// 区块标题的统一样式（主页 + 画像分区共用同一语言）。
+TextStyle sectionTitleStyle(TextTheme te, ColorScheme cs) => te.labelLarge!.copyWith(
+      fontWeight: FontWeight.w600,
+      letterSpacing: 0.4,
+      color: cs.onSurfaceVariant,
+    );
+
 class _SectionCard extends StatelessWidget {
   const _SectionCard({required this.title, required this.child, this.trailing});
 
@@ -485,13 +550,14 @@ class _SectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme cs = theme.colorScheme;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: cs.surfaceContainerLowest,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: cs.outline.withValues(alpha: 0.25)),
       ),
       child: Column(
@@ -499,15 +565,7 @@ class _SectionCard extends StatelessWidget {
         children: <Widget>[
           Row(
             children: <Widget>[
-              Text(
-                title,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.4,
-                  color: cs.onSurfaceVariant,
-                ),
-              ),
+              Text(title, style: sectionTitleStyle(theme.textTheme, cs)),
               const Spacer(),
               if (trailing != null) trailing!,
             ],
@@ -520,42 +578,114 @@ class _SectionCard extends StatelessWidget {
   }
 }
 
-class _MoodBadge extends StatelessWidget {
-  const _MoodBadge({required this.moodStyle});
+/// 帖子条目：时间/置顶/点赞收成一行小字，正文为主，无分割线。
+class _PostItem extends StatelessWidget {
+  const _PostItem({
+    required this.post,
+    required this.pinned,
+    required this.timeLabel,
+    required this.theme,
+    required this.cs,
+  });
 
-  final String moodStyle;
+  final Map<String, dynamic> post;
+  final bool pinned;
+  final String timeLabel;
+  final ThemeData theme;
+  final ColorScheme cs;
 
   @override
   Widget build(BuildContext context) {
-    final ({String label, Color color, Color bg}) mood = switch (moodStyle) {
-      "funny" => (label: "摸鱼", color: const Color(0xFF2CBF6D), bg: const Color(0x1F2CBF6D)),
-      "sad" => (label: "离开", color: const Color(0xFF8091A7), bg: const Color(0x1F8091A7)),
-      "cool" => (label: "请勿打扰", color: const Color(0xFF7C73FF), bg: const Color(0x1F7C73FF)),
-      "energetic" => (label: "在线", color: const Color(0xFFFF8A3D), bg: const Color(0x1FFF8A3D)),
-      "mysterious" => (label: "隐身感", color: const Color(0xFF3F8CFF), bg: const Color(0x1F3F8CFF)),
-      _ => (label: "忙碌", color: const Color(0xFF3AA7A3), bg: const Color(0x1F3AA7A3)),
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(color: mood.bg, borderRadius: BorderRadius.circular(999)),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: mood.color),
+    final int likes = (post["likeCount"] as num?)?.toInt() ?? 0;
+    final List<String> meta = <String>[
+      if (pinned) "置顶",
+      if (timeLabel.isNotEmpty) timeLabel,
+      if (likes > 0) "$likes 赞",
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          meta.join(" · "),
+          style: theme.textTheme.bodySmall?.copyWith(
+            fontSize: 11,
+            color: cs.onSurfaceVariant.withValues(alpha: 0.75),
           ),
-          const SizedBox(width: 5),
+        ),
+        if ((post["text"] ?? "").toString().trim().isNotEmpty) ...<Widget>[
+          const SizedBox(height: 5),
           Text(
-            mood.label,
+            post["text"].toString(),
+            style: theme.textTheme.bodyMedium?.copyWith(height: 1.6),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// hover 才显形的操作锚点：
+///  - 有 [child]：内容常显，操作图标 hover 才现（如名字行的改名铅笔）；
+///  - 无 [child]：独立操作挂件，平时半透明、hover 点亮（如区块标题右侧的「编辑」）。
+class _HoverActionAnchor extends StatefulWidget {
+  const _HoverActionAnchor({required this.onTap, this.child, this.icon, this.label});
+
+  final VoidCallback onTap;
+  final Widget? child;
+  final IconData? icon;
+  final String? label;
+
+  @override
+  State<_HoverActionAnchor> createState() => _HoverActionAnchorState();
+}
+
+class _HoverActionAnchorState extends State<_HoverActionAnchor> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final Widget action = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        if (widget.icon != null)
+          Icon(widget.icon,
+              size: 14, color: cs.onSurfaceVariant.withValues(alpha: 0.7)),
+        if (widget.label != null) ...<Widget>[
+          if (widget.icon != null) const SizedBox(width: 3),
+          Text(
+            widget.label!,
             style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              color: mood.color.withValues(alpha: 0.95),
+              fontSize: 11.5,
+              color: cs.onSurfaceVariant.withValues(alpha: 0.9),
             ),
           ),
         ],
+      ],
+    );
+    final double idleOpacity = widget.child == null ? 0.45 : 0.0;
+    final Widget? anchorChild = widget.child;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: <Widget>[
+            if (anchorChild != null) Flexible(child: anchorChild),
+            AnimatedOpacity(
+              duration: const Duration(milliseconds: 120),
+              opacity: _hovering ? 1 : idleOpacity,
+              child: anchorChild == null
+                  ? action
+                  : Padding(padding: const EdgeInsets.only(left: 6), child: action),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -592,12 +722,16 @@ class AgentHomepageResult {
     required this.profile,
     required this.identity,
     required this.posts,
+    this.agentNumber,
   });
 
   final bool ok;
   final Map<String, dynamic> profile;
   final Map<String, dynamic> identity;
   final List<Map<String, dynamic>> posts;
+
+  /// QQ 式身份短号（注册即得）；服务端对无账号主体回 null，客户端回退 actorId。
+  final String? agentNumber;
 }
 
 class AgentHomepageApi {
@@ -624,6 +758,9 @@ class AgentHomepageApi {
         ok: true,
         profile: _mapOf(body["profile"]),
         identity: _mapOf(body["identity"]),
+        agentNumber: (body["agentNumber"] as String?)?.trim().isNotEmpty == true
+            ? body["agentNumber"] as String
+            : null,
         posts: <Map<String, dynamic>>[
           for (final dynamic p in (body["posts"] as List<dynamic>? ?? const <dynamic>[]))
             (p as Map).cast<String, dynamic>(),

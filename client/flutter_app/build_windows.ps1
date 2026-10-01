@@ -29,7 +29,11 @@ param(
   [string] $UpdateManifestUrl = 'http://47.98.122.29:3000',
   # 控制面（管理后台所在服务器）：反馈/站内信等运营数据走这里。默认烤入 ECS，
   # 本地构建也能在后台看到反馈；确要回落本地请显式传空：-ControlPlaneUrl ''
-  [string] $ControlPlaneUrl = 'http://47.98.122.29:3000'
+  [string] $ControlPlaneUrl = 'http://47.98.122.29:3000',
+  # 发行版本：internal=内测版（默认，能力全量）；oss=开源版（GitHub 发行，
+  # 内测独占能力整族隐藏）。与服务端 NEXTBOT_EDITION 同名值，开源安装包传 -Edition oss。
+  [ValidateSet('internal', 'oss')]
+  [string] $Edition = 'internal'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -138,7 +142,7 @@ function Invoke-BuildAndDeploy {
     [string] $Mode
   )
 
-  $dartDefines = @()
+  $dartDefines = @('--dart-define', "PAI_EDITION=$Edition")
   if ($HttpBase) { $dartDefines += @('--dart-define', "HTTP_BASE=$HttpBase") }
   if ($UpdateManifestUrl) { $dartDefines += @('--dart-define', "UPDATE_MANIFEST_URL=$UpdateManifestUrl") }
   if ($ControlPlaneUrl) { $dartDefines += @('--dart-define', "CONTROL_PLANE_URL=$ControlPlaneUrl") }

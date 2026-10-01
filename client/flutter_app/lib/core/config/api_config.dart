@@ -72,15 +72,42 @@ class ApiConfig {
     defaultValue: "",
   );
 
-  /// 与后端 `boundActorId` 一致：优先 `trim(userId)`，否则 [sessionId]。HTTP `?sessionId=`、本地存储桶、钱包等应使用本值。
+  /// 运行时身份覆盖：登录成功后写入登录邮箱（已归一化），退出登录置回 null。
+  ///
+  /// 编译期 [userId] 是烤死在安装包里的，所有装同一包的用户会撞成同一个
+  /// 身份；邮箱登录才是真正的按账号隔离——覆盖值优先于 [userId]，未登录
+  /// 时为 null，回落原行为（USER_ID → sessionId）。
+  static String? _runtimeUserIdOverride;
+
+  /// 当前登录身份覆盖（已归一化）；null = 未登录。
+  static String? get runtimeUserId => _runtimeUserIdOverride;
+
+  static set runtimeUserId(String? value) {
+    final String t = normalizeIdentity(value);
+    _runtimeUserIdOverride = t.isEmpty ? null : t;
+  }
+
+  /// 身份归一化：trim；邮箱形态统一小写——同一邮箱大小写不同不得裂成两个
+  /// 账号（服务端 /accounts 路由对邮箱形态 actorId 同规则归一）。
+  static String normalizeIdentity(String? raw) {
+    final String t = raw?.trim() ?? "";
+    if (t.isEmpty) return "";
+    return t.contains("@") ? t.toLowerCase() : t;
+  }
+
+  /// 生效登录主体：登录邮箱覆盖 → 编译期 USER_ID → [sessionId]。
+  /// 与后端 `boundActorId` 一致。HTTP `?sessionId=`、本地存储桶、钱包等应使用本值。
   static String get effectiveActorId {
+    final String o = _runtimeUserIdOverride ?? "";
+    if (o.isNotEmpty) return o;
     final String u = userId.trim();
     return u.isNotEmpty ? u : sessionId;
   }
 
-  /// `GET /accounts/me` 等查询参数：配置了 USER_ID 时只传 `userId`，否则传 `sessionId`。
+  /// `GET /accounts/me` 等查询参数：有登录身份（覆盖或 USER_ID）时只传
+  /// `userId`，否则传 `sessionId`。
   static Map<String, String> get accountAuthQuery {
-    final String u = userId.trim();
+    final String u = _runtimeUserIdOverride ?? userId.trim();
     if (u.isNotEmpty) {
       return <String, String>{"userId": u};
     }
@@ -90,7 +117,7 @@ class ApiConfig {
   /// `POST /accounts/register` 请求体（与 [accountAuthQuery] 规则一致）。
   static Map<String, String> accountRegisterBody(String displayName) {
     final String name = displayName.trim();
-    final String u = userId.trim();
+    final String u = _runtimeUserIdOverride ?? userId.trim();
     final Map<String, String> m = <String, String>{"displayName": name};
     if (u.isNotEmpty) {
       m["userId"] = u;
@@ -102,7 +129,7 @@ class ApiConfig {
 
   /// `POST /accounts/register/email/verify` 请求体（6 位数字码 + 与 [accountAuthQuery] 一致的登录主体）。
   static Map<String, String> accountEmailVerifyBody(String code) {
-    final String u = userId.trim();
+    final String u = _runtimeUserIdOverride ?? userId.trim();
     final Map<String, String> m = <String, String>{"code": code.trim()};
     if (u.isNotEmpty) {
       m["userId"] = u;
@@ -130,6 +157,21 @@ class ApiConfig {
     "LOCAL_PIN",
     defaultValue: "123456",
   );
+
+  /// 发行版本（与服务端 NEXTBOT_EDITION 同名值，打包脚本 -Edition 对齐）：
+  /// internal —— 内测版（默认）：能力全量（旅游/虚拟电话/好友/比价/手机桥接等）；
+  /// oss      —— 开源版（GitHub 发行）：内测独占能力整族剔除，服务端闸
+  ///             capability-modules/internalOnly + 家族注册块 + HTTP 路由，
+  ///             客户端守卫 = travel_itinerary/product_compare 卡、电话 WS 事件、
+  ///             好友面板、设置页手机桥接。
+  /// 打包：`--dart-define=PAI_EDITION=oss`；开发/内测构建不传即 internal。
+  static const String edition = String.fromEnvironment(
+    "PAI_EDITION",
+    defaultValue: "internal",
+  );
+
+  /// 是否开源版（内测独占能力应隐藏）。
+  static const bool isOssEdition = edition == "oss";
 
   static const String _defaultSocialFeedUrl = "http://127.0.0.1:3001";
 

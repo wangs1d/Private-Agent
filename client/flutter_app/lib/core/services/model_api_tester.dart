@@ -186,3 +186,32 @@ class VoiceprintApi {
     }
   }
 }
+
+/// 邮箱接入（邮箱盯梢）API：状态查询 + IMAP 授权码提交（设置页「邮箱接入」卡）。
+/// 授权码即刻生效（服务端当场启动轮询）；持久化由设置页写 config.env（重启后
+/// runtime 环境注入回来），服务端不落盘明文。
+class MailWatchApi {
+  static Uri _uri(String path) => Uri.parse("${ApiConfig.httpBase}$path");
+
+  static Future<Map<String, dynamic>> status() async {
+    try {
+      final http.Response res = await http
+          .get(_uri("/api/mail-watch/status"))
+          .timeout(const Duration(seconds: 5));
+      return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      return <String, dynamic>{"ok": false};
+    }
+  }
+
+  static Future<Map<String, dynamic>> applyPass(String pass) async {
+    final http.Response res = await http
+        .post(
+          _uri("/api/mail-watch/pass"),
+          headers: <String, String>{"Content-Type": "application/json"},
+          body: jsonEncode(<String, dynamic>{"pass": pass}),
+        )
+        .timeout(const Duration(seconds: 10));
+    return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+  }
+}

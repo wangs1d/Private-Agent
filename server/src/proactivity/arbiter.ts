@@ -65,10 +65,12 @@ export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): Arbitratio
       utility: utilityResult,
     };
   }
-  // 静默时段：非 critical 且用户不在设备前 → 择时到静默结束（defer 而非丢弃——
-  // "没发"与"择机发"是两种体验）。用户活跃（深夜还在用设备）时的低/中打扰
-  // 聊天气泡不算惊扰，照发；high/critical（弹窗级）仍一律 defer/critical 直达
-  if (isQuietHourNow(new Date(ctx.now)) && p.importance !== "critical") {
+  // 静默时段：critical/high 豁免（时效性事务——验证码 10 分钟作废、传票/逾期类，
+  // defer 到明早等于没提醒；与 governor「静默仅 high 放行」口径对齐，2026-10-01
+  // 修复：邮件提醒 high 被吞到早上 7 点、验证码全无效）。用户活跃（在设备前）
+  // 时的低/中打扰聊天气泡不算惊扰，照发；其余 medium/low defer 到静默结束
+  // （"没发"与"择机发"是两种体验）。
+  if (isQuietHourNow(new Date(ctx.now)) && p.importance !== "critical" && p.importance !== "high") {
     const userAwake = ctx.presence === "active";
     const lowKey = p.importance === "low" || p.importance === "medium";
     if (!(userAwake && lowKey)) {

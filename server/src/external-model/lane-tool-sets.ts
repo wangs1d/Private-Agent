@@ -54,6 +54,9 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   "agent.send_to_peer",
   // 记忆（感知）
   "brain.recall",
+  // 用户画像自编辑（2026-09-29）：「越来越了解用户」是对话基本动作；
+  // 进延迟目录模型会忘记搜索、直接嘴硬说记了（真机实证），须常驻可见。
+  "profile.update",
   // 持续感知回溯（只读，2026-09-19 P0-1）
   "perception.overview",
   // 自我/能力（模型自救入口）
@@ -236,13 +239,12 @@ export function buildLaneCoreTools(
 }
 
 /**
- * 任务面 router-first 旅游域定向保底（2026-09-24 大理轮）。
- *
- * router-first 下任务轮可见集只剩 tool_discover/tool_call 桥，travel.* 规划族
- * 退进 BM25 延迟目录——意图预召回（top-1≥0.5、600ms 超时静默）漏命中且模型
- * 不主动 discover 时整轮漏召：模型凭常识自写行程，travel_itinerary 行程卡
- * 随之整卡漏发。这里定义提为常驻可见的规划族（编辑/回查类跟随轮操作不提，
- * 仍走 discover）；goal 命中旅游语义时由 agent-core 调 pickTravelPlanningTools 提升。
+ * 任务面 router-first 旅游规划族常驻保底（2026-09-24 大理轮；2026-10-01 从
+ * goal 语义+latch 改为恒注入）。旅游是模型"自觉会写"的域：拿不到 schema 就
+ * 凭常识自写行程，行程卡整卡漏发。goal 正则判定会抖动（"对了酒店呢"不命中），
+ * 与其维护正则+会话 latch 的点补状态，不如恒注入瘦身 schema（≈4 工具首句
+ * 描述，token 可忽略）——集合同 intent 恒同集，前缀缓存天然稳定。编辑/回查
+ * 类跟随轮操作不提，仍走 discover。
  */
 export const TRAVEL_PLANNING_PROMOTED_NAMES: ReadonlySet<string> = new Set([
   "travel.plan-itinerary",
@@ -251,16 +253,26 @@ export const TRAVEL_PLANNING_PROMOTED_NAMES: ReadonlySet<string> = new Set([
   "travel.compute-route",
 ]);
 
-/** 从语料中取旅游规划族工具（goal 未命中旅游语义时返回空，不提升）。 */
+/** 从语料中取旅游规划族工具（瘦身 schema，恒注入 router-first 任务轮）。 */
 export function pickTravelPlanningTools(
   corpus: ChatCompletionTool[],
-  goalHit: boolean,
 ): ChatCompletionTool[] {
-  if (!goalHit) return [];
-  return corpus.filter(
-    (d) => d.type === "function" && TRAVEL_PLANNING_PROMOTED_NAMES.has(d.function?.name ?? ""),
-  );
+  return corpus
+    .filter(
+      (d) => d.type === "function" && TRAVEL_PLANNING_PROMOTED_NAMES.has(d.function?.name ?? ""),
+    )
+    .map(slimToolSchema);
 }
+
+/**
+ * router-first 车道判定口径（2026-10-01 统一）：可见工具数 ≤ 此值且延迟目录
+ * 非空 = "业务工具主力在延迟目录、本轮依赖检索召回"的轮。两个消费方共享：
+ *   - agent-gateway 意图预召回（只对这类轮投机，chat/束轮 Core 已覆盖主力）
+ *   - tool-loop 规划指导语第 0 条（先 discover 后 call 的两步走引导）
+ * 数值 = 桥工具(2) + travel 规划族保底(4) 的常驻规模（高频晋升轮按非
+ * router-first 处理——晋升工具本身已是主力，预召回/两步引导价值消失）。
+ */
+export const ROUTER_FIRST_LANE_MAX_VISIBLE = 6;
 
 /**
  * 能力束 → 工具名/命名空间前缀映射（Tier-2 确定性增量注入）。

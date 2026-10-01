@@ -79,6 +79,9 @@ const RULES: ClassRule[] = [
   { exact: "wallet.purchase", domain: "finance", action: "book", risk: "spend" },
   { exact: "wallet.recharge", domain: "finance", action: "book", risk: "spend" },
   { prefix: "wallet.", domain: "finance" },
+  // 查支付方式/查订单是只读，exact 前置；家族前缀默认 spend
+  { exact: "payment.list_methods", domain: "finance", action: "query", risk: "read" },
+  { exact: "payment.query_order", domain: "finance", action: "query", risk: "read" },
   { prefix: "payment.", domain: "finance", action: "book", risk: "spend" },
   { exact: "shopping.order.place", domain: "finance", action: "book", risk: "spend" },
   { exact: "shopping.pay.submit", domain: "finance", action: "book", risk: "spend" },
@@ -89,6 +92,9 @@ const RULES: ClassRule[] = [
   // ── health 健康 ──
   { prefix: "health.", domain: "health" },
   // ── social 社交 ──
+  // 拉时间线/搜帖是只读，必须 exact 前置；落进家族默认 outbound 会触发高危确认闸
+  { exact: "social.get_feed", domain: "social", action: "query", risk: "read" },
+  { exact: "social.search_posts", domain: "social", action: "query", risk: "read" },
   { prefix: "social.", domain: "social", action: "communicate", risk: "outbound" },
   { exact: "email.send", domain: "social", action: "communicate", risk: "outbound" },
   { exact: "sms.send", domain: "social", action: "communicate", risk: "outbound" },

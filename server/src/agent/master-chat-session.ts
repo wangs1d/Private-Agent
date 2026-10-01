@@ -40,6 +40,14 @@ export function isNotesChatSessionId(sessionId: string | undefined | null): bool
   return typeof sessionId === "string" && sessionId.startsWith(NOTES_CHAT_SESSION_PREFIX);
 }
 
+/** 隐身会话前缀（2026-09-29）：`incognito:` 开头的 session 不进用户画像观察。 */
+export const INCOGNITO_CHAT_SESSION_PREFIX = "incognito:";
+
+/** 判定是否为隐身 session（对齐 ChatGPT temporary chat：聊可以，画像不长）。 */
+export function isIncognitoChatSessionId(sessionId: string | undefined | null): boolean {
+  return typeof sessionId === "string" && sessionId.startsWith(INCOGNITO_CHAT_SESSION_PREFIX);
+}
+
 /* ── 渠道隔离会话（2026-09-06 P1，OpenClaw 模式）────────────────────────
  * 通用消息桥（QQ/飞书/自定义 webhook）的入站消息此前在缺省时全部落
  * MESSAGE_BRIDGE_DEFAULT_ACTOR_ID（session-mvp-001）——不同平台/来源的对话

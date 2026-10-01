@@ -1,6 +1,10 @@
 ; PrivateAgent Windows 安装包（Inno Setup 6）
 ; 打包入口：scripts/release/build-installer.ps1（负责 staging，再调 ISCC 编译本文件）
-; AppId 固定不变：覆盖安装/升级检测/卸载全靠它，永不可改。
+; 发行版本（/DEdition 由打包脚本传入）：
+;   internal —— 内测版（默认）：全量能力，AppId 固定为历史 GUID；
+;   oss      —— 开源版（GitHub 发行）：内测独占能力已剔除。
+; 两版必须使用不同 AppId / 安装目录 / 快捷方式名：AppId 相同会互相覆盖升级
+; （内测版会被开源版的安装动作顶掉），永不可共用。
 
 #ifndef AppVersion
 #define AppVersion "0.1.0"
@@ -11,16 +15,36 @@
 #define Stage "E:\PAStage"
 #endif
 
+#ifndef Edition
+#define Edition "internal"
+#endif
+
+#if Edition == "oss"
+#define MyAppId "{{C11EB7C6-FACF-4AF9-A5F7-CF91B8B65F94}}"
+#define MyAppName "Nextbot OSS"
+#define MyAppPublisher "Nextbot OSS"
+#define MyOutputBase "Nextbot-Setup-OSS"
+#define MyDirName "{autopf}\Nextbot-OSS"
+#define MyIconName "Nextbot OSS"
+#else
+#define MyAppId "{{D4A7F1B8-6C2E-4F9A-B3D8-91E05A7C4216}}"
+#define MyAppName "Nextbot"
+#define MyAppPublisher "Nextbot"
+#define MyOutputBase "Nextbot-Setup"
+#define MyDirName "{autopf}\Nextbot"
+#define MyIconName "Nextbot"
+#endif
+
 [Setup]
-AppId={{D4A7F1B8-6C2E-4F9A-B3D8-91E05A7C4216}}
-AppName=Nextbot
+AppId={#MyAppId}
+AppName={#MyAppName}
 AppVersion={#AppVersion}
-AppPublisher=Nextbot
-DefaultDirName={autopf}\Nextbot
+AppPublisher={#MyAppPublisher}
+DefaultDirName={#MyDirName}
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 OutputDir=..\windows_dist\installer
-OutputBaseFilename=Nextbot-Setup
+OutputBaseFilename={#MyOutputBase}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -35,11 +59,11 @@ Source: "{#Stage}\app\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion 
 Source: "{#Stage}\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs ignoreversion createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\Nextbot"; Filename: "{app}\private_ai_agent.exe"
-Name: "{autodesktop}\Nextbot"; Filename: "{app}\private_ai_agent.exe"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyIconName}"; Filename: "{app}\private_ai_agent.exe"
+Name: "{autodesktop}\{#MyIconName}"; Filename: "{app}\private_ai_agent.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\private_ai_agent.exe"; Description: "立即启动 Nextbot"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\private_ai_agent.exe"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; 故意不删 %APPDATA%\PrivateAgent（用户 key 与数据），安装器只管应用目录

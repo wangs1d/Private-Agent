@@ -3,6 +3,7 @@ import "dart:math" show min;
 
 import "package:flutter/material.dart";
 
+import "../../core/config/api_config.dart";
 import "../../core/models/schedule_models.dart";
 import "../../core/services/device_api_client.dart";
 import "../../core/services/right_panel_tool_preference.dart";
@@ -190,6 +191,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
   }
 
   Future<void> _refreshDeviceStatus() async {
+    if (ApiConfig.isOssEdition) return; // 开源版无手机设备能力，跳过轮询
     try {
       final DeviceApiResult<List<DeviceInfo>> result =
           await _deviceApi.listDevices();
@@ -964,17 +966,20 @@ class _RightSidePanelState extends State<RightSidePanel> {
   // ═══════════════════════════════════════════════════════════
   List<_ToolSpec> _allToolSpecs() {
     return <_ToolSpec>[
-      _ToolSpec(
-          id: "friends",
-          icon: Icons.people_outline,
-          label: "好友",
-          onTap: widget.onAgentLink),
-      _ToolSpec(
-          id: "phone",
-          icon: Icons.phone_iphone,
-          label: "手机",
-          onTap: widget.onPhone,
-          subLabelBuilder: () => _phoneSubLabel),
+      // 版本闸（开源版剔除内测独占能力）：好友/手机设备入口不出现
+      if (!ApiConfig.isOssEdition) ...[
+        _ToolSpec(
+            id: "friends",
+            icon: Icons.people_outline,
+            label: "好友",
+            onTap: widget.onAgentLink),
+        _ToolSpec(
+            id: "phone",
+            icon: Icons.phone_iphone,
+            label: "手机",
+            onTap: widget.onPhone,
+            subLabelBuilder: () => _phoneSubLabel),
+      ],
       _ToolSpec(
           id: "messages",
           icon: Icons.message_outlined,

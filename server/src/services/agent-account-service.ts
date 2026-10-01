@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
-import { randomUUID } from "crypto";
+import { randomInt, randomUUID } from "crypto";
 
 export type AgentAccountRecord = {
   accountId: string;
@@ -9,12 +9,19 @@ export type AgentAccountRecord = {
   displayName: string;
   /** 经邮箱验证流程绑定的地址；旧数据或工具直开账号可能为空 */
   email?: string;
+  /** QQ 式对外身份短号（6-8 位数字，注册即得、终身不变）；旧账号在 load 时自动补号 */
+  agentNumber?: string;
   createdAt: string;
   /** 自导初始化流程是否已标记完成 */
   setupComplete: boolean;
   /** 管理员禁用标记；置位后主对话入口拒绝该用户（管理控制台可开关） */
   disabled?: boolean;
+  /** 最近一次活跃（注册/登录/WS session.init）时间；旧数据缺省 */
+  lastActiveAt?: string;
 };
+
+/** 身份短号格式：6-8 位数字、首位非零（与 generateAgentNumber 的取值域一致）。 */
+export const AGENT_NUMBER_PATTERN = /^[1-9]\d{5,7}$/;
 
 type PersistedAccountRow = AgentAccountRecord & { sessionId?: string };
 
@@ -23,9 +30,25 @@ type PersistedAccountRow = AgentAccountRecord & { sessionId?: string };
  */
 export class AgentAccountService {
   private readonly byActorId = new Map<string, AgentAccountRecord>();
+  /** 身份短号唯一性索引：短号 → actorId（load/register 时同步维护） */
+  private readonly byAgentNumber = new Map<string, string>();
 
   private get persistPath(): string {
     return process.env.AGENT_ACCOUNTS_FILE ?? join(process.cwd(), "data", "agent-accounts.json");
+  }
+
+  /**
+   * 生成一个未被占用的身份短号（6-8 位数字、首位非零）。
+   * 取值域 9000 万，随机 64 次仍撞号则线性探测兜底。
+   */
+  private generateAgentNumber(): string {
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const n = String(randomInt(100_000, 100_000_000));
+      if (!this.byAgentNumber.has(n)) return n;
+    }
+    let n = 100_000;
+    while (this.byAgentNumber.has(String(n))) n++;
+    return String(n);
   }
 
   async load(): Promise<void> {
@@ -34,11 +57,16 @@ export class AgentAccountService {
       const data = JSON.parse(raw) as { accounts?: PersistedAccountRow[] };
       const list = data.accounts ?? [];
       this.byActorId.clear();
+      this.byAgentNumber.clear();
+      // 短号唯一性两遍扫描（QQ 式身份号码 2026-09-30）：
+      // 第一遍认领全部已存有效短号（先到先得，存过的号永不被新号抢占）；
+      // 第二遍给缺号 / 撞号 / 格式非法的账号补生成——保证全库唯一。
+      const needsNumber: AgentAccountRecord[] = [];
       for (const a of list) {
         if (!a?.accountId) continue;
         const actorId = String(a.userId ?? a.sessionId ?? "").trim();
         if (!actorId) continue;
-        this.byActorId.set(actorId, {
+        const record: AgentAccountRecord = {
           accountId: a.accountId,
           userId: actorId,
           displayName: String(a.displayName ?? "").trim() || "Agent",
@@ -46,8 +74,24 @@ export class AgentAccountService {
           createdAt: a.createdAt ?? new Date().toISOString(),
           setupComplete: Boolean(a.setupComplete),
           ...(a.disabled ? { disabled: true } : {}),
-        });
+          ...(a.lastActiveAt ? { lastActiveAt: a.lastActiveAt } : {}),
+        };
+        const stored = String(a.agentNumber ?? "").trim();
+        if (stored && AGENT_NUMBER_PATTERN.test(stored) && !this.byAgentNumber.has(stored)) {
+          record.agentNumber = stored;
+          this.byAgentNumber.set(stored, actorId);
+        } else {
+          needsNumber.push(record);
+        }
+        this.byActorId.set(actorId, record);
       }
+      let migrated = false;
+      for (const record of needsNumber) {
+        record.agentNumber = this.generateAgentNumber();
+        this.byAgentNumber.set(record.agentNumber, record.userId);
+        migrated = true;
+      }
+      if (migrated) await this.persist();
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "ENOENT") return;
@@ -67,6 +111,14 @@ export class AgentAccountService {
 
   getByActorId(actorId: string): AgentAccountRecord | undefined {
     return this.byActorId.get(actorId.trim());
+  }
+
+  /** 按身份短号查账号（不存在或格式不符返回 undefined）。 */
+  getByAgentNumber(agentNumber: string): AgentAccountRecord | undefined {
+    const t = agentNumber.trim();
+    if (!AGENT_NUMBER_PATTERN.test(t)) return undefined;
+    const actorId = this.byAgentNumber.get(t);
+    return actorId ? this.byActorId.get(actorId) : undefined;
   }
 
   /** 全部账号（管理统计用）。 */
@@ -96,7 +148,8 @@ export class AgentAccountService {
       if (
         a.displayName.toLowerCase().includes(q) ||
         a.userId.toLowerCase().includes(q) ||
-        (a.email && a.email.toLowerCase().includes(q))
+        (a.email && a.email.toLowerCase().includes(q)) ||
+        (a.agentNumber && a.agentNumber.includes(q))
       ) {
         hits.push(a);
       }
@@ -144,11 +197,14 @@ export class AgentAccountService {
       accountId: randomUUID(),
       userId: id,
       displayName: name,
+      agentNumber: this.generateAgentNumber(),
       ...(email !== undefined ? { email: email.trim() } : {}),
       createdAt: new Date().toISOString(),
       setupComplete: false,
+      lastActiveAt: new Date().toISOString(),
     };
     this.byActorId.set(id, record);
+    this.byAgentNumber.set(record.agentNumber!, id);
     await this.persist();
     return record;
   }
@@ -167,6 +223,22 @@ export class AgentAccountService {
   isDisabled(actorId: string): boolean {
     return Boolean(this.byActorId.get(actorId.trim())?.disabled);
   }
+
+  /**
+   * 记录一次活跃（管理后台「最近活跃」指标的数据源）。内存即时生效，
+   * 落盘按服务级 60s 节流——WS session.init / 登录都是高频入口，
+   * 不节流的话每连一次就全量重写账号 JSON。
+   */
+  touchLastActive(actorId: string, at: Date = new Date()): void {
+    const r = this.byActorId.get(actorId.trim());
+    if (!r) return;
+    r.lastActiveAt = at.toISOString();
+    const now = Date.now();
+    if (now - this.lastActivePersistAt < 60_000) return;
+    this.lastActivePersistAt = now;
+    void this.persist().catch(() => {});
+  }
+  private lastActivePersistAt = 0;
 
   /**
    * 管理员禁用/恢复账号。禁用后主对话入口拒绝该用户；账号本身保留，

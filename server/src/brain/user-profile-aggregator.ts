@@ -31,6 +31,7 @@ import OpenAI from "openai";
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { getModelForTask, TaskTier } from "../config/model-routing.js";
 import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
+import { touchProfileLines, rebuildProfileMeta, listStaleLines } from "./profile-lines-meta.js";
 
 /** 规则画像的最小接口（OnlineLearningCortex 子集，避免硬依赖） */
 export interface OnlineLearningLike {
@@ -47,6 +48,10 @@ export interface ProfileAggregatorConfig {
   enabled: boolean;
   /** 每轮 LLM 抽取开关 */
   extractEnabled: boolean;
+  /** 抽取 token 闸：仅高信号/个人陈述轮跑抽取（寒暄轮靠深度合成兜底） */
+  extractPrescreen: boolean;
+  /** 画像行陈旧判定阈值（天）：超过该天数未被对话证实的行进合成裁决 */
+  staleLineDays: number;
   /** 每轮抽取使用的模型 */
   extractModel: string;
   /** 每 N 轮触发一次 LLM 深度合成 */
@@ -81,6 +86,8 @@ export function loadProfileAggregatorConfig(): ProfileAggregatorConfig {
   return {
     enabled: envFlag(process.env.MEMORY_PROFILE_AGGREGATOR_ENABLED, true),
     extractEnabled: envFlag(process.env.MEMORY_PROFILE_EXTRACT_ENABLED, true),
+    extractPrescreen: envFlag(process.env.MEMORY_PROFILE_EXTRACT_PRESCREEN, true),
+    staleLineDays: parseIntEnv(process.env.MEMORY_PROFILE_STALE_DAYS, 90),
     extractModel: process.env.MEMORY_PROFILE_EXTRACT_MODEL?.trim() || primaryModel,
     synthesisTurnThreshold: parseIntEnv(process.env.MEMORY_PROFILE_SYNTHESIS_TURNS, 12),
     minSynthesisIntervalMs: parseFloatEnv(process.env.MEMORY_PROFILE_SYNTHESIS_INTERVAL_MS, 30 * 60 * 1000),
@@ -347,6 +354,7 @@ function buildSynthesisMessages(
   currentProfile: string,
   onlineLearningBlock: string,
   recentTurns: string,
+  extra?: { factBlock?: string; understandingBlock?: string; staleText?: string },
 ): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
   const system = [
     "你是用户画像维护器。根据「现有画像」「规则引擎提取的画像信号」「最近对话轮」，输出更新后的完整用户画像 markdown。",
@@ -361,6 +369,8 @@ function buildSynthesisMessages(
     "7. 亲密关系单值：老婆/对象/正主/未婚妻等（含「未来老婆」等变体）视为同一字段，以用户最新明确表述为准，删除旧表述与「候选/备选/关系未确认」式暧昧条目；助手的调侃、求证永远不是依据；",
     "8. 画像开头保留一行引用块：`> 本文件由 Agent 在与你的对话中持续更新。最后更新：{ISO时间}`；",
     "9. 直接输出 markdown 全文，不要任何解释或代码围栏。",
+    "10. 跨库一致性：若提供了【结构化事实库当前值】/【理解档案当前要点】，它们是其他记忆库的权威快照——画像与它们矛盾时，以「最近对话轮」为最高权威统一口径，画像与快照必须改到一致；无矛盾证据时不要凭空改写快照内容。",
+    "11. 陈旧裁决：若提供了【陈旧行候选】，逐条判断——近期对话或事实库/理解档案能证实的保留；已明显过时（换了工作/搬了家/关系变化）的删除或改写为现状；拿不准的保留原样。不要为了删而删。",
   ].join("\n");
   const user = [
     "【现有画像】",
@@ -372,6 +382,11 @@ function buildSynthesisMessages(
     "【最近对话轮（供提炼隐性偏好）】",
     recentTurns || "（无）",
     "",
+    ...(extra?.factBlock ? [extra.factBlock, ""] : []),
+    ...(extra?.understandingBlock ? [extra.understandingBlock, ""] : []),
+    ...(extra?.staleText
+      ? ["【陈旧行候选（长期未被对话证实，逐条裁决：保留/删除/改写为现状）】", extra.staleText, ""]
+      : []),
     "请输出更新后的完整画像 markdown：",
   ].join("\n");
   return [
@@ -399,9 +414,7 @@ export class UserProfileAggregator {
   private readonly client: OpenAI | null;
   private onlineLearning: OnlineLearningLike | null = null;
 
-  /** actorId → 自上次深度合成以来的轮计数 */
-  private readonly turnCounters = new Map<string, number>();
-  /** actorId → 未消费轮次队列（内存缓存，落盘到 pending-turns.json，重启不丢） */
+  /** actorId → 未消费轮次队列（内存缓存，落盘到 pending-turns.json，重启不丢；合成触发判据） */
   private readonly pendingTurns = new Map<string, string[]>();
   private readonly pendingLoaded = new Set<string>();
   /** actorId → 上次深度合成时间戳 */
@@ -440,12 +453,18 @@ export class UserProfileAggregator {
   }
 
   /**
-   * 每轮 cognize 完成后调用（brain-center 阶段 3.6.1 后置）。
-   * - 轮次进入持久化队列（深度合成的输入，重启不丢）；
-   * - 异步触发每轮 LLM 抽取（ADD/UPDATE/DELETE 精确落位，不阻塞调用方）；
-   * - 计数达到阈值时异步触发 LLM 深度合成。
+   * 每轮 finalizeTurn 收尾时调用（2026-09-29 从 brain-center 阶段3.6.1 迁入：
+   * 原位传 cognitive.response 恒空串，画像只见用户半边；finalizeTurn 拿真实全文）。
+   * - 轮次进入持久化队列（深度合成的输入 + 合成触发判据，重启不丢）；
+   * - 条件触发 LLM 抽取（token 闸预筛，ADD/UPDATE/DELETE 精确落位，不阻塞调用方）；
+   * - 队列条数达阈值时异步触发 LLM 深度合成。
    */
-  observeTurn(actorId: string, userText: string, assistantText: string): void {
+  observeTurn(
+    actorId: string,
+    userText: string,
+    assistantText: string,
+    opts?: { highSignal?: boolean },
+  ): void {
     if (!this.config.enabled) return;
     const user = (userText ?? "").trim();
     const assistant = (assistantText ?? "").trim();
@@ -453,25 +472,79 @@ export class UserProfileAggregator {
 
     // 1. 持久化轮次队列
     const block = `用户: ${user.slice(0, 200)}\n助手: ${assistant.slice(0, 200)}`;
-    void this.appendPendingTurn(actorId, block).catch(() => {
-      /* 队列落盘失败静默，内存仍有 */
-    });
+    void this.appendPendingTurn(actorId, block)
+      .then(() => this.maybeSynthesizeByPendingCount(actorId))
+      .catch(() => {
+        /* 队列落盘失败静默，内存仍有 */
+      });
 
-    // 2. 每轮 LLM 抽取 → 结构化操作确定性写入画像
-    if (user) {
+    // 2. 条件 LLM 抽取 → 结构化操作确定性写入画像。
+    //    token 闸：高信号轮或个人陈述预筛命中才跑 MINI 抽取，寒暄轮跳过；
+    //    漏掉的由深度合成兜底（轮次已在队列，零丢失）。
+    if (user && this.shouldExtractNow(user, opts?.highSignal === true)) {
       void this.extractAndApply(actorId, user, assistant).catch(() => {
         /* 抽取失败静默，深度合成兜底 */
       });
     }
+  }
 
-    // 3. 计数达到阈值 → 异步深度合成
-    const count = (this.turnCounters.get(actorId) ?? 0) + 1;
-    this.turnCounters.set(actorId, count);
-    if (count >= this.config.synthesisTurnThreshold) {
-      this.turnCounters.set(actorId, 0);
-      void this.synthesizeDeepProfile(actorId).catch(() => {
-        /* 深度合成失败静默降级 */
-      });
+  /**
+   * 个人陈述信号（宽匹配：假阳性=多跑一次 MINI 抽取，假阴性=深度合成兜底）。
+   * 二组为改口/迁移类（2026-09-29 纠错腿盲区：「现在在泉州开咖啡店/以后长住」
+   * 无「住在/搬家/换工作」字样，被闸误跳过导致画像不更新）。
+   */
+  private static readonly EXTRACT_HINT_RE =
+    /我叫|我的(名字|小名|生日|猫|狗|爱好|工作|职业|公司|学校|专业|老婆|老公|男朋友|女朋友|女儿|儿子|家人|爸妈)|我是(一名|做|搞|学)|住在|在.{0,10}上班|喜欢|讨厌|害怕|最近在(学|练|看|读|准备|找)|养了|要考|结婚|订婚|分手|搬家|换工作|辞职|入职|毕业|记错|搞错|其实|直接一?点|绕弯子|现在(在|不|是)|以后(就|在)|长住|定居|转行|改行|搬(到|去|家)|转让|不干了|改(成|开|做)|换成/;
+
+  /** 抽取 token 闸（MEMORY_PROFILE_EXTRACT_PRESCREEN=0 关闭预筛，恢复每轮抽取） */
+  private shouldExtractNow(userText: string, highSignal: boolean): boolean {
+    if (!this.config.extractPrescreen) return true;
+    if (highSignal) return true;
+    return UserProfileAggregator.EXTRACT_HINT_RE.test(userText);
+  }
+
+  /**
+   * 跨库一致性快照块（P1-2）：事实库当前值 + 理解档案要点，进合成 prompt 交
+   * LLM 与画像统一裁决。库未装配/为空时返回空串（零注入）。
+   * 返回第三项恒为 "stale" 占位——陈旧行须在合成串行链内按最新画像全文计算。
+   */
+  private async buildCrossStoreBlocks(
+    actorId: string,
+  ): Promise<[factBlock: string, understandingBlock: string, staleMarker: string]> {
+    try {
+      const { getMemoryComponents } = await import("../agentic-memory/index.js");
+      const components = getMemoryComponents();
+      const facts = components.factStore?.getActiveFacts?.(actorId) ?? [];
+      const understandings =
+        components.understandingStore?.getActiveUnderstandings?.(actorId) ?? [];
+      const factText = facts
+        .slice(0, 20)
+        .map((f) => `- ${f.field}: ${f.value}`)
+        .join("\n");
+      const understandingText = understandings
+        .slice(0, 10)
+        .map((n) => `- [${n.kind}] ${n.topic}: ${n.note}`)
+        .join("\n");
+      return [factText, understandingText, "stale"];
+    } catch {
+      return ["", "", ""];
+    }
+  }
+
+  /**
+   * 持久化队列条数达标即触发深度合成（2026-09-29 换锚：原内存计数器随 tsx watch
+   * 重启清零，阈值永远凑不齐；队列文件本就每轮落盘，判据读它重启不丢）。
+   * 间隔/在途去重由 synthesizeDeepProfile 内部闸承担；未放行时队列继续累积
+   * （上限 200），后续每轮重试直至合成。
+   */
+  private async maybeSynthesizeByPendingCount(actorId: string): Promise<void> {
+    try {
+      const pending = await this.ensurePendingLoaded(actorId);
+      if (pending.length >= this.config.synthesisTurnThreshold) {
+        await this.synthesizeDeepProfile(actorId);
+      }
+    } catch {
+      /* 静默 */
     }
   }
 
@@ -553,6 +626,12 @@ export class UserProfileAggregator {
           inputChars: JSON.stringify(messages).length,
           outputChars: content.length,
           model: this.config.extractModel,
+          // P1-3（2026-09-29）：非流式调用天然带 usage——真值进审计/预算闸，
+          // 不再按字符估算虚高 ~1.8 倍记账
+          ...(response.usage ? {
+            apiPromptTokens: response.usage.prompt_tokens,
+            apiCompletionTokens: response.usage.completion_tokens,
+          } : {}),
         });
       }
       if (!content) return false;
@@ -574,12 +653,23 @@ export class UserProfileAggregator {
       } else {
         console.log(`[ProfileAggregator] LLM 抽取更新画像: ${actorId} (${applied.length} 条操作，校验通过)`);
       }
+      // 新鲜度 sidecar：同步画像全文 + 证实本次落位的行（P1-1）
+      try {
+        await touchProfileLines(
+          actorId,
+          written,
+          applied.map((a) => a.expectLine ?? "").filter(Boolean),
+        );
+      } catch (metaErr) {
+        console.warn(`[ProfileAggregator] 行元数据同步失败（忽略）: ${metaErr instanceof Error ? metaErr.message : metaErr}`);
+      }
       return failures.length === 0;
     });
   }
 
   /**
-   * LLM 深度画像合成：现有画像 + 规则增量 + 未消费轮次队列 → 更新后的画像 markdown。
+   * LLM 深度画像合成：现有画像 + 规则增量 + 未消费轮次队列 + 跨库一致性快照 +
+   * 陈旧行裁决清单 → 更新后的画像 markdown。
    * in-flight 去重 + 最小间隔控制；失败静默保持旧画像（轮次不清空，下次再消费）。
    */
   async synthesizeDeepProfile(actorId: string): Promise<boolean> {
@@ -588,6 +678,9 @@ export class UserProfileAggregator {
 
     const last = this.lastSynthesisAt.get(actorId) ?? 0;
     if (Date.now() - last < this.config.minSynthesisIntervalMs) return false;
+
+    // 跨库一致性快照（P1-2）+ 陈旧行候选（P1-1）：都在合成 prompt 里交 LLM 统一裁决
+    const [factBlock, understandingBlock, staleBlock] = await this.buildCrossStoreBlocks(actorId);
 
     this.synthesizing.add(actorId);
     try {
@@ -598,8 +691,18 @@ export class UserProfileAggregator {
           : "";
         const pending = await this.ensurePendingLoaded(actorId);
         const recentTurns = pending.slice(-PENDING_TURNS_PER_SYNTHESIS).join("\n\n");
+        // 陈旧行要在拿到画像全文后按当前内容过滤（loadMeta 在串行链外读的，行集合可能有变）
+        const staleLines = staleBlock ? await listStaleLines(actorId, currentProfile, this.config.staleLineDays * 86_400_000) : [];
+        const staleText = staleLines.length > 0
+          ? staleLines.map((m) => `- 「${m.line}」（${m.section}，最近证实 ${m.lastConfirmedAt.slice(0, 10)}，证实 ${m.seenCount} 次）`).join("\n")
+          : "";
 
-        const messages = buildSynthesisMessages(currentProfile, onlineBlock, recentTurns);
+        const messages = buildSynthesisMessages(
+          currentProfile,
+          onlineBlock,
+          recentTurns,
+          { factBlock, understandingBlock, staleText },
+        );
         const response = await this.client!.chat.completions.create({
           model: this.config.model,
           temperature: 0.2,
@@ -615,6 +718,11 @@ export class UserProfileAggregator {
             inputChars: JSON.stringify(messages).length,
             outputChars: content.length,
             model: this.config.model,
+            // P1-3（2026-09-29）：同 extract——非流式 usage 真值进审计
+            ...(response.usage ? {
+              apiPromptTokens: response.usage.prompt_tokens,
+              apiCompletionTokens: response.usage.completion_tokens,
+            } : {}),
           });
         }
         if (!content) return false;
@@ -627,6 +735,12 @@ export class UserProfileAggregator {
 
         await this.store.write(actorId, cleaned);
         this.lastSynthesisAt.set(actorId, Date.now());
+        // 新鲜度 sidecar 随整文重写重建（保留原有行的历史，新行从现在起算）
+        try {
+          await rebuildProfileMeta(actorId, cleaned);
+        } catch (metaErr) {
+          console.warn(`[ProfileAggregator] 行元数据重建失败（忽略）: ${metaErr instanceof Error ? metaErr.message : metaErr}`);
+        }
         // 消费轮次队列（已在序列化链内，直接落盘避免嵌套死锁）
         this.pendingTurns.set(actorId, []);
         try {
@@ -654,9 +768,10 @@ export class UserProfileAggregator {
     lastSynthesisAt: string | null;
     canSynthesize: boolean;
   } {
+    const buffered = (this.pendingTurns.get(actorId) ?? []).length;
     return {
-      turnsSinceSynthesis: this.turnCounters.get(actorId) ?? 0,
-      bufferedTurns: (this.pendingTurns.get(actorId) ?? []).length,
+      turnsSinceSynthesis: buffered,
+      bufferedTurns: buffered,
       lastSynthesisAt: this.lastSynthesisAt.has(actorId)
         ? new Date(this.lastSynthesisAt.get(actorId)!).toISOString()
         : null,

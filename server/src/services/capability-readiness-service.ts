@@ -72,12 +72,11 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
   {
     id: "agentic_memory",
     label: "长期记忆",
-    description: "记住你的偏好与事实，越用越懂你",
+    description: "记住你的偏好与事实，越用越懂你（内置本地向量引擎，零配置即用）",
     groups: [
       {
-        anyOf: ["OPENAI_API_KEY", "AGENT_EMBEDDING_API_KEY"],
-        required: true,
-        hint: "记忆向量化需要 OPENAI_API_KEY 或 AGENT_EMBEDDING_API_KEY",
+        anyOf: ["AGENT_EMBEDDING_API_KEY"],
+        hint: "可选：配置远端 Embedding 端点可提升记忆检索质量（内置本地引擎默认可用）",
       },
     ],
   },
@@ -174,25 +173,13 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
     ],
   },
   {
-    id: "image_gen",
-    label: "图片生成",
-    description: "文生图、头像与插画",
-    groups: [
-      {
-        anyOf: ["SILICONFLOW_API_KEY", "OPENAI_API_KEY"],
-        required: true,
-        hint: "配置 SILICONFLOW_API_KEY 或 OPENAI_API_KEY",
-      },
-    ],
-  },
-  {
     id: "voice_chat",
     label: "语音对话",
     description: "中文语音识别（本地 FunASR）与语音播报",
     groups: [
       {
-        allOf: ["SILICONFLOW_API_KEY"],
-        hint: "配置 SILICONFLOW_API_KEY 解锁语音播报（TTS）",
+        allOf: ["MINIMAX_API_KEY"],
+        hint: "配置 MINIMAX_API_KEY 解锁语音播报与实时语音（MiniMax）",
       },
     ],
   },

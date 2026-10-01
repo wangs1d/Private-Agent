@@ -7,8 +7,8 @@
  *
  * 用法：
  *   npx tsx scripts/live-tool-arch.ts --model gpt-4o-mini --repeat 3
- *   npx tsx scripts/live-tool-arch.ts --base-url https://api.siliconflow.cn/v1 \
- *     --api-key-env SILICONFLOW_API_KEY --model deepseek-ai/DeepSeek-V4-Flash
+ *   npx tsx scripts/live-tool-arch.ts --base-url https://api.deepseek.com/v1 \
+ *     --api-key-env OPENAI_API_KEY --model deepseek-chat
  */
 import "dotenv/config";
 import { mkdtempSync } from "node:fs";
@@ -164,7 +164,7 @@ for (const sc of SCENARIOS) {
   for (let i = 0; i < REPEAT; i++) {
     const before = traces.length;
     const t0 = Date.now();
-    // 每轮整体硬超时：SiliconFlow 流式响应可能"头已到、身体挂住"，
+    // 每轮整体硬超时：中转端点流式响应可能"头已到、身体挂住"，
     // SDK timeout 管不到 body 阶段，必须用 signal 贯穿整轮。
     const turnSignal = AbortSignal.timeout(150_000);
     try {

@@ -38,7 +38,7 @@ export function createImageGenerateHandler(
       return {
         ok: false,
         error:
-          "图像生成未配置：服务端需设置 SILICONFLOW_API_KEY。请告知用户「图像生成能力未启用」。",
+          "图像生成未配置：服务端需 OPENAI_API_KEY（OpenAI 兼容 images 接口）。请告知用户「图像生成能力未启用」。",
       };
     }
 

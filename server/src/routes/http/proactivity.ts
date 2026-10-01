@@ -53,6 +53,27 @@ export type ProactivityFabricDeps = {
   arbiterPreview: () => unknown;
   /** 目标板统计（L4） */
   goalStats: () => unknown;
+  /**
+   * P3 自诊断（2026-10-01）：按 actor 输出「为什么没说话」分层计数——
+   * 活跃判定/状态板/事件/提案/投递各层最新数据，主动性健康一查即知。
+   */
+  whySilent?: (actorId?: string) => Record<string, unknown>;
+  /**
+   * 邮件反应链测试注入（2026-10-01）：模拟邮件走真实 handleIncoming 链
+   * （分级→主动提醒→票务日程桥→消息中心），只跳过 IMAP 拉取（需授权码）。
+   */
+  mailTestInject?: (mail: {
+    actorId?: string;
+    from: string;
+    subject: string;
+    text: string;
+    uid?: number;
+    source?: Buffer;
+  }) => Promise<{ importance: string; reasons: string[] }>;
+  /** 邮箱接入状态（设置页；诚实反映自动接入/授权码/轮询态） */
+  mailWatchStatus?: () => unknown;
+  /** 授权码提交（设置页）：即刻配置并尝试启动轮询，返回启动后状态 */
+  mailWatchApplyPass?: (pass: string) => unknown;
   /** 成本校准快照（接受率 → alert 阈值） */
   calibration?: () => unknown;
   /** 评估器探针（L2：id/订阅流/状态键） */
@@ -210,6 +231,79 @@ export function registerProactivityPipelineRoutes(
   app.get("/api/proactivity/sensors", async () => {
     if (!deps.fabric) return { ok: false, error: "fabric not wired" };
     return { ok: true, sensors: deps.fabric.sensorHealth(), goals: deps.fabric.goalStats() };
+  });
+
+  // P3 自诊断（2026-10-01）：「主动性到底干没干活 / 为什么没说话」——
+  // 按 actor 输出活跃判定、状态板当下层、事件/提案/投递计数与最近痕迹。
+  app.get("/api/proactivity/why-silent", async (request) => {
+    if (!deps.fabric?.whySilent) return { ok: false, error: "whySilent not wired" };
+    const q = request.query as { actorId?: string };
+    return {
+      ok: true,
+      ...(deps.fabric.whySilent(q.actorId?.trim() || undefined) as Record<string, unknown>),
+    };
+  });
+
+  // 邮件反应链测试注入口（2026-10-01）：一封模拟邮件走真实 handleIncoming 链
+  // （重要性分级 → 主动提醒 → 票务日程桥 → 消息中心落库），与 IMAP 轮询取到
+  // 真邮件后的路径完全一致——只跳过 IMAP 拉取本身（需授权码）。
+  // 正文按 RFC822 组装成原始 MIME（utf-8 base64），票务桥吃的 source 与真邮件同构。
+  // 诊断/验收用：POST /api/proactivity/mail/test {from, subject, text, actorId?}
+  app.post("/api/proactivity/mail/test", async (request, reply) => {
+    const inject = deps.fabric?.mailTestInject;
+    if (!inject) return reply.code(503).send({ ok: false, error: "mailTestInject not wired" });
+    const body = (request.body ?? {}) as {
+      from?: string;
+      subject?: string;
+      text?: string;
+      actorId?: string;
+    };
+    if (!body.from || !body.subject) {
+      return reply.code(400).send({ ok: false, error: "from / subject required" });
+    }
+    const source = Buffer.from(
+      [
+        `From: ${body.from}`,
+        `To: user@example.com`,
+        `Subject: ${body.subject}`,
+        `Date: ${new Date().toUTCString()}`,
+        `MIME-Version: 1.0`,
+        `Content-Type: text/plain; charset=utf-8`,
+        `Content-Transfer-Encoding: base64`,
+        ``,
+        Buffer.from(body.text ?? "", "utf8").toString("base64").replace(/(.{76})/g, "$1\r\n"),
+      ].join("\r\n"),
+      "utf8",
+    );
+    const classification = await inject({
+      actorId: body.actorId?.trim() || undefined,
+      from: body.from,
+      subject: body.subject,
+      text: body.text ?? "",
+      uid: Date.now(),
+      source,
+    });
+    return { ok: true, classification };
+  });
+
+  // 邮箱接入状态（设置页「邮箱盯梢」块数据源）：诚实反映自动接入/授权码/轮询态
+  app.get("/api/mail-watch/status", async () => {
+    const status = deps.fabric?.mailWatchStatus;
+    if (!status) return { ok: false, error: "mailWatchStatus not wired" };
+    return { ok: true, status: status() };
+  });
+
+  // 授权码提交（设置页填 IMAP 授权码）：写进 MailWatchService 即刻尝试启动轮询。
+  // 注意：本进程内生效；持久化由客户端写 config.env（MAIL_WATCH_PASS），重启后
+  // 由 runtime 环境注入回来——服务端不落盘明文授权码。
+  app.post("/api/mail-watch/pass", async (request, reply) => {
+    const applyPass = deps.fabric?.mailWatchApplyPass;
+    if (!applyPass) return reply.code(503).send({ ok: false, error: "mailWatchApplyPass not wired" });
+    const body = (request.body ?? {}) as { pass?: string };
+    const pass = String(body.pass ?? "").trim();
+    if (!pass) return reply.code(400).send({ ok: false, error: "pass required" });
+    const result = applyPass(pass);
+    return { ok: true, ...(result as Record<string, unknown>) };
   });
 
   // GET /api/proactivity/selftest —— 一键链路自检：上下文快照 + 打断成本 + 裁决预览。

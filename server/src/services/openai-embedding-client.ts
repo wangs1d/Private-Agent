@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 
 import { isPlaceholderApiKey } from "../config/api-key-validator.js";
+import { getLocalEmbeddingEndpoint } from "../agentic-memory/local-embedding/local-embedding-endpoint.js";
 
 export type EmbeddingEndpoint = {
   baseUrl: string;
@@ -67,27 +68,34 @@ export function resolveEmbeddingModel(): string {
 
 /**
  * 解析当前可用的 Embedding 端点（OpenAI 兼容 /v1/embeddings）。
- * 优先级：AGENT_EMBEDDING_BASE_URL → OPENAI_EMBEDDINGS_URL → OPENAI_BASE_URL。
- * DeepSeek / Moonshot 等纯聊天渠道没有 /embeddings，返回 null（调用方跳过向量检索）。
+ * 远端只认显式配置：AGENT_EMBEDDING_BASE_URL → OPENAI_EMBEDDINGS_URL；
+ * 否则落到本地内置向量引擎（零配置底座，bootstrap 无远端配置时预热）。
+ *
+ * 刻意【不】拿 OPENAI_BASE_URL 兜底：对话网关未必提供 /embeddings（真链踩过：
+ * 通用网关/embeddings 连接失败），误信会产出运行期才炸的假端点；确有嵌入能力
+ * 的端点请显式配 OPENAI_EMBEDDINGS_URL。
  */
 export function resolveEmbeddingEndpoint(): EmbeddingEndpoint | null {
   const apiKey =
     process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
     process.env.OPENAI_API_KEY?.trim() ||
     "";
-  if (!apiKey || isPlaceholderApiKey(apiKey)) return null;
   const model = resolveEmbeddingModel();
 
+  const validKey = apiKey && !isPlaceholderApiKey(apiKey);
   const explicit = process.env.AGENT_EMBEDDING_BASE_URL?.trim();
-  if (explicit) return { baseUrl: explicit.replace(/\/+$/, ""), apiKey, model };
+  if (explicit && validKey) {
+    return { baseUrl: explicit.replace(/\/+$/, ""), apiKey, model };
+  }
 
   const embeddingsUrl = process.env.OPENAI_EMBEDDINGS_URL?.trim();
-  if (embeddingsUrl) return { baseUrl: embeddingsUrl.replace(/\/+$/, ""), apiKey, model };
-
-  const chatBase = process.env.OPENAI_BASE_URL?.trim();
-  if (chatBase && !/deepseek|moonshot|kimi/i.test(chatBase)) {
-    return { baseUrl: chatBase.replace(/\/+$/, ""), apiKey, model };
+  if (embeddingsUrl && validKey) {
+    return { baseUrl: embeddingsUrl.replace(/\/+$/, ""), apiKey, model };
   }
+
+  // 本地内置引擎兜底：模型/维度/鉴权自成一体，与远端配置解耦
+  const local = getLocalEmbeddingEndpoint();
+  if (local) return { baseUrl: local.baseUrl, apiKey: local.apiKey, model: local.model };
   return null;
 }
 
@@ -171,8 +179,8 @@ export async function fetchOpenAiCompatibleEmbedding(opts: {
   // api.openai.com 浪费时间（401 / 超时）。
   if (!opts.baseUrl && !ep) {
     throw new Error(
-      "embeddings: no compatible endpoint configured; set AGENT_EMBEDDING_BASE_URL " +
-        "(e.g. https://api.siliconflow.cn/v1) + AGENT_EMBEDDING_API_KEY",
+      "embeddings: no compatible endpoint; 可配置 AGENT_EMBEDDING_BASE_URL + AGENT_EMBEDDING_API_KEY " +
+        "走远端，或检查本地内置向量引擎（AGENT_LOCAL_EMBEDDING_DISABLED / models/bge-small-zh-v1.5）",
     );
   }
 
@@ -187,7 +195,7 @@ export async function fetchOpenAiCompatibleEmbedding(opts: {
   }
   const model = opts.model ?? ep?.model ?? "text-embedding-3-small";
 
-  // baseUrl 约定为"纯 base"（如 https://api.siliconflow.cn/v1，来自 AGENT_EMBEDDING_BASE_URL），
+  // baseUrl 约定为"纯 base"（如 https://api.deepseek.com/v1，来自 AGENT_EMBEDDING_BASE_URL），
   // 需补 /embeddings 路径；默认值已含 /embeddings，直接跳过拼接。
   const endpoint = base.endsWith("/embeddings") ? base : `${base}/embeddings`;
 
@@ -214,8 +222,8 @@ export async function fetchOpenAiCompatibleEmbeddings(opts: {
   const ep = resolveEmbeddingEndpoint();
   if (!opts.baseUrl && !ep) {
     throw new Error(
-      "embeddings: no compatible endpoint configured; set AGENT_EMBEDDING_BASE_URL " +
-        "(e.g. https://api.siliconflow.cn/v1) + AGENT_EMBEDDING_API_KEY",
+      "embeddings: no compatible endpoint; 可配置 AGENT_EMBEDDING_BASE_URL + AGENT_EMBEDDING_API_KEY " +
+        "走远端，或检查本地内置向量引擎（AGENT_LOCAL_EMBEDDING_DISABLED / models/bge-small-zh-v1.5）",
     );
   }
   const base =

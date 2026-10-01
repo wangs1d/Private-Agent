@@ -67,6 +67,13 @@ export type AgentPromptMemoryContext = {
    * KV 式精确记录，确定性高于语义检索来源；同字段新值实时覆盖旧值。
    */
   userFacts?: string;
+  /**
+   * 本轮寻址块（2026-09-29 P0-1 缓存优化）：用户最新消息命中的理解话题/事实
+   * 字段清单。理解档案/事实块本体进稳定层时不再带逐条寻址标记（那会让稳定层
+   * 逐轮变字节，打断 DeepSeek 前缀缓存——实测改一行命中 98%→27%），命中信息
+   * 改由本块沉底注入动态层，功能等价（"我老婆是谁"仍直达对应条目）。
+   */
+  turnAddressing?: string;
   memorySummary?: string;
   memoryPreferences?: string;
   memoryFacts?: string;
@@ -79,6 +86,17 @@ export type AgentPromptMemoryContext = {
   userLocation?: string;
   /** 用户常去地点（位置历史 DBSCAN 聚类，程序化注入，零 LLM） */
   frequentPlaces?: string;
+  /**
+   * 当下状态（WorldBoard.current 程序化整理，零 LLM）：屏幕焦点/在线状态 +
+   * 持续时长 + 顺嘴纪律锚点。让顺嘴/关心贴着「此刻」说，不再拿旧记忆套模板。
+   * 陈旧信号（>10min）不注入。
+   */
+  currentUserState?: string;
+  /**
+   * 顺嘴机会（主动性搭车通道，每轮至多一条）：挂起的 low 主动意图织入
+   * 回复末尾的括号旁注。块内自带织入形态指令；与话题不搭时模型可不提。
+   */
+  turnAside?: string;
   /** Per-turn task profile and operating policy injected into the system prompt. */
   taskContext?: string;
   /** `USER_PROFILE.md` 摘录：长期用户画像 */
@@ -90,6 +108,8 @@ export type AgentPromptMemoryContext = {
   dailyDigest?: string;
   /** 后台记忆管理服务自动合成的用户长期画像（偏好/话题/意图/风险标记） */
   userProfileSummary?: string;
+  /** 冷启动引导（P2）：画像还是模板且会话首轮时的一条自然破冰提示（动态层） */
+  onboardingHint?: string;
   /**
    * 记忆目录（元认知）：MemoryInventory 统计的记忆规模/时间分布/高频主题摘要。
    * 让 LLM "知道自己记住了什么"，用户问"你知道我什么"时有真实依据可答。

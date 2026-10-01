@@ -8,7 +8,7 @@ import type { TtsService } from "../../services/tts-service.js";
  * 用途：客户端 voice 模式或卡片 🔊 按钮点击时，把 narrationText 发到服务端
  * 合成 mp3 base64，再用客户端 TtsPlayer.playFromBase64 播放。
  *
- * 复用现有 TtsService（硅基流动优先，OpenAI 回退），不存档、不落盘。
+ * 复用现有 TtsService（MiniMax 优先，OpenAI 回退），不存档、不落盘。
  */
 export function registerBriefingTtsRoutes(
   app: FastifyInstance,

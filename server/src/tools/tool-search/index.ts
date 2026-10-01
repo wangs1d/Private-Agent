@@ -226,14 +226,9 @@ export {
 export { executeToolSearchBridge, type ToolSearchBridgeResult } from "./handlers.js";
 export * from "./registry/index.js";
 export * from "./intent-router/intent-router.js";
-export * from "./hierarchical-router/hierarchical-router.js";
 export * from "./retrieval/history-score.js";
 export * from "./retrieval/hybrid-retrieval.js";
 export * from "./top-p-selector/top-p-selector.js";
-export * from "./feedback/feedback-models.js";
-export * from "./feedback/online-learner.js";
-export * from "./feedback/circuit-breaker.js";
-export * from "./feedback/async-feedback-queue.js";
 export * from "./knowledge-graph/graph-relations.js";
 export * from "./knowledge-graph/neo4j-client.js";
 export * from "./lazy-loader/lazy-loader.js";

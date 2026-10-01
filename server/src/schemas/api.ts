@@ -84,8 +84,27 @@ export const accountRegisterBodySchema = z
     // 注册界面的邮箱（可选）：落在账号名单（后台 /api/admin/users 已展示）。
     // 格式校验在 agentAccountService.register 内做（与邮箱验证码注册同闸）。
     email: z.string().optional(),
+    // 邮箱所有权验证码（可选字段；OTP 闸开启时邮箱形态主体必须携带，
+    // 见 routes/http/accounts.ts 的 enforcement 说明）。
+    otpCode: z.string().max(8).optional(),
   })
   .superRefine(accountActorRefine);
+
+/** 邮箱验证码签发（POST /accounts/email/otp/start）：只收邮箱本体。 */
+export const accountEmailOtpStartBodySchema = z.object({
+  email: z.string().min(3).max(254),
+});
+
+/** 内测候补申请（登录页自助排队）：邮箱必填，备注可选。 */
+export const accountBetaApplyBodySchema = z.object({
+  email: z.string().min(3).max(254),
+  note: z.string().max(200).optional(),
+});
+
+/** 内测进度查询（公开 /beta 页）：只读，不做任何状态变更。 */
+export const accountBetaStatusQuerySchema = z.object({
+  email: z.string().min(3).max(254),
+});
 
 export const accountMeQuerySchema = z
   .object({

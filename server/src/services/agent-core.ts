@@ -39,12 +39,6 @@ import { isActorDisabled } from "./user-disable-gate.js";
 export { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUIDANCE } from "../agent/lane-role-guidance.js";
 import { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUIDANCE } from "../agent/lane-role-guidance.js";
 
-/** 任务面 plan-driven 工具注入开关（2026-09-05，默认开启；0/off/false 回退能力束注入）。 */
-function isTaskToolPlannerEnabled(): boolean {
-  const raw = process.env.AGENT_TASK_TOOL_PLANNER?.trim().toLowerCase();
-  return raw !== "0" && raw !== "off" && raw !== "false";
-}
-
 /**
  * 前台小工具集白名单（2026-09-06 P0 修复，原生 function calling）。
  *
@@ -65,7 +59,8 @@ const FOREGROUND_INLINE_TOOL_NAMES = new Set([
  * 日历/提醒创建类工具（2026-09-24）：本轮任一成功返回 → 该轮按「办妥确认轮」
  * 执法回复风格闸（不吃结构豁免），堵"订阅确认写成五段导购"的废话出口。
  */
-const CALENDAR_CONFIRM_TOOLS = new Set([
+/** 确认轮工具集（WS 层同源消费：分泡轮说话算话裁决的确认轮例外，见 bubble-tracker.ts） */
+export const CALENDAR_CONFIRM_TOOLS = new Set([
   "reminder.plan",
   "calendar.create_from_text",
   "calendar.create_task",
@@ -102,28 +97,6 @@ function getForegroundChatToolWhitelist(userText?: string): ChatCompletionTool[]
     ),
   ];
 }
-
-/** 解析规划器输出的 {"tools":["a","b"]}（容错：剥前缀/截取 JSON 对象）。 */
-function parsePlannedToolNames(raw: string | undefined | null): string[] {
-  const text = (raw ?? "").trim();
-  if (!text) return [];
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return [];
-  try {
-    const obj = JSON.parse(text.slice(start, end + 1)) as { tools?: unknown };
-    if (!Array.isArray(obj.tools)) return [];
-    return obj.tools
-      .filter((x): x is string => typeof x === "string")
-      .map((x) => x.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-/** 延迟目录桥：explicit 白名单下必须可见，保证 plan 漏选的工具可被 tool_discover 召回。 */
-const TOOL_BRIDGE_NAMES = [...TASK_TOOL_BRIDGE_NAMES] as const;
 
 /**
  * fast 对话模式的单次输出 token 上限。
@@ -188,6 +161,7 @@ import {
   isStaticToolArchEnabled,
   isTaskLaneRouterFirst,
   pickTravelPlanningTools,
+  slimToolSchema,
   toolsMatchingCapabilityBeam,
 } from "../external-model/lane-tool-sets.js";
 import {
@@ -217,7 +191,6 @@ import { type LlmExecutionMode, type RouteDecision } from "../agent/task-router.
 import {
   isForegroundDispatchMode,
   isForegroundTagProtocolEnabled,
-  TASK_TOOL_BRIDGE_NAMES,
 } from "../agent/task-router.js";
 import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
 import {
@@ -241,7 +214,6 @@ import {
   type MediaCardItem,
 } from "./tool-result-processor.js";
 import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
-import { shouldInjectTravelState } from "./travel-prompt-snapshot.js";
 import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
@@ -413,6 +385,8 @@ export class AgentCore {
       userPersonalizationService: this.userPersonalizationService,
       agentMemorySyncService: this.agentMemorySyncService,
       shortTermMemoryGateway: this.shortTermMemoryGateway,
+      // 画像聚合器经 brainCenter 惰性取（构造序：turnLifecycle 先于 brainCenter 赋值）
+      getUserProfileAggregator: () => this.brainCenter?.getUserProfileAggregator() ?? null,
     });
     this.toolContextFactory = new ToolContextFactory({
       toolRegistry: this.toolRegistry,
@@ -658,6 +632,19 @@ export class AgentCore {
     this.proactivityHub = hub;
     // 复杂任务完成恭喜接线：编排器持有同一 hub
     this.agentTaskOrchestrator?.setProactivityHub(hub);
+    // 顺嘴搭车通道（2026-10-01）：hub 的挂起 low 意图经 prompt builder 织入
+    // 对话面回复末尾；取走即交付（每轮至多一条，频控/TTL 在队列内）
+    this.promptContextBuilder.setTurnAsideProvider(
+      hub ? (actorId: string) => hub.takeTurnAsideForTurn(actorId) : null,
+    );
+  }
+
+  /**
+   * 注入当下状态拉取器（WorldBoard.current 格式化，bootstrap 接线）。
+   * 每轮对话面注入【当下状态】块：屏幕焦点/在线状态，顺嘴的 grounded 依据。
+   */
+  setCurrentStateProvider(fn: ((actorId: string) => string | null) | null): void {
+    this.promptContextBuilder.setCurrentStateProvider(fn);
   }
 
   /**
@@ -762,6 +749,28 @@ export class AgentCore {
     } | undefined;
     /** 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围 */
     let cognitiveToolPlan: import("../brain/tool-planning-cortex.js").ToolPlan | undefined;
+    // 阶段计时（2026-09-28 延迟诊断配套，见下方 routed 分支内赋值与 preMain 汇总日志）
+    let turnT0 = 0;
+    let turnRouteDone = 0;
+    let turnCognizeDone = 0;
+    // ctxTiming：上下文装配成员级计时（>100ms 才打，定位冷会话装配黑洞）
+    const ctxTiming = <T,>(label: string, p: Promise<T>): Promise<T> => {
+      const s = Date.now();
+      return p.then(
+        (v) => {
+          if (Date.now() - s > 100) {
+            // eslint-disable-next-line no-console
+            console.info(`[ctx-timing] ${label} ${Date.now() - s}ms`);
+          }
+          return v;
+        },
+        (e) => {
+          // eslint-disable-next-line no-console
+          console.info(`[ctx-timing] ${label} FAILED ${Date.now() - s}ms`);
+          throw e;
+        },
+      );
+    };
 
     // 投机并行搜索（2026-09-13）：路由判定期间就用用户原话发起前置搜索。
     // realtime 轮省掉「路由(≤3s)→搜索(≤9s)」的串行首响；路由判非 realtime
@@ -798,6 +807,10 @@ export class AgentCore {
       // 而出口词表闸永远慢一步。触发必须是程序层的确定动作，不是模型的概率选择。
       // AGENT_FOREGROUND_DISPATCH=0 语义已并入默认路径（前台自决模式整体退役）。
       const recentUserTurns = this.getRecentUserTurnsForRouting(actorId, sessionId, text);
+      // 阶段计时（2026-09-28 延迟诊断配套）：t0 → 路由就绪 → cognize 就绪 →
+      // 上下文装配完 → 主调用派发（绝对时间戳跨日志行关联）。声明在外层供
+      // preMain 汇总日志读取（brainCenter 缺席的降级路径保持 0）。
+      turnT0 = Date.now();
       const routePromise = opts?.routeDecision
         ? Promise.resolve(opts.routeDecision)
         : routeTurnByLlm(
@@ -825,6 +838,7 @@ export class AgentCore {
         });
 
       const fastRoute = await routePromise;
+      turnRouteDone = Date.now();
 
       // 异步情绪推断（不阻塞主流程/工具执行）：优先消费语义路由顺带产出的
       // 情绪/话题辅助分析（与路由调用合并，省一次每轮 LLM 调用）；路由超时/
@@ -857,8 +871,28 @@ export class AgentCore {
       const shouldGoTaskPlane = fastRoute.plane === "task";
 
       let brainCognition: import("../brain/types.js").CognitiveResult | null = null;
-      // cognize 已与路由并行启动，此处仅等待结果
-      brainCognition = await cognizePromise;
+      // cognize 已与路由并行启动，此处仅等待结果。
+      // 护栏超时（2026-09-28）：cognize 大并行的个别成员（记忆检索/anticipation/
+      // contextCortex）无自身超时，外部依赖抖动时会楔死整轮（实测 embedding 超时
+      // 爆发时 90s 无响应）。超时降级 null（既有降级路径），后台任务任其完成。
+      // 默认 3500ms，AGENT_COGNIZE_TIMEOUT_MS 可调。
+      const cognizeGuardMs = (() => {
+        const n = Number.parseInt(process.env.AGENT_COGNIZE_TIMEOUT_MS ?? "", 10);
+        return Number.isFinite(n) && n > 0 ? n : 3500;
+      })();
+      brainCognition = await Promise.race([
+        cognizePromise,
+        new Promise<null>((resolve) =>
+          setTimeout(() => {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[turn-timing] cognize 护栏超时（${cognizeGuardMs}ms），主回复降级先行`,
+            );
+            resolve(null);
+          }, cognizeGuardMs),
+        ),
+      ]);
+      turnCognizeDone = Date.now();
       // v3：cognize 的 recallGate 判定不再消费（读路径改窄线索单点，见下方 narrowMemoryCue）
 
       // 对话内推入后台感知底座：完全后台化——只采集对话内容，由 ProactivityHub
@@ -1053,11 +1087,13 @@ export class AgentCore {
           // 对话面记忆注入：
           // - 有 cognize 召回结果时直接复用（Complex 路径）
           // - 无 cognize 召回结果时（Fast 跳过 cognize 路径），走 prepareNarrativeRecall
-          suppressNarrativeRecall
+          // ctxTiming：成员级计时（2026-09-28 延迟诊断配套，定位冷会话 6s 装配黑洞）
+          ctxTiming("narrativeRecall",
+            suppressNarrativeRecall
             ? Promise.resolve(undefined)
             : (cognitiveRecallItems && cognitiveRecallItems.length > 0
                 ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-                : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text))),
+                : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text)))),
           // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
           // 跨会话待办衔接块（最近对话原文不再注入——messages 数组已含同样内容）：
@@ -1066,9 +1102,15 @@ export class AgentCore {
             ? Promise.resolve(undefined)
             : Promise.resolve(this.buildRecentConversationHistoryBlock(actorId)),
           // 2026-09-05：对话面也注入位置背景（纯缓存/按需 RPC，零 LLM）
-          this.resolveUserLocationForPrompt(actorId, opts),
-          Promise.resolve({} as PersonalizationPromptSlice),
-          Promise.resolve(this.resolveFrequentPlacesPrompt(actorId)),
+          ctxTiming("userLocation", this.resolveUserLocationForPrompt(actorId, opts)),
+          // 2026-09-29 画像接通对话面：chat 面注入文件画像（轻量切片零副作用；
+          // 模板画像不注入）。语气不走 toneGuidance（mood/风格闸单点管）。
+          ctxTiming(
+            "userProfileChat",
+            this.userPersonalizationService?.getProfileOnlySlice(actorId) ??
+              Promise.resolve({} as PersonalizationPromptSlice),
+          ),
+          ctxTiming("frequentPlaces", Promise.resolve(this.resolveFrequentPlacesPrompt(actorId))),
         ])
       : await Promise.all([
           // 复用 cognize 阶段已召回的记忆条目，避免同一轮用户消息重复触发 MemoryCortex.recall
@@ -1102,6 +1144,14 @@ export class AgentCore {
     );
 
     const prepDuration = Date.now() - prepStartTime;
+    if (turnT0 > 0) {
+      // eslint-disable-next-line no-console
+      console.info(
+        `[turn-timing] session=${sessionId?.slice(0, 24)} routeMs=${turnRouteDone - turnT0} ` +
+          `cognizeExtraMs=${turnCognizeDone - turnRouteDone} ctxMs=${prepDuration} ` +
+          `preMainMs=${Date.now() - turnT0} ctxDoneAt=${Date.now()}`,
+      );
+    }
 
     const trajCap = this.trajectorySkillPromotion?.beginCapture(
       actorId,
@@ -1600,11 +1650,17 @@ if (route.plane === "task") {
       const lastAttempt = this.promptLocationLastAttemptAt.get(actorId) ?? 0;
       if (Date.now() - lastAttempt >= AgentCore.PROMPT_LOCATION_RETRY_MS) {
         this.promptLocationLastAttemptAt.set(actorId, Date.now());
-        const fetched = await coordinator.requestLocation(actorId, "prompt:chat-context");
-        if (fetched) {
-          location = fetched;
-          observedAt = Date.now();
-        }
+        // 后台补位（2026-09-28 根修）：位置只是 prompt 背景注入，绝不阻塞主回复。
+        // 此前 await requestLocation——客户端不回位置包时干等满 6s requestTimeout
+        //（新会话首轮必中，实测把 pre-main 拖到 7s+）。改为只发起不等待：回包
+        // 由 completeFromSocket 写缓存，供下一轮注入；本轮用旧缓存或无位置。
+        // 实时等待语义保留给工具路径（weather.get_local 等经 tool-context 的
+        // requestLocation），那里拿不到位置可以明确兜底。
+        void coordinator
+          .requestLocation(actorId, "prompt:chat-context")
+          .catch(() => {
+            /* 超时/失败静默：缓存未更新，下一窗口重试 */
+          });
       }
     }
 
@@ -2130,6 +2186,9 @@ if (route.plane === "task") {
             longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
             semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
             recallGateTriggered: ctx.orchestrateToolCtx?.recallGateTriggered,
+            // 单一调用点在 chat 车道分支（isChatLane），plane 固定 chat：
+            // 顺嘴搭车块按车道门控只进对话面
+            plane: "chat",
           }) ?? {}),
           // 前台工具暴露（2026-09-19 静态双车道改造）：
           // - 静态架构（默认）：chat Core 静态常驻（感知只读 + 单步轻动作 +
@@ -2404,51 +2463,57 @@ if (route.plane === "task") {
     let pePlan: TaskExecutionPlan | null = null;
     let peExhausted = false;
 
-    // plan-driven 工具注入（2026-09-05 前后台架构）：
-    // - 快速通道（toolRecallOnly，默认起步）：跳过 planner，可见工具 = 桥工具
-    //   （tool_discover/tool_call），全量工具集只进 BM25 目录语料——模型经
-    //   tool router 按需召回并执行，上下文零业务 schema（先轻后重）。
-    // - 完整通道：Plan 调用只看紧凑工具目录（name + 一句话描述，零 schema），
-    //   输出必需工具名，Execute 以 explicit 白名单一次性注入计划工具 schema
-    //   （多步任务的重型路径）。
-    // - 规划失败/为空 → 回退原 delegate 能力束注入（保守路径不变）。
+    // 任务面工具装配（2026-10-01「一次分类，处处消费」收敛为三条确定性路径）：
+    // - 轻任务束（realtime/media 等非 full 束）：路由表判出的 capabilities 直接
+    //   投影为可见集全 schema——「路由判需要搜索」在结构上保证「搜索工具必然
+    //   可见」，不再依赖 BM25 拿用户原话二次猜（原话弱召回=漏召→模型凭常识
+    //   直答的根源），discover 波次随之从流程消失。
+    // - full 束（multi_step/后台派发/保守降级）：router-first 桥 + travel 规划族
+    //   保底，全量语料进 BM25 目录按需召回。
+    // - AGENT_TASK_LANE=core 回滚：静态 task Core ∪ 能力束（原路径保留）。
     let execStreamOpts = streamOpts;
     if (!useExplicitPlanner && this.isTaskLane(mode)) {
+      const corpus = [
+        ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
+        ...(streamOpts.chatToolsExtra ?? []),
+      ];
       if (isStaticToolArchEnabled() && isTaskLaneRouterFirst()) {
-        // router-first（2026-09-23 token 优化）：可见集 = 桥工具（tool_discover/
-        // tool_call 由 prepareToolsWithToolSearch 按延迟目录自动注入），全量语料
-        // 进 BM25 目录按需召回——task 轮不再背 36 个 Core 全量 schema（实测
-        // ≈5.1k tok/轮，占 light 档单次输入六成）。质量护栏：意图预召回
-        // （top-1 高置信免 discover 直转正）+ <tool_request> 请求卡 + 高频
-        // 自动晋升。回滚：AGENT_TASK_LANE=core（下方原静态 Core ∪ 能力束路径）。
-        const corpus = [
-          ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
-          ...(streamOpts.chatToolsExtra ?? []),
-        ];
-        // 旅游域定向保底（2026-09-24 大理轮）：goal 命中旅游语义时把 travel
-        // 规划族提为常驻可见，其余工具仍走桥召回（可见集在 prepareToolsWithToolSearch
-        // 自动去重）。防的是预召回漏命中 + 模型不主动 discover 的双重漏召——
-        // 旅游是模型"自觉会写"的域，拿不到 schema 就凭常识自写行程，行程卡整卡漏发。
-        const travelPromoted = pickTravelPlanningTools(
-          corpus,
-          shouldInjectTravelState(text) || /去[^，。！？!?\s]{0,10}玩/.test(text),
-        );
-        execStreamOpts = {
-          ...streamOpts,
-          toolExposureProfile: "explicit",
-          chatToolsBuiltin: travelPromoted,
-          chatToolsExtra: corpus,
-        };
+        // 显式禁网轮（2026-09-23）：束与目录语料一并剥联网检索族，防 tool_discover
+        // 把搜索工具召回回来绕过开关。
+        const webForbidden = ctx.webSearchForbidden === true;
+        const corpusSafe = webForbidden ? filterWebSearchTools(corpus) : corpus;
+        // 轻任务束确定性注入：束轮可见集恒同集（同 intent 同投影），前缀缓存稳定。
+        // schema 走瘦身（首句描述、剥字段说明，与 travel 保底同款）——束的价值在
+        // 「确定性可达」不在参数手册，全 schema 会把束轮输入抬高数 k token。
+        const caps = ctx.turnPlan?.capabilities ?? [];
+        const lightBeam =
+          caps.length > 0 && !caps.includes("full")
+            ? toolsMatchingCapabilityBeam(corpusSafe, caps).map(slimToolSchema)
+            : [];
+        if (lightBeam.length > 0 && !isSessionBudgetExceeded(ctx.sessionId ?? undefined, actorId)) {
+          execStreamOpts = {
+            ...streamOpts,
+            toolExposureProfile: "explicit",
+            chatToolsBuiltin: lightBeam,
+            chatToolsExtra: corpusSafe,
+          };
+        } else {
+          // router-first（2026-09-23 token 优化）：可见集 = 桥工具（tool_discover/
+          // tool_call 由 prepareToolsWithToolSearch 自动注入）+ travel 规划族保底
+          // （恒注入瘦身 schema，2026-10-01 替代 goal 正则+会话 latch 点补），全量
+          // 语料进 BM25 目录按需召回。质量护栏：意图预召回 + <tool_request> 请求卡
+          // + 高频自动晋升。回滚：AGENT_TASK_LANE=core（下方静态 Core 路径）。
+          execStreamOpts = {
+            ...streamOpts,
+            toolExposureProfile: "explicit",
+            chatToolsBuiltin: pickTravelPlanningTools(corpusSafe),
+            chatToolsExtra: corpusSafe,
+          };
+        }
       } else if (isStaticToolArchEnabled()) {
         // 静态双车道（2026-09-19 架构改造）：可见 = task Core（静态常驻）∪ 路由
         // 能力束投影（Tier-2 确定性增量，TurnPlan.capabilities 不变则集合不变）；
         // 其余全部进延迟目录经 tool_discover/tool_call/tool_request 到达。
-        // 取代 toolRecallOnly 空可见集与 per-turn LLM planner 两条每轮可变路径——
-        // planner 的一次额外 LLM 规划请求和漏选抖动一并消除。
-        const corpus = [
-          ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
-          ...(streamOpts.chatToolsExtra ?? []),
-        ];
         const coreTools = buildLaneCoreTools("task", corpus, [
           TASK_DISPATCH_TOOL_DEFINITION,
           TASK_STATUS_TOOL_DEFINITION,
@@ -2491,40 +2556,17 @@ if (route.plane === "task") {
           // 全量语料进延迟目录（prepareToolsWithToolSearch 会按可见集自动去重）
           chatToolsExtra: webForbidden ? filterWebSearchTools(corpus) : corpus,
         };
-      } else if (ctx.toolRecallOnly) {
-        // 空可见集 + 全量目录语料：prepareToolsWithToolSearch 会把全量工具视为
-        // deferred 并自动注入 tool_discover/tool_call 桥——模型经 tool router
-        // 召回并执行，上下文零业务 schema。
-        const corpus = [
-          ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
-          ...(streamOpts.chatToolsExtra ?? []),
-        ];
+      } else {
+        // legacy（AGENT_TOOL_ARCH=legacy 回滚档）：空可见集 + 全量目录语料，
+        // prepareToolsWithToolSearch 会把全量工具视为 deferred 并自动注入
+        // tool_discover/tool_call 桥。per-turn LLM planner 暗门已删（2026-10-01）：
+        // 每轮一次规划调用是被否决的架构，legacy 档统一桥召回语义。
         if (corpus.length > 0) {
           execStreamOpts = {
             ...streamOpts,
             toolExposureProfile: "explicit",
             chatToolsBuiltin: [],
             chatToolsExtra: corpus,
-          };
-        }
-      } else if (isTaskToolPlannerEnabled()) {
-        const plannedTools = await this.planTaskTools(text, streamOpts, ctx.sessionId, ctx.orchestrateToolCtx?.desktopBridgeOnline);
-        if (plannedTools.length > 0) {
-          const plannedNames = new Set(
-            plannedTools.map((d) => (d.type === "function" ? d.function?.name : "")).filter(Boolean),
-          );
-          const corpus = [
-            ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
-            ...(streamOpts.chatToolsExtra ?? []),
-          ];
-          execStreamOpts = {
-            ...streamOpts,
-            toolExposureProfile: "explicit",
-            chatToolsBuiltin: plannedTools,
-            // 全量工具集只进延迟目录语料（去重）：plan 漏选的工具可被 tool_discover 召回
-            chatToolsExtra: corpus.filter(
-              (d) => d.type !== "function" || !plannedNames.has(d.function?.name ?? ""),
-            ),
           };
         }
       }
@@ -2800,106 +2842,6 @@ if (route.plane === "task") {
     }
   }
 
-  /**
-   * 任务工具规划器（2026-09-05 前后台架构）：plan → 白名单注入的唯一入口。
-   *
-   * Plan 调用只看紧凑工具目录（工具名 + 截断到 80 字的一句话描述，零 JSON
-   * schema——全量 schema 注入是任务面 prompt 膨胀的最大单点），输出完成本
-   * 任务必需的工具名集合；调用方以 explicit profile 一次性注入这些工具的
-   * 完整 schema 后再进入执行循环。延迟目录桥（tool_discover 族）始终可见，
-   * plan 漏选的工具在执行期仍可按需召回。
-   *
-   * 返回空数组表示规划失败/无必需工具，调用方回退 delegate 能力束注入。
-   */
-  private async planTaskTools(
-    text: string,
-    streamOpts: AgentStreamOptions,
-    sessionId: string,
-    desktopBridgeOnline: boolean | undefined,
-  ): Promise<ChatCompletionTool[]> {
-    type FunctionTool = Extract<ChatCompletionTool, { type: "function" }>;
-    try {
-      const provider = this.externalChat;
-      if (!provider?.isEnabled()) return [];
-      const corpus = [
-        ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
-        ...(streamOpts.chatToolsExtra ?? []),
-      ];
-      const byName = new Map<string, FunctionTool>();
-      // WS 桥离线但本机视觉执行体可用（DESKTOP_VISUAL_ENABLED=1）时，desktop.*
-      // 经 localVisual 兜底仍能真实执行，不属「必然失败工具」，不得剔除——
-      // 剔除会让「打开网易云/抖音」这类开 App 任务在规划目录里无工具可选，
-      // 模型只能口头推脱（"App 我没法替你点开"）或编造 phone.open_app 这类不存在的工具。
-      const desktopExecutable =
-        desktopBridgeOnline !== false || isLocalDesktopVisualEnabledFromEnv();
-      for (const def of corpus) {
-        if (def.type !== "function") continue;
-        // 桥接明确离线且无本机兜底的 desktop.* 是必然失败工具，不进目录（防 plan 点名后必然失败）
-        if (!desktopExecutable && def.function.name.startsWith("desktop.")) continue;
-        if (!byName.has(def.function.name)) byName.set(def.function.name, def);
-      }
-      if (byName.size === 0) return [];
-      const catalog = Array.from(byName.values())
-        .map((def) => {
-          const desc = (def.function.description ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
-          return `- ${def.function.name}：${desc}`;
-        })
-        .join("\n");
-      const prompt = [
-        "你是任务执行规划器。针对下面的任务，从工具目录中挑选完成它必需的工具。",
-        '只输出一个 JSON 对象：{"tools":["工具名",...]}。不要输出其他任何字符。',
-        "原则：宁少勿多——单一查证通常 1-2 个工具；多步任务列每一步必需的工具；",
-        "不确定要不要的不要列（执行中可用 tool_discover 按需召回）。",
-        '目录里没有必需工具时输出 {"tools":[]}。',
-        "",
-        "工具目录：",
-        catalog,
-        "",
-        `任务：${text.slice(0, 2000)}`,
-      ].join("\n");
-      const raw = await Promise.race([
-        provider.streamCompletion(
-          `task-planner::${sessionId}`,
-          { text: prompt },
-          () => {}, // 规划无需流式回传
-          undefined,
-          {
-            ephemeralTurn: true,
-            suppressRuntimeSuffixes: true,
-            functionalSuffixes: false,
-            toolExposureProfile: "none",
-            maxOutputTokens: 256,
-          },
-        ),
-        new Promise<undefined>((r) => setTimeout(() => r(undefined), 8000)),
-      ]);
-      const names = parsePlannedToolNames(raw);
-      const planned: FunctionTool[] = [];
-      const seen = new Set<string>();
-      for (const name of names) {
-        const def = byName.get(name);
-        if (def && !seen.has(name)) {
-          planned.push(def);
-          seen.add(name);
-        }
-      }
-      // 延迟目录桥始终可见：plan 漏选的工具执行期可被 tool_discover 召回
-      for (const bridge of TOOL_BRIDGE_NAMES) {
-        const def = byName.get(bridge);
-        if (def && !seen.has(bridge)) {
-          planned.push(def);
-          seen.add(bridge);
-        }
-      }
-      return planned;
-    } catch (err) {
-      console.warn(
-        "[AgentCore] 任务工具规划失败，回退能力束注入:",
-        err instanceof Error ? err.message : String(err),
-      );
-      return [];
-    }
-  }
 
   /**
    * 前后台架构：派发后台任务（2026-09-05）。

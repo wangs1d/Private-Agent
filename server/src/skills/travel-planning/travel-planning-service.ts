@@ -18,7 +18,12 @@ import https from 'node:https';
 import { poiCache, type CacheEntry, type RawPOI } from './poi-cache-manager.js';
 import { pricingService, formatQuotePriceInfo, type MemberTier, type PriceQuote, type BoundPlatform, type PricingContext } from './pricing-service.js';
 import { travelMediaStore } from './travel-media-store.js';
-import { destinationCoverStore } from './travel-destination-cover-store.js';
+import { destinationCoverStore, type DestinationCoverSource } from './travel-destination-cover-store.js';
+import { compressImage } from '../../services/image-caption-service.js';
+import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from '../../external-model/resolve-provider.js';
+import { modelSupportsVision } from '../../external-model/vision-support.js';
+import OpenAI from 'openai';
+import fs from 'node:fs';
 import { WeatherService, type WeatherBrief } from '../../services/weather-service.js';
 import { knowledgeBase } from './knowledge-base.js';
 import { extractDays, extractDestination, extractPreferences } from './intent-parser.js';
@@ -317,6 +322,50 @@ const OSM_OVERPASS_BASES = [
 ];
 const OVERPASS_REQUEST_TIMEOUT_MS = 6000;
 const USER_AGENT = 'TravelPlanner3D/1.0 (Educational Project)';
+
+/**
+ * 封面候选关键词预排序（按文件名打分，分高者排前；同分保持原序）。
+ * 2026-09-28 选图升级的兜底闸：VLM 不可用/超时时，保证「洱海全景」排在
+ * 「太和街道全景」前面——旅游代表性词加分，街道/行政区词减分。
+ */
+export function scoreCoverCandidate(url: string): number {
+  let name = url;
+  try {
+    name = decodeURIComponent(url);
+  } catch { /* 保留原串 */ }
+  let score = 0;
+  // 旅游代表性意象（自然风光/地标）
+  for (const [re, s] of [
+    [/湖|lake/i, 4],
+    [/海|江|河|溪/, 3],
+    [/海湾|海滩|沙滩|bay|beach/i, 3],
+    [/雪山|山|mountain|mont/i, 2],
+    [/古城|古镇|老街|old\s?town|heritage/i, 3],
+    [/塔|pagoda|temple|寺|庙|教堂|cathedral|宫殿|palace|fort/i, 2],
+    [/天际线|skyline|全景|panorama/i, 1],
+    [/风景|风光|景色|scenery|landscape|view/i, 2],
+    [/日落|日出|黄昏|sunset|sunrise|黄昏|dusk|dawn/i, 2],
+    [/公园|park|花园|garden/i, 1],
+  ] as Array<[RegExp, number]>) {
+    if (re.test(name)) score += s;
+  }
+  // 非旅游代表性/用户明确嫌弃的意象
+  for (const [re, s] of [
+    [/街道|街景|马路|道路|street|roadway/i, -5],
+    [/行政|区政府|办公楼|district|townhall|municipal/i, -4],
+    [/路口|交叉口|立交|高架|intersection|overpass/i, -4],
+    [/室内|interior|会议室|conference/i, -3],
+    [/特写|人像|closeup|portrait/i, -2],
+    [/地图|示意图|map|chart/i, -3],
+    [/婚礼|wedding|宴会|banquet/i, -3],
+    // 黑白/单色摄影几乎必是历史档案或艺术作品而非当代旅游形象照
+    [/黑白|单色|monochrome|black.?and.?white|b&w/i, -6],
+    [/绘画|画室|艺术作品|painting|artwork|sculpture|雕塑/i, -5],
+  ] as Array<[RegExp, number]>) {
+    if (re.test(name)) score += s;
+  }
+  return score;
+}
 
 // ======================== 高德地图配置 ========================
 
@@ -628,7 +677,8 @@ export class PlanningService {
     // 的照片；磁盘缓存命中时微秒级返回，首次解析约 1~10s 且全程有界。
     let coverSettled = false;
     const coverPromise: Promise<string | undefined> = this
-      .resolveDestinationCover(destName, cacheEntry.center)
+      .resolveDestinationCover(destName, cacheEntry.center,
+        ranked.attractions.slice(0, 3).map((a) => a.name))
       .then((url) => { coverSettled = true; return url; });
 
     // === 阶段1：构建行程数据（聚类+交通腿+排时，交通腿走 OSRM 缓存）===
@@ -3401,8 +3451,11 @@ export class PlanningService {
     return await this.fetchImageUrlsByTitles(fileTitles, validate);
   }
 
-  /** 封面解析总截止时间：各阶段在剩余预算内竞速，超时即止（结果可为空，走前端兜底） */
-  private static readonly COVER_DEADLINE_MS = 10_000;
+  /** 封面解析总截止：候选池（并行）+ 预排序 + VLM 终审共用（各阶段按剩余预算竞速） */
+  private static readonly COVER_DEADLINE_MS = 15_000;
+
+  /** VLM 终审单次看图选优的独立超时（与候选池预算分开计） */
+  private static readonly COVER_VLM_TIMEOUT_MS = 12_000;
 
   /**
    * Wikimedia/Wikidata API 取 JSON：默认出口与 IPv6 定向两路并发，任一路先
@@ -3492,62 +3545,264 @@ export class PlanningService {
   /**
    * 目的地代表性封面解析（行程卡海报区背景的唯一数据源）。
    *
-   * 「最具代表性的照片」= 百科为目的地选定的形象照（如杭州→西湖全景），优先级：
-   *   1. zh/en.wikipedia 条目主图（pageimages，两库并行查）；
-   *   2. Wikidata P18 图像（与条目主图同源的形象照；国内网络 wikipedia 主站
-   *      常不可达而 wikidata/commons 可达，此层保证主图链路仍能命中）；
-   *   3. 目的地中心 8km 地理锚定实拍 + Commons 文本搜索（fetchDestinationCover）。
+   * 2026-09-28 选图升级（用户反馈「背景图选择太随意」：维基条目主图给大理
+   * 选了张街道全景）：从「第一个来源命中即用」改为「多候选池 + 预排序 +
+   * 视觉模型终审」。
    *
-   * 全链路经 WIKI_BLOCKED_PATTERNS（旗/图/徽标/地图不进）+ 最小尺寸过滤，
-   * 拿到的都是真实照片。结果落 destinationCoverStore（30 天 TTL），重复规划
-   * 零网络开销。失败返回 undefined——宁可让海报走渐变兜底，不放与目的地
-   * 不符的占位图。
+   * 候选池（并行、预算内竞速）：
+   *   a. zh/en.wikipedia 条目主图（pageimages）；
+   *   b. Wikidata P18 图像；
+   *   c. 目的地中心地理锚定实拍 + Commons 文本搜索（fetchDestinationCover）；
+   *   d. 风景向文本搜索（「{目的地}风景」/「{目的地} scenery」）——百科主图
+   *      常是行政区划条目的街景/行政区图，风景向查询直接把洱海/古城类照片
+   *      拉进候选池。
+   * 全链路经 WIKI_BLOCKED_PATTERNS（旗/图/徽标/地图不进）+ 最小尺寸过滤。
+   *
+   * 终审两段：
+   *   1. 关键词预排序（scoreCoverCandidate：湖/山/古城/塔加分，街道/道路减分）；
+   *   2. 视觉模型终审（主模型支持视觉时，取预排序前 5 张看图选出最具旅游
+   *      代表性的一张；不可用/超时/失败静默回退预排序第一）。
+   *
+   * 结果落 destinationCoverStore（30 天 TTL），重复规划零网络开销；换图时
+   * 旧 URL 登记升级映射（markSuperseded/registerCoverDir），历史卡片自动换新。
+   * 失败返回 undefined——宁可让海报走渐变兜底，不放与目的地不符的占位图。
    */
-  private async resolveDestinationCover(destName: string, center: Coordinates): Promise<string | undefined> {
+  /** 迁移失败备忘（进程内）：每个目的地的存量远程封面只尝试迁移一次，失败不再重试拖慢请求路径 */
+  private coverMigrationFailed = new Set<string>();
+
+  private async resolveDestinationCover(
+    destName: string,
+    center: Coordinates,
+    attractionNames: string[] = [],
+  ): Promise<string | undefined> {
     const cached = destinationCoverStore.get(destName);
     if (cached) {
       // 已是本机 assets 路径 → 直接用
       if (cached.url.startsWith('/travel/media/assets/')) return cached.url;
-      // 存量远程 URL（wikimedia）在客户端网络常不可达（Flutter 不走系统代理）
-      // → 迁移落盘为本机路径；迁移失败才回退远程原 URL
-      const migrated = await travelMediaStore.saveRemoteAsset(`dest-cover-${destName}`, cached.url);
+      // 存量远程 URL（wikimedia）在客户端网络不可直连（Flutter 不走系统代理）
+      // → 迁移落盘为本机路径；失败记入备忘不再重试（2026-09-28 抓取通道已修为
+      //   双路竞速，正常一次即成），本进程内后续命中直接回远程原 URL
+      if (this.coverMigrationFailed.has(destName)) return cached.url;
+      const migrated = await travelMediaStore.saveRemoteAsset(`dest-cover-${destName}`, cached.url, 8_000);
       if (migrated) {
+        destinationCoverStore.registerCoverDir(destName, migrated);
+        // 迁移即换图：旧远程 URL 登记升级映射（存量卡片烤的远程缩略 URL 走
+        // 代理时被改发当前封面）
+        destinationCoverStore.markSuperseded(destName, cached.url);
         destinationCoverStore.set(destName, { url: migrated, source: cached.source });
         console.log(`[ImageSearch] 目的地封面「${destName}」: 远程封面已落盘本地 (${migrated})`);
         return migrated;
       }
+      this.coverMigrationFailed.add(destName);
       return cached.url;
     }
+    // 被 TTL 淘汰的旧封面仍在历史卡片里烤着：换图前取出，供升级映射登记
+    const stale = destinationCoverStore.peek(destName);
     const t0 = Date.now();
-    const remaining = () => PlanningService.COVER_DEADLINE_MS - (Date.now() - t0);
     try {
-      // 1. 百科条目主图（zh/en 并行：主站被墙时并行 4s 超时，而非串行 8s）
-      const lead = await this.raceDeadline(this.wikipediaLeadImage(destName), remaining());
-      // 2. Wikidata P18：与条目主图同源的形象照，wikipedia 主站不可达时仍可达
-      const p18 = lead ? null : await this.raceDeadline(this.wikidataLeadImage(destName), remaining());
-      const curated = lead ?? p18 ?? undefined;
-      if (curated) {
-        const local = await travelMediaStore.saveRemoteAsset(`dest-cover-${destName}`, curated);
-        const url = local ?? curated;
-        destinationCoverStore.set(destName, { url, source: 'wikipedia-lead' });
-        console.log(`[ImageSearch] 目的地封面「${destName}」: 百科主图 ${local ? '(已落盘本地)' : '(远程)'} (${Date.now() - t0}ms)`);
-        return url;
+      // ===== 阶段1：候选池（并行，预算内竞速）=====
+      const candidates = await this.collectCoverCandidates(destName, center, attractionNames, () =>
+        PlanningService.COVER_DEADLINE_MS - (Date.now() - t0));
+      if (candidates.length === 0) return undefined;
+
+      // ===== 阶段2：关键词预排序 =====
+      const ranked = [...candidates].sort(
+        (a, b) => scoreCoverCandidate(b) - scoreCoverCandidate(a),
+      );
+
+      // ===== 阶段3：视觉模型终审（不可用/失败回退预排序第一）=====
+      let winner = ranked[0]!;
+      let source: DestinationCoverSource = 'wikimedia';
+      const vlmPick = await this.rankCoverWithVlm(destName, ranked.slice(0, 6));
+      if (vlmPick) {
+        winner = vlmPick;
+        source = 'vlm-pick';
       }
-      // 3. 地理锚定实拍 + Commons 文本搜索（现有宽松链，两段网络调用）
-      if (remaining() <= 500) return undefined;
-      const images = (await this.raceDeadline(this.fetchDestinationCover(destName, center), remaining())) ?? [];
-      const first = images[0];
-      if (first) {
-        const local = await travelMediaStore.saveRemoteAsset(`dest-cover-${destName}`, first);
-        const url = local ?? first;
-        destinationCoverStore.set(destName, { url, source: 'wikimedia' });
-        console.log(`[ImageSearch] 目的地封面「${destName}」: wikimedia 兜底 ${local ? '(已落盘本地)' : '(远程)'} (${Date.now() - t0}ms)`);
-        return url;
-      }
-      return undefined;
+
+      const local = await travelMediaStore.saveRemoteAsset(`dest-cover-${destName}`, winner, 8_000);
+      const url = local ?? winner;
+      if (!local) this.coverMigrationFailed.add(destName);
+      if (local) destinationCoverStore.registerCoverDir(destName, local);
+      // 旧封面（含 TTL 淘汰的）与本次不同的 → 登记升级映射，历史卡片自动换新
+      if (stale && stale.url !== url) destinationCoverStore.markSuperseded(destName, stale.url);
+      destinationCoverStore.set(destName, { url, source });
+      console.log(
+        `[ImageSearch] 目的地封面「${destName}」: 候选 ${candidates.length} 张` +
+        `${vlmPick ? '，VLM 终审选出' : '，关键词预排序首推'} ${local ? '(已落盘本地)' : '(远程)'} (${Date.now() - t0}ms)`,
+      );
+      return url;
     } catch (err) {
       console.warn(`[ImageSearch] 目的地封面「${destName}」解析失败:`, err instanceof Error ? err.message : err);
       return undefined;
+    }
+  }
+
+  /**
+   * 封面候选池：百科主图（zh/en 全收）+ Wikidata P18 + 地理锚定/文本搜索 +
+   * 风景向搜索，全部并行发起，各自带独立超时（慢源不拖垮快源），去重后
+   * 截断到 maxCandidates。
+   */
+  private async collectCoverCandidates(
+    destName: string,
+    center: Coordinates,
+    attractionNames: string[],
+    remaining: () => number,
+    maxCandidates = 10,
+  ): Promise<string[]> {
+    const clean = destName.replace(/[（(].*?[)）]/g, '').trim() || destName;
+    const plausible: (info: any, title: string) => boolean = (info, title) =>
+      this.isPlausibleWikiPhoto(info, title);
+    // 行程招牌景点名搜索（2026-09-28 用户反馈「大理应该是洱海」）：目的地级
+    // 搜索词（「大理 风景」）在 Commons 命中质量不稳定，而行程排序前几的
+    // 景点名（洱海/崇圣寺三塔）搜出来的必然是该景点本身——这是把「用户要的
+    // 画面」确定性拉进候选池的最短路径。
+    const attractionTasks: Array<Promise<string[]>> = attractionNames
+      .filter((n) => n && n.trim() && n.trim() !== clean)
+      .slice(0, 3)
+      .map((name) => this.wikimediaTextSearch(name.trim(), undefined, undefined, plausible).then((u) => u.slice(0, 2)));
+    const tasks: Array<Promise<string[]>> = [
+      this.wikipediaLeadImages(destName),
+      this.wikidataLeadImage(destName).then((u) => (u ? [u] : [])),
+      this.fetchDestinationCover(destName, center),
+      // 条目内配图（en 大理市条目里有洱海/崇圣寺三塔类形象照，常优于条目主图）
+      this.fetchImagesFromWikiArticles([clean, `${clean} City`].filter(Boolean), plausible),
+      // 风景向文本搜索：无景点名可用时的泛化兜底（有招牌景点名时冗余且浪费节流预算）
+      ...(attractionNames.length > 0
+        ? []
+        : [
+            this.wikimediaTextSearch(`${clean} 风景`, undefined, undefined, plausible).then((u) => u.slice(0, 3)),
+            this.wikimediaTextSearch(`${clean} scenery`, undefined, undefined, plausible).then((u) => u.slice(0, 3)),
+          ]),
+      ...attractionTasks,
+    ];
+    // 错峰起跑（每路 +300ms）：Wikimedia 对同 IP 并发突发节流（实测 9 路齐发
+    // 全被掐空、单发正常），串行化起跑换取稳定返回
+    const settled = await Promise.allSettled(
+      tasks.map((p, i) =>
+        this.raceDeadline(
+          i === 0 ? p : new Promise<string[]>((resolve) => setTimeout(() => resolve(p as Promise<string[]>), i * 300)),
+          Math.max(2_000, remaining()),
+        ),
+      ),
+    );
+    // 景点名搜到的图排池首（与目的地强锚定，保证进入 VLM 视野前 6），
+    // 其余来源按原顺序跟随，去重后截断
+    const attractionResults: string[][] = [];
+    const otherResults: string[][] = [];
+    for (let i = 0; i < settled.length; i++) {
+      const r = settled[i]!;
+      if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
+      const bucket = i >= tasks.length - attractionTasks.length ? attractionResults : otherResults;
+      bucket.push(r.value);
+    }
+    const pool: string[] = [];
+    const seen = new Set<string>();
+    for (const list of [...attractionResults, ...otherResults]) {
+      for (const url of list) {
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        pool.push(url);
+      }
+    }
+    return pool.slice(0, maxCandidates);
+  }
+
+  /**
+   * 封面候选字节加载（终审看图用）：本地资产直读；远程 URL 走
+   * resolveOrFetchRemote 双路下载+磁盘缓存（普通 fetch 在国内 IPv4 出口到
+   * wikimedia 全超时——caption 服务 loadImageBytes 的 plain fetch 正因此
+   * 拿不到候选图导致终审静默跳过，2026-09-28 改走双路）。
+   * 返回压缩后的 base64（宽 ≤640），任何一步失败返回 null。
+   */
+  private async loadCoverBytes(url: string): Promise<{ base64: string; mime: string } | null> {
+    try {
+      let buf: Buffer;
+      let mime = 'image/jpeg';
+      const local = url.match(/^\/travel\/media\/assets\/([^/]+)\/([^/]+)$/);
+      if (local) {
+        const full = travelMediaStore.resolveAssetPath(local[1]!, local[2]!);
+        if (!full) return null;
+        buf = await fs.promises.readFile(full);
+      } else if (/^https?:\/\//i.test(url)) {
+        const hit = await travelMediaStore.resolveOrFetchRemote(url, 15_000);
+        if (!hit) return null;
+        buf = await fs.promises.readFile(hit.file);
+        mime = hit.mime;
+      } else {
+        return null;
+      }
+      if (buf.length === 0) return null;
+      const compressed = await compressImage(buf, mime);
+      return compressed ?? { base64: buf.toString('base64'), mime };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 视觉模型终审：把候选封面按顺序看图，选出最适合做「{目的地}」旅游行程卡
+   * 封面的一张。主模型不支持视觉/未配置/超时/失败一律返回 null（调用方回退
+   * 关键词预排序结果）。整体失败绝不抛出。
+   *
+   * 这道闸是选图质量的最终保证：Commons 文本搜索存在同名污染（如「大理」
+   * 命中画家 Salvador Dalí 的作品），关键词打分器识别不了这类语义错误，
+   * 只有看图才能拒掉。
+   */
+  private async rankCoverWithVlm(destName: string, urls: string[]): Promise<string | null> {
+    if (urls.length < 2) return null;
+    const cfg = resolvePrimaryLlmClientConfig();
+    if (!cfg || !cfg.model || !modelSupportsVision(cfg.model)) return null;
+    try {
+      const images: Array<{ base64: string; mime: string }> = [];
+      for (const url of urls) {
+        const img = await this.loadCoverBytes(url);
+        if (!img) return null; // 有一张拿不到字节就无法保证序号对齐，整批放弃
+        images.push(img);
+      }
+      const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
+        {
+          type: 'text',
+          text:
+            `以下是 ${images.length} 张「${destName}」的候选封面照片（按顺序编号 1~${images.length}）。` +
+            '请为旅游行程卡选出最佳封面：最能代表目的地旅游形象（地标/自然风光/城市天际线），构图美观、画面干净；' +
+            '排除普通街景、行政区照片、特写人像、室内和杂乱场景。',
+        },
+        ...images.map((img) => ({
+          type: 'image_url' as const,
+          image_url: { url: `data:${img.mime};base64,${img.base64}` },
+        })),
+      ];
+      const client = new OpenAI({
+        apiKey: cfg.apiKey,
+        baseURL: cfg.baseURL,
+        timeout: PlanningService.COVER_VLM_TIMEOUT_MS,
+        maxRetries: 0,
+      });
+      const resp = await client.chat.completions.create({
+        model: cfg.model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你是旅游内容选图师。用户给出候选照片和目的地名，你只输出 JSON：' +
+              '{"best": 序号}。序号是 1 起始的整数，必须是给出的候选之一；不要输出任何其他文字。',
+          },
+          { role: 'user', content },
+        ],
+        temperature: 0.2,
+        ...bypassChatRequestExtras(),
+      });
+      const raw = (resp.choices?.[0]?.message?.content ?? '').trim();
+      const m = raw.match(/"best"\s*:\s*(\d+)/);
+      if (!m) return null;
+      const idx = Number(m[1]) - 1;
+      if (!Number.isInteger(idx) || idx < 0 || idx >= urls.length) return null;
+      return urls[idx]!;
+    } catch (err) {
+      console.info(
+        `[ImageSearch] 封面终审失败（回退预排序）: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
     }
   }
 
@@ -3570,20 +3825,26 @@ export class PlanningService {
    * 返回 1200px 缩略图（海报展示尺寸，避免原图数 MB 的加载开销）。
    */
   private async wikipediaLeadImage(destName: string): Promise<string | null> {
+    const both = await this.wikipediaLeadImages(destName);
+    return both[0] ?? null;
+  }
+
+  /** 双库条目主图全收（封面候选池用）：zh/en 各自的主图都进池，供预排序+终审挑选 */
+  private async wikipediaLeadImages(destName: string): Promise<string[]> {
     const clean = destName.replace(/[（(].*?[)）]/g, '').trim();
-    if (!clean) return null;
+    if (!clean) return [];
     const attempts = await Promise.allSettled(
       ['zh.wikipedia.org', 'en.wikipedia.org'].map((host) => this.pageImageThumb(host, clean)),
     );
+    const urls: string[] = [];
     for (const r of attempts) {
-      if (r.status === 'fulfilled' && r.value) return r.value;
+      if (r.status === 'fulfilled' && r.value && !urls.includes(r.value)) urls.push(r.value);
     }
-    return null;
+    return urls;
   }
 
   /** 单库 pageimages 查询：返回条目主图 1200px 缩略图，未命中/出错返回 null */
-  private async pageImageThumb(host: string, title: string): Promise<string | null> {
-    const params = new URLSearchParams({
+  private async pageImageThumb(host: string, title: string): Promise<string | null> {    const params = new URLSearchParams({
       action: 'query',
       titles: title,
       redirects: '1',
@@ -3664,20 +3925,32 @@ export class PlanningService {
   }
 
   /**
+   * 宽松照片校验（封面/POI 共用）：黑名单（旗/图/徽标/地图）+ 文件类型 +
+   * 最小尺寸。文件类型闸拒绝 PDF/DJVU/SVG 等文档渲染页（Commons 文本搜索
+   * 常把「规划.pdf」一类文件当图片返回，其 imageinfo 有尺寸、能骗过旧闸）。
+   */
+  private isPlausibleWikiPhoto(info: any, fileTitle: string): boolean {
+    const filename = fileTitle.replace(/^File:/i, '');
+    if (WIKI_BLOCKED_PATTERNS.some(p => p.test(filename))) return false;
+    // 文档/非照片类型：PDF、SVG 矢量、DJVU、音频视频、图纸
+    if (/\.(pdf|djvu|svg|tif|tiff|webm|ogv|oga|mid|wav|mp3|xcf)$/i.test(filename)) return false;
+    // Commons 文档缩略 URL 形如 .../page1-960px-xxx.pdf.jpg，扩展名伪装成 jpg
+    if (/page\d+-\d+px-.*\.(pdf|djvu)/i.test(filename)) return false;
+    const w = info?.width || 0;
+    const h = info?.height || 0;
+    if (w > 0 && h > 0 && (w < WIKI_MIN_WIDTH || h < WIKI_MIN_HEIGHT)) return false;
+    return true;
+  }
+
+  /**
    * 目的地封面：以目的地中心为锚的宽松抓取（条目配图优先，Commons 文本搜索兜底）。
    * 仅做 黑名单 + 最小尺寸 过滤——候选已地理锚定，且常为跨语言名称，不做名称相似度门槛。
    * 供 resolveDestinationCover 的第 3 优先级（百科形象照未命中时的实拍兜底）。
    */
   private async fetchDestinationCover(destName: string, center: Coordinates): Promise<string[]> {
     const t0 = Date.now();
-    const permissive = (info: any, fileTitle: string): boolean => {
-      const filename = fileTitle.replace(/^File:/i, '');
-      if (WIKI_BLOCKED_PATTERNS.some(p => p.test(filename))) return false;
-      const w = info?.width || 0;
-      const h = info?.height || 0;
-      if (w > 0 && h > 0 && (w < WIKI_MIN_WIDTH || h < WIKI_MIN_HEIGHT)) return false;
-      return true;
-    };
+    const permissive: (info: any, fileTitle: string) => boolean = (info, fileTitle) =>
+      this.isPlausibleWikiPhoto(info, fileTitle);
     try {
       // 文本搜索与地理搜索并发起跑：地理链路（en.wikipedia geosearch → 条目配图）
       // 在 wikipedia 主站被阻断的网络里要耗满超时，串行等待会把文本搜索挤出

@@ -104,6 +104,19 @@ export async function clearAllMemoryForActor(
     );
   }
 
+  // 10. 用户画像文件级联删除（2026-09-29 隐私闭环补口）：USER_PROFILE.md +
+  //     pending-turns.json 此前清记忆时不删，画像里的个人信息会残留。
+  let userProfileCleared = false;
+  try {
+    const { UserProfileStore } = await import("./user-personalization/user-profile-store.js");
+    userProfileCleared = await new UserProfileStore().deleteAll(actorId);
+  } catch (e) {
+    console.warn("[memory-clear] 画像文件清理失败:", e instanceof Error ? e.message : e);
+  }
+  if (userProfileCleared) {
+    console.info(`[memory-clear] 已删除用户画像文件目录: ${actorId}`);
+  }
+
   return {
     chat: chatCleared,
     primarySessionId,

@@ -1,11 +1,13 @@
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
+import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/link_utils.dart";
 import "travel_plan_launcher.dart";
 import "travel_plan_models.dart";
+import "travel_image_warmer.dart";
 import "travel_theme.dart";
 import "content_summary_detail_formatter.dart";
 import "display_effects/compare_slider.dart";
@@ -81,8 +83,11 @@ class AgentResultCard extends StatelessWidget {
         case "media":
           return _MediaCard(data: data, cs: cs);
         case "travel_itinerary":
+          // 版本闸（开源版剔除旅游家族）：oss 服务端不产此卡，此处纵深防御
+          if (ApiConfig.isOssEdition) return const SizedBox.shrink();
           return _TravelItineraryCard(data: data, cs: cs);
         case "product_compare":
+          // 注意：这是 shopping.suggest（开源保留）的二分化对比卡， oss 不闸
           return _ProductCompareCard(data: data, cs: cs);
         case "morning_briefing":
           // 简报卡（岛上条目退役后简报的聊天流落点）：extra 携带原始简报
@@ -1194,6 +1199,17 @@ class _TravelItineraryCard extends StatelessWidget {
     final TravelPlanData plan = TravelPlanData.from(data);
     final List<String> gallery = _collectImages(plan);
     final String? posterUrl = _pickPosterImage(plan);
+    // 海报候选链：封面优先，条目实拍跟随（封面加载失败自动落到下一张）
+    final List<String> posterCandidates = <String>[
+      if (posterUrl != null) posterUrl,
+      for (final String img in gallery)
+        if (img != posterUrl) img,
+    ];
+    // 图片预热：卡片上屏即并发预取海报候选+全部实拍（全局去重），
+    // 海报先人一步点亮，点开画廊/规划面板时全部命中内存缓存秒开
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (context.mounted) TravelImageWarmer.warm(posterCandidates);
+    });
     // 卡体强调色随 App 主题对齐（海报区压在照片上，保留恒定霓虹青）
     final TravelPalette palette = TravelPalette.of(context);
 
@@ -1218,7 +1234,7 @@ class _TravelItineraryCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            _buildPoster(context, plan, gallery, posterUrl, dayCount),
+            _buildPoster(context, plan, gallery, posterUrl, posterCandidates, dayCount),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
               child: Column(
@@ -1283,6 +1299,7 @@ class _TravelItineraryCard extends StatelessWidget {
     TravelPlanData plan,
     List<String> gallery,
     String? posterUrl,
+    List<String> posterCandidates,
     int dayCount,
   ) {
     final String dateRange = _dateRangeLabel(plan);
@@ -1302,7 +1319,7 @@ class _TravelItineraryCard extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: <Widget>[
-            _buildPosterBackground(posterUrl),
+            _PosterBackdrop(candidates: posterCandidates),
             // 压暗渐变：顶部轻压（徽章行可读）→ 中段几乎不压 → 底部重压（标题/简介可读）
             const DecoratedBox(
               decoration: BoxDecoration(
@@ -1388,37 +1405,16 @@ class _TravelItineraryCard extends StatelessWidget {
   }
 
   /// 海报背景：兜底渐变常驻底层，图片加载中/失败时自然露出，不闪占位框。
-  Widget _buildPosterBackground(String? posterUrl) {
-    const DecoratedBox fallback = DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: _posterFallback,
-        ),
+  /// （候选图逐张回退的有 State 版本见 [_PosterBackdrop]。）
+  static const DecoratedBox posterFallback = DecoratedBox(
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: _posterFallback,
       ),
-    );
-    if (posterUrl == null || posterUrl.trim().isEmpty) return fallback;
-    return Stack(
-      fit: StackFit.expand,
-      children: <Widget>[
-        fallback,
-        Image.network(
-          posterUrl,
-          fit: BoxFit.cover,
-          alignment: Alignment.center,
-          errorBuilder: (_, Object __, StackTrace? ___) =>
-              const SizedBox.shrink(),
-          loadingBuilder: (
-            BuildContext context,
-            Widget child,
-            ImageChunkEvent? progress,
-          ) =>
-              progress == null ? child : fallback,
-        ),
-      ],
-    );
-  }
+    ),
+  );
 
   /// 目的地徽章（玻璃态：半透明黑底 + 白描边，压在海报上深浅图都可读）。
   /// 数据可信度角标（琥珀色调，与深色海报区兼容）
@@ -1583,6 +1579,59 @@ class _TravelItineraryCard extends StatelessWidget {
     final RegExpMatch? m = RegExp(r'^\d{4}-(\d{2}-\d{2})').firstMatch(t);
     if (m != null) return m.group(1)!;
     return t;
+  }
+}
+
+/// 海报背景（候选链版）：兜底渐变常驻底层；候选图从封面起逐张尝试，
+/// 某张加载失败自动落到下一张条目实拍，全失败才露纯渐变——不再「封面一张
+/// 挂掉就永远渐变」。加载中露渐变，不闪占位框。
+class _PosterBackdrop extends StatefulWidget {
+  const _PosterBackdrop({required this.candidates});
+
+  /// 候选图 URL（已归一，封面在前）。
+  final List<String> candidates;
+
+  @override
+  State<_PosterBackdrop> createState() => _PosterBackdropState();
+}
+
+class _PosterBackdropState extends State<_PosterBackdrop> {
+  /// 已加载失败的候选 URL：按 URL 记（同一张失败的图在后续重建中重复回调
+  /// errorBuilder 不会二次推进，避免跳过未尝试的候选）。
+  final Set<String> _failed = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final String? url = widget.candidates
+        .where((String c) => !_failed.contains(c))
+        .firstOrNull;
+    if (url == null) return _TravelItineraryCard.posterFallback;
+    return Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        _TravelItineraryCard.posterFallback,
+        Image.network(
+          url,
+          fit: BoxFit.cover,
+          alignment: Alignment.center,
+          errorBuilder: (_, Object __, StackTrace? ___) {
+            _failed.add(url);
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) setState(() {});
+            });
+            return const SizedBox.shrink();
+          },
+          loadingBuilder: (
+            BuildContext context,
+            Widget child,
+            ImageChunkEvent? progress,
+          ) =>
+              progress == null
+                  ? child
+                  : _TravelItineraryCard.posterFallback,
+        ),
+      ],
+    );
   }
 }
 

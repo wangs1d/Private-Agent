@@ -345,7 +345,9 @@ class WsChatService {
     _isConnecting = false;
     _isConnected = false;
     _pendingOutbound.clear();
-    await _channel?.sink.close(status.goingAway);
+    // 1001(goingAway) 被 web_socket 包 checkCloseCode 拒绝（只收 1000/3000-4999），
+    // 会抛 ArgumentError 成未捕获异步异常；统一用 1000 正常关闭。
+    await _channel?.sink.close(1000);
     await _eventsController.close();
   }
 }

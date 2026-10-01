@@ -287,7 +287,9 @@ export function registerAdminInboxRoutes(app: FastifyInstance, deps: HttpRouteDe
     { preHandler: requireAdmin },
     async (request, reply) => {
       const userId = String(request.params.userId ?? "").trim();
-      if (!/^[A-Za-z0-9._-]+$/.test(userId)) {
+      // 账号主键现已统一为登录邮箱（含 @ / +），这里只拦路径级危险字符；
+      // InboxService 落盘时另有一层 safe() 文件名净化
+      if (!/^[A-Za-z0-9._@+-]+$/.test(userId)) {
         return reply.code(400).send({ ok: false, message: "invalid userId" });
       }
       const inbox = hub();

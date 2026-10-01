@@ -1,7 +1,7 @@
 import { loadServerEnv } from "./config/load-server-env.js";
 import { setupGlobalHttpAgent } from "./config/http-agent.js";
 import { exitIfDevPortInUse, isDevListenConflict } from "./utils/port-in-use.js";
-import { getRuntimeConfig, getRuntimeTopologyConfig } from "./config/env.js";
+import { getRuntimeConfig, getRuntimeTopologyConfig, getServerEdition } from "./config/env.js";
 
 // remote 拓扑下本入口（embedded 单进程形态）不再使用：改用 runtime-main + gateway-main，
 // 否则会出现双世界装配与 sidecar 端口冲突。
@@ -143,6 +143,15 @@ services.hookBus.emit("agent.online", {
   version: "1.0",
   uptime: new Date().toISOString(),
 });
+
+// 发行版本横幅（打包冒烟会断言本行，用于证明 .env 的 NEXTBOT_EDITION 真实生效）
+services.app.log.info(
+  `[edition] NEXTBOT_EDITION=${getServerEdition()} —— ${
+    getServerEdition() === "oss"
+      ? "开源版：内测独占能力（旅游/虚拟电话/好友/比价/社交外联/手机桥接）已剔除"
+      : "内测版：能力全量"
+  }`,
+);
 
 // Phase 2：启动自适应并发控制（AIMD 动态调整全局 turn 并发上限）
 startAdaptiveConcurrency();

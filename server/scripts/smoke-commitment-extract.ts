@@ -5,9 +5,8 @@
  *   node --env-file=.env --import tsx scripts/smoke-commitment-extract.ts
  *
  * 通道：默认走生产路径（OPENAI_* / OPENAI_BASE_URL）；不可达或未配置时，
- * 若设置了 SILICONFLOW_API_KEY 则自动回退到 SiliconFlow（国内可达，OpenAI
- * 兼容协议，经 injectable client 注入——生产代码零改动）。模型可用
- * SMOKE_MODEL 覆盖（缺省 deepseek-ai/DeepSeek-V4-Flash）。
+ * 若设置了 SMOKE_API_KEY + SMOKE_BASE_URL 则经 injectable client 注入备用
+ * OpenAI 兼容通道（生产代码零改动）。模型可用 SMOKE_MODEL 覆盖。
  *
  * 覆盖：4 字超短句 / 显式承诺动词 / 口语无期限 / 第三方报告 / 负对照。
  * 只输出抽取 JSON，不打印任何密钥。
@@ -27,24 +26,25 @@ const CASES: Array<{ label: string; text: string; expect: "承诺" | "无" }> = 
   { label: "负对照", text: "今天天气不错", expect: "无" },
 ];
 
-function siliconflowClient(): UnifiedLlmClient | null {
-  const key = process.env.SILICONFLOW_API_KEY?.trim();
-  if (!key) return null;
+function smokeFallbackClient(): UnifiedLlmClient | null {
+  const key = process.env.SMOKE_API_KEY?.trim();
+  const baseURL = process.env.SMOKE_BASE_URL?.trim();
+  if (!key || !baseURL) return null;
   return new OpenAI({
     apiKey: key,
-    baseURL: process.env.SMOKE_BASE_URL?.trim() || "https://api.siliconflow.cn/v1",
+    baseURL,
     timeout: 60_000,
   }) as unknown as UnifiedLlmClient;
 }
 
 async function main(): Promise<void> {
   const key = resolveOpenAiApiKey();
-  const sf = siliconflowClient();
+  const sf = smokeFallbackClient();
   if (!key && !sf) {
-    console.error("未解析到可用 API key（OPENAI_API_KEY / SILICONFLOW_API_KEY），无法冒烟。");
+    console.error("未解析到可用 API key（OPENAI_API_KEY / SMOKE_API_KEY+SMOKE_BASE_URL），无法冒烟。");
     process.exit(1);
   }
-  const channel = sf ? `SiliconFlow(${process.env.SMOKE_MODEL ?? "deepseek-ai/DeepSeek-V4-Flash"})` : `生产通道(${getAgenticMemoryLlmModel()})`;
+  const channel = sf ? `SMOKE(${process.env.SMOKE_BASE_URL})` : `生产通道(${getAgenticMemoryLlmModel()})`;
   console.log(`通道: ${channel}  生产key: ${key ? `***${key.slice(-4)}` : "无"}\n`);
 
   let hit = 0;
@@ -58,7 +58,7 @@ async function main(): Promise<void> {
       if (!u) useProduction = false;
     }
     if (!u && sf) {
-      via = "siliconflow";
+      via = "smoke";
       u = await extractUnified(c.text, {
         client: sf,
         model: process.env.SMOKE_MODEL ?? "deepseek-ai/DeepSeek-V4-Flash",

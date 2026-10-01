@@ -44,7 +44,7 @@ if (-not $SkipPackage) {
   Push-Location $Repo
   # 相对路径：GNU tar 会把 "E:\x" 里的冒号解析成 远程主机:path
   & tar -czf windows_dist/ecs-deploy/private-agent-ecs.tar.gz package.json package-lock.json `
-    server/dist server/package.json server/config server/.env `
+    server/dist server/package.json server/config server/.env server/public `
     server/scripts/admin-set-password.mjs `
     agent-world/package.json agent-world/dist agent-world/config agent-world/deps agent-world/data `
     packages/agent-protocol/package.json packages/agent-protocol/dist `

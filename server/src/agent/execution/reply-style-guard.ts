@@ -12,8 +12,8 @@
  * - 协议块保真：NEXT_UP / 渲染标记 / 卡片块先摘出、整形后原样拼回，
  *   不破坏 ws 层（chat-user-message）的协议提取；
  * - 永不变差：整形结果为空时回退原文；只删句、不改写、不重排；
- * - 车道差异：overlong 只管 chat 面（task 交付天然长、由结构豁免）；
- *   人格检查（道歉/找补/连环让步）双车道同规。
+ * - 车道差异：overlong 只管 chat 面确认轮（2026-09-28 闲聊轮废除超长截断，
+ *   task 交付天然长、由结构豁免）；人格检查（道歉/找补/连环让步）双车道同规。
  * - 确认轮（2026-09-24）：日历/提醒创建成功后的办妥确认不吃结构豁免——
  *   把废话预告排成列表也算 chat 超长（opts.confirmationRound，agent-core 传参）。
  *
@@ -209,8 +209,12 @@ function detectViolations(
   }
   if (
     lane === "chat" &&
-    // 确认轮不吃结构豁免（见 ReplyStyleGateOptions 注释）
-    (confirmationRound || !hasStructure(body)) &&
+    // 2026-09-28 用户拍板：闲聊轮废除超长截断/重写——分泡形态下多句连发就是
+    // 微信式正常回复，硬压短毁人设（「怕我跑了？」被重写成一句话），且触发
+    // 客户端塌缩（finalTextReplacesStream）造成回复混乱。overlong 收窄为
+    // 仅确认轮生效：订阅/定时任务的废话确认（五段导购腔）仍靠这条砍
+    // （见 confirm-round-style-gate 真机校准），闲聊轮不再有句数/字数上限。
+    confirmationRound === true &&
     (sentences.length > CHAT_MAX_SENTENCES ||
       body.replace(/[\s*#>`~|]/g, "").length > CHAT_MAX_PLAIN_CHARS)
   ) {

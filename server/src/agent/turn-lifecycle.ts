@@ -15,7 +15,7 @@ import { isKvSummaryMinimal } from "../config/memory-env.js";
 import { inferMemoryTopic } from "./memory-topic.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 import { getConversationTimelineService } from "../services/conversation-timeline.js";
-import { isNotesChatSessionId } from "./master-chat-session.js";
+import { isNotesChatSessionId, isIncognitoChatSessionId } from "./master-chat-session.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import { getMemoryConsolidationService } from "../services/memory-consolidation-service.js";
 
@@ -50,6 +50,15 @@ export class TurnLifecycle {
       userPersonalizationService: UserPersonalizationService | null;
       agentMemorySyncService: AgentMemorySyncService | null;
       shortTermMemoryGateway: ShortTermMemoryGatewayService | null;
+      /** 用户画像聚合器（惰性取：构造序晚于 BrainCenter 装配） */
+      getUserProfileAggregator?: () => {
+        observeTurn(
+          actorId: string,
+          userText: string,
+          assistantText: string,
+          opts?: { highSignal?: boolean },
+        ): void;
+      } | null;
     },
   ) {}
 
@@ -147,7 +156,13 @@ export class TurnLifecycle {
 
   finalizeTurn(input: FinalizeTurnInput): FinalizeTurnResult {
     const full = input.assistantText.trim();
+    // 隐身会话（incognito: 前缀）：画像观察整体跳过——聊可以，画像不长
+    const incognito = isIncognitoChatSessionId(input.sessionId);
     if (!full) {
+      // 空回复轮也喂画像聚合器：用户半边仍入队（与原 brain-center 阶段3.6.1 行为对齐）
+      if (!incognito) {
+        this.deps.getUserProfileAggregator?.()?.observeTurn(input.actorId, input.userText, "");
+      }
       return this.applyQuota(input);
     }
 
@@ -217,6 +232,14 @@ export class TurnLifecycle {
 
     this.deps.evolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
     this.deps.userPersonalizationService?.observeTurn(input.actorId, input.userText, full);
+    // 用户画像聚合器观察（2026-09-29 从 brain-center 阶段3.6.1 迁入）：
+    // 这里拿得到真实助手全文（原位 cognitive.response 恒空串，画像只见用户半边）；
+    // 且任务面轮次也开始喂画像。highSignal 供抽取 token 闸预筛。隐身会话跳过。
+    if (!incognito) {
+      this.deps.getUserProfileAggregator?.()?.observeTurn(input.actorId, input.userText, full, {
+        highSignal: signal.isHighSignal,
+      });
+    }
 
     getMemoryManagerService()?.onTurnCompleted(input.actorId, input.sessionId, input.userText, full);
 

@@ -18,6 +18,10 @@ class _MessageHubPageState extends State<MessageHubPage> {
   bool _serverOffline = false;
   List<Map<String, dynamic>> _conversations = [];
 
+  /// 面板内正在查看的会话：列表⇄详情都在右栏双面板里切换，
+  /// 不开全窗路由（2026-10-01 用户定调）。
+  Map<String, dynamic>? _selectedConversation;
+
   @override
   void initState() {
     super.initState();
@@ -53,16 +57,34 @@ class _MessageHubPageState extends State<MessageHubPage> {
         msg.contains("Connection refused");
   }
 
-  String _platformGlyph(String platform) {
+  /// 平台标识 → 图标（对应消息源的可识别图形，2026-10-01 用户定调：
+  /// 不再用文字单字区分）。
+  IconData _platformIcon(String platform) {
     switch (platform) {
       case "wechat":
-        return "微";
+        return Icons.wechat;
       case "qq":
-        return "Q";
+        return Icons.chat;
       case "feishu":
-        return "飞";
+        return Icons.flutter_dash;
+      case "email":
+        return Icons.mail_outline;
       default:
-        return "信";
+        return Icons.chat_bubble_outline;
+    }
+  }
+
+  /// 平台品牌色（沿用原 appbar 浮卡映射）；无品牌色的走中性色。
+  Color _platformIconColor(String platform, ThemeData theme) {
+    switch (platform) {
+      case "wechat":
+        return const Color(0xFF07C160);
+      case "qq":
+        return const Color(0xFF12B7F5);
+      case "feishu":
+        return const Color(0xFF3370FF);
+      default:
+        return theme.colorScheme.onSurfaceVariant;
     }
   }
 
@@ -72,7 +94,29 @@ class _MessageHubPageState extends State<MessageHubPage> {
     // 面板自身显式铺上主题背景色，避免依赖父容器（黑色主题下为纯黑）
     return ColoredBox(
       color: theme.colorScheme.surface,
-      child: _buildBody(theme),
+      child: _selectedConversation != null
+          ? _buildDetail(theme)
+          : _buildBody(theme),
+    );
+  }
+
+  /// 会话详情：嵌在右栏面板内展示（返回时刷新列表——详情打开即标已读）。
+  Widget _buildDetail(ThemeData theme) {
+    final Map<String, dynamic> item = _selectedConversation!;
+    final String conversationId = item["conversationId"] as String? ?? "";
+    final String title = (item["title"] as String?)?.trim().isNotEmpty == true
+        ? item["title"] as String
+        : ((item["participantName"] as String?)?.trim().isNotEmpty == true
+              ? item["participantName"] as String
+              : (item["channelId"] as String? ?? "未命名会话"));
+    return _ConversationDetailPage(
+      api: widget.api,
+      conversationId: conversationId,
+      title: title,
+      onBack: () {
+        setState(() => _selectedConversation = null);
+        _loadConversations();
+      },
     );
   }
 
@@ -136,7 +180,11 @@ class _MessageHubPageState extends State<MessageHubPage> {
               backgroundColor: unread > 0
                   ? theme.colorScheme.primaryContainer
                   : theme.colorScheme.surfaceContainerHighest,
-              child: Text(_platformGlyph(platform)),
+              child: Icon(
+                _platformIcon(platform),
+                size: 20,
+                color: _platformIconColor(platform, theme),
+              ),
             ),
             title: Text(
               title,
@@ -163,21 +211,7 @@ class _MessageHubPageState extends State<MessageHubPage> {
                 : const Icon(Icons.chevron_right),
             onTap: conversationId.isEmpty
                 ? null
-                : () async {
-                    await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => _ConversationDetailPage(
-                          api: widget.api,
-                          conversationId: conversationId,
-                          title: title,
-                        ),
-                      ),
-                    );
-                    if (mounted) {
-                      await _loadConversations();
-                    }
-                  },
+                : () => setState(() => _selectedConversation = item),
           );
         },
       ),
@@ -225,11 +259,15 @@ class _ConversationDetailPage extends StatefulWidget {
     required this.api,
     required this.conversationId,
     required this.title,
+    required this.onBack,
   });
 
   final WorldApiClient api;
   final String conversationId;
   final String title;
+
+  /// 返回列表（面板内切换，非路由 pop）。
+  final VoidCallback onBack;
 
   @override
   State<_ConversationDetailPage> createState() => _ConversationDetailPageState();
@@ -346,7 +384,15 @@ class _ConversationDetailPageState extends State<_ConversationDetailPage> {
     final ThemeData theme = Theme.of(context);
     return Scaffold(
       backgroundColor: theme.colorScheme.surface,
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(
+        // 面板内嵌形态：无路由可推断返回，显式给返回钮。
+        automaticallyImplyLeading: false,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: widget.onBack,
+        ),
+        title: Text(widget.title),
+      ),
       body: Column(
         children: [
           if (_conversation != null)

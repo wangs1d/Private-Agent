@@ -8,6 +8,16 @@ import "../core/config/api_config.dart";
 import "../core/services/ws_chat_service.dart";
 import "../core/models/chat_models.dart";
 
+// ===== 真·分绿泡（2026-09-28）：气泡拆分消息 id 工具（与桌面端 main.dart 同构）=====
+final RegExp _bubbleIdPattern = RegExp(r"^assistant-(.+)-b(\d+)$");
+
+/// 是否为分泡消息 id（assistant-<traceId>-bN，服务端 BubbleTracker 分配）。
+bool _isBubbleId(String messageId) => _bubbleIdPattern.hasMatch(messageId);
+
+/// 从分泡消息 id 提取轮次 traceId；非分泡 id 返回 null。
+String? _bubbleTraceOf(String messageId) =>
+    _bubbleIdPattern.firstMatch(messageId)?.group(1);
+
 /// 手机端对话控制器：复用 [WsChatService] 连接与桌面端同一后端，数据/会话自动同步。
 ///
 /// 协议(与桌面端一致)：
@@ -92,9 +102,9 @@ class MobileChatController extends ChangeNotifier {
       "sessionId": ApiConfig.sessionId,
       "deviceId": "mobile-${defaultTargetPlatform.name}",
       "userAlias": "owner",
+      // 登录邮箱覆盖（未登录回落 USER_ID/sessionId），服务端按 userId 绑定 actor
+      "userId": ApiConfig.effectiveActorId,
     };
-    final String uid = ApiConfig.userId.trim();
-    if (uid.isNotEmpty) init["userId"] = uid;
     _service.sendEvent("session.init", init);
   }
 
@@ -126,11 +136,15 @@ class MobileChatController extends ChangeNotifier {
       "text": text,
       "timestamp": DateTime.now().toIso8601String(),
       "agentAccessMode": "full",
+      // 与 session.init 同源：登录邮箱优先，保证消息落在本账号车道
+      "userId": ApiConfig.effectiveActorId,
     };
-    final String uid = ApiConfig.userId.trim();
-    if (uid.isNotEmpty) payload["userId"] = uid;
     _service.sendEvent("chat.user_message", payload);
   }
+
+  /// 测试入口：直接驱动 WS 事件（生产路径走 [_subscription] → 本方法）。
+  @visibleForTesting
+  void debugHandleWsEvent(Map<String, dynamic> event) => _onWsEvent(event);
 
   void _onWsEvent(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
@@ -189,8 +203,18 @@ class MobileChatController extends ChangeNotifier {
   }
 
   void _appendChunk(Map<String, dynamic> payload) {
-    _openStreamingMessage(payload);
     final String chunk = payload["chunk"]?.toString() ?? "";
+    final String? traceId = payload["traceId"]?.toString();
+    final String id = payload["messageId"]?.toString() ??
+        (traceId != null && traceId.isNotEmpty
+            ? "assistant-$traceId"
+            : "assistant-streaming");
+    // 真·分绿泡：chunk 自带独立泡 id（assistant-<trace>-bN）→ 走分泡追加
+    if (_isBubbleId(id)) {
+      _appendBubbleChunk(id, traceId, chunk);
+      return;
+    }
+    _openStreamingMessage(payload);
     if (chunk.isEmpty) return;
     final int idx = messages.indexWhere(
       (m) => m.messageId == _streamingMessageId,
@@ -211,6 +235,66 @@ class MobileChatController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 真·分绿泡：分泡 chunk 追加。新泡开=旧泡完；turn_started 建的空占位
+  /// （assistant-$traceId，非泡 id 且无正文）让位给第一个真泡。
+  void _appendBubbleChunk(String id, String? traceId, String chunk) {
+    if (_streamingMessageId != null &&
+        _streamingMessageId != id &&
+        !_isBubbleId(_streamingMessageId!)) {
+      final int phIdx = messages.indexWhere(
+        (m) => m.messageId == _streamingMessageId,
+      );
+      if (phIdx >= 0 && messages[phIdx].text.trim().isEmpty) {
+        messages.removeAt(phIdx);
+      }
+    }
+    if (chunk.isNotEmpty) {
+      // 同 trace 的其他流式泡定稿（打字机收尾），新泡从头逐字
+      for (int i = 0; i < messages.length; i++) {
+        final ChatMessage m = messages[i];
+        if (!m.streaming || m.messageId == id) continue;
+        if (!_isBubbleId(m.messageId)) continue;
+        if (traceId != null && traceId.isNotEmpty && _bubbleTraceOf(m.messageId) != traceId) {
+          continue;
+        }
+        messages[i] = ChatMessage(
+          messageId: m.messageId,
+          sessionId: m.sessionId,
+          role: m.role,
+          text: m.text,
+          timestamp: m.timestamp,
+          pendingMediaCards: m.pendingMediaCards,
+          // streaming 不带 → false：定稿
+        );
+      }
+      final int idx = messages.indexWhere((m) => m.messageId == id);
+      if (idx < 0) {
+        messages.add(ChatMessage(
+          messageId: id,
+          sessionId: ApiConfig.effectiveActorId,
+          role: "assistant",
+          text: chunk,
+          timestamp: DateTime.now(),
+          streaming: true,
+        ));
+      } else {
+        final ChatMessage prev = messages[idx];
+        messages[idx] = ChatMessage(
+          messageId: prev.messageId,
+          sessionId: prev.sessionId,
+          role: prev.role,
+          text: prev.text + chunk,
+          timestamp: prev.timestamp,
+          streaming: true,
+          pendingMediaCards: prev.pendingMediaCards,
+        );
+      }
+      _streamingMessageId = id;
+    }
+    isProcessing = true;
+    notifyListeners();
+  }
+
   /// 边说边出图：`chat.media_ready` 到达时把已搜到的照片先挂到当前流式消息上，
   /// 前端插到正在打字的正文下方实时展示；`chat.assistant_done` 后以
   /// renderBlocks 的最终顺序渲染（pendingMediaCards 被清空由最终消息接管）。
@@ -221,6 +305,27 @@ class MobileChatController extends ChangeNotifier {
         .whereType<Map<String, dynamic>>()
         .toList(growable: false);
     if (cards.isEmpty) return;
+    // 真·分绿泡：分泡轮次媒体照片挂到当前流式泡上（media_ready 的 messageId
+    // 恒为 assistant-$traceId 基础 id，不能据此开占位消息，防幻影空泡）
+    if (_streamingMessageId != null && _isBubbleId(_streamingMessageId!)) {
+      final int bIdx = messages.indexWhere(
+        (m) => m.messageId == _streamingMessageId,
+      );
+      if (bIdx >= 0) {
+        final ChatMessage prev = messages[bIdx];
+        messages[bIdx] = ChatMessage(
+          messageId: prev.messageId,
+          sessionId: prev.sessionId,
+          role: prev.role,
+          text: prev.text,
+          timestamp: prev.timestamp,
+          streaming: prev.streaming,
+          pendingMediaCards: cards,
+        );
+        notifyListeners();
+        return;
+      }
+    }
     _openStreamingMessage(payload);
     final int idx = messages.indexWhere(
       (m) => m.messageId == _streamingMessageId,
@@ -253,6 +358,13 @@ class MobileChatController extends ChangeNotifier {
   }
 
   void _finalizeReply(Map<String, dynamic> payload) {
+    // 真·分绿泡：带 bubbles 对账数组的轮次按泡收口（不走单泡 finalText 替换）
+    final List<Map<String, dynamic>>? bubbles =
+        _parseStructuredList(payload, "bubbles");
+    if (bubbles != null && bubbles.isNotEmpty) {
+      _finalizeBubbles(payload, bubbles);
+      return;
+    }
     final String? traceId = payload["traceId"]?.toString();
     final String? messageId = payload["messageId"]?.toString();
     // 优先用已经打开的流式消息;否则尝试按 trace 对齐
@@ -300,6 +412,110 @@ class MobileChatController extends ChangeNotifier {
         renderBlocks: renderBlocks ?? prev.renderBlocks,
         replyBlocks: replyBlocks ?? prev.replyBlocks,
       );
+    }
+    _streamingMessageId = null;
+    currentToolName = null;
+    isProcessing = false;
+    notifyListeners();
+  }
+
+  /// 真·分绿泡 done 收口：逐泡以服务端对账数组定稿；
+  /// finalTextReplacesStream=true 时整轮塌缩成单泡（删除全部分泡）。
+  void _finalizeBubbles(
+    Map<String, dynamic> payload,
+    List<Map<String, dynamic>> bubbles,
+  ) {
+    final String? traceId = payload["traceId"]?.toString();
+    final String finalText = payload["finalText"]?.toString() ?? "";
+    final List<Map<String, dynamic>>? mediaCards =
+        _parseStructuredList(payload, "mediaCards");
+    final List<Map<String, dynamic>>? renderBlocks =
+        _parseStructuredList(payload, "renderBlocks");
+    final List<Map<String, dynamic>>? replyBlocks =
+        _parseStructuredList(payload, "blocks");
+    if (payload["finalTextReplacesStream"] == true) {
+      // 塌缩：删除本轮所有分泡（含 id 对账与同 trace 兜底），落单泡 finalText
+      messages.removeWhere((m) {
+        final bool hit = bubbles.any((b) => b["id"]?.toString() == m.messageId) ||
+            (traceId != null &&
+                traceId.isNotEmpty &&
+                _bubbleTraceOf(m.messageId) == traceId);
+        return hit;
+      });
+      messages.add(ChatMessage(
+        messageId: traceId != null && traceId.isNotEmpty
+            ? "assistant-$traceId"
+            : "assistant-final",
+        sessionId: ApiConfig.effectiveActorId,
+        role: "assistant",
+        text: finalText,
+        timestamp: DateTime.now(),
+        mediaCards: mediaCards,
+        renderBlocks: renderBlocks,
+        replyBlocks: replyBlocks,
+      ));
+      _streamingMessageId = null;
+      currentToolName = null;
+      isProcessing = false;
+      notifyListeners();
+      return;
+    }
+    // 正常收口：空占位让位，逐泡定稿（服务端文本为准），卡片挂末泡。
+    // 多泡时块序列只留非 text 块（text 块按全文切分，挂末泡会整段复读）。
+    messages.removeWhere((m) =>
+        m.streaming && m.text.trim().isEmpty && !_isBubbleId(m.messageId));
+    List<Map<String, dynamic>>? replyBlocksForLast = replyBlocks;
+    List<Map<String, dynamic>>? renderBlocksForLast = renderBlocks;
+    if (bubbles.length > 1) {
+      if (replyBlocks != null) {
+        final List<Map<String, dynamic>> cardOnly = replyBlocks
+            .where((b) => b["type"]?.toString() != "text")
+            .toList(growable: false);
+        replyBlocksForLast = cardOnly.isEmpty ? null : cardOnly;
+      }
+      if (renderBlocks != null) {
+        final List<Map<String, dynamic>> mediaOnly = renderBlocks
+            .where((b) => b["type"]?.toString() != "text")
+            .toList(growable: false);
+        renderBlocksForLast = mediaOnly.isEmpty ? null : mediaOnly;
+      }
+    }
+    for (int i = 0; i < bubbles.length; i++) {
+      final Map<String, dynamic> b = bubbles[i];
+      final String id = b["id"]?.toString() ?? "";
+      if (id.isEmpty) continue;
+      final bool isLast = i == bubbles.length - 1;
+      final String text = b["text"]?.toString() ?? "";
+      final int idx = messages.indexWhere((m) => m.messageId == id);
+      if (idx < 0) {
+        // 客户端漏收该泡 chunk：按对账补建
+        messages.add(ChatMessage(
+          messageId: id,
+          sessionId: ApiConfig.effectiveActorId,
+          role: "assistant",
+          text: text,
+          timestamp: DateTime.now(),
+          mediaCards: isLast ? mediaCards : null,
+          renderBlocks: isLast ? renderBlocksForLast : null,
+          replyBlocks: isLast ? replyBlocksForLast : null,
+        ));
+      } else {
+        final ChatMessage prev = messages[idx];
+        messages[idx] = ChatMessage(
+          messageId: prev.messageId,
+          sessionId: prev.sessionId,
+          role: prev.role,
+          text: text.isNotEmpty ? text : prev.text,
+          timestamp: prev.timestamp,
+          mediaCards: isLast ? (mediaCards ?? prev.mediaCards) : prev.mediaCards,
+          renderBlocks:
+              isLast ? (renderBlocksForLast ?? prev.renderBlocks) : prev.renderBlocks,
+          replyBlocks:
+              isLast ? (replyBlocksForLast ?? prev.replyBlocks) : prev.replyBlocks,
+          pendingMediaCards: isLast ? null : prev.pendingMediaCards,
+          // streaming 不带 → false：定稿
+        );
+      }
     }
     _streamingMessageId = null;
     currentToolName = null;

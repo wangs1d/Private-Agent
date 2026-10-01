@@ -239,8 +239,10 @@ function parseCaptionArray(raw: string, expected: number): string[] {
  * - `/agent/images/{actorId}/{file}`：直读本地 `data/images/{actorId}/{file}`；
  * - http(s)：限时下载。
  * 读取/下载/解码任何一步失败返回 null。
+ * （导出供 travel-planning 封面终审复用：同一套「本地直读/远程限时下载 +
+ *   sharp 压缩」语义，避免第二份实现漂移。）
  */
-async function loadImageBytes(
+export async function loadImageBytes(
   url: string,
 ): Promise<{ base64: string; mime: string } | null> {
   try {
@@ -271,8 +273,9 @@ async function loadImageBytes(
   }
 }
 
-/** 用 sharp 压缩图片（宽 ≤640，JPEG q80）。失败返回 null（调用方回退原图）。 */
-async function compressImage(
+/** 用 sharp 压缩图片（宽 ≤640，JPEG q80）。失败返回 null（调用方回退原图）。
+ *  （导出供 travel-planning 封面终审复用。） */
+export async function compressImage(
   buf: Buffer,
   mime: string,
 ): Promise<{ base64: string; mime: string } | null> {

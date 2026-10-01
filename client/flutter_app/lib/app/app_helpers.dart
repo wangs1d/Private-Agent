@@ -1,8 +1,8 @@
 /// 右侧抽屉要展示的内容种类。
 /// （行程规划不在此列：它以独立全屏界面打开，见 TravelPlanFullscreenPage。
 ///   设置同样不在此列：它以独立全屏界面打开，见 SettingsPage。
-///   图库不在此列：2026-09-25 起升级为一级 tab（见 GalleryWorkbenchPage），
-///   右面板窄栏放不下 3D 照片墙，双入口也一并收掉。）
+///   图库不在此列：2026-09-29 起退出一级 tab，走常用工具入口以全屏路由
+///   打开（见 GalleryWorkbenchPage），右面板窄栏放不下 3D 照片墙。）
 enum RightPanelKind { friends, messages, devices, schedule, imagePreview, browser, catalog, approvals, contentSummary, agentHome }
 
 /// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
@@ -40,10 +40,9 @@ extension RightPanelKindDefaults on RightPanelKind {
   }
 }
 
-/// 顶栏标题占位（对话 tab 为空；图库 tab 显示「图库」）。
+/// 顶栏标题占位（对话 tab 为空；钱包占位为空）。
 const List<String> kTabTitles = <String>[
   "",
-  "图库",
   "",
 ];
 

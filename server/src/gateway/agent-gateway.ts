@@ -3,7 +3,7 @@
  *
  * 所有工具/技能/MCP 资源的「准备、检索、桥接执行、强制路由」都经由本模块发起，
  * 底层委托：
- *   - tool-search/：tool-router 对接层（deferred catalog 构建 + HTTP/stdio 检索 + 桥接执行）
+ *   - tool-search/：延迟目录（deferred catalog 构建 + 进程内 adaptive 检索 + 桥接执行）
  *   - gateway/forced-tool.ts：强制工具路由（phone/clock/search_web）
  *
  * 网关职责：
@@ -31,6 +31,7 @@ import {
 } from "../tools/tool-search/index.js";
 import { adaptiveSearchDeferredTools, type AdaptiveDeferredToolSearchMatch } from "../tools/tool-search/adaptive-catalog.js";
 import { resolveForcedToolChoice, type ForcedToolChoice } from "./forced-tool.js";
+import { ROUTER_FIRST_LANE_MAX_VISIBLE } from "../external-model/lane-tool-sets.js";
 import { recordGatewayTrace } from "./gateway-trace.js";
 
 let _traceCounter = 0;
@@ -105,15 +106,19 @@ async function tracedAsync<T>(
 }
 
 // ===== 意图预召回（speculative preload）=====
-// 延迟目录激活时，用用户文本提前跑一次 tool-router 检索（短超时），
-// top-1 高置信度命中时直接把该工具 schema 注入 visibleTools——
-// LLM 无需再走 tool_discover → tool_call 两轮往返即可直接调用。
-// 预召回失败/超时/低置信度一律静默跳过，LLM 仍可走 tool_discover 兜底。
+// 用用户文本提前跑一次延迟目录检索（进程内 adaptive，短超时），top-1 高置信
+// 命中时直接把该工具 schema 注入 visibleTools——LLM 无需再走 tool_discover →
+// tool_call 两轮往返即可直接调用。失败/超时/低置信度一律静默跳过，LLM 仍可走
+// tool_discover 兜底。
+//
+// 收敛（2026-10-01）：只对 router-first 轮（可见集 ≤ ROUTER_FIRST_LANE_MAX_VISIBLE，
+// 即"业务工具主力在延迟目录"的轮）投机。chat 轮（Core 常驻）与意图束轮（束确定性
+// 覆盖主力）不跑——最坏 600ms 阻塞第一波 LLM 请求，纯加 TTFT 无命中收益。
 
 function parsePrerecallTimeoutMs(): number {
   const raw = Number.parseInt(process.env.GATEWAY_PRERECALL_TIMEOUT_MS ?? "", 10);
-  // 默认 600ms：覆盖 stdio worker 冷启动（实测 250~560ms）；
-  // 首轮超时则静默走 tool_discover 兜底，worker 由 prewarm 常驻后后续轮次命中缓存。
+  // 默认 600ms：进程内 adaptive 检索（BM25+embedding 混合）常规远低于此；
+  // 超时则静默走 tool_discover 兜底，不影响正确性。
   return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 2000) : 600;
 }
 
@@ -190,7 +195,8 @@ export async function prepareTools(
     if (
       prepared.toolSearchActive &&
       userText &&
-      prepared.deferredCatalog.entries.length > 0
+      prepared.deferredCatalog.entries.length > 0 &&
+      prepared.visibleTools.length <= ROUTER_FIRST_LANE_MAX_VISIBLE
     ) {
       prerecall = await preloadTopDeferredTool(prepared, userText);
     }
@@ -238,7 +244,7 @@ export function resolveForcedTool(
 
 /**
  * 桥接工具执行：tool_discover（搜索/加载延迟工具 schema）与 tool_call（执行）。
- * 检索后端为 Python tool-router（HTTP 优先，stdio 兜底）。
+ * 检索后端为进程内 adaptive 管线（意图路由 → 混合召回 → 自适应 top-p → 图扩展 → 重排）。
  */
 export function executeBridge(
   bridgeName: string,

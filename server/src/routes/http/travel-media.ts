@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import fs from "fs";
 import { travelMediaStore } from "../../skills/travel-planning/travel-media-store.js";
+import { destinationCoverStore } from "../../skills/travel-planning/travel-destination-cover-store.js";
 import type { PlanningService } from "../../skills/travel-planning/travel-planning-service.js";
 
 const poiBodySchema = z.object({
@@ -64,6 +65,27 @@ const deleteVideoSchema = poiBodySchema.extend({
 });
 
 const backfillSchema = poiBodySchema;
+
+const remoteQuerySchema = z.object({ u: z.string().min(8).max(2000) });
+
+/**
+ * 远程图代理白名单：仅 Wikimedia 家族（thumb/upload/commons 图床、wikipedia、
+ * wikidata）。行程链路的所有远程图 URL 都出自这三个域，收窄到零 SSRF 面。
+ */
+const REMOTE_IMAGE_HOST_SUFFIXES = ["wikimedia.org", "wikipedia.org", "wikidata.org"] as const;
+
+function isAllowedRemoteImageHost(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+    const host = u.hostname.toLowerCase();
+    return REMOTE_IMAGE_HOST_SUFFIXES.some(
+      (s) => host === s || host.endsWith(`.${s}`),
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * POI 媒体库路由：本地上传实拍图、评论、视频（元数据+播放页），
@@ -244,13 +266,57 @@ export function registerTravelMediaRoutes(
     }
   });
 
-  /** 媒体库静态资源（上传实拍图）。文件名严格校验防穿越，长缓存（内容不可变）。 */
+  /**
+   * 远程图代理（2026-09-28，存量数据兼容通道）：历史行程/聊天快照里烤死的
+   * wikimedia 远程 URL，客户端网络直连不可达（不走系统代理，IPv4 被墙）。
+   * 客户端把这类 URL 重写到本路由，服务端以 URL 哈希为键落盘缓存（双路抓取，
+   * 见 travelMediaStore.resolveOrFetchRemote），首次抓取后续永久本机直出。
+   *
+   * 封面升级映射（2026-09-28）：被换下的旧封面 URL 命中映射时改发当前封面
+   * （重定向语义用 302 指向新代理地址，客户端 Image.network 自动跟随），
+   * 历史卡片自动换上更好的新封面。
+   */
+  app.get("/travel/media/remote", async (request, reply) => {
+    const parsed = remoteQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, reason: "BAD_PARAMS" });
+    }
+    const remoteUrl = parsed.data.u;
+    if (!isAllowedRemoteImageHost(remoteUrl)) {
+      return reply.code(400).send({ ok: false, reason: "HOST_NOT_ALLOWED" });
+    }
+    // 封面升级：旧封面 URL → 当前封面（本地资产直接 302；仍远程的走本路由再跳一次）
+    const upgraded = destinationCoverStore.resolveSuperseded(remoteUrl);
+    if (upgraded) {
+      if (upgraded.url.startsWith("/travel/media/assets/")) {
+        // Location 头必须 ASCII：中文目的地名编码掉（与 assets 路由同款）
+        return reply.redirect(encodeURI(upgraded.url), 302);
+      }
+      return reply.redirect(`/travel/media/remote?u=${encodeURIComponent(upgraded.url)}`, 302);
+    }
+    const hit = await travelMediaStore.resolveOrFetchRemote(remoteUrl);
+    if (!hit) return reply.code(502).send({ ok: false, reason: "UPSTREAM_UNREACHABLE" });
+    void reply.header("Content-Type", hit.mime);
+    void reply.header("Cache-Control", "public, max-age=2592000, immutable");
+    return reply.send(fs.createReadStream(hit.file));
+  });
+
+  /** 媒体库静态资源（上传实拍图）。文件名严格校验防穿越，长缓存（内容不可变）。
+   *  封面升级映射：目的封面对象目录内的历史文件请求改发当前封面（本地资产 302）。 */
   app.get<{ Params: { dir: string; fileName: string } }>(
     "/travel/media/assets/:dir/:fileName",
     async (request, reply) => {
       const { dir, fileName } = request.params;
       const full = travelMediaStore.resolveAssetPath(dir, fileName);
       if (!full) return reply.code(404).send({ ok: false, reason: "NOT_FOUND" });
+      // 封面升级：旧封面对象目录内的任何文件 → 当前封面（避免长缓存钉死旧图）
+      const upgraded = destinationCoverStore.resolveSuperseded(
+        `/travel/media/assets/${dir}/${fileName}`,
+      );
+      if (upgraded?.url.startsWith("/travel/media/assets/")) {
+        // Location 头必须 ASCII：路径里的中文目的地编码掉，否则 Node 抛 ERR_INVALID_CHAR
+        return reply.redirect(encodeURI(upgraded.url), 302);
+      }
       const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
       const mime =
         ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : "image/jpeg";
@@ -269,6 +335,7 @@ export function registerTravelMediaRoutes(
       "POST /travel/media/reviews  {name,type,rating,text,author?}",
       "POST /travel/media/videos   {name,type,platform,title,author,playPageUrl}",
       "GET  /travel/media/assets/:dir/:fileName",
+      "GET  /travel/media/remote?u=<wikimedia 图床 URL>",
       "PUT    /travel/media/images   {name,type,url,source?,takenAt?,uploader?}",
       "DELETE /travel/media/images   {name,type,url}",
       "PUT    /travel/media/reviews  {name,type,reviewId,rating?,text?,author?}",

@@ -16,6 +16,7 @@ class ChatSuggestion {
     required this.tag,
     required this.prompt,
     this.experimental = false,
+    this.personalized = false,
   });
 
   final String id;
@@ -32,6 +33,9 @@ class ChatSuggestion {
   /// 实验能力徽标（从就绪注册表透传）。
   final bool experimental;
 
+  /// true = 该条按当前用户的使用习惯出了「回访版」文案（服务端判定）。
+  final bool personalized;
+
   /// 「上新」判定与本地已知集合共用的稳定键：优先能力 id，
   /// 无能力 id 的内置条目退化为推荐项自身 id。
   String get capabilityKey => capabilityId ?? "suggestion:$id";
@@ -42,6 +46,7 @@ class ChatSuggestion {
         tag: json["tag"]?.toString() ?? "",
         prompt: json["prompt"]?.toString() ?? "",
         experimental: json["experimental"] as bool? ?? false,
+        personalized: json["personalized"] as bool? ?? false,
       );
 }
 
@@ -60,8 +65,17 @@ class ChatSuggestionsApi {
       };
 
   Future<List<ChatSuggestion>> fetch() async {
+    // 按用户个性化：带当前登录身份（与服务端 actorId 同口径）；
+    // 鉴权开启时服务端会以 token 归属钉死，这里的 userId 只是兜底通道。
+    final String actorId =
+        AccessCredentialStore.instance.userId?.isNotEmpty == true
+            ? AccessCredentialStore.instance.userId!
+            : ApiConfig.effectiveActorId;
+    final Uri uri = Uri.parse("$_baseUrl/api/chat/suggestions").replace(
+      queryParameters: <String, String>{"userId": actorId},
+    );
     final http.Response res = await _client
-        .get(Uri.parse("$_baseUrl/api/chat/suggestions"), headers: _headers)
+        .get(uri, headers: _headers)
         .timeout(_timeout);
     if (res.statusCode != 200) {
       throw Exception("获取聊天推荐项失败: ${res.statusCode}");

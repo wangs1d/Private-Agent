@@ -1,4 +1,5 @@
 import type { AgentPromptMemoryContext, ToolExposureProfile } from "../external-model/types.js";
+import { HIGH_RISK_TOOL_REASON, isHighRiskToolName } from "../services/agent-task-safety.js";
 
 /**
  * RuntimeKernel prompt 模式：
@@ -110,6 +111,11 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "toneGuidance",
   "relationshipGuidance",
   "userLocation",
+  // 当下状态（2026-10-01）：屏幕焦点/在线状态，顺嘴与关心的 grounded 依据，
+  // 剥离会让回复退回「拿旧记忆套模板」（熬夜→劝睡事故）
+  "currentUserState",
+  // 顺嘴机会（主动性搭车通道）：挂起的 low 意图织入本轮回复末尾
+  "turnAside",
   // 情绪：让 LLM 知道"自己现在感觉如何"——剥离会让 Agent 失去情绪感知
   "emotionState",
   // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
@@ -129,6 +135,8 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "taskContext",
   "userProfile",
   "userLocation",
+  "currentUserState",
+  "turnAside",
   "dailyDigest",
   // 人格·终极版动态块：mood 每轮变化，归动态层
   "personaMood",
@@ -553,25 +561,15 @@ export class RuntimeKernel {
    * 工具动作风险检查（兼容旧 API）。
    *
    * 实际的高风险工具治理已迁移到 AgentTaskSafety.checkToolCall（集中管理），
-   * 此方法保留为轻量级硬匹配入口，供 RuntimeKernel 调用方在不注入
+   * 此方法保留为轻量级入口，供 RuntimeKernel 调用方在不注入
    * AgentTaskSafety 的场景下做快速风险闸门。
    *
-   * 规则与 AgentTaskSafety.isHighRiskFinancialTool 保持一致：
-   *  - shopping.order.place / payment / transfer / wallet → 需人工确认
-   *  - 其他 → 放行（精细治理由工具暴露范围 + AgentTaskSafety 负责）
+   * 直接委托 isHighRiskToolName（静态四件套 + FeatureCatalog risk 分类），
+   * 与 AgentTaskSafety 强制同口径，不再各自维护一份硬匹配规则。
    */
   checkToolAction(toolName: string): { allowed: boolean; reason?: string } {
-    const isHighRisk =
-      toolName === "shopping.order.place" ||
-      toolName.includes("payment") ||
-      toolName.includes("transfer") ||
-      toolName.includes("wallet");
-    if (isHighRisk) {
-      return {
-        allowed: false,
-        reason:
-          "High-risk financial or purchase action requires explicit confirmation before execution.",
-      };
+    if (isHighRiskToolName(toolName)) {
+      return { allowed: false, reason: HIGH_RISK_TOOL_REASON };
     }
     return { allowed: true };
   }

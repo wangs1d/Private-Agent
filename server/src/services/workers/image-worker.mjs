@@ -16,40 +16,44 @@ const storageRoot = join(process.cwd(), "data", "images");
 
 async function generateImage(payload) {
   const { prompt, actorId, options = {} } = payload;
-  const apiKey = process.env.SILICONFLOW_API_KEY ?? "";
-  const baseUrl = process.env.SILICONFLOW_BASE_URL ?? "https://api.siliconflow.cn/v1";
+  const apiKey = process.env.OPENAI_API_KEY ?? "";
+  const baseUrl = (
+    process.env.IMAGE_GEN_BASE_URL?.trim() ||
+    process.env.OPENAI_BASE_URL?.trim() ||
+    "https://api.openai.com/v1"
+  ).replace(/\/+$/, "");
 
   if (!apiKey) {
-    return { ok: false, error: "SILICONFLOW_API_KEY 未配置" };
+    return { ok: false, error: "OPENAI_API_KEY 未配置" };
   }
   if (!prompt?.trim()) {
     return { ok: false, error: "prompt 不能为空" };
   }
 
-  const model = options.model ?? "Kwai-Kolors/Kolors";
+  const model = options.model ?? process.env.IMAGE_GEN_MODEL?.trim() ?? "dall-e-3";
   const imageSize = options.imageSize ?? "1024x1024";
   const batchSize = Math.max(1, Math.min(4, options.batchSize ?? 1));
 
-  // 调用 SiliconFlow API（60s 超时）
+  // 调用 OpenAI 兼容 images 接口（60s 超时）
   const res = await fetch(`${baseUrl}/images/generations`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ model, prompt, image_size: imageSize, batch_size: batchSize }),
+    body: JSON.stringify({ model, prompt, size: imageSize, n: batchSize }),
     signal: AbortSignal.timeout(60_000),
   });
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    return { ok: false, error: `硅基流动图像生成失败：HTTP ${res.status} ${txt.slice(0, 200)}` };
+    return { ok: false, error: `图像生成失败：HTTP ${res.status} ${txt.slice(0, 200)}` };
   }
 
   const data = await res.json();
-  const images = (data.images ?? data.data ?? []).filter((img) => img.url?.length > 0);
+  const images = (data.data ?? data.images ?? []).filter((img) => img.url?.length > 0);
   if (images.length === 0) {
-    return { ok: false, error: "硅基流动返回空图片列表" };
+    return { ok: false, error: "图像生成返回空图片列表" };
   }
 
   // 下载第一张图到本地（30s 超时）

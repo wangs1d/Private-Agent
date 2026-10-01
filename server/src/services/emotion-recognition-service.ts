@@ -343,24 +343,24 @@ export class EmotionRecognitionService {
       const systemPrompt =
         "你是情绪识别器。分析用户文本的情绪，输出 JSON：{\"label\":\"情绪标签\",\"valence\":-1到1,\"arousal\":0到1,\"dominance\":0到1,\"intensity\":0到1,\"cause\":\"简短原因或空\"}。标签用中文：开心/悲伤/愤怒/焦虑/疲惫/平静/兴奋/感激/困惑/恐惧/骄傲/羞愧。只输出 JSON。";
 
-      let responseText = "";
-      const onDelta = (delta: string) => {
-        responseText += delta;
-      };
-
-      await this.provider.streamCompletion(
-        `emotion_recognition_${actorId}_${Date.now()}`,
-        { text },
-        onDelta,
-        undefined,
-        {
-          ephemeralTurn: true,
-          systemPromptOverride: systemPrompt,
-          disableThinking: true,
-          maxThreadMessages: 0,
-          ...buildModelOverrideOpts(TaskTier.MINI),
-        },
-      );
+      // 2026-09-28 修复：改用 streamCompletion 的返回值而非 onDelta 累积。
+      // 流式净化器对「无句末标点的输出」（纯 JSON 正是这种）会把增量永久
+      // 吞在 pending 缓冲里不冲刷（见 createStreamMetaSentenceFilter），导致
+      // delta 累积恒为空、识情 L2 层静默失明；返回值走 result 聚合，不受影响。
+      const responseText =
+        (await this.provider.streamCompletion(
+          `emotion_recognition_${actorId}_${Date.now()}`,
+          { text },
+          () => {},
+          undefined,
+          {
+            ephemeralTurn: true,
+            systemPromptOverride: systemPrompt,
+            disableThinking: true,
+            maxThreadMessages: 0,
+            ...buildModelOverrideOpts(TaskTier.MINI),
+          },
+        )) ?? "";
 
       const parsed = this.parseEmotionJson(responseText, actorId);
       return parsed ?? fallback;

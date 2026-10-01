@@ -25,7 +25,6 @@ class AppSidebar extends StatefulWidget {
     required this.onCheckUpdate,
     required this.onOpenUserMenuFeedback,
     required this.onOpenDevices,
-    required this.onEnterPureVoiceMode,
     required this.onLogout,
     this.userName = "king",
   });
@@ -67,9 +66,6 @@ class AppSidebar extends StatefulWidget {
   /// 用户菜单「我的设备」行:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
 
-  /// 点击「纯语音模式」:主窗口隐藏，唤醒/对话由灵动岛承载
-  final VoidCallback onEnterPureVoiceMode;
-
   /// 用户菜单「退出登录」行
   final VoidCallback onLogout;
 
@@ -81,18 +77,14 @@ class AppSidebar extends StatefulWidget {
 }
 
 class _AppSidebarState extends State<AppSidebar> {
+  // 图库已于 2026-09-29 退出一级 tab：入口收进右侧「常用工具」，全屏打开
+  // （见 GalleryWorkbenchPage.show），侧栏只保留「对话」。
   static const List<SidebarItemSpec> _kItems = <SidebarItemSpec>[
     SidebarItemSpec(
       iconOutlined: Icons.chat_bubble_outline_rounded,
       iconFilled: Icons.chat_rounded,
       label: '对话',
       tabIndex: 0,
-    ),
-    SidebarItemSpec(
-      iconOutlined: Icons.photo_library_outlined,
-      iconFilled: Icons.photo_library_rounded,
-      label: '图库',
-      tabIndex: 1,
     ),
   ];
 
@@ -186,7 +178,6 @@ class _AppSidebarState extends State<AppSidebar> {
                     onInboxUnreadChanged: widget.onInboxUnreadChanged,
                     onOpenFeedback: widget.onOpenUserMenuFeedback,
                     onOpenDevices: widget.onOpenDevices,
-                    onEnterPureVoiceMode: widget.onEnterPureVoiceMode,
                     onLogout: widget.onLogout,
                   ),
                 ),

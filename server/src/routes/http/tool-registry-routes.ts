@@ -15,7 +15,6 @@ import {
   type RegisterInput,
 } from "../../tools/tool-search/registry/index.js";
 import { IntentRouter, type ParsedIntent } from "../../tools/tool-search/intent-router/intent-router.js";
-import { HierarchicalRouter } from "../../tools/tool-search/hierarchical-router/hierarchical-router.js";
 import { HybridRetrievalEngine, type HybridRetrievedResource } from "../../tools/tool-search/retrieval/hybrid-retrieval.js";
 import { AdaptiveTopPSelector } from "../../tools/tool-search/top-p-selector/top-p-selector.js";
 import { HistoryScoreStore } from "../../tools/tool-search/retrieval/history-score.js";
@@ -24,13 +23,6 @@ import { ResourceLazyLoader } from "../../tools/tool-search/lazy-loader/lazy-loa
 import { McpConnectionPool } from "../../tools/tool-search/lazy-loader/mcp-connection-pool.js";
 import { ToolRerankingPipeline } from "../../tools/tool-search/reranking/reranking-pipeline.js";
 import { createNeuralLlmReranker } from "../../tools/tool-search/reranking/neural-reranker.js";
-import {
-  feedbackBatchSchema,
-  feedbackReportSchema,
-} from "../../tools/tool-search/feedback/feedback-models.js";
-import { OnlineLearner } from "../../tools/tool-search/feedback/online-learner.js";
-import { ToolFailureCircuitBreaker } from "../../tools/tool-search/feedback/circuit-breaker.js";
-import { AsyncFeedbackQueue } from "../../tools/tool-search/feedback/async-feedback-queue.js";
 import { normalizeGraphRelation } from "../../tools/tool-search/knowledge-graph/graph-relations.js";
 import { toolSearchMetrics } from "../../tools/tool-search/observability/metrics.js";
 
@@ -38,7 +30,6 @@ type ToolSearchRuntime = {
   store: ToolRegistryStore;
   registry: RegistryService;
   intentRouter: IntentRouter;
-  hierarchicalRouter: HierarchicalRouter;
   retrieval: HybridRetrievalEngine;
   topP: AdaptiveTopPSelector;
   history: HistoryScoreStore;
@@ -46,9 +37,6 @@ type ToolSearchRuntime = {
   lazyLoader: ResourceLazyLoader;
   mcpPool: McpConnectionPool;
   reranker: ToolRerankingPipeline;
-  learner: OnlineLearner;
-  circuitBreaker: ToolFailureCircuitBreaker;
-  feedbackQueue: AsyncFeedbackQueue;
 };
 
 let runtimePromise: Promise<ToolSearchRuntime> | null = null;
@@ -223,40 +211,6 @@ export function registerToolRegistryRoutes(app: FastifyInstance): void {
     return reply.code(code).send(envelope(result.ok, tenant, started, result));
   });
 
-  app.post("/api/feedback/report", async (request, reply) => {
-    const started = Date.now();
-    const parsed = feedbackReportSchema.safeParse(request.body);
-    if (!parsed.success) return validationError(reply, parsed.error);
-    const tenant = resolveTenantId(request);
-    if (!tenant) return tenantError(reply);
-    const runtime = await getRuntime();
-    runtime.feedbackQueue.enqueue(parsed.data);
-    toolSearchMetrics.recordFeedback(1);
-    const learned = await runtime.learner.report(parsed.data);
-    const circuit = parsed.data.success
-      ? null
-      : await runtime.circuitBreaker.evaluate(parsed.data.resource_id);
-    return envelope(true, tenant, started, { learned, circuit });
-  });
-
-  app.post("/api/feedback/batch", async (request, reply) => {
-    const started = Date.now();
-    const parsed = feedbackBatchSchema.safeParse(request.body);
-    if (!parsed.success) return validationError(reply, parsed.error);
-    const tenant = resolveTenantId(request);
-    if (!tenant) return tenantError(reply);
-    const runtime = await getRuntime();
-    runtime.feedbackQueue.enqueueBatch(parsed.data.items);
-    toolSearchMetrics.recordFeedback(parsed.data.items.length);
-    const results: Array<Record<string, unknown>> = [];
-    for (const item of parsed.data.items) {
-      const learned = await runtime.learner.report(item);
-      const circuit = item.success ? null : await runtime.circuitBreaker.evaluate(item.resource_id);
-      results.push({ resource_id: item.resource_id, learned, circuit });
-    }
-    return envelope(true, tenant, started, { count: results.length, results });
-  });
-
   app.get("/api/resource/health-check", async (request, reply) => {
     const started = Date.now();
     const tenant = resolveTenantId(request);
@@ -315,7 +269,6 @@ export function registerToolRegistryRoutes(app: FastifyInstance): void {
     return {
       ok: true,
       metrics: toolSearchMetrics.snapshot(),
-      feedback_queue: runtime.feedbackQueue.snapshot(),
       lazy_loader_cache: runtime.lazyLoader.cacheStats(),
       mcp_connections: runtime.mcpPool.listStates(),
     };
@@ -370,18 +323,10 @@ async function getRuntime(): Promise<ToolSearchRuntime> {
       const graph = new ToolKnowledgeGraphService(store);
       const retrieval = new HybridRetrievalEngine({ historyStore: history });
       const lazyLoader = new ResourceLazyLoader(store, graph);
-      const learner = new OnlineLearner({ historyStore: history });
-      const feedbackQueue = new AsyncFeedbackQueue();
-      feedbackQueue.registerConsumer(async (item) => {
-        console.log(
-          `[tool-search:feedback-log] resource=${item.feedback.resource_id} success=${item.feedback.success} latency=${item.feedback.latency_ms}ms`,
-        );
-      });
       return {
         store,
         registry: new RegistryService(store),
         intentRouter: new IntentRouter(),
-        hierarchicalRouter: new HierarchicalRouter(store),
         retrieval,
         topP: new AdaptiveTopPSelector(),
         history,
@@ -390,9 +335,6 @@ async function getRuntime(): Promise<ToolSearchRuntime> {
         mcpPool: new McpConnectionPool(),
         // 与检索主链路同构（金丝雀评估才反映生产行为）：神经重排钩子一并注入
         reranker: new ToolRerankingPipeline({ llmReranker: createNeuralLlmReranker() }),
-        learner,
-        circuitBreaker: new ToolFailureCircuitBreaker(store, { historyStore: history }),
-        feedbackQueue,
       };
     })();
   }
@@ -443,14 +385,12 @@ async function searchSingleIntent(
   top_p: number;
   candidates: HybridRetrievedResource[];
 }> {
-  const route = await runtime.hierarchicalRouter.route({
-    tenant_id: tenant,
-    parsed_intent: intent,
-    max_resources: input.limit * 4,
-  });
+  // 2026-10-01：hierarchical-router 已删（仅本诊断面引用，主链路从未经过）——
+  // 诊断检索直接以租户全量资源为候选，评估口径与 adaptive 主链路一致。
+  const candidates = await runtime.registry.listByTenant(tenant);
   const retrieved = await runtime.retrieval.search({
     query: intent.intent,
-    candidates: route.resources,
+    candidates,
     queryVector: input.query_vector,
     limit: input.limit * 4,
   });
@@ -481,11 +421,7 @@ async function searchSingleIntent(
   });
   return {
     route: {
-      domain_groups: route.domain_groups,
-      domains: route.domains,
-      capabilities: route.capabilities,
-      cache_hit: route.cache_hit,
-      routed_resource_count: route.resources.length,
+      candidate_count: candidates.length,
       rule_filtered_count: reranked.rule_filtered_count,
       llm_seen_count: reranked.llm_seen_count,
     },

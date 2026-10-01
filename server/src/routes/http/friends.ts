@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { FriendService } from "../../services/friend-service.js";
 import type { AgentAccountService } from "../../services/agent-account-service.js";
+import { AGENT_NUMBER_PATTERN } from "../../services/agent-account-service.js";
 
 function accountActorRefine(data: { userId?: string; sessionId?: string }, ctx: z.RefinementCtx): void {
   const u = data.userId?.trim() ?? "";
@@ -20,7 +21,9 @@ const sendFriendRequestSchema = z
   .object({
     userId: z.string().optional(),
     sessionId: z.string().optional(),
-    toActorId: z.string().min(1),
+    toActorId: z.string().max(254).optional(),
+    /** QQ 式身份短号（6-8 位数字）；与 toActorId 二选一，也接受 toActorId 直接填短号 */
+    toAgentNumber: z.string().max(20).optional(),
     message: z.string().max(500).optional(),
   })
   .superRefine(accountActorRefine);
@@ -75,6 +78,28 @@ function accountActorFromBody(data: { userId?: string; sessionId?: string }): st
   return u || s;
 }
 
+/**
+ * 解析好友申请目标：toActorId 优先（先按登录主体精确查）；
+ * 未命中且形如短号（或显式传了 toAgentNumber）时按身份短号反查。
+ * 返回目标 actorId（登录主体 userId）；解析不到返回 undefined。
+ */
+function resolveTargetActorId(
+  agentAccountService: AgentAccountService,
+  rawToActorId: string | undefined,
+  toAgentNumber: string | undefined,
+): string | undefined {
+  const raw = rawToActorId?.trim() ?? "";
+  if (raw) {
+    const direct = agentAccountService.getByActorId(raw);
+    if (direct) return direct.userId;
+  }
+  const num = toAgentNumber?.trim() || raw;
+  if (num && AGENT_NUMBER_PATTERN.test(num)) {
+    return agentAccountService.getByAgentNumber(num)?.userId;
+  }
+  return raw || undefined;
+}
+
 export function registerFriendRoutes(
   app: FastifyInstance,
   deps: {
@@ -95,7 +120,14 @@ export function registerFriendRoutes(
     }
 
     const fromActorId = accountActorFromBody(parsed.data);
-    const toActorId = parsed.data.toActorId.trim();
+    const toActorId = resolveTargetActorId(
+      agentAccountService,
+      parsed.data.toActorId,
+      parsed.data.toAgentNumber,
+    );
+    if (!toActorId) {
+      return reply.code(400).send({ ok: false, message: "缺少目标：请填 toActorId 或 toAgentNumber（对方身份号码）" });
+    }
 
     // 检查目标用户是否存在
     const targetAccount = agentAccountService.getByActorId(toActorId);
@@ -231,6 +263,7 @@ export function registerFriendRoutes(
         ...f,
         displayName: account?.displayName ?? f.friendActorId,
         email: account?.email ?? null,
+        agentNumber: account?.agentNumber ?? null,
       };
     });
 
@@ -249,7 +282,14 @@ export function registerFriendRoutes(
 
     const actorId = accountActorFromBody(parsed.data);
     const query = request.query as Record<string, unknown>;
-    const targetActorId = String(query.targetActorId ?? "").trim();
+    const targetRaw = String(query.targetActorId ?? "").trim();
+    const targetAgentNumber = String(query.targetAgentNumber ?? "").trim();
+
+    const targetActorId = resolveTargetActorId(
+      agentAccountService,
+      targetRaw || undefined,
+      targetAgentNumber || undefined,
+    );
 
     if (!targetActorId) {
       return reply.code(400).send({ ok: false, message: "缺少 targetActorId 参数" });
@@ -311,6 +351,7 @@ export function registerFriendRoutes(
       actorId: a.userId,
       displayName: a.displayName,
       email: a.email ?? null,
+      agentNumber: a.agentNumber ?? null,
       createdAt: a.createdAt,
       friendship: friendService.friendshipStatus(actorId, a.userId),
       autoAccept: friendService.isAutoAccept(a.userId),

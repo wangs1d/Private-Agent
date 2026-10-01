@@ -3,6 +3,9 @@
 // 职责：基于 LifeSignalHub / DesktopPresence / MoodInference / AnticipationEngine
 // 子系统提供的信号，按纯规则（无 LLM）推断用户当前的活动状态（UserActivityState），
 // 并对外提供 observe / recentActivity / onActivityChange 等查询与订阅入口。
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type { AnticipationCandidate, LifeSignal } from "../services/life-signal-types.js";
 import type {
   BrainDecision,
@@ -213,6 +216,117 @@ export class AwarenessCortex {
   /** 正在跟踪的 sleeping 会话：actorId → 进入 sleeping 的时间戳 */
   private readonly ongoingSleepSession = new Map<string, number>();
 
+  // ---- 睡眠样本持久化 + 周期刷新（2026-10-01 rhythm 断供根修）--------------
+  // 断供三根因：① observe() 命中缓存即短路 + 夜间桌面无活动=无信号 → 状态机
+  // 永远进不了 sleeping，样本零积累；② 样本纯内存，重启清零，凑不齐
+  // SLEEP_WINDOW_MIN_SAMPLES(3)；③ 样本按原始 actorId 存取，与 rhythm 侧
+  // 下划线归一形式错位。修复：定时器周期重推断 + 落盘 + 归一 key。
+
+  /** 样本落盘目录（setPersistPath 注入；null=纯内存，测试用） */
+  private persistDir: string | null = null;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 周期刷新定时器：无信号时段（睡眠中）也能推进状态机 */
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  static readonly REFRESH_INTERVAL_MS = 10 * 60_000;
+  private static readonly PERSIST_DEBOUNCE_MS = 30_000;
+
+  /**
+   * 睡眠样本 key 归一：与 rhythm/profile-store 的文件名归一（@ → _）一致，
+   * 消除「样本按原始 id 存、节律引擎按归一 id 取」的错位。
+   */
+  private static sleepKey(actorId: string): string {
+    return actorId.replace(/[^a-zA-Z0-9._-]/g, "_") || "unknown";
+  }
+
+  /** 注入样本持久化目录并立即恢复存量（bootstrap 装配时调用一次） */
+  setPersistPath(dir: string): void {
+    this.persistDir = dir;
+    this.restoreSleepSamples();
+  }
+
+  private get sleepSamplesPath(): string {
+    return this.persistDir ? join(this.persistDir, "awareness-sleep-samples.json") : "";
+  }
+
+  private restoreSleepSamples(): void {
+    if (!this.persistDir) return;
+    try {
+      const p = this.sleepSamplesPath;
+      if (!existsSync(p)) return;
+      const raw = JSON.parse(readFileSync(p, "utf8")) as {
+        actors?: Record<
+          string,
+          { samples?: Array<{ date: string; startHour: number; endHour: number }>; ongoingSince?: number }
+        >;
+      };
+      for (const [key, entry] of Object.entries(raw.actors ?? {})) {
+        if (Array.isArray(entry.samples)) {
+          this.sleepWindowSamples.set(key, entry.samples.slice(-50));
+        }
+        if (typeof entry.ongoingSince === "number") {
+          this.ongoingSleepSession.set(key, entry.ongoingSince);
+        }
+      }
+      const total = [...this.sleepWindowSamples.values()].reduce((n, s) => n + s.length, 0);
+      if (total > 0) {
+        console.log(`[AwarenessCortex] 睡眠样本已恢复：${total} 条 / ${this.sleepWindowSamples.size} 用户`);
+      }
+    } catch {
+      /* 损坏文件按空处理 */
+    }
+  }
+
+  private schedulePersist(): void {
+    if (!this.persistDir || this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.flushSleepSamples();
+    }, AwarenessCortex.PERSIST_DEBOUNCE_MS);
+    if (typeof this.persistTimer.unref === "function") this.persistTimer.unref();
+  }
+
+  flushSleepSamples(): void {
+    if (!this.persistDir) return;
+    try {
+      const actors: Record<
+        string,
+        { samples: unknown[]; ongoingSince?: number }
+      > = {};
+      const keys = new Set([...this.sleepWindowSamples.keys(), ...this.ongoingSleepSession.keys()]);
+      for (const key of keys) {
+        actors[key] = {
+          samples: this.sleepWindowSamples.get(key) ?? [],
+          ...(this.ongoingSleepSession.has(key)
+            ? { ongoingSince: this.ongoingSleepSession.get(key) }
+            : {}),
+        };
+      }
+      mkdirSync(this.persistDir, { recursive: true });
+      writeFileSync(this.sleepSamplesPath, JSON.stringify({ version: 1, actors }));
+    } catch {
+      /* 落盘失败不影响主链路 */
+    }
+  }
+
+  /**
+   * 周期刷新（定时器驱动）：对所有已跟踪 actor 重新推断一次并静默提交。
+   * 关键价值在无信号时段——夜间桌面无活动 = hub 无信号 = handleSignal 不触发
+   * = sleeping 永远进不去；定时器让状态机按墙钟推进，睡眠窗口才可被记录。
+   * 纯规则推断（零 LLM 零 IO），10 分钟一拍，睡眠起点精度 ±10 分钟（样本为
+   * 小时粒度，足够）。
+   */
+  private refreshTrackedActors(): void {
+    const actorIds = new Set([...this.latest.keys(), ...this.history.keys()]);
+    for (const actorId of actorIds) {
+      try {
+        const state = this.inferActivity(actorId);
+        if (state) this.commitState(state, false);
+      } catch {
+        /* 单 actor 失败不影响其他 */
+      }
+    }
+  }
+
   // ---- 子系统注册 -------------------------------------------------------
 
   registerLifeSignalHub(hub: LifeSignalHubLike): void {
@@ -372,6 +486,13 @@ export class AwarenessCortex {
     } else {
       console.log("[AwarenessCortex] LifeSignalHub 未注册，跳过订阅");
     }
+    // 周期刷新：无信号时段（夜间睡眠中桌面零信号）状态机也能推进——
+    // 否则 sleeping 永远进不去，睡眠窗口样本永远零积累（rhythm 断供根因①）
+    this.refreshTimer = setInterval(
+      () => this.refreshTrackedActors(),
+      AwarenessCortex.REFRESH_INTERVAL_MS,
+    );
+    if (typeof this.refreshTimer.unref === "function") this.refreshTimer.unref();
     this.started = true;
     console.log("[AwarenessCortex] 启动完成");
   }
@@ -389,6 +510,12 @@ export class AwarenessCortex {
       this.bodyBusUnsubscribe();
       this.bodyBusUnsubscribe = null;
     }
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    // 停机前把睡眠样本落盘（进行中的 sleeping 会话起点也带上，重启后接续计时）
+    this.flushSleepSamples();
     this.latest.clear();
     this.history.clear();
     this.started = false;
@@ -575,15 +702,17 @@ export class AwarenessCortex {
     nextActivity: UserActivityKind,
   ): void {
     const now = Date.now();
+    const key = AwarenessCortex.sleepKey(actorId);
     if (nextActivity === "sleeping" && prevActivity !== "sleeping") {
       // 进入 sleeping：记录会话起点
-      this.ongoingSleepSession.set(actorId, now);
+      this.ongoingSleepSession.set(key, now);
+      this.schedulePersist();
       return;
     }
     if (nextActivity !== "sleeping" && prevActivity === "sleeping") {
       // 离开 sleeping：关闭会话，写入样本
-      const startTs = this.ongoingSleepSession.get(actorId);
-      this.ongoingSleepSession.delete(actorId);
+      const startTs = this.ongoingSleepSession.get(key);
+      this.ongoingSleepSession.delete(key);
       if (!startTs) return;
       const durationMs = now - startTs;
       // 不足 30 分钟不算睡眠样本（短暂打盹/误判）
@@ -595,13 +724,17 @@ export class AwarenessCortex {
       ).padStart(2, "0")}`;
       const startHour = startDate.getHours() + startDate.getMinutes() / 60;
       const endHour = endDate.getHours() + endDate.getMinutes() / 60;
-      const samples = this.sleepWindowSamples.get(actorId) ?? [];
+      const samples = this.sleepWindowSamples.get(key) ?? [];
       samples.push({ date: dateStr, startHour, endHour });
       // 只保留最近 SLEEP_WINDOW_SAMPLE_LIMIT 个样本
       if (samples.length > SLEEP_WINDOW_SAMPLE_LIMIT) {
         samples.splice(0, samples.length - SLEEP_WINDOW_SAMPLE_LIMIT);
       }
-      this.sleepWindowSamples.set(actorId, samples);
+      this.sleepWindowSamples.set(key, samples);
+      this.schedulePersist();
+      console.log(
+        `[AwarenessCortex] 睡眠样本记录：${dateStr} ${startHour.toFixed(1)}→${endHour.toFixed(1)}（${key}，共${samples.length}条）`,
+      );
     }
   }
 
@@ -617,7 +750,7 @@ export class AwarenessCortex {
   getLearnedSleepWindow(
     actorId: string,
   ): { startHour: number; endHour: number; sampleCount: number } | null {
-    const samples = this.sleepWindowSamples.get(actorId);
+    const samples = this.sleepWindowSamples.get(AwarenessCortex.sleepKey(actorId));
     if (!samples || samples.length < SLEEP_WINDOW_MIN_SAMPLES) return null;
     const startHours = samples.map((s) => s.startHour).sort((a, b) => a - b);
     const endHours = samples.map((s) => s.endHour).sort((a, b) => a - b);
@@ -642,7 +775,9 @@ export class AwarenessCortex {
     actorId: string,
     limit = 14,
   ): Array<{ date: string; startHour: number; endHour: number }> {
-    return [...(this.sleepWindowSamples.get(actorId) ?? [])].slice(-limit);
+    return [
+      ...(this.sleepWindowSamples.get(AwarenessCortex.sleepKey(actorId)) ?? []),
+    ].slice(-limit);
   }
 
   private appendHistory(state: UserActivityState): void {

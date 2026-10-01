@@ -84,6 +84,7 @@ export class MoonshotKimiProvider extends AbstractChatProvider {
       // 展示形式协议只属于聊天面（与 openai-official 同规则）：ephemeral
       // 工具调用不注入，防止 [RENDER_HINT:xxx] 透进无剥除层的下游。
       includeRenderProtocol: ctx.streamOpts?.ephemeralTurn !== true,
+      sessionId: ctx.sessionId,
     });
     return { sysContent: promptPlan.fullSystemPrompt, promptPlan };
   }

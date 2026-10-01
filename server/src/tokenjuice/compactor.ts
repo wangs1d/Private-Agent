@@ -52,8 +52,51 @@ function resolveMaxChars(input: ToolOutputCompactInput): number {
   return envMax;
 }
 
+/**
+ * 搜索族 LLM 视图裁剪（2026-09-29 P1-2）：search_web 实测压缩率仅 15.7%
+ * （raw 643K→542K/82 次）——预算 7000 字符宽松，12 条结果几乎原样进上下文，
+ * 是工具轮输入的最大结果源。这里在通用压缩管线之前做确定性裁剪：
+ * 只影响喂给 LLM 的内容，归档原文（rawText/originalText）与客户端展示
+ * （resultForWire 走原始结果）不受影响。AGENT_SEARCH_LLM_TRIM=0 关闭。
+ */
+const SEARCH_LLM_TRIM_TOOLS = new Set(["search_web", "info.search", "search"]);
+
+function searchLlmTrimEnabled(): boolean {
+  const raw = process.env.AGENT_SEARCH_LLM_TRIM?.trim().toLowerCase();
+  if (!raw) return true;
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
+function searchLlmMaxItems(): number {
+  const n = Number.parseInt(process.env.AGENT_SEARCH_LLM_MAX_ITEMS ?? "", 10);
+  return Number.isFinite(n) && n > 0 && n <= 25 ? n : 8;
+}
+
+function searchLlmFieldChars(): number {
+  const n = Number.parseInt(process.env.AGENT_SEARCH_LLM_FIELD_CHARS ?? "", 10);
+  return Number.isFinite(n) && n >= 80 && n <= 1000 ? n : 240;
+}
+
+function trimSearchPayloadForLlm(payload: Record<string, unknown>): Record<string, unknown> {
+  const items = payload.items;
+  if (!Array.isArray(items)) return payload;
+  const fieldCap = searchLlmFieldChars();
+  const trimmedItems = items.slice(0, searchLlmMaxItems()).map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(entry as Record<string, unknown>)) {
+      out[k] = typeof v === "string" && v.length > fieldCap ? v.slice(0, fieldCap) + "…" : v;
+    }
+    return out;
+  });
+  return { ...payload, items: trimmedItems };
+}
+
 function buildStructuredFallback(rawText: string, maxChars: number): string {
   try {
+    // 快速路径（2026-09-29）：已裁/已小的结果直接原样通过——旧逻辑无条件从
+    // items cap=5 开始试，预算内也会把 8→5 条砍掉（结构感知裁剪反而过裁）。
+    if (rawText.length <= maxChars) return rawText;
     const parsed = JSON.parse(rawText) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return hardTruncate(rawText, maxChars);
@@ -171,7 +214,7 @@ function stripKeys(value: unknown, keys: string[]): unknown {
 export async function compactToolOutputForLlm(
   input: ToolOutputCompactInput,
 ): Promise<ToolOutputCompactOutput> {
-  const rawPayload = input.ok
+  let rawPayload = input.ok
     ? stripKeys(input.result, input.stripKeys ?? [])
     : stripKeys({
         ok: false,
@@ -180,8 +223,22 @@ export async function compactToolOutputForLlm(
           ? { hint: (input.result as Record<string, unknown>).hint }
           : {}),
       }, input.stripKeys ?? []);
-  const rawText = JSON.stringify(rawPayload);
+  let rawText = JSON.stringify(rawPayload);
+  // P1-2 搜索族 LLM 视图裁剪：条数+字段长收紧（只影响喂给 LLM 的内容）。
+  // rawBytes 记「裁剪前」规模——压缩遥测（recordToolCompactionByChars）以真
+  // before/after 为准，预裁剪的节省要体现在账上。
   const rawBytes = Buffer.byteLength(rawText, "utf8");
+  if (
+    input.ok &&
+    searchLlmTrimEnabled() &&
+    SEARCH_LLM_TRIM_TOOLS.has(input.toolName) &&
+    rawPayload &&
+    typeof rawPayload === "object" &&
+    !Array.isArray(rawPayload)
+  ) {
+    rawPayload = trimSearchPayloadForLlm(rawPayload as Record<string, unknown>);
+    rawText = JSON.stringify(rawPayload);
+  }
   const maxChars = resolveMaxChars(input);
   // 归档用完整原文（未 strip 的原始结果序列化）：stripKeys 会截短数组/丢元数据键，
   // 作为「读回原文」必须保真，故与内部压缩管线用的 rawText 区分开。

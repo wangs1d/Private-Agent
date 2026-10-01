@@ -6,12 +6,19 @@
  *   （capability-readiness-service）的条目 id；未就绪（needs_config/disabled）
  *   的能力不会进推荐。capabilityId 为 null 表示依赖内置工具，永远可用。
  * - 抽样在服务端做：核心组（core，无配置依赖）保证至少 CORE_MIN 条在场，
- *   其余位置随机补足，调用间天然轮换。
- * - 个性化（按使用习惯动态出文案）：habit-loop 的工具执行观察
- *   （configureChatSuggestionUsageSource 注入）按 toolSignals 归到推荐项，
+ *   其余位置轮换补足，调用间天然轮换。
+ * - 个性化必须带用户身份（getChatSuggestions 的 actorId）：无身份 = 完全不
+ *   个性化（纯轮换），绝不回退到「全体用户混算」——那是跨用户串数据事故。
+ * - 使用习惯层：habit-loop 的工具执行观察（configureChatSuggestionUsageSource
+ *   注入）先按 obs.actorId === actorId 过滤，再按 toolSignals 归到推荐项；
  *   近 14 天里有 ≥2 天真实用过的能力视为「在用」——保底在场（最多 2 条，
  *   不挤占轮换与上新位）并切换为「回访版」文案（usedPrompt），
- *   personalized=true 供客户端/取证区分。无观察数据时完全退回原随机行为。
+ *   personalized=true 供客户端/取证区分。
+ * - 画像层：UserPersonalizationService 的行为信号（behavior signals，
+ *   configureChatSuggestionProfileSource 注入）按 interestKey 给对应推荐项
+ *   加权（加权随机抽样，不打乱核心保底与轮换性质）。信号是累计计数，
+ *   按占总信号比例归一，总量不足 PROFILE_MIN_SIGNALS 不加权（防单次提及
+ *   与冷启动噪声）。
  * - experimental 从就绪注册表透传，客户端渲染「实验」徽标。
  */
 import { listCapabilityStatuses } from "./capability-readiness-service.js";
@@ -36,6 +43,14 @@ export interface SuggestionUsageObservation {
   at: number;
 }
 
+/** 画像快照（UserPersonalizationService.getBehaviorSignals 的结构化最小面） */
+export interface SuggestionProfileSnapshot {
+  shoppingInterest: number;
+  planningInterest: number;
+  companionNeed: number;
+  privacyConcern: number;
+}
+
 interface SuggestionPoolEntry {
   id: string;
   capabilityId: string | null;
@@ -47,6 +62,10 @@ interface SuggestionPoolEntry {
   usedPrompt?: string;
   /** 工具名使用信号（精确匹配或前缀匹配），非空才参与个性化 */
   toolSignals?: string[];
+  /** 画像兴趣轴：behavior signals 里驱动加权的信号键 */
+  interestKey?: "shopping" | "planning";
+  /** 画像加权上限幅度：boost = interestWeight × min(1, 信号占比) */
+  interestWeight?: number;
 }
 
 const CORE_MIN = 3;
@@ -56,6 +75,8 @@ const RETURNING_WINDOW_DAYS = 14;
 const RETURNING_MIN_ACTIVE_DAYS = 2;
 /** 「在用」能力保底在场的上限：不挤占轮换与上新位 */
 const ALWAYS_IN_MAX = 2;
+/** 画像加权门槛：行为信号总量不足此值时不加权（冷启动/单次提及不算画像） */
+const PROFILE_MIN_SIGNALS = 6;
 
 const SUGGESTION_POOL: SuggestionPoolEntry[] = [
   // —— 核心组：无需配置，来自内置工具 / 必就绪能力 ——
@@ -75,6 +96,8 @@ const SUGGESTION_POOL: SuggestionPoolEntry[] = [
     prompt: "帮我记个日程，周六上午十点去牙医",
     usedPrompt: "帮我看看这周的日程，找个空档加个安排",
     toolSignals: ["calendar.", "reminder."],
+    interestKey: "planning",
+    interestWeight: 1.2,
     core: true,
   },
   {
@@ -93,6 +116,8 @@ const SUGGESTION_POOL: SuggestionPoolEntry[] = [
     prompt: "帮我比比价，选台性价比高的空气炸锅",
     usedPrompt: "再帮我比比价，看看最近想买的降没降价",
     toolSignals: ["shopping.compare", "shopping.suggest"],
+    interestKey: "shopping",
+    interestWeight: 1.2,
     core: true,
   },
   {
@@ -109,6 +134,8 @@ const SUGGESTION_POOL: SuggestionPoolEntry[] = [
     capabilityId: "proactive",
     tag: "早报",
     prompt: "每天早上八点给我一份早报",
+    interestKey: "planning",
+    interestWeight: 0.8,
     core: true,
   },
   // —— 就绪才展示：配置解锁后自动进池 ——
@@ -119,6 +146,8 @@ const SUGGESTION_POOL: SuggestionPoolEntry[] = [
     prompt: "下周五去上海，帮我比比高铁和机票的价格",
     usedPrompt: "这周末想短途出行，帮我看看高铁和机票价格",
     toolSignals: ["travel_booking.", "travel."],
+    interestKey: "planning",
+    interestWeight: 0.5,
     core: false,
   },
   {
@@ -171,10 +200,19 @@ const SUGGESTION_POOL: SuggestionPoolEntry[] = [
 /** 用量观察源（bootstrap 注入 habit-loop 观察流；null = 无个性化） */
 let usageSource: (() => readonly SuggestionUsageObservation[]) | null = null;
 
+/** 画像源（bootstrap 注入 UserPersonalizationService 行为信号；null = 无画像加权） */
+let profileSource: ((actorId: string) => SuggestionProfileSnapshot | null) | null = null;
+
 export function configureChatSuggestionUsageSource(
   source: (() => readonly SuggestionUsageObservation[]) | null,
 ): void {
   usageSource = source;
+}
+
+export function configureChatSuggestionProfileSource(
+  source: ((actorId: string) => SuggestionProfileSnapshot | null) | null,
+): void {
+  profileSource = source;
 }
 
 function shuffle<T>(items: readonly T[]): T[] {
@@ -188,20 +226,54 @@ function shuffle<T>(items: readonly T[]): T[] {
   return out;
 }
 
+/** 加权随机抽样（不放回）：权重恒 ≥1，保持轮换性质的同时让画像项更常在场 */
+function weightedSampleWithoutReplacement<T>(items: readonly T[], weight: (t: T) => number, count: number): T[] {
+  const pool = [...items];
+  const out: T[] = [];
+  while (out.length < count && pool.length > 0) {
+    let total = 0;
+    for (const item of pool) total += weight(item);
+    let r = Math.random() * total;
+    let idx = pool.length - 1;
+    for (let i = 0; i < pool.length; i += 1) {
+      r -= weight(pool[i] as T);
+      if (r <= 0) {
+        idx = i;
+        break;
+      }
+    }
+    out.push(pool.splice(idx, 1)[0] as T);
+  }
+  return out;
+}
+
 function matchesToolSignal(entry: SuggestionPoolEntry, tool: string): boolean {
   if (!entry.toolSignals?.length || !tool) return false;
   return entry.toolSignals.some((m) => tool === m || tool.startsWith(m));
 }
 
-/** 近 N 天活跃天数（本地日期去重）与最近一次使用时间 */
+/** 画像兴趣加权：信号按占总信号比例归一，总量不足门槛返回 0 */
+function profileBoost(entry: SuggestionPoolEntry, profile: SuggestionProfileSnapshot | null): number {
+  if (!profile || !entry.interestKey || !entry.interestWeight) return 0;
+  const total =
+    profile.shoppingInterest + profile.planningInterest + profile.companionNeed + profile.privacyConcern;
+  if (!Number.isFinite(total) || total < PROFILE_MIN_SIGNALS) return 0;
+  const raw = entry.interestKey === "shopping" ? profile.shoppingInterest : profile.planningInterest;
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return entry.interestWeight * Math.min(1, raw / total);
+}
+
+/** 近 N 天活跃天数（本地日期去重）与最近一次使用时间；仅统计该 actorId 自己的观察 */
 function computeUsageStats(
   eligible: readonly SuggestionPoolEntry[],
   usage: readonly SuggestionUsageObservation[],
   now: Date,
+  actorId: string,
 ): Map<string, { activeDays: Set<string>; lastAt: number }> {
   const windowStart = now.getTime() - RETURNING_WINDOW_DAYS * 86_400_000;
   const stats = new Map<string, { activeDays: Set<string>; lastAt: number }>();
   for (const obs of usage) {
+    if (!actorId || obs.actorId !== actorId) continue;
     if (!Number.isFinite(obs.at) || obs.at < windowStart || obs.at > now.getTime() + 60_000) {
       continue;
     }
@@ -219,8 +291,12 @@ function computeUsageStats(
   return stats;
 }
 
-/** 全量推荐（HTTP /api/chat/suggestions 的数据源，纯内存计算，无 IO） */
-export function getChatSuggestions(now: Date = new Date()): { suggestions: ChatSuggestion[] } {
+/**
+ * 全量推荐（HTTP /api/chat/suggestions 的数据源，纯内存计算，无 IO）。
+ *
+ * @param actorId 当前用户身份；为空 = 无个性化（纯轮换），绝不混算他人数据
+ */
+export function getChatSuggestions(now: Date = new Date(), actorId = ""): { suggestions: ChatSuggestion[] } {
   const readyById = new Map(
     listCapabilityStatuses()
       .capabilities.filter((c) => c.state === "ready")
@@ -231,12 +307,12 @@ export function getChatSuggestions(now: Date = new Date()): { suggestions: ChatS
     (e) => e.capabilityId === null || readyById.has(e.capabilityId),
   );
 
-  const usageStats = computeUsageStats(eligible, usageSource?.() ?? [], now);
+  const usageStats = computeUsageStats(eligible, usageSource?.() ?? [], now, actorId);
   const isReturning = (e: SuggestionPoolEntry): boolean =>
     (usageStats.get(e.id)?.activeDays.size ?? 0) >= RETURNING_MIN_ACTIVE_DAYS;
 
   // 「在用」能力保底在场（按活跃天数优先，最多 ALWAYS_IN_MAX 条），
-  // 其余位置随机轮换——个性化加权与发现新能力并存。
+  // 其余位置按画像加权轮换——个性化加权与发现新能力并存。
   const returningSorted = eligible
     .filter(isReturning)
     .sort(
@@ -248,8 +324,14 @@ export function getChatSuggestions(now: Date = new Date()): { suggestions: ChatS
     .slice(0, ALWAYS_IN_MAX);
   const alwaysIn = new Set(returningSorted);
   const picked = [...returningSorted];
-  for (const entry of shuffle(eligible.filter((e) => !alwaysIn.has(e)))) {
-    if (picked.length >= SAMPLE_MAX) break;
+
+  const profile = actorId ? (profileSource?.(actorId) ?? null) : null;
+  const remaining = shuffle(eligible.filter((e) => !alwaysIn.has(e)));
+  for (const entry of weightedSampleWithoutReplacement(
+    remaining,
+    (e) => 1 + profileBoost(e, profile),
+    SAMPLE_MAX - picked.length,
+  )) {
     picked.push(entry);
   }
 

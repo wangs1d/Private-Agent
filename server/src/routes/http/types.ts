@@ -2,6 +2,10 @@ import type { AipService } from "../../aip/aip-service.js";
 import type { AgentPairingService } from "../../services/agent-pairing-service.js";
 import type { AgentAccountService } from "../../services/agent-account-service.js";
 import type { EmailRegistrationService } from "../../services/email-registration-service.js";
+import type { EmailOtpService } from "../../services/email-otp-service.js";
+import type { EmailSmsService } from "../../services/email-sms-service.js";
+import type { BetaWhitelistService } from "../../services/beta-whitelist-service.js";
+import type { BetaInviteService, BetaWaitlistService } from "../../services/beta-invite-service.js";
 import type { FinanceIngestService } from "../../services/finance-ingest-service.js";
 import type { AgentRelayService } from "../../services/agent-relay-service.js";
 import type { FriendService } from "../../services/friend-service.js";
@@ -74,6 +78,16 @@ export type HttpRouteDeps = {
   aipService: AipService;
   agentAccountService: AgentAccountService;
   emailRegistrationService: EmailRegistrationService;
+  /** 邮箱所有权验证码（OTP）存取；未装配时 OTP 闸不生效 */
+  emailOtpService?: EmailOtpService;
+  /** 出站邮件 SMTP 通道；未配置凭据时 isEmailEnabled()=false，OTP 闸不生效 */
+  emailSmsService?: EmailSmsService;
+  /** 内测注册白名单（未装配时不设闸；名单落 data/beta-whitelist.json，校验实时读盘） */
+  betaWhitelistService?: BetaWhitelistService;
+  /** 内测候补申请队列（未装配时 /accounts/beta/apply 返回 503） */
+  betaWaitlistService?: BetaWaitlistService;
+  /** 内测邀请码（未装配时注册闸不认码） */
+  betaInviteService?: BetaInviteService;
   /** 财务入站邮件记账（未装配时 /finance/ingest/* 端点返回 503） */
   financeIngestService?: FinanceIngestService;
   /** 支付订单服务（未装配时管理概览不含支付统计） */

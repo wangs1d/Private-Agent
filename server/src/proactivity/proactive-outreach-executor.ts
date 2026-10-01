@@ -25,6 +25,7 @@ import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { ToolContext, ToolRegistry } from "../tools/tool-registry.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
+import { isTurnAsideEnabled } from "./turn-aside-queue.js";
 import {
   ProactiveOutboundMessageService,
   type ProactiveOutboundChannel,
@@ -140,6 +141,16 @@ export type ProactiveOutreachDeps = {
   synapseBus: () => SynapseBus | null;
   proactiveOutbound: ProactiveOutboundMessageService;
   agentMemorySyncService: AgentMemorySyncService;
+  /**
+   * 顺嘴搭车队列（2026-10-01 P1）：low 级主动消息挂起等用户下一轮对话织入
+   * 回复末尾（rhythm 关怀候选等）。队列拒绝/关闭时走原即时推送路径。
+   */
+  turnAsideQueue?: import("./turn-aside-queue.js").TurnAsideQueue;
+  /**
+   * 死信闸（2026-10-01 P0）：用户全设备离线时外发必蒸发——照发既浪费一次
+   * 话术 LLM 调用（还可能带工具循环），又产生「已发送」假台账。缺省视为在线。
+   */
+  isActorOnline?: (actorId: string) => boolean;
 };
 
 export function createProactiveOutreachExecutor(
@@ -217,6 +228,35 @@ export function createProactiveOutreachExecutor(
     decision: BrainDecision,
     signal: BrainSignalInput,
   ): Promise<void> {
+    // 顺嘴搭车（2026-10-01 P1）：low 级主动消息挂起等下一轮对话织入回复末尾，
+    // 比单推一条气泡打扰更低（rhythm 关怀候选即此形态）。队列拒绝（同 kind
+    // 挂起中/间隔不足）或通道关闭时回退原即时推送路径——不静默吞消息。
+    if (
+      signal.importance === "low" &&
+      isTurnAsideEnabled() &&
+      deps.turnAsideQueue?.tryEnqueue({
+        actorId: signal.actorId,
+        kind: signal.kind,
+        title: signal.title,
+        summary: signal.summary,
+      })
+    ) {
+      console.log(
+        `[ProactiveOutreach] 顺嘴挂起（等下一轮对话织入）kind=${signal.kind} actor=${signal.actorId}`,
+      );
+      return;
+    }
+
+    // 死信闸（2026-10-01 P0）：全设备离线时话术发不进任何屏幕——放弃这次
+    // 说话（省一次话术 LLM + 可能的工具循环），决策日志已留痕可追溯。
+    // 注意放在顺嘴挂起之后：low 级挂起不等在线（用户回来聊天才织入）。
+    if (deps.isActorOnline && !deps.isActorOnline(signal.actorId)) {
+      console.log(
+        `[ProactiveOutreach] 死信丢弃（全设备离线，省话术 LLM）kind=${signal.kind} actor=${signal.actorId}`,
+      );
+      return;
+    }
+
     const brainCenter = deps.brainCenter();
     const externalChat = deps.externalChat();
     // Task 5: 加载 Agent 自身风格指纹，注入 system prompt 供话术生成遵循

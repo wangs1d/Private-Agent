@@ -152,7 +152,92 @@ export function createTimelineHandler(deps: MemoryGovernanceModuleDeps): ToolHan
   };
 }
 
+/** 敏感类目：命中须先获用户明确同意（confirmed=true）才落画像 */
+const PROFILE_SENSITIVE_RE =
+  /病史|疾病|病症|确诊|用药|抑郁|焦虑|心理咨询|怀孕|流产|性|恋爱|出轨|离婚|分手|吵架|收入|工资|存款|负债|欠款|贷款|借[款钱]|身份证|护照|体检|遗传/;
+
+/**
+ * profile.update（2026-09-29 P0-2「说话算话的记」）：agent 在对话中自编辑
+ * 用户画像——确定性落位复用聚合器的 applyProfileOps/verifyProfileOps，
+ * 写后同步行新鲜度 sidecar。敏感类目未确认即拒绝（needConfirmation）。
+ */
+export function createProfileUpdateHandler(_deps: MemoryGovernanceModuleDeps): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const actorId = resolveActorId(context);
+    const op = String(input.op ?? "").trim();
+    const section = String(input.section ?? "").trim();
+    const line = typeof input.line === "string" ? input.line.trim() : "";
+    const match = typeof input.match === "string" ? input.match.trim() : "";
+    const confirmed = input.confirmed === true;
+
+    if (!["ADD", "UPDATE", "DELETE"].includes(op)) {
+      return { ok: false, error: "op 必须是 ADD/UPDATE/DELETE" };
+    }
+    if (!["basic", "interest", "communication", "note"].includes(section)) {
+      return { ok: false, error: "section 必须是 basic/interest/communication/note" };
+    }
+    if ((op === "ADD" || op === "UPDATE") && !line) {
+      return { ok: false, error: `${op} 需要 line（新内容，一行）` };
+    }
+    if ((op === "UPDATE" || op === "DELETE") && !match) {
+      return { ok: false, error: `${op} 需要 match（定位旧行的关键词）` };
+    }
+    if (PROFILE_SENSITIVE_RE.test(`${line} ${match}`) && !confirmed) {
+      return {
+        ok: false,
+        needConfirmation: true,
+        hint:
+          "这是敏感信息（健康/婚恋/财务/证件类）。请先向用户复述要记的内容并明确询问「要我记在长期画像里吗」，" +
+          "用户同意后重新调用并带 confirmed=true。不要默认记录。",
+      };
+    }
+
+    const { applyProfileOps, verifyProfileOps } = await import(
+      "../../../brain/user-profile-aggregator.js"
+    );
+    const { UserProfileStore } = await import(
+      "../../../services/user-personalization/user-profile-store.js"
+    );
+    const { touchProfileLines } = await import("../../../brain/profile-lines-meta.js");
+
+    const store = new UserProfileStore();
+    const current = await store.read(actorId);
+    const { profile: next, applied } = applyProfileOps(current, [
+      { op: op as "ADD" | "UPDATE" | "DELETE", section: section as "basic" | "interest" | "communication" | "note", ...(line ? { line } : {}), ...(match ? { match } : {}) },
+    ]);
+    if (applied.length === 0) {
+      return {
+        ok: false,
+        error: "没有产生任何变更（ADD 幂等：该行已存在，或定位词没匹配到旧行）",
+        hint: "如实告诉用户这条已经在档案里了，或换个更贴近旧行原文的 match 再试一次",
+      };
+    }
+    await store.write(actorId, next);
+    const written = await store.read(actorId);
+    const failures = verifyProfileOps(written, applied);
+    try {
+      await touchProfileLines(
+        actorId,
+        written,
+        applied.map((a) => a.expectLine ?? "").filter(Boolean),
+      );
+    } catch {
+      /* sidecar 失败不影响主流程 */
+    }
+    return {
+      ok: failures.length === 0,
+      appliedCount: applied.length,
+      section,
+      recorded: line || match,
+      hint: failures.length === 0
+        ? "已写入画像。向用户明确复述记下的内容（说话算话），一句就好，不要啰嗦"
+        : "写入校验未通过，如实告知用户这条可能没记上",
+    };
+  };
+}
+
 export function registerMemoryGovernanceTools(registry: ToolRegistry, deps: MemoryGovernanceModuleDeps): void {
   registry.register("memory.forget", createForgetHandler(deps));
   registry.register("activity.timeline", createTimelineHandler(deps));
+  registry.register("profile.update", createProfileUpdateHandler(deps));
 }

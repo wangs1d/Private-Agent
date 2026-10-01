@@ -79,16 +79,28 @@ test("arbiter: 负反馈抑制优先", () => {
   assert.equal(d.verdict, "suppressed");
 });
 
-test("arbiter: 静默时段非 critical defer 到早晨而非丢弃", () => {
-  const d = arbitrate(proposal(), ctx({ now: NIGHT }));
+test("arbiter: 静默时段 critical/high 豁免当场投递（2026-10-01：时效性事务 defer 到早晨=没提醒）", () => {
+  // high 豁免（与 governor「静默仅 high 放行」口径对齐）——验证码/传票类当场说
+  const h = arbitrate(proposal({ importance: "high", tier: "social" }), ctx({ now: NIGHT }));
+  assert.equal(h.verdict, "delivered");
+  // critical 原有豁免不变
+  const c = arbitrate(proposal({ importance: "critical" }), ctx({ now: NIGHT }));
+  assert.equal(c.verdict, "delivered");
+});
+
+test("arbiter: 静默时段 medium/low 且用户不在场 defer 到早晨而非丢弃", () => {
+  const d = arbitrate(
+    proposal({ importance: "medium", tier: "social" }),
+    ctx({ now: NIGHT, presence: "offline" }),
+  );
   assert.equal(d.verdict, "deferred");
   assert.equal(d.reasonChain[0], "quiet_hours_defer_to_morning");
   assert.equal(d.deliverAfter, nextQuietEnd(new Date(NIGHT)));
-});
-
-test("arbiter: 静默时段 critical 立即投递", () => {
-  const d = arbitrate(proposal({ importance: "critical" }), ctx({ now: NIGHT }));
-  assert.equal(d.verdict, "delivered");
+  const l = arbitrate(
+    proposal({ importance: "low", tier: "social" }),
+    ctx({ now: NIGHT, presence: "offline" }),
+  );
+  assert.equal(l.verdict, "deferred");
 });
 
 test("arbiter: must 层绕过社交预算（预算耗尽仍可达）", () => {
@@ -213,12 +225,43 @@ test("proposal-store: 落盘重启恢复待发区", () => {
   try {
     const path = join(dir, "proposals.json");
     const store = new ProposalStore(path);
-    store.enqueue(proposal({ dedupKey: "kp" }));
+    // createdAt 用当前时间：启动清理会丢弃 48h+ 的僵尸挂起（2026-10-01 P0）
+    const fresh = proposal({ dedupKey: "kp", createdAt: Date.now() });
+    store.enqueue(fresh);
     store.logDecision({ proposal: proposal(), verdict: "deferred", reasonChain: ["r1"] });
     store.flush();
     const restored = new ProposalStore(path);
     assert.equal(restored.listPending().length, 1);
     assert.equal(restored.recentDecisions()[0].reasonChain[0], "r1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("proposal-store: 启动清理丢弃幽灵/超期僵尸挂起（2026-10-01 P0）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "proactive-store-"));
+  try {
+    const path = join(dir, "proposals.json");
+    const store = new ProposalStore(path);
+    store.enqueue(proposal({ dedupKey: "fresh", createdAt: Date.now(), actorId: "user-a" }));
+    store.enqueue(
+      proposal({
+        dedupKey: "stale",
+        createdAt: Date.now() - 49 * 60 * 60_000,
+        actorId: "user-a",
+      }),
+    );
+    store.enqueue(
+      proposal({
+        dedupKey: "ghost",
+        createdAt: Date.now(),
+        actorId: "()=>{const actors=proactivityHub.exportActors()",
+      }),
+    );
+    store.flush();
+    const restored = new ProposalStore(path);
+    const ids = restored.listPending().map((p) => p.dedupKey);
+    assert.deepEqual(ids, ["fresh"], "僵尸（48h+）与幽灵（函数串 actor）启动即弃");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

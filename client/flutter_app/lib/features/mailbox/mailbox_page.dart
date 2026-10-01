@@ -141,6 +141,82 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
         msg.contains("Connection refused");
   }
 
+  /// 发好友申请：输入对方身份号码（QQ 式数字短号；填邮箱也认）。
+  Future<void> _showAddFriendDialog() async {
+    final idController = TextEditingController();
+    final msgController = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text("添加好友"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: idController,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: "对方身份号码",
+                hintText: "数字短号或邮箱，主页名字下方可复制",
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: msgController,
+              decoration: const InputDecoration(
+                labelText: "验证留言（可选）",
+                hintText: "一句话说明你是谁",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text("取消"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text("发送申请"),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    final toActorId = idController.text.trim();
+    if (toActorId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("先填对方的身份号码")),
+      );
+      return;
+    }
+    final message = msgController.text.trim();
+    try {
+      final result = await widget.api.sendFriendRequest(
+        toActorId,
+        message: message.isEmpty ? null : message,
+      );
+      if (!mounted) return;
+      if (result["ok"] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("好友申请已发出")),
+        );
+        await _loadData();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(result["message"] ?? "发送失败")),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("发送失败: $e")),
+        );
+      }
+    }
+  }
+
   Future<void> _acceptRequest(String requestId) async {
     try {
       final result = await widget.api.respondToFriendRequest(requestId, true);
@@ -195,6 +271,22 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
       color: theme.colorScheme.surface,
       child: Column(
         children: [
+          // 右上角「添加好友」入口（空态文案指向的 + 就在这里）
+          SizedBox(
+            height: 34,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                IconButton(
+                  tooltip: "添加好友",
+                  icon: const Icon(Icons.person_add_alt_outlined, size: 18),
+                  color: theme.colorScheme.onSurfaceVariant,
+                  onPressed: _showAddFriendDialog,
+                ),
+                const SizedBox(width: 6),
+              ],
+            ),
+          ),
           TabBar(
             controller: _tabController,
             tabs: [

@@ -60,6 +60,8 @@ export interface SystemAndPlanContext {
   toolSearchPrepared: ToolSearchPrepared | null;
   model: string;
   streamOpts: AgentStreamOptions | undefined;
+  /** 当前会话 id（P0-1② 稳定层会话冻结用；无会话上下文时可缺省） */
+  sessionId?: string;
 }
 
 export interface SystemAndPlanResult {
@@ -257,6 +259,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       toolSearchPrepared,
       model,
       streamOpts,
+      sessionId,
     });
 
     // system 写入 msgs：三分支逻辑（ephemeral/空 → push；minimal+override → 内容不同才覆盖；else → 覆盖）
@@ -453,10 +456,22 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     try {
       const sanitizer = createStreamControlTagSanitizer();
       const metaFilter = createStreamMetaSentenceFilter();
+      // LLM 计时（2026-09-28 延迟诊断配套）：request 发出 → 首个可见 delta → 流结束，
+      // 区分「API 排队/首 token 慢」与「生成长」。首 delta 为空（净化后无输出）
+      // 时以首个原始 chunk 近似（由首参数记录）。量小常开，一行一条。
+      const timingStart = Date.now();
+      let timingFirstRaw: number | null = null;
+      let timingFirstDelta: number | null = null;
+      const timedSource = (async function* () {
+        for await (
+          const chunk of stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>
+        ) {
+          if (timingFirstRaw === null) timingFirstRaw = Date.now();
+          yield chunk;
+        }
+      })();
       const result = await consumeNormalizedStream(
-        adaptOpenAiChatCompletionStream(
-          stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
-        ),
+        adaptOpenAiChatCompletionStream(timedSource),
         {
           onContentDelta: (d) => {
             // 根源净化：model 偶发会把内部控制标签（如 [STOP...] / [话题切换...]）
@@ -466,12 +481,20 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             const clean = metaFilter(sanitizer(d));
             if (clean) {
               streamedVisible += clean;
+              if (timingFirstDelta === null) timingFirstDelta = Date.now();
               onDelta(clean);
             }
           },
           providerId: this.id,
           model,
         },
+      );
+      // eslint-disable-next-line no-console
+      console.info(
+        `[llm-timing] plain provider=${this.id} model=${model} session=${sessionId} ` +
+          `firstRaw=${timingFirstRaw === null ? "-" : timingFirstRaw - timingStart}ms ` +
+          `firstDelta=${timingFirstDelta === null ? "-" : timingFirstDelta - timingStart}ms ` +
+          `total=${Date.now() - timingStart}ms chars=${streamedVisible.length}`,
       );
       streamUsage = result.usage;
       toolIntentCalls = result.toolCalls;

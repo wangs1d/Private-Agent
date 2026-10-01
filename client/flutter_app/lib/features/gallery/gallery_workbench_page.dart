@@ -7,21 +7,30 @@ import "gallery_page.dart";
 import "gallery_review_page.dart";
 import "gallery_wall_host.dart";
 
-/// 图库工作台：一级 tab 的落地页。
+/// 图库工作台：常用工具「图库」入口的全屏落地页。
+///
+/// 2026-09-29 起从一级 tab 改为全屏路由（侧栏只留「对话」），通过
+/// [GalleryWorkbenchPage.show] 打开，页内左上角返回按钮退出。
 ///
 /// 三个视图（顶部切换，IndexedStack 保活）：
 ///   照片墙 —— 3D 时间走廊（WebView 承载 /gallery-wall，服务端 three.js 场景）；
 ///   管理   —— 2D 网格（复用 GalleryPage：上传/多选批量删/收藏）；
 ///   回顾   —— 盲盒清理（随机 15 张三向滑断舍离）+ 记忆放映。
 ///
-/// WebView 懒启动铁律：只有首次真正进入本 tab 才调用 host.ensureStarted()
-/// （WebView2 提前创建会产生幽灵窗）。离开 tab（visible=false）调用
-/// setPaused 暂停页面渲染，避免后台烧 GPU。
+/// WebView 懒启动铁律：本页只允许作为路由页在用户主动进入时挂载，
+/// 挂载即调用 host.ensureStarted()（WebView2 提前创建会产生幽灵窗，
+/// 禁止塞进 IndexedStack 之类启动期就构建全部子项的容器）。
+/// 退出路由时 setPaused 暂停页面渲染（宿主是进程级单例，控制器常驻），
+/// 避免后台烧 GPU。
 class GalleryWorkbenchPage extends StatefulWidget {
-  const GalleryWorkbenchPage({super.key, required this.visible});
+  const GalleryWorkbenchPage({super.key});
 
-  /// 当前是否是激活 tab（由主壳 _tabIndex 驱动）。
-  final bool visible;
+  /// 全屏路由打开图库工作台（常用工具「图库」入口 / 预览「在照片墙中查看」）。
+  static Future<void> show(BuildContext context) {
+    return Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(builder: (_) => const GalleryWorkbenchPage()),
+    );
+  }
 
   @override
   State<GalleryWorkbenchPage> createState() => _GalleryWorkbenchPageState();
@@ -32,34 +41,16 @@ enum _GalleryView { wall, manage, review }
 class _GalleryWorkbenchPageState extends State<GalleryWorkbenchPage> {
   final GalleryWallHost _host = GalleryWallHost.instance;
   _GalleryView _view = _GalleryView.wall;
-  /// 首次激活才挂载 WebView（IndexedStack 会在启动期构建全部子项，
-  /// 必须用此闸挡住 WebView 的提前创建）。
-  bool _everActivated = false;
 
   @override
   void initState() {
     super.initState();
-    if (widget.visible) {
-      _everActivated = true;
-      unawaited(_activate());
-    }
-  }
-
-  @override
-  void didUpdateWidget(covariant GalleryWorkbenchPage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.visible == oldWidget.visible) return;
-    if (widget.visible && !_everActivated) {
-      _everActivated = true;
-      unawaited(_activate());
-    } else {
-      unawaited(_host.setPaused(!widget.visible));
-    }
+    unawaited(_activate());
   }
 
   Future<void> _activate() async {
     await _host.ensureStarted();
-    await _host.setPaused(!widget.visible);
+    await _host.setPaused(false);
   }
 
   @override
@@ -67,6 +58,7 @@ class _GalleryWorkbenchPageState extends State<GalleryWorkbenchPage> {
     if (_host.onOpenGrid == _handleOpenGrid) {
       _host.onOpenGrid = null;
     }
+    unawaited(_host.setPaused(true));
     super.dispose();
   }
 
@@ -79,18 +71,6 @@ class _GalleryWorkbenchPageState extends State<GalleryWorkbenchPage> {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    if (!_everActivated) {
-      return _buildScaffold(
-        cs,
-        body: const Center(
-          child: SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
-      );
-    }
     // 注册/刷新 openGrid 意图回调（每次 build 保持最新闭包）
     _host.onOpenGrid = _handleOpenGrid;
     return _buildScaffold(
@@ -121,9 +101,14 @@ class _GalleryWorkbenchPageState extends State<GalleryWorkbenchPage> {
 
   Widget _buildViewToggle(ColorScheme cs) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+      padding: const EdgeInsets.fromLTRB(12, 8, 16, 8),
       child: Row(
         children: <Widget>[
+          _BackButton(
+            cs: cs,
+            onTap: () => Navigator.of(context).maybePop(),
+          ),
+          const SizedBox(width: 12),
           _ToggleChip(
             label: "照片墙",
             selected: _view == _GalleryView.wall,
@@ -190,6 +175,39 @@ class _GalleryWorkbenchPageState extends State<GalleryWorkbenchPage> {
         }
         return Webview(_host.controller!);
       },
+    );
+  }
+}
+
+/// 返回按钮：与视图切换胶囊同规格的圆形描边钮（黑白极简）。
+class _BackButton extends StatelessWidget {
+  const _BackButton({required this.cs, required this.onTap});
+
+  final ColorScheme cs;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: "返回",
+      child: Material(
+        color: Colors.transparent,
+        shape: CircleBorder(
+          side: BorderSide(color: cs.outline.withValues(alpha: 0.4)),
+        ),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Icon(
+              Icons.arrow_back_ios_new_rounded,
+              size: 13,
+              color: cs.onSurface.withValues(alpha: 0.75),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

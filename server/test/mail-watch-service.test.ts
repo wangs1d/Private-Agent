@@ -312,7 +312,8 @@ test("未启用 start() no-op；启用但缺凭证也 no-op 并如实说明原�
   status = unconfigured.status();
   assert.equal(status.running, false);
   assert.equal(status.configured, false);
-  assert.match(status.reason ?? "", /未配置/);
+  // 2026-10-01 邮箱自动接入后文案区分两种缺配置：host+user 在而 pass 缺 = 等授权码；全缺 = 未配置
+  assert.match(status.reason ?? "", /授权码|未配置/);
   assert.equal(factoryCalls.count, 0, "no-op 路径不得创建 IMAP 客户端");
 });
 

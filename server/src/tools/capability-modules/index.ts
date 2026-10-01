@@ -14,6 +14,7 @@
  */
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import { isOssEdition } from "../../config/env.js";
 import type { ToolRegistry } from "../tool-registry.js";
 import type { ToolIntentRule } from "../tool-search/intent-metadata.js";
 import type { ImageGenerationService } from "../../services/image-generation-service.js";
@@ -175,6 +176,11 @@ export interface CapabilityModule {
     name: string;
     keywords: string[];
   };
+  /**
+   * 版本闸：true = 内测独占家族（NEXTBOT_EDITION=oss 开源版整族剔除）。
+   * 模块被剔除后 LLM schema / intent 调权 / 执行器注册 / 关键词路由四处同步收缩。
+   */
+  internalOnly?: boolean;
 }
 
 /**
@@ -236,7 +242,7 @@ export interface CapabilityModuleDeps {
  * ⚠️ 新增能力域时只改这里，不动其他文件。
  */
 export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityModule[] {
-  return [
+  const modules: CapabilityModule[] = [
     {
       domain: "image_gen",
       label: "图像生成（text-to-image）",
@@ -346,6 +352,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
     {
       domain: "social_outreach",
       label: "社交主动出击（外部平台）",
+      internalOnly: true,
       chatTools: SOCIAL_OUTREACH_CHAT_TOOLS,
       intentRules: SOCIAL_OUTREACH_INTENT_RULES,
       register: (registry) => registerSocialOutreachTools(registry, { socialOutreachService: deps.socialOutreachService }),
@@ -378,6 +385,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
     {
       domain: "shopping_compare",
       label: "购物比价（跨平台同款比价 + 降价监控 + 保险/服务调研对比）",
+      internalOnly: true,
       chatTools: SHOPPING_COMPARE_CHAT_TOOLS,
       intentRules: SHOPPING_COMPARE_INTENT_RULES,
       register: (registry) => registerShoppingCompareTools(registry, { shoppingCompareService: deps.shoppingCompareService }),
@@ -426,6 +434,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
     {
       domain: "travel_booking",
       label: "机票/火车票/酒店预订（统一预订抽象层 + 多源报价比价）",
+      internalOnly: true,
       chatTools: TRAVEL_BOOKING_CHAT_TOOLS,
       intentRules: TRAVEL_BOOKING_INTENT_RULES,
       register: (registry) => registerTravelBookingTools(registry, { bookingService: deps.bookingService }),
@@ -461,8 +470,8 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       },
     },
     // 电话代办：模块自带 PHONE_CALL_ENABLED 开关门控（关闭时 schema/执行器/intent 全空，
-    // 对 LLM 不可见且无漂移），故直接复用 buildPhoneCallModule。
-    buildPhoneCallModule({ phoneCallCoordinator: deps.phoneCallCoordinator }),
+    // 对 LLM 不可见且无漂移），故直接复用 buildPhoneCallModule；开源版整族剔除（internalOnly）。
+    { ...buildPhoneCallModule({ phoneCallCoordinator: deps.phoneCallCoordinator }), internalOnly: true },
     {
       domain: "picture",
       label: "图片图库",
@@ -486,6 +495,9 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
     // 记忆治理（定向遗忘 + 行为审计）：依赖全部可选，handler 逐项降级
     buildMemoryGovernanceModule(deps),
   ];
+  // 版本闸（NEXTBOT_EDITION=oss 开源版）：internalOnly 家族整族剔除，
+  // 四个消费口（chatTools/intentRules/register/categoryMappings）共用本出口，自动收缩。
+  return isOssEdition() ? modules.filter((m) => !m.internalOnly) : modules;
 }
 
 /** 合并所有能力模块的 ChatCompletionTool schema。 */

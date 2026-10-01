@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { ProactivityHub } from "../src/proactivity/proactivity-hub.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
+import { TurnAsideQueue } from "../src/proactivity/turn-aside-queue.js";
 
 const ACTOR = "actor-1";
 
@@ -184,4 +185,60 @@ test("频控：每日预算耗尽后全部拦截", async () => {
   hub.onUserLoopCompleted(ACTOR, "待办一"); // 不同 kind，但预算已尽
   await flush();
   assert.equal(signals.length, 1);
+});
+
+// ── 顺嘴搭车（2026-10-01 P1）──────────────────────────────
+
+test("顺嘴搭车：low 级 submitIntent 挂起不即时推送，takeTurnAsideForTurn 取货", async () => {
+  const { deps, signals } = makeDeps();
+  const queue = new TurnAsideQueue();
+  const hub = new ProactivityHub({ ...deps, turnAsideQueue: queue });
+  hub.submitIntent({
+    actorId: ACTOR,
+    kind: "location_arrival",
+    importance: "low",
+    title: "用户到达常去地点：家",
+    summary: "用户刚到家，轻问一句",
+    mode: "speak",
+    source: "location",
+  });
+  await flush();
+  assert.equal(signals.length, 0, "low 意图不即时推送");
+  const aside = hub.takeTurnAsideForTurn(ACTOR);
+  assert.ok(aside, "下一轮对话取到顺嘴块");
+  assert.match(aside, /【顺嘴机会】/);
+  assert.ok(aside.includes("刚到家"));
+  assert.equal(hub.takeTurnAsideForTurn(ACTOR), null, "每轮至多一条");
+});
+
+test("顺嘴搭车：medium/high 不拦，照旧即时推送", async () => {
+  const { deps, signals } = makeDeps();
+  const hub = new ProactivityHub({ ...deps, turnAsideQueue: new TurnAsideQueue() });
+  hub.submitIntent({
+    actorId: ACTOR,
+    kind: "life_reminder",
+    importance: "medium",
+    title: "降价提醒",
+    summary: "关注的商品已降价",
+    mode: "speak",
+    source: "finance",
+  });
+  await flush();
+  assert.equal(signals.length, 1, "medium 走原即时路径");
+});
+
+test("顺嘴搭车：未注入队列时 low 照旧即时推送（回退兼容）", async () => {
+  const { deps, signals } = makeDeps();
+  const hub = new ProactivityHub(deps);
+  hub.submitIntent({
+    actorId: ACTOR,
+    kind: "location_arrival",
+    importance: "low",
+    title: "到达",
+    summary: "到家",
+    mode: "speak",
+    source: "location",
+  });
+  await flush();
+  assert.equal(signals.length, 1, "无队列回退原路径");
 });

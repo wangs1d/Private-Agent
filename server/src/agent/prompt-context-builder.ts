@@ -193,6 +193,30 @@ function compactSchemaField(text: string, maxChars: number): string {
   return `${trimmed.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
 
+/**
+ * 文件画像 + memoryManager 派生摘要合并（2026-09-29 互斥改合并）：
+ * 文件画像（LLM 抽取的当前事实）为主位；派生摘要与画像不重复的行追加在后。
+ * 产物进稳定层【用户长期画像】，吃 prefix cache——画像只在真变更时断一次缓存。
+ */
+export function mergeUserProfilePromptSources(
+  fileProfile: string | undefined,
+  managerSummary: string | undefined,
+): string | undefined {
+  if (!fileProfile) return managerSummary;
+  if (!managerSummary) return fileProfile;
+  const fileLines = new Set(
+    fileProfile
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean),
+  );
+  const extraLines = managerSummary
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !fileLines.has(l));
+  return extraLines.length > 0 ? `${fileProfile}\n${extraLines.join("\n")}` : fileProfile;
+}
+
 function splitPromptLines(block: string | undefined): string[] {
   return (block ?? "")
     .split("\n")
@@ -210,6 +234,28 @@ function dedupePromptBlock(block: string | undefined, existingFingerprints: Set<
     return true;
   });
   return kept.length > 0 ? kept.join("\n") : undefined;
+}
+
+/**
+ * 本轮寻址块（2026-09-29 P0-1 缓存优化）：用户最新消息命中的理解话题/事实
+ * 字段清单，沉底注入动态层。等价承接旧版「← 本轮提问相关，基于此回答」的
+ * 逐条寻址标记——标记原在稳定层逐行移动，每轮改变稳定层字节，打断 DeepSeek
+ * 前缀缓存（实测改一行命中 98%→27%）。无命中返回 undefined 零注入。
+ */
+export function formatTurnAddressingBlock(
+  matchedTopics: string[],
+  matchedFields: string[],
+): string | undefined {
+  const topics = [...new Set(matchedTopics.filter(Boolean))].slice(0, 6);
+  const fields = [...new Set(matchedFields.filter(Boolean))].slice(0, 6);
+  if (topics.length === 0 && fields.length === 0) return undefined;
+  const lines: string[] = [
+    "【本轮寻址】",
+    "（用户最新消息命中了以下档案条目；回答对应问题时直接引用【我对用户的理解】/【用户档案·结构化事实】中的当前值作答）",
+  ];
+  if (topics.length > 0) lines.push(`- 理解话题：${topics.join("、")}`);
+  if (fields.length > 0) lines.push(`- 事实字段：${fields.join("、")}`);
+  return lines.join("\n");
 }
 
 export function formatNarrativeRecallPrompt(text: string | undefined): string | undefined {
@@ -359,6 +405,11 @@ export type BuildPromptContextInput = {
    * 语义意图理解结果（LLM 解析）。注入 system prompt，让主 LLM 明确用户真实意图。
    */
   semanticIntent?: string;
+  /**
+   * 本轮车道（agent-core 路由结果）：顺嘴搭车块只允许进对话面（chat），
+   * 任务面交付形态单一、旁注会污染结构化输出，故按车道门控。
+   */
+  plane?: string;
 };
 
 export type PromptContextLayers = {
@@ -453,6 +504,28 @@ export class PromptContextBuilder {
    */
   setInterestListProvider(fn: ((actorId: string) => string | null) | null): void {
     this.interestListProvider = fn;
+  }
+
+  /**
+   * 当下状态拉取器（WorldBoard.current 格式化，agent-core 转发注入）。
+   * 每轮注入【当下状态】块：屏幕焦点/在线状态 + 顺嘴纪律锚点。
+   * 无新鲜信号返回 null（零注入）。
+   */
+  private currentStateProvider: ((actorId: string) => string | null) | null = null;
+
+  setCurrentStateProvider(fn: ((actorId: string) => string | null) | null): void {
+    this.currentStateProvider = fn;
+  }
+
+  /**
+   * 顺嘴机会拉取器（主动性搭车通道，agent-core 经 proactivityHub 转发注入）。
+   * 返回即交付——每轮至多一条挂起意图；仅对话面调用（plane=chat 门控在
+   * assembleMemory 内做）。provider 内部自带频控/TTL。
+   */
+  private turnAsideProvider: ((actorId: string) => string | null) | null = null;
+
+  setTurnAsideProvider(fn: ((actorId: string) => string | null) | null): void {
+    this.turnAsideProvider = fn;
   }
 
   /**
@@ -696,8 +769,21 @@ export class PromptContextBuilder {
     const relationshipMemoryCompact = compactPromptBlock(relationshipMemory, 480, "normal");
     const lifeThemeMemoryCompact = compactPromptBlock(lifeThemeMemory, 280, "low");
     const dreamMemoryCompact = compactPromptBlock(dreamMemory, 500, "normal", "both");
-    const userProfile =
-      userProfileFromManagerCompact == null ? rawUserProfile : undefined;
+    // 2026-09-29 互斥改合并：文件画像（LLM 抽取的当前事实）升稳定层【用户长期画像】主位，
+    // manager 派生摘要非重复行追加；原互斥（manager 存在即弃文件画像）导致画像被挤掉。
+    const userProfileSummary = mergeUserProfilePromptSources(
+      rawUserProfile,
+      userProfileFromManagerCompact,
+    );
+    // 冷启动引导（P2）：画像还没有任何真实事实（模板/空）且是会话首轮时，
+    // 给一句自然破冰提示——新用户第一周画像未成形，agent 主动了解而不是干等。
+    // 画像成形或非首轮后自动消失（模板闸双重门控，零常驻成本）。
+    const onboardingHint =
+      !userProfileSummary &&
+      userText &&
+      (input.threadMessageCount == null || input.threadMessageCount <= 1)
+        ? "【初次见面】\n你还不认识这位用户。可以自然地了解一个称呼或对方最近在忙什么——问一句就好，别连环盘问，下轮也别重复问。"
+        : undefined;
 
     // 深度优化：用户画像注入（来自 OnlineLearningCortex）
     let userPatternBlock: string | undefined;
@@ -772,12 +858,20 @@ export class PromptContextBuilder {
     };
 
     // 用户理解档案块：无条件注入（当前理解档案，非历史召回，不受 longTermEnabled
-    // 门控）；userText 命中话题词的理解带"基于此回答"寻址标记。
-    const userUnderstandingBlock = this.buildUserUnderstandingBlock(input.actorId, userText);
+    // 门控）；P0-1 后字节稳定渲染，命中话题进 turnAddressing 动态块。
+    const understanding = this.buildUserUnderstandingBlock(input.actorId, userText);
+    const userUnderstandingBlock = understanding.stableBlock;
 
     // 结构化事实块：用户档案字段的确定性记录（KV 式精确寻址，无条件注入）；
-    // userText 命中字段名的事实带"基于此回答"寻址标记（"我是做什么工作的"直达）。
-    const userFactsBlock = this.buildUserFactsBlock(input.actorId, userText);
+    // P0-1 后字节稳定渲染，命中字段进 turnAddressing 动态块。
+    const facts = this.buildUserFactsBlock(input.actorId, userText);
+    const userFactsBlock = facts.stableBlock;
+
+    // 本轮寻址块（P0-1）：沉底注入动态层，等价承接旧版逐条寻址标记。
+    const turnAddressingBlock = formatTurnAddressingBlock(
+      understanding.matchedTopics,
+      facts.matchedFields,
+    );
 
     // 互斥：shortTermTaskContext 非空时跳过 taskContext，避免语义重叠字段同时以完整长度注入
     const effectiveTaskContext = shortTermTaskContext ? undefined : taskContext;
@@ -789,10 +883,34 @@ export class PromptContextBuilder {
       ? compactPromptBlock(formatPersonalityCorePrompt(rawPersonalityCore), 400)
       : undefined;
 
+    // 当下状态（P0 2026-10-01「顺嘴要贴此刻」）：状态板 current 层格式化注入，
+    // 陈旧信号 provider 内自判不注入。失败零阻塞。
+    let currentUserState: string | undefined;
+    if (this.currentStateProvider) {
+      try {
+        currentUserState = this.currentStateProvider(input.actorId) ?? undefined;
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 当下状态注入失败（忽略）: ${err}`);
+      }
+    }
+
+    // 顺嘴机会（P1 主动性搭车通道）：挂起的 low 意图织入回复末尾。仅对话面
+    // （任务面旁注会污染结构化交付）；取走即交付，provider 内自带频控/TTL。
+    let turnAside: string | undefined;
+    if (this.turnAsideProvider && input.plane === "chat") {
+      try {
+        turnAside = this.turnAsideProvider(input.actorId) ?? undefined;
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 顺嘴机会注入失败（忽略）: ${err}`);
+      }
+    }
+
     const promptMemory: AgentPromptMemoryContext = {
       ...fromKv,
       currentTime: buildCurrentTimePrompt(new Date(), extractUserTimezoneFromLocation(input.userLocation)),
       ...(personalityCore ? { personalityCore } : {}),
+      ...(currentUserState ? { currentUserState } : {}),
+      ...(turnAside ? { turnAside } : {}),
       ...(fromKv.taskContext || effectiveTaskContext || shortTermTaskContext
         ? { taskContext: [fromKv.taskContext, effectiveTaskContext, shortTermTaskContext].filter(Boolean).join("\n\n") }
         : {}),
@@ -801,9 +919,7 @@ export class PromptContextBuilder {
         : {}),
       ...(userUnderstandingBlock ? { userUnderstanding: userUnderstandingBlock } : {}),
       ...(userFactsBlock ? { userFacts: userFactsBlock } : {}),
-      ...(userProfile
-        ? { userProfile }
-        : {}),
+      ...(turnAddressingBlock ? { turnAddressing: turnAddressingBlock } : {}),
       ...(input.personalization?.relationshipGuidance
         ? { relationshipGuidance: input.personalization.relationshipGuidance }
         : {}),
@@ -818,7 +934,8 @@ export class PromptContextBuilder {
       // 当日对话日志检索：当天 md 承载的对话历史，注入供 agent 读取当前对话历史（短期记忆）
       ...(journalRecall ? { journalRecall } : {}),
       ...(dedupedDailyDigest ? { dailyDigest: dedupedDailyDigest } : {}),
-      ...(userProfileFromManagerCompact ? { userProfileSummary: userProfileFromManagerCompact } : {}),
+      ...(userProfileSummary ? { userProfileSummary } : {}),
+      ...(onboardingHint ? { onboardingHint } : {}),
       ...(memoryContinuityCompact ? { memoryContinuity: memoryContinuityCompact } : {}),
       ...(relationshipMemoryCompact ? { relationshipMemory: relationshipMemoryCompact } : {}),
       ...(lifeThemeMemoryCompact ? { lifeThemeMemory: lifeThemeMemoryCompact } : {}),
@@ -831,7 +948,9 @@ export class PromptContextBuilder {
       ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
       ...(compactTravelState ? { travelState: compactTravelState } : {}),
-      ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
+      // 规则画像块（OnlineLearningCortex）单独走动态层【用户档案】画像槽；
+      // 文件画像已升稳定层（userProfileSummary），不再在此合并避免双注入
+      ...(userPatternBlock ? { userProfile: userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
       ...(interestListBlock ? { interestList: interestListBlock } : {}),
       // commitmentBoard（未兑现承诺块）不再构建：prompt-assembler 从不渲染该字段，
@@ -884,39 +1003,51 @@ export class PromptContextBuilder {
   /**
    * 用户理解档案块：agent 对用户理解的结构化沉淀（topic + 理解句 + 性质标注
    * + 演变历史）。无条件注入（当前理解档案，非历史召回，不受 longTermEnabled
-   * 门控）；userText 命中话题词的理解带"基于此回答"寻址标记——"我老婆是谁"
-   * 直达当前理解，不依赖向量检索，也不会被旧画像/旧检索结果带偏。
+   * 门控）。
+   *
+   * 2026-09-29 P0-1 缓存优化：渲染不再带 per-turn 寻址标记——标记位置随用户
+   * 措辞逐轮移动会让稳定层逐轮变字节，打断 DeepSeek 前缀缓存（实测改一行
+   * 命中 98%→27%）。字节稳定渲染 + 命中话题走 turnAddressing 动态块沉底，
+   * "我老婆是谁"仍直达当前理解。
    */
-  private buildUserUnderstandingBlock(actorId: string, userText: string): string | undefined {
+  private buildUserUnderstandingBlock(
+    actorId: string,
+    userText: string,
+  ): { stableBlock: string | undefined; matchedTopics: string[] } {
     try {
       const store = getMemoryComponents().understandingStore;
-      if (!store) return undefined;
-      const grounded = new Set(
-        store.matchTopicsInText(actorId, userText).map((n) => n.topic.trim()),
-      );
-      return store.renderForPrompt(actorId, grounded) ?? undefined;
+      if (!store) return { stableBlock: undefined, matchedTopics: [] };
+      const matchedTopics = store
+        .matchTopicsInText(actorId, userText)
+        .map((n) => n.topic.trim())
+        .filter(Boolean);
+      return { stableBlock: store.renderForPrompt(actorId) ?? undefined, matchedTopics };
     } catch (err) {
       console.log(`[PromptContextBuilder] 用户理解块构建失败（忽略）: ${err}`);
-      return undefined;
+      return { stableBlock: undefined, matchedTopics: [] };
     }
   }
 
   /**
    * 结构化事实块：用户档案字段的确定性记录（称呼/职业/居住地/技术栈…）。
-   * 无条件注入（当前档案，非历史召回）；userText 命中字段名的事实带
-   * "基于此回答"寻址标记——"我是做什么工作的"直达当前值，不依赖向量检索。
+   * 无条件注入（当前档案，非历史召回）。同 P0-1：字节稳定渲染，命中字段走
+   * turnAddressing 动态块沉底，"我是做什么工作的"直达当前值。
    */
-  private buildUserFactsBlock(actorId: string, userText: string): string | undefined {
+  private buildUserFactsBlock(
+    actorId: string,
+    userText: string,
+  ): { stableBlock: string | undefined; matchedFields: string[] } {
     try {
       const store = getMemoryComponents().factStore;
-      if (!store) return undefined;
-      const grounded = new Set(
-        store.matchFieldsInText(actorId, userText).map((f) => f.field.trim()),
-      );
-      return store.renderForPrompt(actorId, grounded) ?? undefined;
+      if (!store) return { stableBlock: undefined, matchedFields: [] };
+      const matchedFields = store
+        .matchFieldsInText(actorId, userText)
+        .map((f) => f.field.trim())
+        .filter(Boolean);
+      return { stableBlock: store.renderForPrompt(actorId) ?? undefined, matchedFields };
     } catch (err) {
       console.log(`[PromptContextBuilder] 结构化事实块构建失败（忽略）: ${err}`);
-      return undefined;
+      return { stableBlock: undefined, matchedFields: [] };
     }
   }
 
@@ -927,10 +1058,11 @@ export class PromptContextBuilder {
    * 紧凑列表（上限 20 条 / 总 500 字符），不含 doc 全文。让 LLM 感知"我有这些
    * 沉淀的技能"，遇到相关任务时先用 skill.view 工具加载全文（Level 1）再复用。
    *
-   * 按相关性排序：userText 命中技能名/描述关键词的排在前面，其余按名称排序。
-   * 无技能时返回空（不注入）。
+   * 2026-09-29 P0-1：技能索引在稳定层，按本轮 userText 相关性重排会让稳定层
+   * 逐轮变字节（同 grounded 标记问题）。改为纯名称序（确定性），技能发现走
+   * Level 1 的 skill.view 按需加载，不依赖索引排序的先后。
    */
-  private buildSkillIndexPrompt(userText: string | undefined): { skillIndex: string } | undefined {
+  private buildSkillIndexPrompt(_userText: string | undefined): { skillIndex: string } | undefined {
     if (!this.deps.skillManager) return undefined;
     let manifests;
     try {
@@ -940,24 +1072,10 @@ export class PromptContextBuilder {
     }
     if (!manifests || manifests.length === 0) return undefined;
 
-    const query = (userText ?? "").toLowerCase();
-    const scored = manifests.map((m) => {
-      const haystack =
-        `${m.name} ${m.displayName} ${m.description} ${(m.tags ?? []).join(" ")}`.toLowerCase();
-      let score = 0;
-      const terms = query.match(/[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}/g) ?? [];
-      for (const t of terms) {
-        if (haystack.includes(t)) score += 1;
-      }
-      return { m, score };
-    });
-    scored.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return a.m.name.localeCompare(b.m.name);
-    });
+    const sorted = [...manifests].sort((a, b) => a.name.localeCompare(b.name));
 
     const lines: string[] = [];
-    for (const { m } of scored.slice(0, 20)) {
+    for (const m of sorted.slice(0, 20)) {
       const skillType = m.skillType ?? "code";
       const desc = m.description.replace(/\s+/g, " ").slice(0, 80);
       const tags = (m.tags ?? []).slice(0, 3).join("/");
@@ -996,6 +1114,7 @@ export class PromptContextBuilder {
       memorySummary: redact(ctx.memorySummary),
       memoryFacts: redact(ctx.memoryFacts),
       userFacts: redact(ctx.userFacts),
+      turnAddressing: redact(ctx.turnAddressing),
       memoryPreferences: redact(ctx.memoryPreferences),
       memoryCommitments: redact(ctx.memoryCommitments),
       memoryOpenLoops: redact(ctx.memoryOpenLoops),

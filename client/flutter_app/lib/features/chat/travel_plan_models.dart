@@ -1,10 +1,37 @@
 import "../../core/config/api_config.dart";
 import "../../core/utils/agent_result_parser.dart";
 
-/// 相对路径（/travel/media/assets/...）→ 服务端绝对地址；外链原样返回。
+/// 行程链路远程图床域（Wikimedia 家族）：这些域在国内网络直连不可达
+/// （Flutter Image.network 不走系统代理，IPv4 被墙），统一重写到本机
+/// server 的 /travel/media/remote 代理——服务端双路抓取落盘后本机直出。
+const List<String> _remoteImageHostSuffixes = <String>[
+  "wikimedia.org",
+  "wikipedia.org",
+  "wikidata.org",
+];
+
+bool _isBlockedRemoteImageHost(String url) {
+  final Uri? uri = Uri.tryParse(url);
+  final String host = (uri?.host ?? "").toLowerCase();
+  if (host.isEmpty) return false;
+  for (final String suffix in _remoteImageHostSuffixes) {
+    if (host == suffix || host.endsWith(".$suffix")) return true;
+  }
+  return false;
+}
+
+/// 相对路径（/travel/media/assets/...）→ 服务端绝对地址；Wikimedia 家族
+/// 远程 URL → 本机代理路由（存量行程/聊天快照里烤死的远程图由此通道渲染）；
+/// 其余外链原样返回。
 String resolveTravelMediaUrl(String url) {
   final String u = url.trim();
-  if (u.isEmpty || u.startsWith("http")) return u;
+  if (u.isEmpty) return u;
+  if (u.startsWith("http")) {
+    if (_isBlockedRemoteImageHost(u)) {
+      return "${ApiConfig.httpBase}/travel/media/remote?u=${Uri.encodeComponent(u)}";
+    }
+    return u;
+  }
   return "${ApiConfig.httpBase}$u";
 }
 

@@ -18,9 +18,9 @@ export const IMAGE_GEN_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "image.generate",
       description:
-        "文本生成图片（text-to-image）。基于硅基流动 Kwai-Kolors / FLUX.1-schnell 等模型。" +
+        "文本生成图片（text-to-image）。走服务端配置的 OpenAI 兼容图像模型。" +
         "适用场景：用户说「画一张」「生成图片」「做张图」「画个 logo」「配张插图」等。\n" +
-        "prompt 推荐英文（Kolors 中文也可），尽量具体描述主体、风格、构图、光影。\n" +
+        "prompt 中英文均可，尽量具体描述主体、风格、构图、光影。\n" +
         "返回 imageUrl（本地静态 URL，可永久访问）+ 实际使用模型。",
       parameters: {
         type: "object",
@@ -33,11 +33,7 @@ export const IMAGE_GEN_CHAT_TOOLS: ChatCompletionTool[] = [
           model: {
             type: "string",
             description:
-              "图像模型，可选：\n" +
-              "- Kwai-Kolors/Kolors（默认，中文友好）\n" +
-              "- black-forest-labs/FLUX.1-schnell（速度快，2 步出图）\n" +
-              "- stabilityai/stable-diffusion-3-5-large（高质量）\n" +
-              "未传时由服务端按默认选择。",
+              "图像模型名（可选，传服务端图像端点支持的模型 id）。未传时由服务端按默认选择。",
           },
           imageSize: {
             type: "string",

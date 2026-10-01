@@ -25,6 +25,7 @@ import "agent_result_card.dart";
 import "typewriter_reveal.dart";
 import "mood_driven_emotion_ball.dart";
 import "chat_suggestions.dart";
+import "../../core/services/profile_manage_api.dart";
 import "../../core/presentation/emotion_ball_ids.dart";
 
 /// 输入框内图标按钮的视觉强度
@@ -314,6 +315,49 @@ class _ChatPageState extends State<ChatPage>
   /// 聊天内容列（消息流 + 输入区）的最大宽度：宽屏下共同居中收敛，
   /// 避免长文本横向铺满整个窗口。
   static const double _contentMaxWidth = 860;
+  /// 空态居中问候语（豆包式，无对话/工作分栏）：称呼 + 俏皮尾句；
+  /// 称呼取不到（新用户/跳过向导/接口失败）时退化为不带称呼。
+  static const String _emptyGreetingTail = "今天想搞点什么？";
+  static Future<String>? _appellationFuture;
+
+  String _appellation = "";
+  Timer? _appellationRetry;
+
+  /// 首启向导存的称呼（画像事实 field=称呼）。
+  /// 用户自己填的名字不做得体化（「老王」就是老王，不是王先生）。
+  Future<void> _loadAppellation() async {
+    final String name = await (_appellationFuture ??= _fetchAppellation());
+    if (!mounted || _appellation.isNotEmpty) return;
+    if (name.isEmpty) {
+      // 拉空不缓存负结果：冷启动早期登录身份可能尚未武装/服务瞬时失败，
+      // 5s 后重试（仅空态期间有意义，发了消息就不再刷）。
+      _appellationRetry?.cancel();
+      _appellationRetry = Timer(const Duration(seconds: 5), () {
+        if (!mounted || _appellation.isNotEmpty || widget.messages.isNotEmpty) {
+          return;
+        }
+        _appellationFuture = null;
+        _loadAppellation();
+      });
+      return;
+    }
+    setState(() => _appellation = name);
+  }
+
+  static Future<String> _fetchAppellation() async {
+    try {
+      final ProfileManageData? data = await ProfileManageApi().fetch();
+      if (data == null) return "";
+      for (final ProfileFactItem f in data.facts) {
+        if (f.field == "称呼" && f.value.trim().isNotEmpty) {
+          return f.value.trim();
+        }
+      }
+    } catch (_) {
+      // 拉不到就不带称呼，问候照常
+    }
+    return "";
+  }
   static const EdgeInsets _listPadding =
       EdgeInsets.symmetric(horizontal: 12, vertical: 4);
   static const EdgeInsets _cardPadding = EdgeInsets.all(7);
@@ -327,6 +371,8 @@ class _ChatPageState extends State<ChatPage>
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
       _speechService.initialize();
     }
+    // 空态问候语的称呼：取首启向导存的画像事实（field=称呼），进程内只查一次
+    _loadAppellation();
     // 初始化呼吸动画：agent 工作中输入框的白色光晕靠这个 0~1 的脉动驱动，
     // 周期压到 1.6s 让呼吸感更明显。
     _breathingController = AnimationController(
@@ -625,6 +671,7 @@ class _ChatPageState extends State<ChatPage>
     }
     _breathingController?.dispose();
     _speechService.cancel();
+    _appellationRetry?.cancel();
     _endPreviewAnchorSession();
     _scrollController.dispose();
     _isUserScrollingNotifier.dispose();
@@ -1266,20 +1313,43 @@ class _ChatPageState extends State<ChatPage>
           Expanded(
             child: Stack(
               children: <Widget>[
-                if (widget.messages.isEmpty)
-                  // 空会话:「为你推荐」能力引导列表（拉取失败时不挡聊天）。
+                if (widget.messages.isEmpty) ...<Widget>[
+                  // 豆包式空态主视觉：居中问候语（推荐接口挂了也常驻），
+                  // 底部抬高避开下方推荐块；首条消息出现后随空态整体让位。
                   Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        EmptyStateSuggestions(
-                          onSuggestionTap: _sendSuggestion,
-                          onSuggestionInsert: _insertSuggestion,
-                          localStore: widget.localStore,
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 140),
+                      child: Text(
+                        _appellation.isEmpty
+                            ? _emptyGreetingTail
+                            : "$_appellation，$_emptyGreetingTail",
+                        style: (Theme.of(context).textTheme.titleLarge ??
+                                const TextStyle())
+                            .copyWith(
+                          fontSize: 26,
+                          height: AppTypography.headingLineHeight,
+                          fontWeight: FontWeight.w600,
+                          color: cs.onSurface,
                         ),
-                      ],
+                      ),
                     ),
-                  )
+                  ),
+                  // 「为你推荐」能力引导列表（拉取失败时不挡聊天）。
+                  // 贴对话区左下角：左缘与消息列表左 padding 对齐（不随宽屏
+                  // 内容列居中收缩）；首条消息出现后让位给消息流。
+                  Align(
+                    alignment: Alignment.bottomLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.only(
+                          left: 12, bottom: 4),
+                      child: EmptyStateSuggestions(
+                        onSuggestionTap: _sendSuggestion,
+                        onSuggestionInsert: _insertSuggestion,
+                        localStore: widget.localStore,
+                      ),
+                    ),
+                  ),
+                ]
                 else
                   // 使整块消息文字支持鼠标框选复制。
                   // 居中内容列：宽屏下消息流和输入框共同收敛到同一最大宽度，

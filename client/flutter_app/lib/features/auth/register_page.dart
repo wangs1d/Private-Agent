@@ -70,7 +70,8 @@ Future<void> runRegisterPreviewWindow() async {
 Future<void> registerAccountToControlPlane(
   String email,
 ) async {
-  final String mail = email.trim();
+  // 邮箱即账号主键，统一小写（与 /accounts/web 页面、服务端同规则）
+  final String mail = email.trim().toLowerCase();
   final http.Client client = http.Client();
   try {
     final http.Response res = await client

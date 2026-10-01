@@ -3,7 +3,6 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type { ExternalChatProvider } from "../external-model/types.js";
-import { recordLlmUsageByChars } from "./llm-token-audit.js";
 
 export type MoodInferenceSource = "conversation" | "behavior" | "context";
 
@@ -306,31 +305,41 @@ export class MoodInferenceService {
 {"sentimentScore": <-1 到 1 的小数，-1 极差、0 中性、1 极好>, "confidence": <0 到 1>, "emotionTags": [<中文标签，最多 3 个>], "topics": [<1-3 个业务领域/话题关键词，如 "旅行","编程","健康">], "agentNote": "<给 Agent 自己看的一句话>"}
 
 用户消息：${text.slice(0, 1000)}`;
-      let auditInputChars = prompt.length;
-      const result = await this.deps.externalChat.streamCompletion(
-        `mood-inference:${sessionId}`,
-        { text: prompt },
-        () => {},
-        undefined,
-        {
-          systemPromptOverride: "你是一个情感分析助手，只输出 JSON，不要任何解释。",
-          // 情绪分析自包含（prompt 携带全部所需输入），ephemeral 不落线程：
-          // 否则 mood 会话整天累积历史，每轮重发最多 MAX_CONTEXT_TOKENS 的陈旧分析。
-          ephemeralTurn: true,
-          disableThinking: true,
-        },
-      );
-      // Token 用量审计：情绪推断（每轮用户消息最多一次）
-      try {
-        recordLlmUsageByChars({
-          stage: "mood_inference",
-          sessionId,
-          inputChars: auditInputChars,
-          outputChars: result?.length ?? 0,
-        });
-      } catch {
-        /* 审计失败静默 */
-      }
+      // 超时护栏（2026-09-28）：情绪推断是主回复前 cognize 并行链上唯一无超时的
+      // LLM 调用（路由有 LLM_ROUTE_TIMEOUT_MS=3s 兜底）——模型/网络抖动时它会
+      // 独自把每轮 pre-LLM 时间拖长。超时即放弃本轮情绪（中性），后台请求任其
+      // 自行完成（结果丢弃）。默认 2500ms，AGENT_MOOD_INFERENCE_TIMEOUT_MS 可调。
+      const moodTimeoutMs = (() => {
+        const n = Number.parseInt(
+          process.env.AGENT_MOOD_INFERENCE_TIMEOUT_MS ?? "",
+          10,
+        );
+        return Number.isFinite(n) && n > 0 ? n : 2500;
+      })();
+      const result = await Promise.race([
+        this.deps.externalChat.streamCompletion(
+          `mood-inference:${sessionId}`,
+          { text: prompt },
+          () => {},
+          undefined,
+          {
+            systemPromptOverride: "你是一个情感分析助手，只输出 JSON，不要任何解释。",
+            // 情绪分析自包含（prompt 携带全部所需输入），ephemeral 不落线程：
+            // 否则 mood 会话整天累积历史，每轮重发最多 MAX_CONTEXT_TOKENS 的陈旧分析。
+            ephemeralTurn: true,
+            disableThinking: true,
+            // 审计归位（2026-10-01）：真调用由 provider 咽喉以真实 usage 记账到本环节。
+            // 此前不传 auditStage，真调用被记成 main_chat，调用方再补一条无 usage 的
+            // 字符估算——同一笔花费两行半真半假的记录，token 审计的 mood 账永远失真。
+            auditStage: "mood_inference",
+          },
+        ),
+        new Promise<null>((resolve) =>
+          setTimeout(() => resolve(null), moodTimeoutMs),
+        ),
+      ]);
+      // 审计已上移 provider 咽喉（见 auditStage）：此处不再补估算记录，避免双记。
+      // 超时放弃本轮时后台请求仍会完成记账（真实花费不丢）。
       if (!result) return null;
       const jsonMatch = String(result).match(/\{[\s\S]*\}/);
       if (!jsonMatch) return null;

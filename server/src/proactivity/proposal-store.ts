@@ -10,6 +10,8 @@ type PersistedShape = {
 
 /** 已投递指纹的保留窗口（防 watcher 重启重扫/同源重复提交导致重复投递） */
 const RECENT_DELIVERED_TTL_MS = 24 * 60 * 60 * 1000;
+/** 挂起提案最长滞留：超过即视为僵尸（信息已过时），启动清理时丢弃 */
+const PROPOSAL_PENDING_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
 export class ProposalStore {
   /** dedupKey → 提案（待发区：延迟/离线挂起的提案在此等待重仲裁） */
@@ -24,7 +26,24 @@ export class ProposalStore {
     private readonly maxDecisions = 200,
   ) {
     const raw = readJson<PersistedShape>(path, { pending: [], decisions: [], recent: [] });
-    for (const p of raw.pending ?? []) this.pending.set(p.dedupKey, p);
+    // 启动清理（2026-10-01 P0）：挂起区僵尸提案（幽灵 actor/48h+ 陈旧挂起）
+    // 不再恢复——某天这些测试 actor「重连」会把旧消息当新推给用户；幽灵键
+    // （历史接线 bug 把函数源码当 actorId）一并清除。
+    const nowMs = Date.now();
+    let dropped = 0;
+    for (const p of raw.pending ?? []) {
+      const aid = String(p.actorId ?? "");
+      const stale = nowMs - p.createdAt > PROPOSAL_PENDING_MAX_AGE_MS;
+      if (aid.includes("exportActors") || aid.startsWith("()=>") || stale) {
+        dropped++;
+        continue;
+      }
+      this.pending.set(p.dedupKey, p);
+    }
+    if (dropped > 0) {
+      this.dirty = true;
+      console.log(`[ProposalStore] 挂起区启动清理：丢弃 ${dropped} 条僵尸/幽灵提案`);
+    }
     for (const [k, at] of raw.recent ?? []) this.recentDelivered.set(k, at);
     this.decisions = raw.decisions ?? [];
   }

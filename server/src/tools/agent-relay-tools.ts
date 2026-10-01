@@ -2,6 +2,7 @@ import { ServerEventType as S } from "../protocol.js";
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import { relayRequiresPairEnv } from "../services/agent-pairing-service.js";
 import type { AgentRelayService } from "../services/agent-relay-service.js";
+import type { AgentAccountService } from "../services/agent-account-service.js";
 import type { ClientPushPort } from "../ports/client-push-port.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
@@ -10,9 +11,10 @@ export function registerAgentRelayTools(
   relay: AgentRelayService,
   wsRegistry: ClientPushPort,
   pairing: AgentPairingService,
+  agentAccountService?: AgentAccountService,
 ): void {
   registry.register("agent.send_to_peer", async (input, context) => {
-    const targetSessionId = String(input.targetSessionId ?? "").trim();
+    let targetSessionId = String(input.targetSessionId ?? "").trim();
     const body = String(input.body ?? "").trim();
     const subject =
       input.subject !== undefined && input.subject !== null
@@ -23,6 +25,18 @@ export function registerAgentRelayTools(
     }
     if (!body) {
       throw new Error("缺少 body");
+    }
+    // QQ 式身份短号直发：纯数字目标先按登录主体查，未命中且形如短号则按号反查
+    // （与 /friends/* 与 agent.link 的解析同口径；actorId 优先保证数字形态的
+    // 旧 sessionId 不被误吸走）。
+    if (agentAccountService) {
+      const direct = agentAccountService.getByActorId(targetSessionId);
+      if (direct) {
+        targetSessionId = direct.userId;
+      } else if (/^[1-9]\d{5,7}$/.test(targetSessionId)) {
+        const byNumber = agentAccountService.getByAgentNumber(targetSessionId);
+        if (byNumber) targetSessionId = byNumber.userId;
+      }
     }
     if (targetSessionId === context.sessionId) {
       throw new Error("不能向自己的 session 发中继消息");

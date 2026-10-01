@@ -220,6 +220,9 @@ class _EmptyStateSuggestionsState extends State<EmptyStateSuggestions> {
 
     return Column(
       mainAxisSize: MainAxisSize.min,
+      // 左对齐：贴对话区左下角时标题与各胶囊左缘须齐一条线
+      // （默认 center 会让不等宽胶囊在 420 约束盒内各自居中、左缘错落）。
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         Text(
           "为你推荐",

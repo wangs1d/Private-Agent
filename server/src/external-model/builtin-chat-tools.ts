@@ -444,7 +444,10 @@ export const AGENT_RELAY_CHAT_TOOLS: ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          targetSessionId: { type: "string", description: "对方 sessionId" },
+          targetSessionId: {
+            type: "string",
+            description: "对方身份：好友列表里的 friendActorId，或对方的身份短号（纯数字，来自 agent.link.list_friends 的 agentNumber / 对方主页）",
+          },
           body: { type: "string", description: "消息正文" },
           subject: { type: "string", description: "可选主题" },
           traceId: { type: "string", description: "可选追踪 id" },

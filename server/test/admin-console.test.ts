@@ -259,3 +259,110 @@ test("系统状态与服务配置接口返回完整结构", async () => {
   assert.equal(c.payment.wechat.apiKey, undefined);
   await app.close();
 });
+
+test("最近活跃：register/touch 记录 lastActiveAt，落盘 60s 节流", async () => {
+  const svc = new AgentAccountService();
+  await svc.load();
+  const acc = await svc.register("active-user-1", "活跃用户");
+  assert.ok(acc.lastActiveAt, "注册即记一次活跃");
+
+  // 第一次 touch：距上次落盘超过节流窗 → 应写穿文件（异步写，等它落地）
+  svc.touchLastActive("active-user-1");
+  await new Promise((r) => setTimeout(r, 80));
+  const persisted = new AgentAccountService();
+  await persisted.load();
+  const touchedAt = persisted.getByActorId("active-user-1")?.lastActiveAt;
+  assert.ok(touchedAt, "touch 应落盘 lastActiveAt");
+
+  // 第二次 touch 在 60s 节流窗内：内存即时更新、不再落盘
+  svc.touchLastActive("active-user-1", new Date(Date.now() + 5000));
+  assert.notEqual(
+    svc.getByActorId("active-user-1")?.lastActiveAt, touchedAt,
+    "节流窗内的 touch 仍应即时更新内存值",
+  );
+  await new Promise((r) => setTimeout(r, 80));
+  const reread = new AgentAccountService();
+  await reread.load();
+  assert.equal(
+    reread.getByActorId("active-user-1")?.lastActiveAt, touchedAt,
+    "节流窗内的第二次 touch 不应额外落盘",
+  );
+  // 未知主体静默忽略
+  svc.touchLastActive("nobody-touch");
+});
+
+test("用户/概览接口：返回 lastActiveAt 与活跃统计；待办计数接口可用", async () => {
+  process.env.ADMIN_UPLOAD_TOKEN = TEST_TOKEN;
+  const app = buildApp();
+
+  await accountService.register("active-user-2", "活跃用户2");
+  accountService.touchLastActive("active-user-2");
+
+  const users = await app.inject({ method: "GET", url: "/api/admin/users", headers: adminHeaders });
+  assert.equal(users.statusCode, 200);
+  const uj = users.json();
+  const row = uj.users.find((u: { userId: string }) => u.userId === "active-user-2");
+  assert.ok(row, "用户列表应包含刚注册用户");
+  assert.ok(row.lastActiveAt, "用户行应带 lastActiveAt");
+  assert.ok(uj.stats.activeToday >= 1, "今日活跃应至少 1（刚 touch 过）");
+  assert.equal(typeof uj.stats.active7d, "number");
+
+  const overview = await app.inject({ method: "GET", url: "/api/admin/overview", headers: adminHeaders });
+  assert.equal(overview.statusCode, 200);
+  const oj = overview.json();
+  assert.ok(oj.users.activeToday >= 1, "概览应含今日活跃");
+  assert.equal(typeof oj.users.active7d, "number");
+  assert.ok(Array.isArray(oj.orders?.series), "概览应含收入趋势 series");
+  assert.equal(oj.orders.series.length, 14, "收入趋势应为近 14 天");
+  // 上一用例/支付用例落过 live 已付订单 → 今日金额应大于 0
+  const today = oj.orders.series[oj.orders.series.length - 1];
+  assert.ok(today.count > 0, "今日收入应大于 0（台账有 live 已付单）");
+
+  const pending = await app.inject({ method: "GET", url: "/api/admin/pending-counts", headers: adminHeaders });
+  assert.equal(pending.statusCode, 200);
+  const pj = pending.json();
+  assert.equal(pj.ok, true);
+  assert.equal(typeof pj.feedbackOpen, "number");
+  assert.equal(typeof pj.waitlistPending, "number");
+  assert.equal(pj.waitlistPending, 0, "测试环境候补服务未装配时应为 0");
+  await app.close();
+});
+
+test("反馈最老待处理：有 open 时返回 oldestOpenAt，全部流转后为 null", async () => {
+  process.env.ADMIN_UPLOAD_TOKEN = TEST_TOKEN;
+  const app = buildApp();
+
+  const submit = await app.inject({
+    method: "POST",
+    url: "/api/feedback",
+    payload: {
+      type: "bug",
+      title: "最老待处理测试",
+      description: "检查 oldestOpenAt",
+      userId: "user-oldest-1",
+      clientVersion: "0.1.0",
+      platform: "windows-x64",
+    },
+  });
+  assert.equal(submit.statusCode, 200);
+  const id = submit.json().feedback.id;
+
+  let counts = await feedbackStatusCounts();
+  if (counts.open > 0) {
+    assert.ok(counts.oldestOpenAt, "有待处理时 oldestOpenAt 应有值");
+  }
+
+  const resolve = await app.inject({
+    method: "POST",
+    url: `/api/feedback/${id}/status`,
+    headers: adminHeaders,
+    payload: { status: "resolved", replyNote: "已处理" },
+  });
+  assert.equal(resolve.statusCode, 200);
+
+  counts = await feedbackStatusCounts();
+  if (counts.open === 0) {
+    assert.equal(counts.oldestOpenAt, null, "无待处理时 oldestOpenAt 应为 null");
+  }
+  await app.close();
+});

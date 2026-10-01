@@ -86,6 +86,13 @@ export type MappingExecutorOptions = {
   nowFn?: () => number;
   /** 全局 tick 步长（缺省 60s；规则内部再按各自 tickEveryMs 节流） */
   tickIntervalMs?: number;
+  /**
+   * 活跃 actor 过滤（2026-10-01 P0 配额窃取根修）：tickAll 只评估此判定为
+   * 活跃的 actor。单用户机上状态板是测试 actor 坟场（E2E/bench 永不过期），
+   * 规则状态若按插入序全局消费，先到的测试 actor 会吃掉当天配额，真实用户
+   * 永远轮空（审计实证：16 天 60 事件 0 条归真实用户）。缺省不过滤（兼容测试）。
+   */
+  isActiveActor?: (actorId: string) => boolean;
 };
 
 const EVENT_DEDUP_MAX = 400;
@@ -207,11 +214,21 @@ export class MappingExecutor {
     this.persistState(true);
   }
 
-  /** 全量 tick（所有已知 actor × 所有到期规则）；测试可直调 */
+  /** 全量 tick（活跃 actor × 所有到期规则）；测试可直调 */
   tickAll(now: number = this.nowFn()): void {
     const actors = this.opts.board.knownActors();
     const fallback = this.opts.defaultActorId?.() ?? null;
-    const ids = actors.length > 0 ? actors : fallback ? [fallback] : [];
+    let ids = actors.length > 0 ? actors : fallback ? [fallback] : [];
+    // 活跃过滤：只评估在真正交互的用户（测试 actor 坟场不进 tick、不吃配额）
+    if (this.opts.isActiveActor && ids.length > 0) {
+      ids = ids.filter((id) => {
+        try {
+          return this.opts.isActiveActor!(id);
+        } catch {
+          return false;
+        }
+      });
+    }
     for (const actorId of ids) this.tickActor(actorId, now);
     this.stateDirty = true;
     this.persistState();
@@ -232,7 +249,7 @@ export class MappingExecutor {
           now: nowDate,
           nowMs: now,
           board: board ?? {},
-          state: this.state.get(rule.id) ?? new Map(),
+          state: this.stateFor(rule.id, actorId),
           services: {},
         });
         for (const outcome of outcomes ?? []) this.dispatch(rule.id, outcome, actorId, now);
@@ -240,6 +257,36 @@ export class MappingExecutor {
         console.log(`[MappingExecutor] 规则 ${rule.id} 失败（忽略）: ${err}`);
       }
     }
+  }
+
+  /**
+   * 规则状态按 actor 分键（2026-10-01 P0）：返回「规则内部状态 Map 中该
+   * (ruleId, actorId) 切片」的视图——规则读写 state 都落进自己的切片，
+   * 不同用户互不覆盖/互不吃配额。旧全局键（升级前落盘）惰性迁移到
+   * 首个评估的活跃 actor 名下，避免升级即清零。
+   */
+  private stateFor(ruleId: string, actorId: string): Map<string, unknown> {
+    const ruleState = this.state.get(ruleId) ?? new Map<string, unknown>();
+    this.state.set(ruleId, ruleState);
+    const nsKey = `@${actorId}`;
+    let slice = ruleState.get(nsKey) as Map<string, unknown> | undefined;
+    if (!slice) {
+      slice = new Map();
+      // 惰性迁移：切片首次创建时，把升级前的全局散键收编（@ 前缀键除外）。
+      // 若全局键已被某个 actor 消费过（多 actor 场景），归首个到达者——
+      // 单用户机上即真实用户，测试 actor 有活跃过滤挡在 tickAll 外。
+      let migrated = false;
+      for (const [k, v] of ruleState) {
+        if (k.startsWith("@")) continue;
+        if (!migrated) {
+          slice.set(k, v);
+          migrated = true;
+        }
+        ruleState.delete(k);
+      }
+      ruleState.set(nsKey, slice);
+    }
+    return slice;
   }
 
   /**
@@ -260,7 +307,7 @@ export class MappingExecutor {
           now: nowDate,
           nowMs: now,
           board: board ?? {},
-          state: this.state.get(rule.id) ?? new Map(),
+          state: this.stateFor(rule.id, actorId),
           services,
         });
         for (const outcome of outcomes ?? []) this.dispatch(rule.id, outcome, actorId, now);
@@ -271,8 +318,8 @@ export class MappingExecutor {
   }
 
   private dispatch(ruleId: string, outcome: RuleOutcome, actorId: string, at: number): void {
-    // 事件级去重（同 dedupKey 一天内只发一次）
-    const fp = outcome.dedupKey || `${ruleId}:${at}`;
+    // 事件级去重（同 dedupKey 一天内只发一次；按 actor 分键——不同用户互不挤占）
+    const fp = `${actorId}::${outcome.dedupKey || `${ruleId}:${at}`}`;
     const dayKey = `${fp}:${new Date(at).toISOString().slice(0, 10)}`;
     if (this.eventFingerprints.has(dayKey)) return;
     this.eventFingerprints.set(dayKey, at);

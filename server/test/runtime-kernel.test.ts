@@ -90,9 +90,25 @@ test("high-risk tools are blocked by runtime safety policy", () => {
   const kernel = new RuntimeKernel();
   kernel.update({ enabled: true });
 
+  // 与 AgentTaskSafety 强制同口径（2026-09 重构）：理由文案统一走 HIGH_RISK_TOOL_REASON
   assert.deepEqual(kernel.checkToolAction("shopping.order.place"), {
     allowed: false,
-    reason: "High-risk financial or purchase action requires explicit confirmation before execution.",
+    reason: "资金支付或对外发送类动作需要用户确认后才能执行。",
   });
   assert.deepEqual(kernel.checkToolAction("search_web"), { allowed: true });
+});
+
+test("read-only tools in high-risk families pass the gate (2026-09-28 root fix)", () => {
+  const kernel = new RuntimeKernel();
+  // 2026-09-28 前这些被 includes("payment"/"transfer"/"wallet") 子串规则误拦，
+  // trajectories 实证 social.get_feed 被拦 6 次、wallet 查询 4 次
+  assert.deepEqual(kernel.checkToolAction("wallet.get_balance"), { allowed: true });
+  assert.deepEqual(kernel.checkToolAction("wallet.get_transactions"), { allowed: true });
+  assert.deepEqual(kernel.checkToolAction("payment.query_order"), { allowed: true });
+  assert.deepEqual(kernel.checkToolAction("payment.list_methods"), { allowed: true });
+  assert.deepEqual(kernel.checkToolAction("social.get_feed"), { allowed: true });
+  assert.deepEqual(kernel.checkToolAction("social.search_posts"), { allowed: true });
+  // 写/外发动作照旧拦
+  assert.equal(kernel.checkToolAction("social.post").allowed, false);
+  assert.equal(kernel.checkToolAction("wallet.transfer").allowed, false);
 });

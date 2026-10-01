@@ -34,6 +34,11 @@ import {
 import { SilenceLog, type SilenceLogEntry, type SilenceSearchOptions } from "./silence-log.js";
 import { FrequencyGovernor } from "./frequency-governor.js";
 import {
+  TurnAsideQueue,
+  formatTurnAsidePrompt,
+  isTurnAsideEnabled,
+} from "./turn-aside-queue.js";
+import {
   buildConversationIntent,
 } from "./triggers/conversation-triggers.js";
 import {
@@ -128,6 +133,18 @@ export interface ProactivityHubDeps {
     approved: boolean,
     executed: boolean,
   ) => void;
+  /**
+   * 顺嘴搭车队列（2026-10-01 P1）：注入后 low 级 speak 不即时推送，挂起等
+   * 用户下一轮对话织入回复末尾（agent-core 经 takeTurnAsideForTurn 取走）。
+   * 队列拒绝（同 kind 挂起中/间隔不足）时回退原即时路径。
+   */
+  turnAsideQueue?: TurnAsideQueue;
+  /**
+   * 在场查询（2026-10-01 P0 死信闸）：缺省视为在线（保持既有测试行为）。
+   * 注入后 emitSpeakSignal 在用户全设备离线时跳过——信号发了也无人接收，
+   * 还会触发一次无谓的话术 LLM 调用（照发既烧钱又产生「已发送」假台账）。
+   */
+  presence?: { isOnline: (actorId: string) => boolean };
 }
 
 /** 兼容别名：ask_first 挂起的确认条目（hub 行动级 + 管道提案级） */
@@ -485,6 +502,9 @@ export class ProactivityHub {
     switch (intent.mode as ProactiveBehaviorMode) {
       case "speak":
       case "advise":
+        // 顺嘴搭车（2026-10-01）：low 级 speak 先尝试挂起等下一轮对话织入；
+        // 队列拒绝（同 kind 挂起中/间隔不足）或通道关闭时走原即时投递。
+        if (this.tryDeferToTurnAside(intent)) break;
         if (this.isDirectLaneEnabled()) {
           this.submitDirectSpeak(intent);
         } else {
@@ -547,9 +567,39 @@ export class ProactivityHub {
   }
 
   /**
+   * 顺嘴搭车拦截（仅 route() 的 speak/advise 主动开口分支使用）：low 级意图
+   * 挂起等下一轮对话织入回复末尾。接受=true 时调用方跳过即时投递；拒绝
+   * （同 kind 挂起中/间隔不足/通道关闭）返回 false 走原路径——不静默吞消息。
+   *
+   * 边界：只拦「主动开口」（location_arrival/节律关怀等可延迟的轻提醒）；
+   * speakFeedback 的行为反馈（act 结果/确认请求）有时效，一律即时，不走此路。
+   */
+  private tryDeferToTurnAside(intent: ProactiveIntent): boolean {
+    if (intent.importance !== "low" || !isTurnAsideEnabled()) return false;
+    if (!this.deps.turnAsideQueue?.tryEnqueue(intent)) return false;
+    this.silenceLog.record({
+      at: Date.now(),
+      actorId: intent.actorId,
+      kind: intent.kind,
+      title: intent.title.slice(0, 60),
+      source: intent.source,
+      scope: "turn_aside",
+      netUtility: 0,
+      riskScore: 0,
+      valueScore: 0,
+      reason: "deferred_to_next_turn",
+    });
+    console.log(
+      `[ProactivityHub] 顺嘴挂起（等下一轮对话织入）kind=${intent.kind} actor=${intent.actorId}`,
+    );
+    return true;
+  }
+
+  /**
    * 行为反馈型 speak（act 执行结果/确认请求）的统一出口：
    * 直达车道开启时走模板直投管道（带 deliveryId/outcome 闭环），否则回退
    * LifeSignal 路径。与 route() 的 speak/advise 分发逻辑保持一致。
+   * （不走顺嘴搭车：行为反馈有时效，挂起隔轮织入会丢语义。）
    */
   private speakFeedback(intent: ProactiveIntent): void {
     if (this.isDirectLaneEnabled()) {
@@ -560,9 +610,33 @@ export class ProactivityHub {
   }
 
   /**
+   * 顺嘴搭车取货口（agent-core 每轮对话面调用，经 prompt builder 注入
+   * 【顺嘴机会】块）。每轮至多一条；取走即交付，频控/TTL 在队列内。
+   */
+  takeTurnAsideForTurn(actorId: string): string | null {
+    if (!this.deps.turnAsideQueue || !isTurnAsideEnabled()) return null;
+    const item = this.deps.turnAsideQueue.takeForTurn(actorId);
+    if (!item) return null;
+    console.log(
+      `[ProactivityHub] 顺嘴织入本轮 kind=${item.kind} actor=${actorId}`,
+    );
+    return formatTurnAsidePrompt(item);
+  }
+
+  /**
    * speak 模式：发布 LifeSignal → 现有 ProactionCortex 闭环接管
    */
   private emitSpeakSignal(intent: ProactiveIntent & { direct?: boolean }): void {
+    // 死信闸（2026-10-01 P0）：全设备离线时信号必然无人接收——跳过，
+    // 省一次下游话术 LLM 调用，也不再产生「已发送」假台账。
+    // （low 级已被搭车队列在 route() 拦截，到这里的多为 medium+，挂起重试
+    // 语义由统一管道承担；本路径（无直达车道回退）直接放弃并留痕。）
+    if (this.deps.presence && !this.deps.presence.isOnline(intent.actorId)) {
+      console.log(
+        `[ProactivityHub] 死信丢弃（全设备离线）kind=${intent.kind} actor=${intent.actorId}`,
+      );
+      return;
+    }
     try {
       this.deps.publishSignal({
         actorId: intent.actorId,

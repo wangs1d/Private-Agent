@@ -5,15 +5,15 @@ import { join } from "node:path";
 import sharp from "sharp";
 
 import type { ImageGenerationProvider, ImageGenerationResult } from "./image-generation-providers.js";
-import { SiliconFlowImageProvider } from "./image-generation-providers.js";
+import { OpenAICompatibleImageProvider } from "./image-generation-providers.js";
 
 /**
- * 图像生成服务：调用 LLM 提供商（硅基流动 / OpenAI DALL-E）的 text-to-image 接口
+ * 图像生成服务：调用 LLM 提供商（OpenAI 兼容 images 接口）的 text-to-image
  * 生成图片，下载到本地 `data/images/{actorId}/{imageId}.png` 后返回可访问 URL。
  *
  * 设计要点：
  *   - 与社交动态 / 语音消息独立目录，便于按能力域管理
- *   - 提供商走优先级链路：硅基流动（中文友好）→ OpenAI DALL-E（兜底）
+ *   - 提供商走 OpenAI 兼容通道（key 复用对话 OPENAI_API_KEY）
  *   - 图片下载到本地，避免上游链接 24h 过期问题
  *   - HTTP 拉流走 `/agent/images/:actorId/:fileName`（与 voice-messages 同模式）
  */
@@ -26,10 +26,10 @@ export class ImageGenerationService {
     providers?: ImageGenerationProvider[];
   } = {}) {
     this.storageRoot = opts.storageRoot ?? join(process.cwd(), "data", "images");
-    // 默认装载硅基流动 provider（如未配置 key 则跳过）
-    const siliconflow = new SiliconFlowImageProvider();
-    if (siliconflow.isEnabled()) this.providers.push(siliconflow);
-    // 允许外部注入额外 provider（如 OpenAI DALL-E）
+    // 默认装载 OpenAI 兼容 provider（如未配置 key 则跳过）
+    const openaiCompat = new OpenAICompatibleImageProvider();
+    if (openaiCompat.isEnabled()) this.providers.push(openaiCompat);
+    // 允许外部注入额外 provider
     if (opts.providers) this.providers.push(...opts.providers);
   }
 
@@ -53,7 +53,7 @@ export class ImageGenerationService {
     } = {},
   ): Promise<{ ok: true; imageUrl: string; model: string; seed?: number; revisedPrompt?: string } | { ok: false; error: string }> {
     if (!this.isEnabled()) {
-      return { ok: false, error: "图像生成未配置：请在服务端设置 SILICONFLOW_API_KEY 或 OPENAI_API_KEY" };
+      return { ok: false, error: "图像生成未配置：服务端需 OPENAI_API_KEY（OpenAI 兼容 images 接口）" };
     }
     if (!prompt.trim()) {
       return { ok: false, error: "prompt 不能为空" };
@@ -102,7 +102,7 @@ export class ImageGenerationService {
     const fileName = `${imageId}.png`;
     const fullPath = join(dir, fileName);
 
-    // 拉远程图（硅基流动 / OpenAI 都返回公网 URL），可传入更短的预算；默认 30s 超时防止挂起
+    // 拉远程图（上游返回公网 URL），可传入更短的预算；默认 30s 超时防止挂起
     const res = await fetch(remoteUrl, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) {
       throw new Error(`下载图像失败：HTTP ${res.status} ${res.statusText}`);

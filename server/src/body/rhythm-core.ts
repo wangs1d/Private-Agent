@@ -18,6 +18,9 @@
 //
 // 与 HomeostasisCore 对称：纯感知聚合服务，tools=[]，act() 恒 ok=false。
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 import type { BodyBus } from "./body-bus.js";
 import type {
   BodyAction,
@@ -121,8 +124,63 @@ export class RhythmCore implements BodyModuleLike {
   private unsubs: Array<() => void> = [];
   private started = false;
 
-  constructor(deps: { bodyBus: BodyBus }) {
+  // ---- 状态落盘（2026-10-01 P1）：连续工作计时/深夜计数跨重启保留 ----
+  // 断供根因：开发机 tsx watch 常态重启 → workStartAt 纯内存清零 → 连续工作
+  // 3h 阈值永远攒不满 → 过劳干预对真实用户零触发。落盘 + 启动恢复即根修。
+  private persistPath: string | null = null;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly PERSIST_DEBOUNCE_MS = 60_000;
+
+  constructor(
+    deps: { bodyBus: BodyBus },
+    /** 状态落盘目录（缺省不落盘，测试用） */
+    persistDir?: string,
+  ) {
     this.bodyBus = deps.bodyBus;
+    if (persistDir) {
+      this.persistPath = join(persistDir, "rhythm-core-state.json");
+      this.restore();
+    }
+  }
+
+  private restore(): void {
+    if (!this.persistPath || !existsSync(this.persistPath)) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.persistPath, "utf8")) as {
+        actors?: Record<string, { state?: RhythmActorState; learned?: RhythmLearned }>;
+      };
+      for (const [actorId, entry] of Object.entries(raw.actors ?? {})) {
+        if (entry.state) this.actors.set(actorId, entry.state);
+        if (entry.learned) this.learned.set(actorId, entry.learned);
+      }
+      const n = this.actors.size;
+      if (n > 0) console.log(`[RhythmCore] 状态已恢复：${n} 用户（连续工作计时跨重启）`);
+    } catch {
+      /* 损坏文件按空状态处理 */
+    }
+  }
+
+  private schedulePersist(): void {
+    if (!this.persistPath || this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.flush();
+    }, RhythmCore.PERSIST_DEBOUNCE_MS);
+    if (typeof this.persistTimer.unref === "function") this.persistTimer.unref();
+  }
+
+  flush(): void {
+    if (!this.persistPath) return;
+    try {
+      mkdirSync(dirname(this.persistPath), { recursive: true });
+      const actors: Record<string, { state: RhythmActorState; learned: RhythmLearned }> = {};
+      for (const [actorId, state] of this.actors) {
+        actors[actorId] = { state, learned: this.learnedOf(actorId) };
+      }
+      writeFileSync(this.persistPath, JSON.stringify({ version: 1, actors }));
+    } catch {
+      /* 落盘失败不影响感知主链路 */
+    }
   }
 
   // ---- 自适应基线 ----
@@ -203,6 +261,12 @@ export class RhythmCore implements BodyModuleLike {
     }
     this.unsubs = [];
     this.started = false;
+    // 停机前落盘：连续工作计时/学习基线跨重启保留（过劳检测的前提）
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.flush();
     console.log("[RhythmCore] 已停止");
   }
 
@@ -240,6 +304,7 @@ export class RhythmCore implements BodyModuleLike {
     }
 
     this.evaluate(actorId, state, now);
+    this.schedulePersist();
   }
 
   // ---- 内部：阈值评估与信号发布 ----

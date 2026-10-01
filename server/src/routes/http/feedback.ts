@@ -294,9 +294,16 @@ class FeedbackStoreManager {
     return { ...row, diagnostics: safeParseDiagnostics(row.diagnostics) };
   }
 
-  async counts(): Promise<{ total: number; open: number; processing: number; resolved: number }> {
+  async counts(): Promise<{
+    total: number;
+    open: number;
+    processing: number;
+    resolved: number;
+    /** 最老一条待处理的提交时间；无待处理时为 null（管理台催办提示用） */
+    oldestOpenAt: string | null;
+  }> {
     const db = this.open();
-    const counts = { total: 0, open: 0, processing: 0, resolved: 0 };
+    const counts = { total: 0, open: 0, processing: 0, resolved: 0, oldestOpenAt: null as string | null };
     if (!db) return counts;
     const rows = db.prepare("SELECT status, COUNT(*) AS c FROM feedback GROUP BY status").all() as Array<{
       status: string;
@@ -307,6 +314,12 @@ class FeedbackStoreManager {
       if (row.status === "open") counts.open = row.c;
       else if (row.status === "processing") counts.processing = row.c;
       else if (row.status === "resolved") counts.resolved = row.c;
+    }
+    if (counts.open > 0) {
+      const oldest = db.prepare(
+        "SELECT MIN(created_at) AS t FROM feedback WHERE status = 'open'",
+      ).get() as { t: string | null };
+      counts.oldestOpenAt = oldest.t ?? null;
     }
     return counts;
   }
@@ -427,6 +440,7 @@ export async function feedbackStatusCounts(): Promise<{
   open: number;
   processing: number;
   resolved: number;
+  oldestOpenAt: string | null;
 }> {
   return storeManager.counts();
 }

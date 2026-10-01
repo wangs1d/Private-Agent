@@ -92,6 +92,7 @@ import {
   StreamIdleTimeoutError,
   stripInlineThinkBlocks,
   stripInternalControlTags,
+  createStreamControlTagSanitizer,
   createStreamMetaSentenceFilter,
   type NormalChatChunk,
   type NormalToolCall,
@@ -110,7 +111,7 @@ import {
 } from "@private-ai-agent/agent-protocol";
 import { evaluateAndSelectStrategy } from "../agent/synthesis-strategy.js";
 import { isDirectFactQuery } from "../agent/direct-fact-query.js";
-import { isStaticToolArchEnabled } from "./lane-tool-sets.js";
+import { isStaticToolArchEnabled, ROUTER_FIRST_LANE_MAX_VISIBLE } from "./lane-tool-sets.js";
 import { recordTurnTrace, type ToolCallTraceEntry } from "./turn-trace.js";
 import {
   fenceUntrustedToolContent,
@@ -638,7 +639,7 @@ function compactSchemaDescriptions(node: unknown): unknown {
   return node;
 }
 
-function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
+export function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
   apiTools: ChatCompletionTool[];
   resolveRegistryToolName: (apiName: string) => string;
   /**
@@ -1416,10 +1417,13 @@ const PLAN_CALL_MAX_OUTPUT_TOKENS: number | undefined = (() => {
 })();
 
 /**
- * 规划轮是否走非流式请求（内容与流式完全一致，协议更省、usage 更确定——含 prefix
- * cache token）。仅对「非思考」模型生效。可用 `PLAN_NON_STREAMING=0` 关闭。
+ * 工具环波次是否走非流式请求。**默认流式**（2026-09-28 放流根修）：此前默认非流式
+ * ——非思考模型的全部波次（含纯聊天的最终回复）都要整段生成完才一次性返回，前端
+ * 无真流式可言（实测 TTFT=总耗时的 84%~92%）。改回流式后 usage（含 prefix cache
+ * 计费）由 `stream_options.include_usage` 随流末 chunk 带回，token 审计不受损。
+ * 设 `PLAN_NON_STREAMING=1` 可回退旧行为（应急开关）。
  */
-const PLAN_NON_STREAMING = process.env.PLAN_NON_STREAMING !== "0";
+const PLAN_NON_STREAMING = process.env.PLAN_NON_STREAMING === "1";
 
 
 /** replan 历史瘦身：折叠旧波次工具结果时保留的结果要点长度（确定性截断，不经 LLM）。 */
@@ -1795,10 +1799,12 @@ export async function streamCompletionWithTools(
   // 规划引导：Plan-and-Execute 要求模型在单次回复里一次性规划全部工具调用，
   // 减少串行波次（每多一波 = 多一次带 schema 的全量历史重发）。
   // 只在有工具可调时注入，纯对话场景不注入。
-  // router-first 车道（可见集只有桥工具）追加两步走引导：先 discover 后 call。
+  // router-first 车道（可见集=桥+定向保底族，业务主力在延迟目录）追加两步走
+  // 引导：先 discover 后 call。口径与 agent-gateway 意图预召回共享
+  // ROUTER_FIRST_LANE_MAX_VISIBLE，两处判定永不漂移。
   const routerFirstLane =
     toolSearchPrepared.toolSearchActive &&
-    toolSearchPrepared.coreToolCount <= 2 &&
+    toolSearchPrepared.coreToolCount <= ROUTER_FIRST_LANE_MAX_VISIBLE &&
     toolSearchPrepared.deferredToolCount > 0;
   if (stableApiTools.length > 0) {
     messages.push({
@@ -1844,6 +1850,11 @@ export async function streamCompletionWithTools(
         : undefined;
     // Token 用量审计：本轮发往 LLM 的输入规模（估算）
     let auditInputChars = 0;
+    // LLM 计时（2026-09-28 延迟诊断配套）：波内 request → 首原始 chunk →
+    // 首个可见 delta → 流结束，区分「API 排队/首 token 慢」与「生成长」。
+    const waveTimingStart = Date.now();
+    let waveFirstRaw: number | null = null;
+    let waveFirstDelta: number | null = null;
 
     while (true) {
       // ① replan 历史瘦身：wave>0 时把早于当前波次的旧工具链折叠为确定性摘要
@@ -1877,6 +1888,9 @@ export async function streamCompletionWithTools(
           // 配合工具描述里的并行引导，减少串行轮次。
           parallel_tool_calls: true,
           stream: planNonStreaming ? false : true,
+          // 流式时随流末 chunk 带回 usage（含 DeepSeek prefix cache 命中/未命中
+          // token），保住 token 审计与预算告警的数据源（非流式响应天然带 usage）。
+          ...(planNonStreaming ? {} : { stream_options: { include_usage: true } }),
           ...(planMaxTokens ? { max_tokens: planMaxTokens } : {}),
           ...(options?.promptCache ?? {}),
           // ⚠️ OpenAI Node SDK v6 不识别 Python 风格的 `extra_body` 顶层字段——它会
@@ -1916,6 +1930,13 @@ export async function streamCompletionWithTools(
     let fullReasoning = "";
     let finishReason: string | null = null;
     const normalizedToolCalls: NormalToolCall[] = [];
+    // 本波次经净化后已直推 onDelta 的累计文本（2026-09-28 波内直推配套）：
+    // 收尾全文/前导话推送时据此跳过已流过的部分，避免重复。
+    let waveStreamedText = "";
+    // 波内直推的逐 delta 净化栈（与纯文本分支同款）：跨块控制标签状态机 +
+    // 元话语整句过滤，think 块已在 consumer 咽喉剥过。
+    const waveTagSanitizer = createStreamControlTagSanitizer();
+    const waveMetaFilter = createStreamMetaSentenceFilter();
     // 流末尾 chunk 的 usage（可能缺失）；声明在 try 外，供块外审计使用
     let streamUsage: NormalUsage | undefined;
 
@@ -1976,13 +1997,29 @@ export async function streamCompletionWithTools(
         // 适配成 NormalChatChunk 即可。后续若要接入 Anthropic/Google，只换 adapter 即可。
         const result = await consumeNormalizedStream(
           adaptOpenAiChatCompletionStream(
-            stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
+            (async function* () {
+              for await (
+                const chunk of stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>
+              ) {
+                if (waveFirstRaw === null) waveFirstRaw = Date.now();
+                yield chunk;
+              }
+            })(),
           ),
           {
             onContentDelta: (d) => {
               fullText += d;
-              // 不在 tool loop 期间推送 delta：避免"思考前导话"流式输出给前端。
-              // 最终内容在 round 结束后（finishReason !== "tool_calls"）统一推送到 onDelta。
+              // 波内直推（2026-09-28 放流）：content delta 经逐 delta 净化后立即
+              // 推给前端，最终波/前导话不再等收尾才整段推送——此前纯聊天轮也要
+              // 全程生成完才见第一个字。历史顾虑「思考前导话流式输出」由净化栈
+              // 兜底（think 块 consumer 已剥 + 控制标签/元话语过滤），与最终文本
+              // 的分叉由 WS 层 finalTextReplacesStream 信号整段替换承接。
+              const clean = waveMetaFilter(waveTagSanitizer(d));
+              if (clean) {
+                if (waveFirstDelta === null) waveFirstDelta = Date.now();
+                waveStreamedText += clean;
+                onDelta(clean);
+              }
             },
             onToolCallsComplete: (calls) => {
               for (const c of calls) normalizedToolCalls.push(c);
@@ -1990,6 +2027,13 @@ export async function streamCompletionWithTools(
             providerId: "openai-compatible",
             model,
           },
+        );
+        // eslint-disable-next-line no-console
+        console.info(
+          `[llm-timing] tool-wave model=${model} wave=${wave} ` +
+            `firstRaw=${waveFirstRaw === null ? "-" : waveFirstRaw - waveTimingStart}ms ` +
+            `firstDelta=${waveFirstDelta === null ? "-" : waveFirstDelta - waveTimingStart}ms ` +
+            `total=${Date.now() - waveTimingStart}ms streamed=${waveStreamedText.length} raw=${fullText.length}`,
         );
         fullText = result.content;
         fullReasoning = result.reasoning;
@@ -2364,7 +2408,10 @@ export async function streamCompletionWithTools(
       const sanitizedFinalText = stripRequestCardTags(
         stripInternalControlTags(metaFilter(stripInlineThinkBlocks(effectiveFinalText))),
       );
-      if (sanitizedFinalText) {
+      // 本波已直推过（波内直推）→ 不再整段重推；与 sanitizedFinalText 的差异
+      // 由 WS 层 streamedText vs reply.text 的残差补推对齐（见 chat-user-message）。
+      // 非流式/规划波（waveStreamedText 空）→ 维持收尾整推。
+      if (sanitizedFinalText && !waveStreamedText.trim()) {
         onDelta(sanitizedFinalText);
       }
       messages.push({
@@ -2424,7 +2471,8 @@ export async function streamCompletionWithTools(
       const preamble = stripInternalControlTags(
         preambleFilter(stripInlineThinkBlocks(fullText)),
       ).trim();
-      if (preamble) {
+      // 波内已直推过前导话 → 不重复推（同最终收尾的跳过语义）。
+      if (preamble && !waveStreamedText.trim()) {
         onDelta(preamble);
       }
     }

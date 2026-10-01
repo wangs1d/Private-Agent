@@ -137,6 +137,9 @@ export function registerAgentHomepageRoutes(
     return {
       ok: true,
       profile,
+      // QQ 式身份短号（注册即得；旧账号 load 时补号）。客户端主页展示+复制，
+      // 是好友申请的对外凭据；无账号主体（session 身份）为 null，客户端回退 actorId。
+      agentNumber: deps.agentAccountService.getByActorId(actorId)?.agentNumber ?? null,
       // KV 里的名字档案优先（agent.update_identity 维护）；没有时回退 prefs
       identity: identity ?? {
         displayName: profile.displayName,

@@ -36,12 +36,19 @@ const ENV_BY_FIELD = {
   channel: "CLIENT_MANIFEST_CHANNEL",
 } as const;
 
-async function readClientManifest(): Promise<ClientManifestDto> {
+export async function readClientManifest(edition: string | null = null): Promise<ClientManifestDto> {
+  // 发行版双清单（NEXTBOT_EDITION / PAI_EDITION 同名值）：edition="oss" 读
+  // client-manifest.oss.json（缺失回落主文件）；"internal"/null 读主文件，存量行为零变化。
+  // 注意：这是「分发版本」维度，与 channel（byok/platform 运行形态开关）正交，勿混用。
+  const fileBase =
+    edition && edition !== "internal" && /^[a-z0-9][a-z0-9-]{0,23}$/.test(edition)
+      ? `client-manifest.${edition}.json`
+      : "client-manifest.json";
   let file: Partial<ClientManifestDto> = {};
   try {
     file = JSON.parse(
       await readFile(
-        join(process.cwd(), "config", "client-manifest.json"),
+        join(process.cwd(), "config", fileBase),
         "utf8",
       ),
     ) as Partial<ClientManifestDto>;
@@ -59,8 +66,9 @@ async function readClientManifest(): Promise<ClientManifestDto> {
 }
 
 export function registerClientManifestRoutes(app: FastifyInstance): void {
-  app.get("/api/client/manifest", async () => {
-    const manifest = await readClientManifest();
+  app.get("/api/client/manifest", async (request) => {
+    const query = (request.query ?? {}) as { edition?: string };
+    const manifest = await readClientManifest(query.edition?.trim() || null);
     return { ok: true, ...manifest };
   });
 }

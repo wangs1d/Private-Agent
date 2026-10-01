@@ -10,6 +10,8 @@
  * **主 Agent** 内置工具与核心库对齐（见 {@link isMasterAgentBuiltinTool}）；
  * `master.*` 委派工具由 `buildMasterSubAgentDelegateChatTools` 单独注入，不在此判定内。
  */
+import { isOssEdition } from "../../config/env.js";
+
 export const CORE_TOOL_LIBRARY = {
   essential: {
     label: "会话基础设施",
@@ -41,6 +43,9 @@ export const CORE_TOOL_LIBRARY = {
       "calendar.list_tasks",
       "calendar.delete_task",
       "reminder.plan",
+      // 用户画像自编辑（2026-09-29）：「越来越了解用户」是每轮对话的基本动作，
+      // 进延迟目录模型会忘记搜、直接嘴硬说记了（真机实证），必须常驻可见。
+      "profile.update",
       "phone.ensure_my_number",
       "phone.call_user",
       "agent.send_to_peer",
@@ -79,6 +84,19 @@ export const CORE_TOOL_LIBRARY = {
   },
 } as const;
 
+/**
+ * 开源版（NEXTBOT_EDITION=oss）从核心常驻名单剔除的条目：
+ * 虚拟电话（phone.*）+ 好友/中继（agent.link.*、agent.send_to_peer）。
+ * 这些工具在开源版不注册执行器，留在 core 名单会变成 LLM 可见但不可调的死条目。
+ */
+const OSS_EXCLUDED_CORE_EXACT = new Set<string>([
+  "phone.ensure_my_number",
+  "phone.call_user",
+  "agent.send_to_peer",
+]);
+
+const OSS_EXCLUDED_CORE_PREFIXES: readonly string[] = ["phone.", "agent.link."];
+
 const CORE_EXACT_NAMES = new Set<string>([
   ...CORE_TOOL_LIBRARY.essential.names,
   ...CORE_TOOL_LIBRARY.dialogue.names,
@@ -98,8 +116,17 @@ export function classifyToolExposureTier(registryName: string): ToolExposureTier
 }
 
 export function isCoreToolRegistryName(name: string): boolean {
-  if (CORE_EXACT_NAMES.has(name)) return true;
-  return CORE_PREFIXES.some((p) => name.startsWith(p));
+  // 内测版（默认）：全量 core，与历史行为一致
+  if (!isOssEdition()) {
+    if (CORE_EXACT_NAMES.has(name)) return true;
+    return CORE_PREFIXES.some((p) => name.startsWith(p));
+  }
+  // 开源版：剔除电话/好友家族
+  if (CORE_EXACT_NAMES.has(name)) return !OSS_EXCLUDED_CORE_EXACT.has(name);
+  return (
+    CORE_PREFIXES.some((p) => name.startsWith(p)) &&
+    !OSS_EXCLUDED_CORE_PREFIXES.some((p) => name.startsWith(p))
+  );
 }
 
 /** @deprecated 使用 {@link isCoreToolRegistryName}；保留别名供旧 import。 */

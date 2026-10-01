@@ -31,6 +31,14 @@ export type PreparePromptCachePlanArgs = {
   tools?: ChatCompletionTool[];
   variant?: string;
   /**
+   * 会话级稳定层冻结（2026-09-29 P0-1②）：传入 sessionId 时，同一会话+
+   * 同一签名（model/variant/baseSystem/includeRenderProtocol）的 stableSystemPrompt
+   * 以首轮为快照冻结——后续轮稳定层字节完全一致，DeepSeek 隐式前缀缓存可
+   * 命中 system+历史 前缀。稳定层记忆中途写入（画像抽取/理解修订）下一会话
+   * 生效，本会话内动态层不受影响。STABLE_PROMPT_SESSION_FREEZE=0 关闭。
+   */
+  sessionId?: string;
+  /**
    * 是否注入展示形式协议（默认 true）。ephemeral 工具调用（简报润色/摘要/改写
    * 等，输出由程序消费、无聊天渲染管线）传 false——协议进入这些调用只会诱导
    * 模型输出 [RENDER_HINT:xxx]，而下游无剥除层，标记直透用户屏幕。
@@ -169,13 +177,23 @@ export function preparePromptCachePlan(
     args.includeRenderProtocol !== false,
   );
 
+  // P0-1② 会话级冻结：同会话+同签名沿用首轮 stable 快照（字节稳定 → 前缀
+  // 缓存可命中）。冻结只覆盖 requestSystemMessages/promptCache key 的 stable
+  // 部分；fullSystemPrompt 的动态段与 tailDynamicContext 每轮照常新鲜。
+  const frozenStable = freezeStableForSession(args, stableSystemPrompt);
+  const stableToUse = frozenStable;
+  const fullToUse =
+    dynamicSystemPrompt && frozenStable !== stableSystemPrompt
+      ? `${frozenStable}\n\n${dynamicSystemPrompt}`
+      : fullSystemPrompt;
+
   // P0-2 前缀稳定化：requestSystemMessages 只保留静态 system（stable）——
   // volatile 动态上下文（记忆图联想检索/当前时间/意图理解等）不再作为独立 system
   // 放在请求头部（任何记忆变化都会使整段前缀缓存失效），改经 tailDynamicContext
   // 沉底注入到「最新 user 消息尾部」。DeepSeek 等 provider 的自动 prefix cache
   // 因此能命中稳定的 system+历史对话前缀，只有尾部动态增量产生新的缓存放量。
   const requestSystemMessages: ChatCompletionMessageParam[] = [
-    { role: "system", content: stableSystemPrompt },
+    { role: "system", content: stableToUse },
   ];
 
   const promptCache =
@@ -184,7 +202,7 @@ export function preparePromptCachePlan(
           prompt_cache_key: buildPromptCacheKey({
             profile,
             model: args.model,
-            stableSystemPrompt,
+            stableSystemPrompt: stableToUse,
             tools: args.tools,
             variant: args.variant,
           }),
@@ -196,11 +214,56 @@ export function preparePromptCachePlan(
 
   return {
     profile,
-    fullSystemPrompt,
+    fullSystemPrompt: fullToUse,
     requestSystemMessages,
     tailDynamicContext: dynamicSystemPrompt,
     promptCache,
   };
+}
+
+/**
+ * 会话级稳定层快照（P0-1②，2026-09-29）：key = sessionId|model|variant|baseHash|renderFlag。
+ * 首轮写入快照；后续轮无论稳定层记忆是否中途更新（画像抽取每轮写、理解档案
+ * 修订等），都沿用首轮字节——更新下个会话自然生效。无 sessionId / 开关关闭 /
+ * LRU 淘汰后重开新快照：行为退回逐轮渲染（正确性不受影响，只是缓存差）。
+ */
+const SESSION_STABLE_SNAPSHOT = new Map<string, string>();
+const SESSION_STABLE_SNAPSHOT_MAX = 256;
+
+function stableFreezeEnabled(): boolean {
+  return envEnabled("STABLE_PROMPT_SESSION_FREEZE", true);
+}
+
+function freezeStableForSession(
+  args: PreparePromptCachePlanArgs,
+  stableSystemPrompt: string,
+): string {
+  if (!args.sessionId || !stableFreezeEnabled()) return stableSystemPrompt;
+  const key = [
+    args.sessionId,
+    args.model,
+    args.variant ?? "chat",
+    createHash("sha256").update(args.baseSystemPrompt).digest("hex").slice(0, 16),
+    args.includeRenderProtocol !== false ? "r1" : "r0",
+  ].join("|");
+  const existing = SESSION_STABLE_SNAPSHOT.get(key);
+  if (existing !== undefined) {
+    // LRU touch
+    SESSION_STABLE_SNAPSHOT.delete(key);
+    SESSION_STABLE_SNAPSHOT.set(key, existing);
+    return existing;
+  }
+  if (SESSION_STABLE_SNAPSHOT.size >= SESSION_STABLE_SNAPSHOT_MAX) {
+    const oldest = SESSION_STABLE_SNAPSHOT.keys().next().value as string | undefined;
+    if (oldest !== undefined) SESSION_STABLE_SNAPSHOT.delete(oldest);
+  }
+  SESSION_STABLE_SNAPSHOT.set(key, stableSystemPrompt);
+  return stableSystemPrompt;
+}
+
+/** 仅供测试使用：清空会话稳定层快照 */
+export function resetStablePromptSnapshotForTest(): void {
+  SESSION_STABLE_SNAPSHOT.clear();
 }
 
 /** 沉底块的包裹标签：让 LLM 明确这是本轮系统注入的上下文，而非用户消息正文。 */

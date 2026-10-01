@@ -136,11 +136,15 @@ describe("destinationCoverStore (封面缓存)", () => {
     });
   });
 
-  it("落盘持久化：临时目录出现 destination-covers.json 且含归一化键", () => {
+  it("落盘持久化：临时目录出现 destination-covers.json（v2 形状）且含归一化键", () => {
     const file = join(coverDir, "destination-covers.json");
     assert.ok(existsSync(file));
-    const raw = JSON.parse(readFileSync(file, "utf-8")) as Record<string, { url: string }>;
-    assert.equal(raw["杭州"]?.url, "https://x/westlake.jpg");
+    const raw = JSON.parse(readFileSync(file, "utf-8")) as {
+      version: number;
+      covers: Record<string, { url: string }>;
+    };
+    assert.equal(raw.version, 2);
+    assert.equal(raw.covers["杭州"]?.url, "https://x/westlake.jpg");
   });
 
   it("空 URL 拒绝写入：不产生坏缓存条目", () => {

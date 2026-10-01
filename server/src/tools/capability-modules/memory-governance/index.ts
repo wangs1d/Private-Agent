@@ -1,7 +1,8 @@
 /**
  * 记忆治理能力模块（capability-module）。
  *
- * memory.forget（用户侧定向遗忘统一入口）+ activity.timeline（行为审计只读视图）。
+ * memory.forget（用户侧定向遗忘统一入口）+ activity.timeline（行为审计只读视图）
+ * + profile.update（agent 自编辑用户画像，说话算话的「记」）。
  */
 import { MEMORY_GOVERNANCE_CHAT_TOOLS } from "./chat-tools.js";
 import { registerMemoryGovernanceTools, type MemoryGovernanceModuleDeps } from "./handlers.js";

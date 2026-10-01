@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -79,12 +81,17 @@ class DynamicIslandController extends ChangeNotifier {
   int _taskPlaneCount = 0;
   bool _foregroundAgentActive = false;
   int _ambientUnread = 0;
+
+  /// 消息聚合未读（微信/QQ/飞书等多来源平台消息）：与站内信分账，
+  /// hover 环境行合并为同一个「N 未读」。
+  int _messageHubUnread = 0;
   String _agentStatusLine = '';
 
   IslandEntry? get entry => _entry;
   bool get expanded => _expanded;
   List<IslandAgentStep> get agentSteps => _agentSteps;
-  int get ambientUnread => _ambientUnread;
+  /// hover 环境行未读总数（站内信 + 消息聚合）。
+  int get ambientUnread => _ambientUnread + _messageHubUnread;
   String get agentStatusLine => _agentStatusLine;
 
   /// agent 是否在忙：后台任务面有活任务，或前台轮次处理中。
@@ -126,6 +133,16 @@ class DynamicIslandController extends ChangeNotifier {
     _ambientUnread = count;
     notifyListeners();
   }
+
+  /// 消息聚合未读数（hover 环境行与站内信合并展示）。
+  void setMessageHubUnread(int count) {
+    if (_messageHubUnread == count) return;
+    _messageHubUnread = count;
+    notifyListeners();
+  }
+
+  /// 消息聚合未读原始值（岛旁挂件数据源；hover 行用合并后的 [ambientUnread]）。
+  int get messageHubUnread => _messageHubUnread;
 
   /// 展示/刷新一条信息。同 id 原地刷新；不同 id 按优先级抢占或排队。
   /// 语音模式独占期间，非语音条目改道停泊区（不抢屏）。
@@ -239,6 +256,13 @@ class DynamicIslandLauncher {
   DynamicIslandController? _controller;
   bool _nativeReady = false;
   bool _syncingFromNative = false;
+  // 岛旁独立消息卡的最近数据缓存：原生窗口重建后随状态同步补推。
+  List<Map<String, Object?>> _lastMessageRows = const <Map<String, Object?>>[];
+  // create 失败退避重试（2026-09-28 根治）：此前一次失败 = 整进程无岛且零日志。
+  Timer? _createRetryTimer;
+  int _createAttempts = 0;
+  // 看门狗：窗口定时器随窗口同死，窗口失活的自愈只能活在窗口之外。
+  Timer? _watchdogTimer;
 
   /// 原生窗口是否就绪（E2E 断言用）。
   bool get isNativeReady => _nativeReady;
@@ -260,13 +284,7 @@ class DynamicIslandLauncher {
     if (_controller != null) return;
     _controller = controller;
     controller.addListener(_syncToNative);
-    try {
-      _nativeReady = await _channel.invokeMethod<bool>('create') ?? false;
-    } on PlatformException catch (_) {
-      _nativeReady = false;
-    } on MissingPluginException catch (_) {
-      _nativeReady = false;
-    }
+    await _ensureNativeCreated();
     _channel.setMethodCallHandler((MethodCall call) async {
       if (call.method == 'onNativeEvent') {
         final Map<dynamic, dynamic> args =
@@ -292,7 +310,65 @@ class DynamicIslandLauncher {
       }
       return null;
     });
+    _startWatchdog();
     _syncToNative();
+  }
+
+  /// 创建原生窗口：失败带日志退避重试（2s/5s/10s，之后每 30s 兜底），
+  /// 不再静默终身放弃。重试成功时补一次全量状态同步。
+  Future<void> _ensureNativeCreated() async {
+    if (_nativeReady) return;
+    _createAttempts += 1;
+    Object? error;
+    try {
+      _nativeReady = await _channel.invokeMethod<bool>('create') ?? false;
+    } on PlatformException catch (e) {
+      error = e;
+    } on MissingPluginException catch (e) {
+      error = e;
+    }
+    if (_nativeReady) {
+      _createRetryTimer?.cancel();
+      _createRetryTimer = null;
+      if (_createAttempts > 1) {
+        debugPrint('[dynamic-island] 原生窗口第 $_createAttempts 次尝试创建成功');
+        unawaited(_syncToNative());
+      }
+      return;
+    }
+    debugPrint('[dynamic-island] 原生窗口创建失败（第 $_createAttempts 次）：'
+        '$error，将退避重试');
+    final int delaySec = switch (_createAttempts) {
+      1 => 2,
+      2 => 5,
+      3 => 10,
+      _ => 30,
+    };
+    _createRetryTimer?.cancel();
+    _createRetryTimer = Timer(Duration(seconds: delaySec), () {
+      unawaited(_ensureNativeCreated());
+    });
+  }
+
+  /// 窗口活体看门狗：周期 ping 原生句柄，失活（曾被外部销毁）即走重建链。
+  /// 2026-09-28 取证发现：岛窗口创建成功后仍可能被外部销毁，而 C++ 悬空
+  /// 句柄会让 create 空转返回 true——看门狗是窗口生命周期之外的兜底。
+  void _startWatchdog() {
+    _watchdogTimer?.cancel();
+    _watchdogTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
+      if (!_nativeReady) return;  // 重试链在跑时让路
+      bool alive = true;
+      try {
+        alive = await _channel.invokeMethod<bool>('ping') ?? false;
+      } catch (_) {
+        return;  // 通道瞬时异常：交给下一轮
+      }
+      if (alive) return;
+      debugPrint('[dynamic-island] 原生窗口失活，触发重建');
+      _nativeReady = false;
+      _createAttempts = 0;
+      unawaited(_ensureNativeCreated());
+    });
   }
 
   /// 提醒时刻的 attention 动画：放大 2 倍 + 高亮脉冲。
@@ -319,6 +395,16 @@ class DynamicIslandLauncher {
     } on PlatformException catch (_) {}
   }
 
+  /// 岛旁独立消息卡数据（最近会话预览行）；缓存待原生重建后补推。
+  Future<void> setMessagesPreview(List<Map<String, Object?>> items) async {
+    _lastMessageRows = items;
+    if (!_nativeReady) return;
+    try {
+      await _channel.invokeMethod<bool>('setMessagesPreview',
+          <String, Object?>{'items': items});
+    } on PlatformException catch (_) {}
+  }
+
   Future<void> _syncToNative() async {
     if (!_nativeReady || _controller == null || _syncingFromNative) return;
     final IslandEntry? e = _controller!.entry;
@@ -337,11 +423,12 @@ class DynamicIslandLauncher {
       }
       await _channel.invokeMethod<bool>('setExpanded',
           <String, Object?>{'expanded': _controller!.expanded});
-      // hover 态环境行 + 展开卡任务动态：轻量数据随状态同步直推。
+      // hover 态环境行 + 展开卡任务动态 + 岛旁消息挂件：轻量数据随状态同步直推。
       await _channel.invokeMethod<bool>('setAmbient', <String, Object?>{
         'unread': _controller!.ambientUnread,
         'agentActive': _controller!.agentActive,
         'agentStatus': _controller!.agentStatusLine,
+        'messageHub': _controller!.messageHubUnread,
       });
       await _channel.invokeMethod<bool>('setAgentSteps', <String, Object?>{
         'labels': <String>[
@@ -351,6 +438,10 @@ class DynamicIslandLauncher {
           for (final IslandAgentStep s in _controller!.agentSteps) s.state
         ],
       });
+      if (_lastMessageRows.isNotEmpty) {
+        await _channel.invokeMethod<bool>('setMessagesPreview',
+            <String, Object?>{'items': _lastMessageRows});
+      }
     } on PlatformException catch (_) {}
   }
 }
@@ -489,6 +580,29 @@ class IslandReminderScheduler {
 /// 启动灵动岛（应用初始化时调用一次）：绑定控制器。
 /// 数据全部来自真实事件源（IslandRealFeeds），无演示模式。
 Future<void> initDynamicIsland() async {
+  if (kDebugMode) {
+    // 真机取证口：VM service 直查岛的原生窗口创建状态，并现场探测一次
+    // create 调用（带 3 秒超时）——用于诊断「岛没上屏」类问题（2026-09-28）。
+    developer.registerExtension('ext.pai.debug.islandState', (method, parameters) async {
+      final DynamicIslandLauncher l = DynamicIslandLauncher.instance;
+      final Map<String, Object?> info = <String, Object?>{
+        'controllerAttached': l._controller != null,
+        'nativeReady': l._nativeReady,
+        'createAttempts': l._createAttempts,
+        'retryTimerActive': l._createRetryTimer != null,
+      };
+      final Stopwatch sw = Stopwatch()..start();
+      try {
+        info['probeCreate'] = await DynamicIslandLauncher._channel
+            .invokeMethod<bool>('create')
+            .timeout(const Duration(seconds: 3));
+      } catch (e) {
+        info['probeCreateError'] = e.toString();
+      }
+      info['probeMs'] = sw.elapsedMilliseconds;
+      return developer.ServiceExtensionResponse.result(jsonEncode(info));
+    });
+  }
   await DynamicIslandLauncher.instance
       .attach(DynamicIslandController.instance);
 }
@@ -576,6 +690,19 @@ class IslandRealFeeds {
     } else {
       _c.dismiss('inbox');
     }
+  }
+
+  /// 消息聚合未读（多来源平台消息轮询驱动）。不做胶囊条目：
+  /// 原生在胶囊右缘画小挂件（信封 + 未读数，点击展开独立消息卡），
+  /// 数值随 setAmbient 全量同步，原生窗口重建后自动恢复。
+  static void setMessageHubUnread(int count) {
+    debugPrint('[island-feed] setMessagesUnread=$count');
+    _c.setMessageHubUnread(count);
+  }
+
+  /// 独立消息卡预览行（最近会话，挂件点开即看，与应用内隔离）。
+  static void setMessagesPreview(List<Map<String, Object?>> items) {
+    _l.setMessagesPreview(items);
   }
 
   // ───────────────────── 纯语音模式（岛=唯一视觉） ─────────────────────

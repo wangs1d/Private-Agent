@@ -22,7 +22,7 @@ import {
   syncPreferredToneInProfile,
   truncateProfileForPrompt,
 } from "./profile-heuristics.js";
-import { UserProfileStore } from "./user-profile-store.js";
+import { UserProfileStore, hasRealProfileContent } from "./user-profile-store.js";
 import {
   decayFactStore,
   defaultFactStore,
@@ -785,7 +785,8 @@ export class UserPersonalizationService {
     const maxChars = Number.parseInt(process.env.AGENT_USER_PROFILE_PROMPT_MAX_CHARS ?? "3500", 10);
     const cap = Number.isFinite(maxChars) && maxChars > 400 ? maxChars : 3500;
     // 结构感知截断：超长时先丢备注/兴趣等次要 section，绝不丢【基本信息】里的姓名/所在地
-    const userProfile = truncateProfileForPrompt(profile, cap);
+    // 模板画像（无任何真实事实）不注入：省 token 且不给 LLM 喂「待了解」占位噪声
+    const userProfile = hasRealProfileContent(profile) ? truncateProfileForPrompt(profile, cap) : undefined;
     // 2026-09-06 瘦身：toneGuidance 只保留本轮长度控制 + 情绪语气（有显著情绪才多行）。
     // 删除：基础回复纪律（与【说话方式】稳定层基准重复）、触达时段/渠道/行为倾向/事实摘要
     // （与回复风格无关或已有独立块）。风格基准单点在 prompt-assembler 的【说话方式】块。
@@ -805,6 +806,22 @@ export class UserPersonalizationService {
         relationshipSummaryLine(relationship, replyLength, userText),
       ].filter(Boolean).join("\n"),
     };
+  }
+
+  /**
+   * chat 面轻量切片（2026-09-29 画像接通对话面）：只读文件画像，零副作用——
+   * 不走 getPromptSlice 的 apply* 状态学习序列（那些由 finalizeTurn 的
+   * observeTurn 每轮承担，chat 面再跑一遍会双写）；语气仍由 mood/风格闸单点管，
+   * 不注入 toneGuidance/relationshipGuidance（避免双头）。
+   * 模板画像（无真实事实）返回空切片，不占 token。
+   */
+  async getProfileOnlySlice(actorId: string): Promise<PersonalizationPromptSlice> {
+    if (!isUserPersonalizationEnabled()) return {};
+    const profile = await this.store.read(actorId);
+    if (!hasRealProfileContent(profile)) return {};
+    const maxChars = Number.parseInt(process.env.AGENT_USER_PROFILE_PROMPT_MAX_CHARS ?? "3500", 10);
+    const cap = Number.isFinite(maxChars) && maxChars > 400 ? maxChars : 3500;
+    return { userProfile: truncateProfileForPrompt(profile, cap) };
   }
 
   getRelationshipState(actorId: string): PersonalizationRelationshipState {

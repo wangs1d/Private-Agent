@@ -1,8 +1,79 @@
+import "dart:async" show StreamSubscription;
+import "dart:convert";
+import "dart:io" show HttpClient, HttpClientRequest, HttpClientResponse, HttpHeaders;
+
 import "package:flutter/material.dart";
+import "package:flutter/painting.dart" show debugNetworkImageHttpClientProvider;
 import "package:flutter_test/flutter_test.dart";
 
 import "package:private_ai_agent/core/utils/agent_result_parser.dart";
 import "package:private_ai_agent/features/chat/agent_result_card.dart";
+
+/// 1x1 透明 PNG（候选链回退测试的「真实可解码图」）
+const String _kPng1x1Base64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/// 极简假 HTTP 客户端：按 URL 决定状态码，200 时回 1x1 PNG 字节。
+/// 只实现 NetworkImage 走到的路径，其余成员 noSuchMethod 兜底。
+class _FakeHttpClient implements HttpClient {
+  _FakeHttpClient(this._statusFor);
+
+  final int Function(Uri url) _statusFor;
+
+  @override
+  Future<HttpClientRequest> getUrl(Uri url) async => _FakeRequest(_statusFor(url));
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError("unexpected: ${invocation.memberName}");
+}
+
+class _FakeRequest implements HttpClientRequest {
+  _FakeRequest(this.statusCode);
+
+  final int statusCode;
+
+  @override
+  Future<HttpClientResponse> close() async => _FakeResponse(statusCode);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError("unexpected: ${invocation.memberName}");
+}
+
+class _FakeResponse extends Stream<List<int>> implements HttpClientResponse {
+  _FakeResponse(this._statusCode);
+
+  final int _statusCode;
+
+  late final Stream<List<int>> _delegate = Stream<List<int>>.value(
+    _statusCode < 400 ? base64Decode(_kPng1x1Base64) : <int>[],
+  );
+
+  @override
+  StreamSubscription<List<int>> listen(
+    void Function(List<int> element)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) =>
+      _delegate.listen(onData, onError: onError, onDone: onDone, cancelOnError: cancelOnError);
+
+  @override
+  int get statusCode => _statusCode;
+
+  @override
+  HttpHeaders get headers => _FakeHeaders();
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError("unexpected: ${invocation.memberName}");
+}
+
+class _FakeHeaders implements HttpHeaders {
+  @override
+  String? value(String name) => name == HttpHeaders.contentTypeHeader ? "image/png" : null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError("unexpected: ${invocation.memberName}");
+}
 
 AgentResultData _structuredPlanData() {
   return AgentResultData(
@@ -102,7 +173,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
   }
 
-  testWidgets("海报卡：徽章/天数/日期区间/简介/记得带/按钮渲染，卡面直读每日安排", (WidgetTester tester) async {
+  testWidgets("海报卡：徽章/天数/日期区间/简介/记得带/按钮渲染", (WidgetTester tester) async {
     await pumpCard(tester, _structuredPlanData());
 
     expect(find.text("马尔代夫"), findsOneWidget);
@@ -114,11 +185,9 @@ void main() {
     expect(find.text("打开行程规划"), findsOneWidget);
     expect(find.text("共 5 天 · 1 项安排"), findsOneWidget);
 
-    // 2026-09-17 用户需求反转（此前的「明细只在规划界面」作废）：
-    // 行程卡即独立的规划卡——卡面直接逐日展示安排（Day 摘要），不点开也能看规划
-    expect(find.textContaining("Day 1"), findsOneWidget);
-    expect(find.textContaining("Day 2"), findsOneWidget);
-    expect(find.textContaining("Day 3"), findsOneWidget);
+    // 2026-09-25 用户定稿「卡面极简」：逐日地标串不再上卡面（旧断言要求 Day
+    // 摘要在卡面，与定稿相反），卡面只保留 海报 + 叮嘱 + 主入口 + 脚注
+    expect(find.textContaining("Day 1"), findsNothing);
   });
 
   testWidgets("海报背景优先目的地代表性封面（目的地形象照），而非首个有图景点", (WidgetTester tester) async {
@@ -146,6 +215,52 @@ void main() {
     expect(find.text("马尔代夫"), findsOneWidget);
     expect(find.text("记得带"), findsNothing);
     expect(find.text("印度洋上的珊瑚岛国，一岛一酒店，以水上屋、浮潜与纯净泻湖闻名"), findsNothing);
+  });
+
+  testWidgets("Wikimedia 远程封面重写到本机代理路由（客户端网络不可直连）", (WidgetTester tester) async {
+    final Map<String, dynamic> tp = Map<String, dynamic>.from(
+      _structuredPlanData().travelPlan!,
+    )..["coverImage"] = "https://upload.wikimedia.org/wikipedia/commons/thumb/x.jpg";
+    await pumpCard(
+      tester,
+      AgentResultData(
+        cardType: "travel_itinerary",
+        title: "大理5日游·海景",
+        items: _structuredPlanData().items,
+        travelPlan: tp,
+      ),
+    );
+
+    final Iterable<Image> images = tester.widgetList<Image>(find.byType(Image));
+    expect(images, isNotEmpty);
+    final NetworkImage poster = images.first.image as NetworkImage;
+    // 测试环境默认 httpBase = http://127.0.0.1:3000
+    expect(poster.url, startsWith("http://127.0.0.1:3000/travel/media/remote?u="));
+    expect(poster.url, contains("upload.wikimedia.org"));
+  });
+
+  testWidgets("封面加载失败自动回退到下一张条目实拍，不再永远渐变", (WidgetTester tester) async {
+    // 假 HTTP：封面 404、条目实拍 200（1x1 PNG）——验证候选链推进到下一张上屏
+    debugNetworkImageHttpClientProvider =
+        () => _FakeHttpClient((Uri url) => url.toString().contains("/poster.jpg") ? 200 : 404);
+    await pumpCard(tester, _coverPlanData());
+
+    // 候选链：封面失败 → 推进 → 条目实拍上屏（给足推进帧）
+    bool advancedToEntry = false;
+    for (int i = 0; i < 8; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+      final Iterable<Image> images = tester.widgetList<Image>(find.byType(Image));
+      if (images.isNotEmpty) {
+        final String url = (images.first.image as NetworkImage).url;
+        if (url.contains("/poster.jpg")) {
+          advancedToEntry = true;
+          break;
+        }
+      }
+    }
+    expect(advancedToEntry, isTrue, reason: "封面失败后应由条目实拍补位海报");
+    // painting 调试变量必须在测试体结束前复位（不变量检查先于 tearDown 跑）
+    debugNetworkImageHttpClientProvider = null;
   });
 
   testWidgets("结构化 days 全空回退文本解析：「全程」空骨架天不计入天数徽章", (WidgetTester tester) async {

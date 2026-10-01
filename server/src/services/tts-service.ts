@@ -1,17 +1,14 @@
 import OpenAI from "openai";
-import { SiliconFlowTTSAdapter } from "./voice-dialogue/adapters/siliconflow-tts-adapter.js";
 import { MiniMaxTTSAdapter } from "./voice-dialogue/adapters/minimax-tts-adapter.js";
 
 /**
  * 文本转语音服务：
  * - 优先使用 MiniMax TTS（speech-2.5，中文拟真度最佳，按字符计费）
- * - 回退到硅基流动 TTS（OpenAI 兼容接口）
- * - 再回退到 OpenAI TTS
+ * - 回退到 OpenAI TTS
  * - 均未配置时仅返回文本供前端本地播报
  */
 export class TtsService {
   private readonly openai: OpenAI | null;
-  private readonly siliconflow: SiliconFlowTTSAdapter | null;
   private readonly minimax: MiniMaxTTSAdapter | null;
 
   constructor() {
@@ -20,21 +17,15 @@ export class TtsService {
     const baseURL = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").trim();
     this.openai = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
 
-    // 硅基流动 TTS
-    this.siliconflow = new SiliconFlowTTSAdapter();
-    if (!this.siliconflow.isEnabled()) {
-      // 无 API Key 时静默，后续回退到 OpenAI
-    }
-
     // MiniMax TTS（speech-2.5）
     this.minimax = new MiniMaxTTSAdapter();
     if (!this.minimax.isEnabled()) {
-      // 无 API Key 时静默，回退到硅基流动 / OpenAI
+      // 无 API Key 时静默，回退到 OpenAI
     }
   }
 
   isEnabled(): boolean {
-    return this.minimax?.isEnabled() || this.siliconflow?.isEnabled() || this.openai !== null;
+    return this.minimax?.isEnabled() || this.openai !== null;
   }
 
   /**
@@ -42,14 +33,13 @@ export class TtsService {
    */
   getProvider(): string {
     if (this.minimax?.isEnabled()) return "minimax";
-    if (this.siliconflow?.isEnabled()) return "siliconflow";
     if (this.openai) return "openai";
     return "none";
   }
 
   /**
    * 生成为 mp3 的 base64；未配置密钥或失败时 ok=false，语音通话仍可以仅靠 transcript。
-   * 优先 MiniMax TTS，失败后回退硅基流动，再回退 OpenAI TTS
+   * 优先 MiniMax TTS，失败后回退 OpenAI TTS
    */
   async synthesizeMp3Base64(text: string): Promise<
     | { ok: true; format: "mp3"; base64: string; provider?: string }
@@ -66,7 +56,7 @@ export class TtsService {
    */
   async synthesizeMp3Buffer(text: string): Promise<
     | { ok: true; format: "mp3"; buffer: Buffer; provider?: string }
-    | { ok: false; reason: string }
+    | { ok: false, reason: string }
   > {
     const trimmed = text.trim();
     if (!trimmed) return { ok: false, reason: "empty text" };
@@ -80,19 +70,7 @@ export class TtsService {
         return { ok: true, format: "mp3", buffer: result.data, provider: "minimax" };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        console.warn(`[TtsService] MiniMax TTS 失败，回退到硅基流动: ${msg}`);
-      }
-    }
-
-    // 2. 回退到硅基流动 TTS
-    if (this.siliconflow?.isEnabled()) {
-      try {
-        const result = await this.siliconflow.synthesize(clipped);
-        console.log(`[TtsService] 使用硅基流动 TTS 合成成功 (${result.data.length} bytes)`);
-        return { ok: true, format: "mp3", buffer: result.data, provider: "siliconflow" };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.warn(`[TtsService] 硅基流动 TTS 失败，回退到 OpenAI: ${msg}`);
+        console.warn(`[TtsService] MiniMax TTS 失败，回退到 OpenAI: ${msg}`);
       }
     }
 
@@ -113,6 +91,6 @@ export class TtsService {
       }
     }
 
-    return { ok: false, reason: "未配置任何 TTS 服务（MINIMAX_API_KEY / SILICONFLOW_API_KEY / OPENAI_API_KEY）" };
+    return { ok: false, reason: "未配置任何 TTS 服务（MINIMAX_API_KEY / OPENAI_API_KEY）" };
   }
 }

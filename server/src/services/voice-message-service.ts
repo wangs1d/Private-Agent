@@ -9,7 +9,7 @@ import type { TtsService } from "./tts-service.js";
  * 设计目标：
  *   1. **作为 Agent 底层能力**：与 socialFeedService 解耦，独立目录 `data/voice-messages/`。
  *   2. **可重播**：每个文件名 = `{actorId}/{msgId}.mp3`，客户端可通过 `GET /agent/voice/messages/:actorId/:msgId.mp3` 反复拉流。
- *   3. **时长估算**：mp3 CBR 下 size ÷ bitrate ≈ duration；bitrate 默认 24kbps（tts-1 模型约 32kbps，硅基流动约 24kbps）。
+ *   3. **时长估算**：mp3 CBR 下 size ÷ bitrate ≈ duration；bitrate 默认 24kbps（tts-1 模型约 32kbps，MiniMax 约 24kbps）。
  *      粗估够用，UI 只需展示秒数，不需要 ffprobe 级精度。
  *   4. **波形降级**：服务端不生成波形数据（避免解码 mp3），客户端可用静默 placeholder 渲染；
  *      用户端上传时由客户端采集 waveform 后随消息体一起发送。

@@ -63,6 +63,11 @@ export function renderAdminConsolePage(): string {
   }
   nav a:hover { background: rgba(255,255,255,.06); color: #d5dbe7; }
   nav a.on { background: rgba(47,107,255,.18); color: #fff; box-shadow: inset 2px 0 0 var(--accent); }
+  .nav-badge {
+    display: none; min-width: 17px; text-align: center; margin-left: 7px;
+    background: #dc2626; color: #fff; font-size: 10.5px; font-weight: 600;
+    border-radius: 999px; padding: 0 5px; line-height: 16px; vertical-align: 1px;
+  }
   .tokenbox { border-top: 1px solid rgba(255,255,255,.08); padding: 12px 10px 4px; }
   .tokenbox label { font-size: 11px; display: block; margin-bottom: 6px; }
   .tokenbox input {
@@ -234,6 +239,15 @@ export function renderAdminConsolePage(): string {
     font-size: 10.5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px;
     padding: 0 5px; color: var(--faint); background: #fff;
   }
+  /* 反馈页轮询发现有新条目但当前草稿未保存时的提示条 */
+  .fb-newpill {
+    display: none; margin-bottom: 10px; padding: 7px 14px; cursor: pointer;
+    background: var(--accent-weak); border: 1px solid #c7d7fe; border-radius: 10px;
+    color: var(--accent-deep); font-size: 12.5px; width: fit-content;
+  }
+  .fb-newpill:hover { background: #e0eaff; }
+  .fb-resolvelab { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+  .fb-ver { font-size: 11px; color: var(--muted); background: #f4f6fa; border: 1px solid var(--line-soft); border-radius: 999px; padding: 0 8px; line-height: 18px; }
   .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
   .desc { white-space: pre-wrap; margin: 10px 0 4px; }
   table { border-collapse: collapse; width: 100%; }
@@ -279,9 +293,10 @@ export function renderAdminConsolePage(): string {
   <nav id="nav">
     <a href="#overview" data-tab="overview">概览</a>
     <a href="#users" data-tab="users">用户</a>
+    <a href="#whitelist" data-tab="whitelist">内测<span class="nav-badge" id="navBadgeWaitlist"></span></a>
     <a href="#messages" data-tab="messages">站内信</a>
     <a href="#payments" data-tab="payments">支付</a>
-    <a href="#feedback" data-tab="feedback">反馈管理</a>
+    <a href="#feedback" data-tab="feedback">反馈管理<span class="nav-badge" id="navBadgeFeedback"></span></a>
     <a href="#downloads" data-tab="downloads">下载分发</a>
     <a href="#system" data-tab="system">系统</a>
   </nav>
@@ -321,9 +336,27 @@ export function renderAdminConsolePage(): string {
     <div class="sub">注册数据 · 搜索 · 禁用/恢复（禁用后该用户无法继续对话）</div>
     <div class="toolbar">
       <input type="search" id="userKw" placeholder="搜索显示名 / 身份 ID / 邮箱">
+      <select id="userStatusSel">
+        <option value="">全部状态</option>
+        <option value="ok">正常</option>
+        <option value="disabled">已禁用</option>
+        <option value="incomplete">未完成初始化</option>
+      </select>
+      <select id="userSortSel">
+        <option value="newreg">最新注册优先</option>
+        <option value="oldreg">最早注册优先</option>
+        <option value="active">最近活跃优先</option>
+        <option value="feedback">反馈最多优先</option>
+      </select>
       <button class="btn primary" id="userRefresh">刷新</button>
     </div>
     <div id="usersBody"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section class="tab" id="tab-whitelist">
+    <h1>内测管理</h1>
+    <div class="sub">注册闸门 · 白名单 / 候补审批（用户登录页自助排队，这里批量通过，通过即邮件通知）· 踢人请到「用户」页禁用</div>
+    <div id="wlBody"><div class="empty">加载中…</div></div>
   </section>
 
   <section class="tab" id="tab-messages">
@@ -336,6 +369,16 @@ export function renderAdminConsolePage(): string {
   <section class="tab" id="tab-payments">
     <h1>支付</h1>
     <div class="sub">真实支付订单（微信 / 支付宝 live 通道）· 台账只记真实交易，模拟订单不落库</div>
+    <div class="toolbar" id="payToolbar" style="display:none">
+      <select id="payRange">
+        <option value="0">全部时间</option>
+        <option value="1">今天</option>
+        <option value="7">近 7 天</option>
+        <option value="30">近 30 天</option>
+      </select>
+      <button class="btn" id="payExportBtn">导出 CSV</button>
+      <span class="meta" id="payRangeHint"></span>
+    </div>
     <div id="paymentsBody"><div class="empty">加载中…</div></div>
   </section>
 
@@ -354,6 +397,7 @@ export function renderAdminConsolePage(): string {
       <button class="iconbtn" id="fbRefresh" title="刷新">⟳</button>
       <span class="fb-kbdhint"><span class="kbd">J</span> <span class="kbd">K</span> 切换条目</span>
     </div>
+    <div class="fb-newpill" id="fbNewPill"></div>
     <div class="fb-split">
       <div class="fb-pane"><div class="fb-rows" id="fbList"><div class="fb-empty">加载中…</div></div></div>
       <div class="fb-pane"><div class="fb-detail" id="fbDetail"><div class="fb-empty">加载中…</div></div></div>
@@ -372,6 +416,7 @@ export function renderAdminConsolePage(): string {
         <span class="meta" id="mfHint"></span>
       </div>
       <div class="meta" id="mfMeta" style="margin-top:6px"></div>
+      <div class="meta" id="mfHistory" style="margin-top:4px"></div>
     </div>
     <div class="toolbar">
       <input type="file" id="dlFile" style="display:none">
@@ -489,12 +534,41 @@ function showTab(name) {
   }
   if (name === "overview") loadOverview();
   else if (name === "users") loadUsers();
+  else if (name === "whitelist") loadWhitelist();
   else if (name === "payments") loadPayments();
   else if (name === "messages") { loadCompose(); loadMessages(); }
   else if (name === "feedback") loadFeedback();
   else if (name === "downloads") { loadDownloads(); loadManifest(); }
   else if (name === "system") loadSystem();
 }
+
+/** 带 hash 的跳转（跨标签按钮统一走这里，保持地址栏可分享/可回退）。 */
+function gotoTab(name) {
+  if (location.hash !== "#" + name) location.hash = "#" + name;
+  else showTab(name);
+}
+
+// ---------- 导航待办徽标 ----------
+function setNavBadge(id, n) {
+  var el = $(id);
+  if (!el) return;
+  if (n > 0) {
+    el.textContent = n > 99 ? "99+" : String(n);
+    el.style.display = "inline-block";
+  } else {
+    el.style.display = "none";
+  }
+}
+
+function refreshPendingBadge() {
+  api("/api/admin/pending-counts").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j || j.ok !== true) return;
+    setNavBadge("navBadgeFeedback", j.feedbackOpen || 0);
+    setNavBadge("navBadgeWaitlist", j.waitlistPending || 0);
+  }).catch(function () {});
+}
+// 60s 常驻轮询（页面隐藏时跳过）；反馈/内测页操作完成后也会即时刷新
+setInterval(function () { if (authed && !document.hidden) refreshPendingBadge(); }, 60000);
 
 // ---------- 通用小组件 ----------
 function statCard(n, label) {
@@ -530,6 +604,8 @@ function loadOverview() {
       var html = '<div class="stats">' +
         kpiCard(d.users.total, "注册用户", "今日 +" + d.users.newToday + " · 7 日 +" + d.users.new7d +
           (d.users.disabled ? " · 禁用 " + d.users.disabled : "")) +
+        kpiCard(d.users.active7d != null ? d.users.active7d : "-", "7 日活跃",
+          "今日活跃 " + (d.users.activeToday != null ? d.users.activeToday : "-")) +
         (d.messages
           ? kpiCard(d.messages.messages, "站内信", "今日 " + d.messages.today + " · 发出 " + d.messages.outbound)
           : kpiCard("-", "站内信", "未启用")) +
@@ -543,14 +619,30 @@ function loadOverview() {
         "</div>";
       html += '<div class="grid2" style="margin-bottom:12px">' +
         '<div class="card"><div class="card-title">注册趋势（近 14 天）</div>' + barChart(d.users.series, "#3b82f6") + "</div>" +
+        (d.orders && d.orders.series
+          ? '<div class="card"><div class="card-title">收入趋势（近 14 天 · ¥）</div>' + barChart(d.orders.series, "#16a34a") + "</div>"
+          : '<div class="card"><div class="card-title">收入趋势</div><div class="meta">支付未启用</div></div>') +
+        "</div>";
+      var oldestDays = null;
+      if (d.feedback.oldestOpenAt) {
+        var ms = Date.now() - Date.parse(d.feedback.oldestOpenAt);
+        if (Number.isFinite(ms)) oldestDays = Math.floor(ms / 86400000);
+      }
+      html += '<div class="grid2" style="margin-bottom:12px">' +
         '<div class="card"><div class="card-title">站内信趋势（近 14 天）</div>' +
         (d.messages ? barChart(d.messages.series, "#16a34a") : '<div class="meta">未启用</div>') +
-        "</div></div>";
-      html += '<div class="stats">' +
+        "</div>" +
+        '<div class="card"><div class="card-title">反馈处理</div><div class="stats" style="margin-bottom:0">' +
         statCard(d.feedback.open, "反馈 · 待处理") +
         statCard(d.feedback.processing, "反馈 · 处理中") +
         statCard(d.feedback.resolved, "反馈 · 已解决") +
-        "</div>";
+        "</div>" +
+        (d.feedback.open > 0 && oldestDays != null
+          ? '<div class="meta" style="margin-top:8px">最老的待处理提交于 ' +
+            (oldestDays >= 1 ? '<b style="color:var(--warn)">' + oldestDays + ' 天前</b>' : '今天') +
+            '，<a href="#feedback">去处理 →</a></div>'
+          : "") +
+        "</div></div>";
       html += '<div class="meta">服务器：运行 ' + fmtUptime(d.server.uptimeMs) + " · 内存 " +
         fmtBytes(d.server.rssBytes) + " · " + esc(d.server.nodeVersion) + " · " + esc(d.server.platform) +
         ' · <a href="#system">详细状态 →</a></div>';
@@ -564,21 +656,84 @@ function loadOverview() {
 
 // ---------- 反馈管理（左列表右详情工作台） ----------
 var fbSelId = null;
+// 跨页跳转：用户页点「反馈」时先记下要搜的身份，反馈列表加载完自动填入
+var pendingFeedbackSearch = null;
+// 自动刷新：45s 轮询，有未保存草稿时不重绘、只亮提示条
+var fbNewCount = 0;
+
+function fbSignature(items) {
+  var newest = "";
+  for (var i = 0; i < items.length; i++) {
+    var t = items[i].updatedAt || items[i].createdAt || "";
+    if (t > newest) newest = t;
+  }
+  return items.length + "@" + newest;
+}
+
+function fbHasDraft() {
+  var ta = document.querySelector("#fbDetail textarea");
+  if (!ta || !fbSelId) return false;
+  var r = fbFind(fbSelId);
+  return ta.value.trim() !== ((r && r.replyNote) || "").trim();
+}
+
+function renderFbNewPill() {
+  var el = $("fbNewPill");
+  if (!el) return;
+  if (fbNewCount > 0) {
+    el.textContent = "有 " + fbNewCount + " 条新反馈 / 状态更新 —— 你的回复草稿未保存，点击后刷新";
+    el.style.display = "block";
+  } else {
+    el.style.display = "none";
+  }
+}
+
+function fbPollTick() {
+  if (currentTab !== "feedback" || !authed || document.hidden) return;
+  api("/api/feedback?limit=500").then(function (r) { return r.json(); }).then(function (data) {
+    if (data.ok !== true) return;
+    var items = data.items || [];
+    if (fbSignature(items) === fbSignature(allFeedback)) return;
+    if (fbHasDraft()) {
+      // 正在写回复：不重绘（重绘会丢草稿），只提示
+      var known = {};
+      allFeedback.forEach(function (r) { known[r.id] = r.updatedAt || r.createdAt || ""; });
+      fbNewCount = 0;
+      items.forEach(function (r) { if (known[r.id] !== (r.updatedAt || r.createdAt || "")) fbNewCount++; });
+      renderFbNewPill();
+      return;
+    }
+    applyFeedbackItems(items);
+  }).catch(function () {});
+}
+setInterval(fbPollTick, 45000);
+
+/** 用一份全量列表刷新工作台（尽量保住当前选中项）。 */
+function applyFeedbackItems(items) {
+  allFeedback = items;
+  fbNewCount = 0;
+  renderFbNewPill();
+  // 选中项被删/被筛掉时回落到列表第一条
+  if (fbSelId && !filteredFeedback().some(function (r) { return r.id === fbSelId; })) fbSelId = null;
+  if (!fbSelId) {
+    var first = filteredFeedback()[0];
+    if (first) fbSelId = first.id;
+  }
+  renderFbSeg();
+  renderFbList();
+  renderFbDetail();
+  refreshPendingBadge();
+}
 
 function loadFeedback() {
   clearErr();
   api("/api/feedback?limit=500").then(function (r) { return r.json(); }).then(function (data) {
     if (data.ok !== true) throw new Error("接口返回异常");
-    allFeedback = data.items || [];
-    // 选中项被删/被筛掉时回落到列表第一条
-    if (fbSelId && !filteredFeedback().some(function (r) { return r.id === fbSelId; })) fbSelId = null;
-    if (!fbSelId) {
-      var first = filteredFeedback()[0];
-      if (first) fbSelId = first.id;
+    if (pendingFeedbackSearch != null) {
+      $("fbKw").value = pendingFeedbackSearch;
+      pendingFeedbackSearch = null;
     }
-    renderFbSeg();
-    renderFbList();
-    renderFbDetail();
+    applyFeedbackItems(data.items || []);
   }).catch(function (e) {
     $("fbList").innerHTML = '<div class="fb-empty">加载失败</div>';
     showErr("反馈加载失败：" + e.message);
@@ -652,7 +807,11 @@ function renderFbDetail() {
   if (!r) { box.innerHTML = '<div class="fb-empty">左侧选择一条反馈</div>'; return; }
   var his = fbByUser(r.actorId);
   var diagKeys = Object.keys(r.diagnostics || {});
-  var h = '<div class="fb-dhead"><span class="fb-type">' + esc(TYPE_LABELS[r.type] || r.type) + '</span><div class="fb-statusseg">';
+  var h = '<div class="fb-dhead"><span class="fb-type">' + esc(TYPE_LABELS[r.type] || r.type) + "</span>" +
+    // 客户端版本 / 平台：判断「是不是新版才有的 bug」的第一眼信息
+    (r.clientVersion ? '<span class="fb-ver">v' + esc(r.clientVersion) + "</span>" : "") +
+    (r.platform ? '<span class="fb-ver">' + esc(r.platform) + "</span>" : "") +
+    '<div class="fb-statusseg">';
   ["open", "processing", "resolved"].forEach(function (st) {
     h += '<button data-act="fb-status" data-id="' + esc(r.id) + '" data-status="' + st + '"' +
       (st === r.status ? ' class="cur ' + st + '"' : "") + ">" + (STATUS_LABELS[st] || st) + "</button>";
@@ -670,6 +829,7 @@ function renderFbDetail() {
   h += '<div class="fb-userbox"><div class="fb-userline">' +
     '<span class="fb-uid-full">' + esc(r.actorId || "-") + "</span>" +
     '<button class="mini" data-act="fb-copyid" data-user="' + esc(r.actorId || "") + '">复制 ID</button>' +
+    (r.actorId ? '<button class="mini" data-act="fb-goto-user" data-user="' + esc(r.actorId) + '">查看账号</button>' : "") +
     (his.length > 1 ? '<button class="mini" data-act="fb-togglehis">他的反馈 · ' + his.length + " 条 ▾</button>" : "") +
     "</div>" +
     (his.length > 1 ? '<div class="fb-hisrows">' + his.map(function (x) {
@@ -686,6 +846,9 @@ function renderFbDetail() {
     (r.replyNote ? "补充新回复…" : "回复说明…（留空仅流转状态）") + '"></textarea>';
   h += '<div class="fb-actions"><button class="btn primary" data-act="fb-save" data-id="' + esc(r.id) + '"' +
     (r.replyNote ? " disabled" : "") + '>保存回复并通知</button>' +
+    (r.status !== "resolved"
+      ? '<label class="fb-resolvelab"><input type="checkbox" id="fb-resolve-' + esc(r.id) + '">保存后标记为已解决</label>'
+      : "") +
     '<span class="fb-savehint">状态流转即时生效，无需另存</span></div>';
   h += '<div class="fb-metafoot"><span>#' + esc(r.id) + "</span><span>·</span><span>" + fmtTime(r.createdAt) + "</span>" +
     (r.contact ? "<span>·</span><span>联系方式：" + esc(r.contact) + "</span>" : "") + "</div>";
@@ -732,29 +895,60 @@ function saveFeedbackReply(id) {
   var note = noteEl ? noteEl.value.trim() : "";
   var current = fbFind(id);
   if (!note || note === ((current && current.replyNote) || "").trim()) return;
-  updateFeedbackStatus(id, current ? current.status : "open");
+  // 勾选「保存后标记为已解决」则随回复一并流转
+  var resolveEl = $("fb-resolve-" + id);
+  var target = resolveEl && resolveEl.checked ? "resolved" : (current ? current.status : "open");
+  updateFeedbackStatus(id, target);
 }
 
 // ---------- 用户 ----------
+var userFbCounts = {};        // actorId -> 反馈条数（与反馈列表同源）
+var pendingUserSearch = null; // 跨页跳转：反馈页「查看账号」带过来的搜索词
+var pendingUserInbox = null;  // 跨页跳转：用户页「收件箱」要打开的目标
+
+function userStatusKey(u) {
+  if (u.disabled) return "disabled";
+  if (!u.setupComplete) return "incomplete";
+  return "ok";
+}
+
 function loadUsers() {
   clearErr();
   var body = $("usersBody");
-  api("/api/admin/users").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
-    .then(function (res) {
+  // 用户列表与反馈列表并行拉：反馈数列与「反馈最多」排序都要用
+  Promise.all([
+    api("/api/admin/users").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); }),
+    api("/api/feedback?limit=500").then(function (r) { return r.json(); }).catch(function () { return null; })
+  ])
+    .then(function (results) {
+      var res = results[0];
       if (res.code === 401) throw new Error("管理员会话已失效，请重新登录");
       if (res.code === 503) throw new Error("管理后台尚未初始化（无任何凭证）");
       allUsers = res.j.users || [];
+      userFbCounts = {};
+      if (results[1] && results[1].ok === true) {
+        (results[1].items || []).forEach(function (r) {
+          if (!r.actorId) return;
+          userFbCounts[r.actorId] = (userFbCounts[r.actorId] || 0) + 1;
+        });
+      }
       var s = res.j.stats || {};
       var html = '<div class="stats">' +
         statCard(s.total, "注册用户") +
         statCard("+" + (s.newToday || 0), "今日新增") +
         statCard("+" + (s.new7d || 0), "近 7 日新增") +
+        kpiCard(s.active7d != null ? s.active7d : "-", "7 日活跃", "今日活跃 " + (s.activeToday != null ? s.activeToday : "-")) +
         (s.disabled ? statCard(s.disabled, "已禁用") : "") +
         "</div>";
       html += '<div class="card" style="margin-bottom:12px"><div class="card-title">注册趋势（近 30 天）</div>' +
         barChart(s.series || [], "#3b82f6") + "</div>";
       html += '<div id="userTableWrap"></div>';
       body.innerHTML = html;
+      if (pendingUserSearch != null) {
+        $("userKw").value = pendingUserSearch;
+        pendingUserSearch = null;
+        var selEl = $("userStatusSel"); if (selEl) selEl.value = "";
+      }
       renderUserTable();
     })
     .catch(function (e) {
@@ -764,17 +958,34 @@ function loadUsers() {
 
 function filteredUsers() {
   var kw = ($("userKw") ? $("userKw").value.trim() : "").toLowerCase();
-  if (!kw) return allUsers;
+  var status = $("userStatusSel") ? $("userStatusSel").value : "";
   return allUsers.filter(function (u) {
+    if (status && userStatusKey(u) !== status) return false;
+    if (!kw) return true;
     var hay = ((u.displayName || "") + " " + u.userId + " " + (u.email || "")).toLowerCase();
     return hay.indexOf(kw) >= 0;
   });
 }
 
+function sortedUsers(users) {
+  var mode = $("userSortSel") ? $("userSortSel").value : "newreg";
+  var byLastActive = function (a, b) {
+    var ta = a.lastActiveAt ? Date.parse(a.lastActiveAt) : 0;
+    var tb = b.lastActiveAt ? Date.parse(b.lastActiveAt) : 0;
+    return tb - ta;
+  };
+  var rows = users.slice();
+  if (mode === "oldreg") rows.sort(function (a, b) { return Date.parse(a.createdAt) - Date.parse(b.createdAt); });
+  else if (mode === "active") rows.sort(byLastActive);
+  else if (mode === "feedback") rows.sort(function (a, b) { return (userFbCounts[b.userId] || 0) - (userFbCounts[a.userId] || 0); });
+  else rows.sort(function (a, b) { return Date.parse(b.createdAt) - Date.parse(a.createdAt); });
+  return rows;
+}
+
 function renderUserTable() {
   var wrap = $("userTableWrap");
   if (!wrap) return;
-  var users = filteredUsers();
+  var users = sortedUsers(filteredUsers());
   if (!allUsers.length) {
     wrap.innerHTML = '<div class="card"><div class="empty">还没有注册用户。客户端注册账号后会出现在这里。</div></div>';
     return;
@@ -788,18 +999,44 @@ function renderUserTable() {
     var toggleBtn = u.disabled
       ? '<button class="btn small" data-act="user-toggle" data-user="' + esc(u.userId) + '" data-disabled="0">恢复启用</button>'
       : '<button class="btn small danger" data-act="user-toggle" data-user="' + esc(u.userId) + '" data-disabled="1">禁用</button>';
+    var fbN = userFbCounts[u.userId] || 0;
+    var fbCell = fbN > 0
+      ? '<button class="mini" data-act="user-goto-feedback" data-user="' + esc(u.userId) + '" title="查看该用户的反馈">反馈 ' + fbN + " 条</button>"
+      : '<span class="meta">0</span>';
+    var lastActive = u.lastActiveAt ? fmtTime(u.lastActiveAt) : '<span class="meta">从未上线</span>';
     return "<tr" + (u.disabled ? ' style="opacity:.55"' : "") + ">" +
       "<td>" + esc(u.displayName || "-") + "</td>" +
       '<td class="wrap">' + esc(u.userId) + "</td>" +
       "<td>" + esc(u.email || "-") + "</td>" +
       "<td>" + statusChip + "</td>" +
+      "<td>" + lastActive + "</td>" +
       "<td>" + fmtTime(u.createdAt) + "</td>" +
-      "<td>" + toggleBtn + "</td>" +
+      "<td>" + fbCell + "</td>" +
+      "<td>" + toggleBtn +
+      ' <button class="btn small" data-act="user-goto-inbox" data-user="' + esc(u.userId) + '" title="查看该用户的站内信收件箱">收件箱</button></td>' +
       "</tr>";
   }).join("");
   wrap.innerHTML = '<div class="card"><table><tr>' +
-    "<th>显示名</th><th>身份 ID</th><th>邮箱</th><th>状态</th><th>注册时间</th><th>操作</th>" +
+    "<th>显示名</th><th>身份 ID</th><th>邮箱</th><th>状态</th><th>最近活跃</th><th>注册时间</th><th>反馈</th><th>操作</th>" +
     "</tr>" + rows + "</table></div>";
+}
+
+/** 反馈页「查看账号」：切到用户页并按身份 ID 过滤。 */
+function gotoUserPage(userId) {
+  pendingUserSearch = userId;
+  gotoTab("users");
+}
+
+/** 用户页「反馈 N 条」/反馈按钮：切到反馈页并按身份搜索。 */
+function gotoFeedbackSearch(userId) {
+  pendingFeedbackSearch = userId;
+  gotoTab("feedback");
+}
+
+/** 用户页「收件箱」：切到站内信页，等发送区渲染完打开该用户的收件箱。 */
+function gotoUserInbox(userId) {
+  pendingUserInbox = userId;
+  gotoTab("messages");
 }
 
 function toggleUser(userId, disable) {
@@ -816,6 +1053,191 @@ function toggleUser(userId, disable) {
       loadUsers();
     })
     .catch(function (e) { showErr(verb + "失败：" + e.message); });
+}
+
+// ---------- 内测管理（白名单 / 候补审批） ----------
+var wlEmails = [];
+var wlEnabled = false;
+var wlCorrupt = false;
+var wlUpdatedAt = null;
+var wlRequests = [];
+
+function wlStatusChip(r) {
+  if (r.status === "approved") return chip("ok", "已通过");
+  if (r.status === "rejected") return chip("bad", "已拒绝");
+  return chip("other", "待审批");
+}
+
+function renderBeta() {
+  var body = $("wlBody");
+  var pendingCount = 0;
+  var i;
+  for (i = 0; i < wlRequests.length; i++) if (wlRequests[i].status === "pending") pendingCount++;
+  var html = '<div class="stats">' +
+    statCard(wlEmails.length, "白名单邮箱") +
+    statCard(pendingCount, "待审批") +
+    "</div>";
+  var stateChip;
+  if (wlCorrupt) stateChip = chip("bad", "名单文件损坏：暂拒一切新注册（fail-closed）· 重新添加邮箱保存即修复");
+  else if (wlEnabled) stateChip = chip("ok", "已设闸：仅名单内邮箱可注册");
+  else stateChip = chip("other", "未设闸：任何人可注册 · 添加第一个邮箱即自动设闸");
+  html += '<div class="card" style="margin-bottom:12px"><div class="card-title">注册闸门</div>' + stateChip +
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px">' +
+    '<input type="email" id="wlEmail" placeholder="tester@example.com" style="padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--text)">' +
+    '<button class="btn primary" id="wlAddBtn">加入白名单</button>' +
+    '<span class="meta">名单更新：' + fmtTime(wlUpdatedAt) + ' · 落盘 data/beta-whitelist.json 改完即生效无需重启 · 只挡新注册，已注册用户登录不受影响</span>' +
+    "</div>";
+  if (wlEmails.length) {
+    var rows = wlEmails.map(function (e) {
+      return "<tr><td>" + esc(e) +
+        '</td><td style="width:90px"><button class="btn small danger" data-act="wl-remove" data-email="' +
+        esc(e) + '">移除</button></td></tr>';
+    }).join("");
+    html += '<table style="margin-top:10px"><tr><th>名单邮箱</th><th>操作</th></tr>' + rows + "</table>";
+  }
+  html += "</div>";
+  html += '<div class="card" style="margin-bottom:12px"><div class="card-title">候补申请（用户在登录页自助排队）</div>' +
+    '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
+    '<button class="btn primary small" data-act="wl-approve-checked">通过选中</button>' +
+    '<button class="btn small danger" data-act="wl-reject-checked">拒绝选中</button>' +
+    '<button class="btn small" data-act="wl-refresh">刷新</button>' +
+    '<span class="meta">通过 = 加入白名单并自动邮件通知对方（需已配置 SMTP）</span></div>';
+  if (!wlRequests.length) {
+    html += '<div class="empty">还没有申请。用户在登录页被闸拦截后可自助提交。</div>';
+  } else {
+    var qrows = wlRequests.map(function (r) {
+      var check = r.status === "pending"
+        ? '<input type="checkbox" class="wl-apply-check" data-email="' + esc(r.email) + '">'
+        : "";
+      var ops = r.status === "pending"
+        ? '<button class="btn small primary" data-act="wl-approve" data-email="' + esc(r.email) + '">通过</button> ' +
+          '<button class="btn small danger" data-act="wl-reject" data-email="' + esc(r.email) + '">拒绝</button>'
+        : "-";
+      return "<tr><td>" + check + "</td><td>" + esc(r.email) + "</td><td>" + esc(r.note || "-") + "</td><td>" +
+        wlStatusChip(r) + "</td><td>" + fmtTime(r.requestedAt) + "</td><td>" + ops + "</td></tr>";
+    }).join("");
+    html += '<table><tr><th style="width:30px"></th><th>邮箱</th><th>备注</th><th>状态</th><th>申请时间</th><th>操作</th></tr>' + qrows + "</table>";
+  }
+  html += "</div>";
+  body.innerHTML = html;
+  $("wlAddBtn").addEventListener("click", addWhitelist);
+  $("wlEmail").addEventListener("keydown", function (ev) { if (ev.key === "Enter") addWhitelist(); });
+}
+
+function loadWhitelist() {
+  clearErr();
+  var body = $("wlBody");
+  Promise.all([
+    api("/api/admin/beta-whitelist").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); }),
+    api("/api/admin/beta-waitlist").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
+  ]).then(function (res) {
+    for (var i = 0; i < res.length; i++) {
+      if (res[i].code === 401) throw new Error("管理员会话已失效，请重新登录");
+      if (res[i].j.ok !== true) throw new Error(res[i].j.message || "加载失败");
+    }
+    wlEmails = res[0].j.emails || [];
+    wlEnabled = !!res[0].j.enabled;
+    wlCorrupt = !!res[0].j.corrupt;
+    wlUpdatedAt = res[0].j.updatedAt;
+    wlRequests = res[1].j.requests || [];
+    renderBeta();
+    refreshPendingBadge();
+  })
+    .catch(function (e) {
+      body.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
+    });
+}
+
+// 候补队列自动刷新：60s 拉一次，有变化才重绘（保住正在输入的白名单邮箱）
+function wlPollTick() {
+  if (currentTab !== "whitelist" || !authed || document.hidden) return;
+  api("/api/admin/beta-waitlist").then(function (r) { return r.json(); }).then(function (j) {
+    if (!j || j.ok !== true) return;
+    var reqs = j.requests || [];
+    var pendingOf = function (list) {
+      var n = 0;
+      for (var i = 0; i < list.length; i++) if (list[i].status === "pending") n++;
+      return n;
+    };
+    if (reqs.length === wlRequests.length && pendingOf(reqs) === pendingOf(wlRequests)) return;
+    wlRequests = reqs;
+    var emailVal = $("wlEmail") ? $("wlEmail").value : "";
+    renderBeta();
+    if (emailVal && $("wlEmail")) $("wlEmail").value = emailVal;
+    refreshPendingBadge();
+  }).catch(function () {});
+}
+setInterval(wlPollTick, 60000);
+
+function addWhitelist() {
+  var input = $("wlEmail");
+  var email = (input ? input.value : "").trim();
+  if (!email) return;
+  var first = wlEmails.length === 0;
+  if (!confirm((first ? "名单当前为空：添加后注册闸立即生效，名单外邮箱将无法注册。" : "") +
+    "添加 " + email + " 到内测白名单？")) return;
+  api("/api/admin/beta-whitelist", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: email })
+  }).then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
+    .then(function (res) {
+      if (res.code === 401) throw new Error("管理员会话已失效，请重新登录");
+      if (res.j.ok !== true) throw new Error(res.j.message || "添加失败");
+      loadWhitelist();
+    })
+    .catch(function (e) { showErr("白名单添加失败：" + e.message); });
+}
+
+function removeWhitelist(email) {
+  if (!confirm("移除 " + email + "？移除后该邮箱无法再新注册；已注册账号不受影响，需要踢出请到「用户」页禁用。")) return;
+  api("/api/admin/beta-whitelist/" + encodeURIComponent(email), { method: "DELETE" })
+    .then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
+    .then(function (res) {
+      if (res.code === 401) throw new Error("管理员会话已失效，请重新登录");
+      if (res.j.ok !== true) throw new Error(res.j.message || "移除失败");
+      loadWhitelist();
+    })
+    .catch(function (e) { showErr("白名单移除失败：" + e.message); });
+}
+
+function checkedApplyEmails() {
+  var boxes = document.querySelectorAll(".wl-apply-check:checked");
+  var emails = [];
+  for (var i = 0; i < boxes.length; i++) emails.push(boxes[i].getAttribute("data-email"));
+  return emails;
+}
+
+function approveWaitlist(emails) {
+  if (!emails.length) { showErr("先勾选要通过的申请"); return; }
+  if (!confirm("通过 " + emails.length + " 个申请？通过后邮箱加入白名单，对方会收到站内信通知。")) return;
+  api("/api/admin/beta-waitlist/approve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ emails: emails })
+  }).then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
+    .then(function (res) {
+      if (res.code === 401) throw new Error("管理员会话已失效，请重新登录");
+      if (res.j.ok !== true) throw new Error(res.j.message || "操作失败");
+      loadWhitelist();
+    })
+    .catch(function (e) { showErr("候补通过失败：" + e.message); });
+}
+
+function rejectWaitlist(emails) {
+  if (!emails.length) { showErr("先勾选要拒绝的申请"); return; }
+  if (!confirm("拒绝 " + emails.length + " 个申请？拒绝后对方可重新申请。")) return;
+  api("/api/admin/beta-waitlist/reject", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ emails: emails })
+  }).then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
+    .then(function (res) {
+      if (res.code === 401) throw new Error("管理员会话已失效，请重新登录");
+      if (res.j.ok !== true) throw new Error(res.j.message || "操作失败");
+      loadWhitelist();
+    })
+    .catch(function (e) { showErr("候补拒绝失败：" + e.message); });
 }
 
 // ---------- 消息发送（站内信群发） ----------
@@ -866,6 +1288,12 @@ function loadCompose() {
       '<div id="bcSentDetail"></div></div>';
   renderBcTargetPane();
   renderSentTable(sent.j.entries || []);
+  // 用户页「收件箱」跳转：等发送区/记录区渲染完再展开目标用户收件箱
+  if (pendingUserInbox) {
+    var inboxTarget = pendingUserInbox;
+    pendingUserInbox = null;
+    showUserInbox(inboxTarget);
+  }
 }).catch(function (e) {
     body.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
     showErr(e.message);
@@ -1109,12 +1537,95 @@ function sendBroadcast() {
 }
 
 // ---------- 支付（只记真实订单：台账不含模拟数据） ----------
+var payOrders = [];
+
 function orderStatusChip(st) {
   if (st === "paid") return chip("ok", "已支付");
   if (st === "pending") return chip("open", "待支付");
   if (st === "closed") return chip("offline", "已关闭");
   if (st === "refunded") return chip("info", "已退款");
   return chip("offline", st || "-");
+}
+
+function orderStatusLabel(st) {
+  if (st === "paid") return "已支付";
+  if (st === "pending") return "待支付";
+  if (st === "closed") return "已关闭";
+  if (st === "refunded") return "已退款";
+  return st || "-";
+}
+
+function filteredPayOrders() {
+  var v = $("payRange") ? $("payRange").value : "0";
+  if (v === "0") return payOrders;
+  var from;
+  if (v === "1") {
+    from = new Date();
+    from.setHours(0, 0, 0, 0);
+  } else {
+    from = Date.now() - Number(v) * 86400000;
+  }
+  return payOrders.filter(function (o) { return Date.parse(o.createdAt) >= from; });
+}
+
+function renderPaymentsTable() {
+  var wrap = $("payTableWrap");
+  if (!wrap) return;
+  var orders = filteredPayOrders();
+  var hint = $("payRangeHint");
+  if (hint) {
+    var paidSum = 0;
+    orders.forEach(function (o) { if (o.status === "paid") paidSum += Number(o.amount) || 0; });
+    hint.textContent = "筛选出 " + orders.length + " / " + payOrders.length + " 笔 · 其中已付 ¥" + paidSum;
+  }
+  if (!payOrders.length) {
+    wrap.innerHTML = '<div class="card"><div class="empty">还没有真实支付订单。</div>' +
+      '<div class="meta" style="text-align:center;padding:0 0 18px">真实通道需在服务端配置微信/支付宝商户凭证（live 模式），' +
+      '渠道配置状态见「系统」标签；模拟测试订单不再展示、不再落库。</div></div>';
+    return;
+  }
+  var rows = orders.map(function (o) {
+    return "<tr>" +
+      '<td class="wrap">' + esc(o.outTradeNo) + "</td>" +
+      "<td>" + esc(o.provider) + " / " + esc(o.method) + "</td>" +
+      "<td>¥" + o.amount + "</td>" +
+      '<td class="wrap">' + esc(o.description || "-") + "</td>" +
+      "<td>" + orderStatusChip(o.status) + "</td>" +
+      "<td>" + fmtTime(o.createdAt) + "</td>" +
+      "<td>" + fmtTime(o.paidAt) + "</td>" +
+      "</tr>";
+  }).join("");
+  wrap.innerHTML = orders.length
+    ? '<div class="card"><table><tr>' +
+      "<th>商户单号</th><th>渠道 / 方式</th><th>金额</th><th>描述</th><th>状态</th><th>创建时间</th><th>支付时间</th>" +
+      "</tr>" + rows + "</table></div>"
+    : '<div class="card"><div class="empty">该时间范围内没有订单</div></div>';
+}
+
+function csvCell(v) {
+  v = String(v == null ? "" : v);
+  // 注意：本页脚本是外层 TS 模板串，正则里的反斜杠必须双写才不会被模板层吃掉一层
+  return /[",\\r\\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+}
+
+function exportPaymentsCsv() {
+  var orders = filteredPayOrders();
+  if (!orders.length) { showErr("当前筛选范围内没有可导出的订单"); return; }
+  var lines = [["商户单号", "渠道", "方式", "金额", "描述", "状态", "创建时间", "支付时间"].join(",")].concat(
+    orders.map(function (o) {
+      return [o.outTradeNo, o.provider, o.method, o.amount, o.description || "", orderStatusLabel(o.status),
+        fmtTime(o.createdAt), fmtTime(o.paidAt)].map(csvCell).join(",");
+    })
+  );
+  // BOM：让 Excel 正确识别 UTF-8 中文
+  var blob = new Blob(["\\uFEFF" + lines.join("\\r\\n")], { type: "text/csv;charset=utf-8" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "orders-" + new Date().toISOString().slice(0, 10) + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 3000);
 }
 
 function loadPayments() {
@@ -1139,28 +1650,12 @@ function loadPayments() {
           (s.refunded ? statCard(s.refunded, "已退款") : "") +
           "</div>";
       }
-      var orders = res.j.orders || [];
-      if (!orders.length) {
-        html += '<div class="card"><div class="empty">还没有真实支付订单。</div>' +
-          '<div class="meta" style="text-align:center;padding:0 0 18px">真实通道需在服务端配置微信/支付宝商户凭证（live 模式），' +
-          '渠道配置状态见「系统」标签；模拟测试订单不再展示、不再落库。</div></div>';
-      } else {
-        var rows = orders.map(function (o) {
-          return "<tr>" +
-            '<td class="wrap">' + esc(o.outTradeNo) + "</td>" +
-            "<td>" + esc(o.provider) + " / " + esc(o.method) + "</td>" +
-            "<td>¥" + o.amount + "</td>" +
-            '<td class="wrap">' + esc(o.description || "-") + "</td>" +
-            "<td>" + orderStatusChip(o.status) + "</td>" +
-            "<td>" + fmtTime(o.createdAt) + "</td>" +
-            "<td>" + fmtTime(o.paidAt) + "</td>" +
-            "</tr>";
-        }).join("");
-        html += '<div class="card"><table><tr>' +
-          "<th>商户单号</th><th>渠道 / 方式</th><th>金额</th><th>描述</th><th>状态</th><th>创建时间</th><th>支付时间</th>" +
-          "</tr>" + rows + "</table></div>";
-      }
+      payOrders = res.j.orders || [];
+      html += '<div id="payTableWrap"></div>';
       body.innerHTML = html;
+      var toolbar = $("payToolbar");
+      if (toolbar) toolbar.style.display = "flex";
+      renderPaymentsTable();
     })
     .catch(function (e) {
       body.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
@@ -1240,6 +1735,22 @@ function loadManifest() {
     .catch(function (e) {
       $("mfMeta").textContent = "清单读取失败：" + e.message;
     });
+  // 发版变更历史（来自管理操作审计，只读展示最近 4 条）
+  api("/api/admin/audit?limit=200").then(function (r) { return r.json(); }).then(function (j) {
+    var box = $("mfHistory");
+    if (!box || !j || j.ok !== true) return;
+    var updates = (j.entries || []).filter(function (e2) { return e2.action === "client_manifest.update"; }).slice(0, 4);
+    if (!updates.length) {
+      box.textContent = "发版变更记录：暂无（保存清单后会在这里留痕）";
+      return;
+    }
+    box.innerHTML = "发版变更记录（最近 " + updates.length + " 次）：<br>" +
+      updates.map(function (e2) {
+        var d = e2.detail || {};
+        var file = (d.url || "").split("/").pop() || "-";
+        return esc(fmtTime(e2.time)) + " · latest <b>" + esc(d.latest || "-") + "</b> · " + esc(file);
+      }).join("<br>");
+  }).catch(function () {});
 }
 
 function saveManifest() {
@@ -1465,6 +1976,9 @@ document.addEventListener("click", function (ev) {
     if (ub) ub.classList.toggle("exp");
   }
   else if (act === "user-toggle") toggleUser(el.getAttribute("data-user"), el.getAttribute("data-disabled") === "1");
+  else if (act === "fb-goto-user") gotoUserPage(el.getAttribute("data-user") || "");
+  else if (act === "user-goto-feedback") gotoFeedbackSearch(el.getAttribute("data-user") || "");
+  else if (act === "user-goto-inbox") gotoUserInbox(el.getAttribute("data-user") || "");
   else if (act === "dl-delete") deleteDownload(el.getAttribute("data-file"));
   else if (act === "sys-reload") loadSystem();
   else if (act === "bc-user") bcToggleUser(el.getAttribute("data-user"), el.checked);
@@ -1530,6 +2044,7 @@ function hideAuthGate(username) {
   $("authGate").style.display = "none";
   $("accountBox").style.display = "block";
   $("accountName").textContent = username || "admin";
+  refreshPendingBadge();
   showTab(hashTab());
 }
 
@@ -1616,7 +2131,25 @@ document.addEventListener("keydown", function (ev) {
 });
 
 $("userKw").addEventListener("input", renderUserTable);
+$("userStatusSel").addEventListener("change", renderUserTable);
+$("userSortSel").addEventListener("change", renderUserTable);
 $("userRefresh").addEventListener("click", loadUsers);
+$("payRange").addEventListener("change", renderPaymentsTable);
+$("payExportBtn").addEventListener("click", exportPaymentsCsv);
+$("fbNewPill").addEventListener("click", loadFeedback);
+
+// 内测管理各操作按钮走事件委托：三张表随增删整体重绘，逐行绑定会丢
+$("wlBody").addEventListener("click", function (ev) {
+  var el = ev.target && ev.target.closest ? ev.target.closest("[data-act]") : null;
+  if (!el) return;
+  var act = el.getAttribute("data-act");
+  if (act === "wl-remove") removeWhitelist(el.getAttribute("data-email"));
+  else if (act === "wl-approve") approveWaitlist([el.getAttribute("data-email")]);
+  else if (act === "wl-reject") rejectWaitlist([el.getAttribute("data-email")]);
+  else if (act === "wl-approve-checked") approveWaitlist(checkedApplyEmails());
+  else if (act === "wl-reject-checked") rejectWaitlist(checkedApplyEmails());
+  else if (act === "wl-refresh") loadWhitelist();
+});
 
 $("dlUploadBtn").addEventListener("click", function () { $("dlFile").click(); });
 $("dlFile").addEventListener("change", function () {

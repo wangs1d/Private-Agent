@@ -1,5 +1,9 @@
 import { stripSentencesAlreadySaid } from "../utils/text.js";
 
+/** 分段推送的附加元数据：bubble="new" 表示开启一个新气泡（客户端新建一条消息），
+ *  "continue" 表示追加到当前末气泡（残差/迟到段不开新泡）。 */
+export type StreamSegmentEmitMeta = { bubble?: "new" | "continue" };
+
 /**
  * StreamSegmenter —— 主回复统一分段器（信息块分段 + 节奏停顿 + 增量去重）
  *
@@ -44,6 +48,19 @@ export type StreamSegmenterOptions = {
    * 直接拖慢 TTS 首句开播；关闭后首句随到随发。
    */
   holdFirstSentence?: boolean;
+  /**
+   * 气泡拆分模式（真·分绿泡，2026-09-28）：信息块直接升级为独立气泡——
+   * 每个信息块推成一条独立消息（emit 带 bubble:"new"），而不是同一气泡里的
+   * 分段递进。切泡只认句末边界/换行（句中逗号永不截断，字数仅做短句并泡的
+   * 下限），模拟真人连发几条短消息的节奏。语音轮次禁止开启（done 会被泡间
+   * 停顿拖慢，且 TTS 链路不消费气泡边界）。
+   */
+  bubbleMode?: boolean;
+  /** 气泡拆分模式：相邻两泡之间的最小/最大停顿（毫秒）。默认 500~800。 */
+  bubbleGapMinMs?: number;
+  bubbleGapMaxMs?: number;
+  /** 气泡拆分模式：单轮气泡数上限，超出后剩余内容并入末气泡（防刷屏）。默认 4。 */
+  maxBubbles?: number;
 };
 
 /** 句子 / 段落边界：中文/英文句末标点与换行。 */
@@ -56,6 +73,24 @@ const TOPIC_SHIFT_RE =
 /** 列表 / 编号起始：句首命中则视为独立信息块。 */
 const LIST_ITEM_BREAK_RE =
   /^\s*(?:[（(]?\d+[\.、)）]|[一二三四五六七八九十]+[\.、)）]|[-*•])\s*/u;
+
+/** 气泡拆分模式：强边界（句末标点/换行，命中且可见字达标即切新泡）。
+ *  切泡只认句末——逗号/顿号等句中位置永不切（见 flushCompleteBubbles）。 */
+const BUBBLE_STRONG_BREAK_RE = /[。！？!?；;\n]/u;
+
+/** 气泡拆分模式：首泡强边界切泡所需的最少可见字数（单字句如"嗯。"不单独成泡）。
+ *  首泡保持细粒度：TTFT 优先（"哎，在呢。"随到随出），短应答场景也能两泡连发。 */
+const BUBBLE_MIN_STRONG_CHARS = 2;
+/** 气泡拆分模式：后续泡的最少可见字数（2026-09-28 用户反馈"分得太多"）：
+ *  首泡之后的边界必须攒够该字数才切——泡更饱满、数量自然收敛（短句不再
+ *  逐条碎裂），也避免末泡硬扛大段剩余内容。 */
+const BUBBLE_MIN_CHARS = 12;
+
+/** 可见字符（字母/数字/汉字），用于气泡长度裁决——标点与空白不计。 */
+const BUBBLE_VISIBLE_CHAR_RE = /[\p{L}\p{N}]/u;
+
+/** 泡尾/泡首需要剥掉的悬挂标点与空白（真人消息不以逗号开头/结尾）。 */
+const BUBBLE_EDGE_STRIP_RE = /^[\s，,、]+|[\s，,、]+$/gu;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -77,6 +112,15 @@ export class StreamSegmenter {
   private blockCharTarget: number;
   /** 正文信息块数量上限 */
   private maxStreamSegments: number;
+  /** 气泡拆分模式：信息块升级为独立气泡（真·分绿泡）。 */
+  private bubbleMode: boolean;
+  /** 气泡拆分模式：相邻两泡之间的停顿区间（毫秒）。 */
+  private bubbleGapMinMs: number;
+  private bubbleGapMaxMs: number;
+  /** 气泡拆分模式：单轮气泡数上限，超出并入末泡。 */
+  private maxBubbles: number;
+  /** 已推送的气泡数（气泡拆分模式重量上限）。 */
+  private bubbleCount = 0;
   /** 串行队列：保证 feed 的异步停顿不交错、乱序 */
   private chain: Promise<void> = Promise.resolve();
   private disposed = false;
@@ -91,7 +135,11 @@ export class StreamSegmenter {
   private emittedText = "";
 
   constructor(
-    private readonly emit: (segment: string, phase: "interim" | "stream") => void,
+    private readonly emit: (
+      segment: string,
+      phase: "interim" | "stream",
+      meta?: StreamSegmentEmitMeta,
+    ) => void,
     opts: StreamSegmenterOptions = {},
   ) {
     this.pauseMs = opts.pauseMs ?? 100;
@@ -101,9 +149,31 @@ export class StreamSegmenter {
     this.blockCharTarget = opts.blockCharTarget ?? 56;
     this.maxStreamSegments = opts.maxStreamSegments ?? 4;
     this.holdFirstSentence = opts.holdFirstSentence ?? true;
+    this.bubbleMode = opts.bubbleMode ?? false;
+    this.bubbleGapMinMs = opts.bubbleGapMinMs ?? 500;
+    this.bubbleGapMaxMs = opts.bubbleGapMaxMs ?? 800;
+    this.maxBubbles = opts.maxBubbles ?? 4;
     // holdFirstSentence=false → 首句随到随发：interimDone 置位使首句按住逻辑
     // 全程短路（flushCompleteBlocks 不按住、dispatchSegment/flushFinal 走普通分支）
     this.interimDone = !this.holdFirstSentence;
+    // 气泡拆分模式天然随到随发，首句按住逻辑强制短路
+    if (this.bubbleMode) {
+      this.holdFirstSentence = false;
+      this.interimDone = true;
+    }
+  }
+
+  /**
+   * 运行时开启气泡拆分模式（真·分绿泡）。供 WS 层在路由决策就绪后调用——
+   * 门禁依赖 decision.segmentable（对话面）与语音态，二者在首个主回复 delta
+   * 之前必然就绪（agent-core 主 LLM 依赖同一决策），故不存在拆分态竞态。
+   * 必须在任何 feed 之前调用。
+   */
+  enableBubbleMode(): void {
+    if (this.disposed) return;
+    this.bubbleMode = true;
+    this.holdFirstSentence = false;
+    this.interimDone = true;
   }
 
   /**
@@ -115,7 +185,7 @@ export class StreamSegmenter {
     if (!delta || this.disposed) return;
     this.buffer += delta;
     this.chain = this.chain
-      .then(() => this.flushCompleteBlocks())
+      .then(() => this.flushComplete())
       .catch((err) => {
         console.error("[StreamSegmenter] feed 异常:", err);
       });
@@ -140,6 +210,34 @@ export class StreamSegmenter {
     if (!this.segmentationEnabled) {
       // 不分段模式：整个缓冲作为一段 stream 发出，无首句裁决
       if (combined) this.emit(combined, "stream");
+      return;
+    }
+
+    // 气泡拆分模式：残差裁决——完整句残差且泡数未封顶 → 开新泡（真人连发的
+    // 最后一条完整消息，带泡间停顿）；碎片残差（无句末边界）或已封顶 →
+    // 追加到当前末气泡（不开新泡）；全程未推出过泡（整段回复无切泡点）时
+    // 作为唯一的"new"泡发出。
+    if (this.bubbleMode) {
+      if (!combined) return;
+      const deduped = stripSentencesAlreadySaid(this.emittedText, combined).trim();
+      if (!deduped) return;
+      const canOpenNew =
+        this.bubbleCount > 0 &&
+        this.bubbleCount < this.maxBubbles &&
+        BUBBLE_STRONG_BREAK_RE.test(deduped);
+      if (this.bubbleCount === 0 || canOpenNew) {
+        if (this.bubbleCount > 0 && this.bubbleGapMaxMs > 0) {
+          const span = Math.max(1, this.bubbleGapMaxMs - this.bubbleGapMinMs + 1);
+          await sleep(this.bubbleGapMinMs + Math.floor(Math.random() * span));
+          if (this.disposed) return;
+        }
+        this.trackEmitted(deduped);
+        this.bubbleCount += 1;
+        this.emit(deduped, "stream", { bubble: "new" });
+        return;
+      }
+      this.trackEmitted(deduped);
+      this.emit(deduped, "stream", { bubble: "continue" });
       return;
     }
 
@@ -188,6 +286,81 @@ export class StreamSegmenter {
     this.interimDone = !this.holdFirstSentence;
   }
 
+  /** feed 链的分发入口：气泡拆分模式走切泡循环，否则走信息块循环。 */
+  private flushComplete(): Promise<void> {
+    if (!this.segmentationEnabled) return Promise.resolve();
+    if (this.bubbleMode) return this.flushCompleteBubbles();
+    return this.flushCompleteBlocks();
+  }
+
+  /** 气泡拆分模式：按切泡粒度逐泡分发，串行、泡间随机停顿。
+   *
+   * 切泡规则（2026-09-29 定稿，替代 09-28「首泡逗号可切」粒度）：
+   * - 只在句末边界（。！？!?；;\n）切泡，逗号/顿号等句中位置永不切——
+   *   一段话必须正确讲完才发，不靠字数在句中随便截断（09-29 用户反馈，
+   *   事故样例："国庆哪都人多，这是定律，/ 躲不掉的。"被逗号阈值拦腰
+   *   切成两条，第二条以依附半句"躲不掉的。"开头）。
+   * - 句末边界的字数只是"短句并泡"的下限：首泡 ≥2 可见字（短应答
+   *   "好的。"随到随出、TTFT 优先），后续泡 ≥12 可见字（短句合并成
+   *   饱满的泡，数量自然收敛，不再逐句碎裂）。
+   * - 换行无条件切（段落/分行是模型刻意的结构分组，永远该换泡）。
+   * - 泡尾/泡首剥悬挂逗号与空白（真人消息不以逗号开头/结尾）。
+   * - 首泡之前零停顿（TTFT 不受影响），第 2 泡起泡间随机停顿
+   *   bubbleGapMinMs~bubbleGapMaxMs，末泡之后无停顿。
+   * - 超过 maxBubbles 后不再切泡，剩余内容留在缓冲，由 flushFinal 以
+   *   "continue" 并入末泡（防刷屏重量上限）。
+   */
+  private async flushCompleteBubbles(): Promise<void> {
+    while (!this.disposed) {
+      if (this.bubbleCount >= this.maxBubbles) break;
+      const firstBubble = this.bubbleCount === 0;
+      const brk = this.findBubbleBreak(
+        this.buffer,
+        firstBubble ? BUBBLE_MIN_STRONG_CHARS : BUBBLE_MIN_CHARS,
+      );
+      if (!brk) break; // 暂无达标的切泡点
+      const raw = this.buffer.slice(0, brk.index + 1);
+      // 消费边界字符，并剥掉余文的leading逗号/顿号/空白
+      this.buffer = this.buffer
+        .slice(brk.index + 1)
+        .replace(/^[\s，,、]+/u, "");
+      const text = raw.replace(BUBBLE_EDGE_STRIP_RE, "");
+      if (!text || !BUBBLE_VISIBLE_CHAR_RE.test(text)) continue;
+      const deduped = stripSentencesAlreadySaid(this.emittedText, text).trim();
+      if (!deduped) continue; // 句级去重后为空（整句已说过）→ 不成泡
+      if (this.bubbleCount > 0 && this.bubbleGapMaxMs > 0) {
+        const span = Math.max(1, this.bubbleGapMaxMs - this.bubbleGapMinMs + 1);
+        await sleep(this.bubbleGapMinMs + Math.floor(Math.random() * span));
+        if (this.disposed) return;
+      }
+      this.trackEmitted(deduped);
+      this.bubbleCount += 1;
+      this.emit(deduped, "stream", { bubble: "new" });
+    }
+  }
+
+  /** 从缓冲中找第一个达标的切泡点（不含则 null）。
+   *  只在强边界切：换行无条件切（段落/分行是模型刻意的结构分组，永远该换泡）；
+   *  句末标点须边界前可见字达标（首泡/后续泡两档下限）。字数只决定"句末边界
+   *  到了切不切"（太短的句子并进下一泡），绝不是切点本身——逗号等句中位置
+   *  永不切泡（2026-09-29 用户反馈：一段话必须正确讲完，不靠字数随便截断）。 */
+  private findBubbleBreak(
+    buf: string,
+    minStrongChars: number,
+  ): { index: number } | null {
+    let visible = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const ch = buf[i];
+      if (ch === "\n") return { index: i };
+      if (BUBBLE_STRONG_BREAK_RE.test(ch)) {
+        if (visible >= minStrongChars) return { index: i };
+      } else if (BUBBLE_VISIBLE_CHAR_RE.test(ch)) {
+        visible += 1;
+      }
+    }
+    return null;
+  }
+
   /** 按信息块逐块分发：每个完整语义块单独作为一段，串行、带块间停顿。
    *  禁用分段时直接返回，不切块。 */
   private async flushCompleteBlocks(): Promise<void> {
@@ -221,8 +394,13 @@ export class StreamSegmenter {
       } else {
         this.blockBuffer += raw;
       }
+      // 首句直出（2026-09-28）：尚未推送任何内容时，首个完整句不等
+      // blockCharTarget 累积立即成块发出——TTFT 从「第二块边界/flushFinal」
+      // 提前到「首个完整句边界」；后续块仍按目标长度/话题边界切分。
+      const firstOutPending =
+        this.streamBlockCount === 0 && this.emittedText === "";
       // 块达到目标长度 → 提前终结当前块（同话题内容也控制单块体量）
-      if (this.blockBuffer.length >= this.blockCharTarget) {
+      if (firstOutPending || this.blockBuffer.length >= this.blockCharTarget) {
         await this.emitCurrentBlock();
         if (this.disposed) return;
       }

@@ -41,7 +41,6 @@ class SidebarUserMenu extends StatefulWidget {
     required this.onInboxUnreadChanged,
     required this.onOpenFeedback,
     required this.onOpenDevices,
-    required this.onEnterPureVoiceMode,
     required this.onLogout,
   });
 
@@ -71,9 +70,6 @@ class SidebarUserMenu extends StatefulWidget {
 
   /// 点击「我的设备」:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
-
-  /// 点击「纯语音模式」:主窗口隐藏，唤醒/对话由灵动岛承载
-  final VoidCallback onEnterPureVoiceMode;
 
   /// 点击「退出登录」:后续接账号注销
   final VoidCallback onLogout;
@@ -129,10 +125,6 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
           onOpenDevices: () {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onOpenDevices();
-          },
-          onEnterPureVoiceMode: () {
-            Navigator.of(context, rootNavigator: true).pop();
-            widget.onEnterPureVoiceMode();
           },
           onLogout: () {
             Navigator.of(context, rootNavigator: true).pop();
@@ -263,7 +255,6 @@ class _UserMenuOverlay extends StatefulWidget {
     required this.onOpenInbox,
     required this.onOpenFeedback,
     required this.onOpenDevices,
-    required this.onEnterPureVoiceMode,
     required this.onLogout,
   });
 
@@ -277,7 +268,6 @@ class _UserMenuOverlay extends StatefulWidget {
   final VoidCallback onOpenInbox;
   final VoidCallback onOpenFeedback;
   final VoidCallback onOpenDevices;
-  final VoidCallback onEnterPureVoiceMode;
   final VoidCallback onLogout;
 
   @override
@@ -379,7 +369,7 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
     // 这样弹窗是从头像位置往上长的,视觉上紧贴头像,不会跑到屏幕最底端。
     final double screenHeight = MediaQuery.of(context).size.height;
     // 预估面板高度,用来在面板太高时夹一下避免溢出屏幕顶部
-    // (header + 退出/主题/反馈/设备/站内信/纯语音 6 行 + 分隔线)
+    // (header + 退出/主题/反馈/设备/站内信 5 行 + 分隔线)
     const double estimatedPanelHeight = 200;
     double bottom = screenHeight - widget.anchor.bottom + 8;
     final double maxBottom = screenHeight - 8 - estimatedPanelHeight;
@@ -477,17 +467,6 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                         ? _UnreadBadge(count: widget.inboxUnread)
                         : const _TrailingValue(showChevron: true),
                     onTap: widget.onOpenInbox,
-                  ),
-                  Divider(
-                      height: 1, thickness: 1,
-                      color: cs.outline.withValues(alpha: 0.2)),
-                  // 纯语音模式：主窗口隐藏，唤醒/对话全由灵动岛承载
-                  // （原 voice-orb 玻璃胶囊已退役，见 pure_voice_mode.dart）。
-                  _Row(
-                    leading: const Icon(Icons.mic_none_outlined, size: 18),
-                    title: "纯语音模式",
-                    trailing: const _TrailingValue(showChevron: true),
-                    onTap: widget.onEnterPureVoiceMode,
                   ),
                 ],
               ),

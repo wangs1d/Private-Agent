@@ -59,7 +59,40 @@ class ClientUpdateCheckResult {
 /// 首调含 ~180ms 初始化开销；保活后手动检查稳定在 ~10ms。
 final http.Client _updateHttpClient = http.Client();
 
-Future<ClientUpdateCheckResult?> checkClientUpdate() async {
+/// 会话内结果缓存：检查成功过的结果 5 分钟内直接复用，手动「检查更新」
+/// 不再等一次网络往返——没有新版本时通知必须立马弹出。缓存随进程存活
+/// （重启即空，启动检查会重新填上）；失败不缓存，「重试」永远真查。
+ClientUpdateCheckResult? _sessionCache;
+DateTime? _sessionCacheAt;
+const Duration _sessionCacheTtl = Duration(minutes: 5);
+
+/// [forceRefresh] = 跳过缓存强查一次（失败卡上的「重试」走这条）。
+Future<ClientUpdateCheckResult?> checkClientUpdate({bool forceRefresh = false}) async {
+  if (!forceRefresh && _sessionCache != null) {
+    final Duration age = DateTime.now().difference(_sessionCacheAt!);
+    if (age < _sessionCacheTtl) {
+      if (kDebugMode) {
+        debugPrint("[update-check] session cache hit (age=${age.inMilliseconds}ms)");
+      }
+      return _sessionCache;
+    }
+    _sessionCache = null; // 过期作废，走下面的真查
+  }
+  final Stopwatch sw = Stopwatch()..start();
+  final ClientUpdateCheckResult? result = await _checkClientUpdateUncached();
+  if (kDebugMode) {
+    debugPrint(
+        "[update-check] fresh check took ${sw.elapsedMilliseconds}ms"
+        "${forceRefresh ? " (forced)" : ""}");
+  }
+  if (result != null) {
+    _sessionCache = result;
+    _sessionCacheAt = DateTime.now();
+  }
+  return result;
+}
+
+Future<ClientUpdateCheckResult?> _checkClientUpdateUncached() async {
   // 本机开发构建（Debug flavor）不走发版版本门禁（用户约定 2026-09-28）：
   // 本机跑的永远视为最新，不被公网 manifest 的 latest/minVersion 提醒或强锁。
   // 发给用户的安装包（Release flavor）不受影响，照常比对。
@@ -84,8 +117,10 @@ Future<ClientUpdateCheckResult?> checkClientUpdate() async {
   }
   try {
     final http.Response res = await _updateHttpClient
-        .get(Uri.parse("${ApiConfig.updateManifestUrl}/api/client/manifest"))
-        .timeout(const Duration(seconds: 5));
+        // 发行版双清单：服务端按 ?edition= 读 client-manifest.<edition>.json（缺失回落主文件）
+        .get(Uri.parse(
+            "${ApiConfig.updateManifestUrl}/api/client/manifest?edition=${ApiConfig.edition}"))
+        .timeout(const Duration(seconds: 3));
     if (res.statusCode != 200) return null;
     final dynamic body = jsonDecode(utf8.decode(res.bodyBytes));
     if (body is! Map<String, dynamic>) return null;

@@ -56,6 +56,13 @@ class _SettingsPageState extends State<SettingsPage> {
   Map<String, dynamic>? _vpStatus;
   bool _vpClearing = false;
 
+  // —— 邮箱接入（邮箱盯梢授权码） ——
+  final TextEditingController _mailPassCtrl = TextEditingController();
+  Map<String, dynamic>? _mailStatus;
+  bool _mailSaving = false;
+  String? _mailSaveMsg;
+  bool _obscureMailPass = true;
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +73,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _refreshCaptureState();
     _loadModelConfig();
     _refreshVoiceprintStatus();
+    _refreshMailStatus();
   }
 
   /// 加载 Windows 本机设置：开机自启（注册表）。
@@ -299,6 +307,54 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => _vpStatus = status);
   }
 
+  Future<void> _refreshMailStatus() async {
+    final Map<String, dynamic> res = await MailWatchApi.status();
+    if (!mounted) return;
+    setState(
+      () => _mailStatus =
+          res["status"] is Map ? res["status"] as Map<String, dynamic> : null,
+    );
+  }
+
+  /// 授权码保存：即刻生效（服务端当场启动轮询）+ 写 config.env 持久化（重启
+  /// runtime 后环境注入回来）。
+  Future<void> _saveMailPass() async {
+    if (_mailSaving) return;
+    final String pass = _mailPassCtrl.text.trim();
+    if (pass.isEmpty) {
+      setState(() => _mailSaveMsg = "授权码不能为空");
+      return;
+    }
+    setState(() {
+      _mailSaving = true;
+      _mailSaveMsg = null;
+    });
+    try {
+      // 持久化：config.env（与模型 Key 同通道）
+      final Map<String, String> cfg = Map.of(LocalRuntimeConfig.readSync());
+      cfg["MAIL_WATCH_PASS"] = pass;
+      cfg["MAIL_WATCH_ENABLED"] = "1";
+      LocalRuntimeConfig.write(cfg);
+      // 即刻生效：服务端当场启动轮询（无需重启 runtime）
+      final Map<String, dynamic> res = await MailWatchApi.applyPass(pass);
+      final Map<String, dynamic> st =
+          res["status"] is Map ? res["status"] as Map<String, dynamic> : <String, dynamic>{};
+      if (!mounted) return;
+      setState(() {
+        _mailStatus = st;
+        _mailPassCtrl.clear();
+        _mailSaveMsg = st["running"] == true
+            ? "已接通，正在盯邮箱"
+            : "已保存，但未启动：${st["reason"] ?? "未知原因"}";
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _mailSaveMsg = "保存失败：$e");
+    } finally {
+      if (mounted) setState(() => _mailSaving = false);
+    }
+  }
+
   Future<void> _saveModelConfig() async {
     if (_modelSaving) return;
     final String key = _modelKeyCtrl.text.trim();
@@ -365,8 +421,89 @@ class _SettingsPageState extends State<SettingsPage> {
       children: <Widget>[
         _buildModelCard(),
         const SizedBox(height: 16),
+        _buildMailCard(),
+        const SizedBox(height: 16),
         _buildVoiceprintCard(),
       ],
+    );
+  }
+
+  Widget _buildMailCard() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final bool running = _mailStatus?["running"] == true;
+    final String user = String.fromCharCodes(
+      ((_mailStatus?["user"] ?? "") as String).codeUnits,
+    );
+    final String reason = (_mailStatus?["reason"] ?? "") as String;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.mark_email_unread_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("邮箱接入", style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                Text(
+                  running ? "盯梢中" : "未接通",
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: running ? cs.primary : cs.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              "登录用的邮箱已自动接入。只需填一次 IMAP 授权码（邮箱网页版设置里生成，"
+              "不是登录密码），agent 即可帮你盯重要邮件、自动把车票/酒店行程记进日程。",
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            if (user.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 8),
+              Text("已接入邮箱：$user", style: const TextStyle(fontSize: 12.5)),
+            ],
+            if (!running && reason.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 4),
+              Text(reason, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+            ],
+            const SizedBox(height: 14),
+            TextField(
+              controller: _mailPassCtrl,
+              obscureText: _obscureMailPass,
+              style: const TextStyle(fontSize: 13),
+              decoration: InputDecoration(
+                labelText: "IMAP 授权码",
+                hintText: "邮箱设置里生成的授权码",
+                isDense: true,
+                suffixIcon: IconButton(
+                  icon: Icon(_obscureMailPass ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18),
+                  onPressed: () => setState(() => _obscureMailPass = !_obscureMailPass),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: <Widget>[
+                FilledButton(
+                  onPressed: _mailSaving ? null : _saveMailPass,
+                  child: _mailSaving
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text("保存并接通", style: TextStyle(fontSize: 13)),
+                ),
+                if (_mailSaveMsg != null) ...<Widget>[
+                  const SizedBox(width: 12),
+                  Expanded(child: Text(_mailSaveMsg!, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis)),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 

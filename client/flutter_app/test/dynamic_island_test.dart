@@ -127,6 +127,17 @@ void main() {
       expect(c.ambientUnread, 3);
     });
 
+    test('消息聚合未读与站内信分账，hover 行合并计数', () {
+      final DynamicIslandController c = DynamicIslandController();
+      c.setAmbientUnread(2);
+      c.setMessageHubUnread(5);
+      expect(c.ambientUnread, 7);
+      c.setMessageHubUnread(5); // 幂等
+      expect(c.ambientUnread, 7);
+      c.setMessageHubUnread(0); // 聚合清零只撤自己的账
+      expect(c.ambientUnread, 2);
+    });
+
     test('IslandAgentStep 状态语义：0 进行中 / 1 成功 / 2 失败', () {
       const IslandAgentStep running = IslandAgentStep(label: 'a');
       const IslandAgentStep ok = IslandAgentStep(label: 'a', state: 1);

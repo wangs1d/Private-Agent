@@ -38,11 +38,14 @@ import { getMemoryManagerService } from "../../services/memory-manager-service.j
 import { getMemoryComponents } from "../../agentic-memory/index.js";
 import {
   isNotesChatSessionId,
+  isIncognitoChatSessionId,
   resolvePrimaryChatSessionId,
 } from "../../agent/master-chat-session.js";
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
+import { StreamSegmenter, type StreamSegmentEmitMeta } from "../../agent/stream-segmenter.js";
+import { BubbleTracker } from "../../agent/bubble-tracker.js";
 import { isVoiceMode } from "../../proactivity/voice-mode-state.js";
-import { StreamSegmenter } from "../../agent/stream-segmenter.js";
+import { CALENDAR_CONFIRM_TOOLS } from "../../services/agent-core.js";
 import {
   buildExecutionEventPayload,
   buildIntentDetectedPayload,
@@ -497,7 +500,12 @@ export async function handleChatUserMessageEvent(
     interruptedContext: (data as { interruptedContext?: string }).interruptedContext,
     originalMessageId: data.messageId,
     userId: data.userId ?? msgActor,
-    sessionId: ctx.sessionId,
+    // 隐身会话（incognito: 前缀）是唯一放行的 payload sessionId——主通道会话
+    // 一律钉死为绑定身份（防串台），但隐身标记必须流到 finalizeTurn 才能生效。
+    sessionId:
+      typeof data.sessionId === "string" && isIncognitoChatSessionId(data.sessionId)
+        ? data.sessionId
+        : ctx.sessionId,
     contentType: typeof data.contentType === "string" ? data.contentType : undefined,
   }, (batched, turn) => processBatchedMessage(ctx, batched, deps, turn));
 
@@ -560,6 +568,13 @@ async function processBatchedMessage(
   let chunkSeq = 0;
   const assistantMessageId = `assistant-${batched.originalMessageId}`;
 
+  // 真·分绿泡（2026-09-28）：对话面闲聊轮把信息块升级为独立气泡连发。
+  // bubbleSplitActive 在路由决策就绪后置位（首个主回复 delta 之前，无竞态）；
+  // 每个气泡独立 messageId（assistant-$traceId-bN，避开 interim- 保留前缀），
+  // done 载荷带 bubbles 对账数组。非拆分轮所有字段与原协议完全一致。
+  // 分配/记账逻辑见 BubbleTracker（bubble-tracker.ts，含独立单测）。
+  const bubbleTracker = new BubbleTracker(false, assistantMessageId);
+
   // [ts:...] 是系统注入的元数据标记，仅供 LLM 上下文使用，绝不能透出到用户可见消息。
   // 2026-09-03 收紧：此前只剥首块，后续块里模型复述的时间戳帧（含残缺帧）会直透前端。
   // 现在每个 chunk 出口都剥"帧"：
@@ -569,7 +584,11 @@ async function processBatchedMessage(
   // 剥离容忍残缺帧（[ts 后断行/丢冒号），杜绝"严格正则匹配不上所以漏网"。
   // 流式标记防泄漏 guard（L2 配套，见 stream-marker-guard.ts 文件头）
   const streamMarkerGuard = createStreamMarkerGuard();
-  const sendAssistantChunk = (chunk: string, phase: "interim" | "stream" = "stream"): void => {
+  const sendAssistantChunk = (
+    chunk: string,
+    phase: "interim" | "stream" = "stream",
+    meta?: StreamSegmentEmitMeta,
+  ): void => {
     if (isStale()) return;
     chunkSeq += 1;
     let cleanedChunk = stripLeadingTimestampFrames(chunk);
@@ -580,16 +599,22 @@ async function processBatchedMessage(
     // 避免打字机气泡闪现原始标记/JSON。
     cleanedChunk = streamMarkerGuard.feed(cleanedChunk);
     if (!cleanedChunk) return;
+    // 气泡拆分：new 开新泡（独立 messageId），无 meta 的直推段（确定性收口
+    // supplement / 零正文兜底）追加到当前末泡；尚无泡时兜底开第一泡。
+    const outbound = bubbleTracker.assign(cleanedChunk, meta);
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantChunk,
         payload: {
           sessionId: msgActor,
-          messageId: assistantMessageId,
+          messageId: outbound.messageId,
           traceId: batched.originalMessageId,
           chunk: cleanedChunk,
           sequence: chunkSeq,
           phase,
+          ...(outbound.bubbleIndex !== undefined
+            ? { bubbleIndex: outbound.bubbleIndex }
+            : {}),
         },
       }),
     );
@@ -678,10 +703,25 @@ async function processBatchedMessage(
           }),
         );
       }
-      // 实时流式例外：knowledge_qa 是对话面唯一保留"出口自检重跑"兜底的意图
-      // ——重跑时第一版文本已经流出会造成气泡重复，该意图保持缓冲模式。
-      realtimeStream =
-        decision.plane !== "chat" || decision.intent !== "knowledge_qa";
+      // 2026-09-28 放流：knowledge_qa 缓冲模式废除。此前该意图整轮缓冲到
+      // 生成完 + 出口收口之后才推 chunk，提问类消息几乎必命中——是「纯提问
+      // 也要全程黑等」的最大单点（实测 TTFT=总耗时 92%）。出口自检重跑/出口
+      // 重写与已流文本的分歧，改由 flushFinal 后的分歧裁决 + done 载荷
+      // finalTextReplacesStream 信号（客户端整段替换气泡）承接。
+      // AGENT_REALTIME_STREAM=0 可整体回退缓冲模式（应急开关）。
+      realtimeStream = process.env.AGENT_REALTIME_STREAM !== "0";
+      // 真·分绿泡门禁（2026-09-28）：仅对话面（segmentable=plane chat）拆泡；
+      // 语音轮不拆（泡间停顿会拖慢 done，且语音 TTS 不消费气泡边界）；
+      // AGENT_BUBBLE_SPLIT=0 可整体关停（回退单泡协议）。
+      // 置位点在首个主回复 delta 之前（agent-core 主 LLM 依赖同一决策），无竞态。
+      if (
+        decision.segmentable &&
+        !isVoiceMode(msgActor) &&
+        process.env.AGENT_BUBBLE_SPLIT !== "0"
+      ) {
+        bubbleTracker.active = true;
+        streamSegmenter.enableBubbleMode();
+      }
     })
     .catch(() => {
       /* 路由决策永不 reject（内部降级）；防御性忽略 */
@@ -700,7 +740,11 @@ async function processBatchedMessage(
   // 间隔 / 首句按住是给前端打字机节奏用的；语音端（orb）拿 chunk 直接分句合成
   // TTS，这些人为停顿只会把 assistant_done 和首句 TTS 一起拖慢——语音链路
   // 的"节奏感"由真人语音本身的播放时长天然保证，不需要额外 sleep。
-  const voiceModeTurn = isVoiceMode(msgActor);
+  // 分段器统一零停顿档（2026-09-28）：文字端原「块间 400ms / 首句后 800ms /
+  // 首句按住到第二块」三个人为停顿实测把 TTFT 推到总耗时的 84%~92%（用户
+  // 全程干等模型生成完才见第一个字），而前端打字机自身已有逐字节奏，服务端
+  // 不再叠加 sleep；语音端（orb）拿 chunk 直接分句合成 TTS，节奏感由真人
+  // 语音播放时长天然保证。
   // 实时流式开关（2026-09-05）：主回复 delta 即刻喂分段器，前端打字机/语音 TTS
   // 在生成过程中就拿到首个信息块，不再等整段生成完才推 chunk（此前 chunk 全部
   // 滞留到 reply 完成后才一次性推出，是文字链路"回复慢"的最大单点）。
@@ -708,13 +752,14 @@ async function processBatchedMessage(
   // 首个 delta 只会在路由决策就绪后到达，此时开关必然已被赋值。
   let realtimeStream = true;
   const streamSegmenter = new StreamSegmenter(
-    (segment, phase) => sendAssistantChunk(segment, phase),
+    (segment, phase, meta) => sendAssistantChunk(segment, phase, meta),
     {
-      // pauseMs：每条回复信息块之间的间隔，拉长到 400ms，
-      // 配合前端打字机，让每块逐字打出后都有一段清晰的停顿再输出下一块。
-      pauseMs: voiceModeTurn ? 0 : 400,
+      // 2026-09-28 去人工节奏：块间 400ms / 首句后 800ms 停顿与首句按住全部
+      // 归零（文字与语音同档）。节奏交给前端打字机逐字渲染；服务端分段器只
+      // 负责信息块切分与句级去重，不再引入任何 sleep。
+      pauseMs: 0,
       minSegmentChars: 6,
-      interimReplyGapMs: voiceModeTurn ? 0 : 800,
+      interimReplyGapMs: 0,
       // 2026-08-28 修复"分段回复一次性整段渲染"：原按路由决策
       // （decision.segmentable）关闭工具/搜索/知识问答轮的分段，工具循环的
       // 最终文本只在收尾时经一次 onDelta 整段喂入 → segmentationEnabled=false
@@ -728,8 +773,9 @@ async function processBatchedMessage(
       // 覆盖真实回复体量，尾部合并只对病态超长输出生效（保留为防刷屏极端阀）。
       blockCharTarget: 56,
       maxStreamSegments: 24,
-      // 语音模式关闭首句按住：首句（agent 的第一声回应）随到随发，TTS 立刻开播
-      holdFirstSentence: !voiceModeTurn,
+      // 首句随到随发（2026-09-28 文字端同样关闭按住）：首句不再等第二块裁决，
+      // 第一个完整句边界即推送——TTFT 从「第二块边界/flushFinal」提前到首个完整句。
+      holdFirstSentence: false,
     },
   );
 
@@ -959,6 +1005,11 @@ async function processBatchedMessage(
         );
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
+        // 确认轮标记（与 agent-core CALENDAR_CONFIRM_TOOLS 同源）：分泡轮
+        // 说话算话裁决的确认轮例外——确认轮保留出口收口塌缩。
+        if (info.ok && CALENDAR_CONFIRM_TOOLS.has(info.toolName)) {
+          bubbleTracker.confirmationAnchored = true;
+        }
         // 捕获搜索类工具的真实结果，供 done 阶段确定性附 search_result 卡（L1）
         if (
           info.ok &&
@@ -1193,11 +1244,42 @@ async function processBatchedMessage(
     //   复述的帧不在这里剥掉，就会成为独立信息块推给前端）。
     const finalFeedRaw = (reply.text && reply.text.trim()) ? reply.text : streamedText;
     const finalFeed = stripAllTimestampFrameLines(finalFeedRaw);
+    // 分歧裁决（2026-09-28 放流配套）：knowledge_qa 缓冲废除后，出口自检重跑/
+    // 出口重写会让最终文本与已流文本分叉。残差小（收口清洗产生的差异）→ 照旧
+    // 补推残差增量；残差大（≥40%，重写/重跑换了说法）→ 不再补推（避免新旧两版
+    // 拼接），改在 done 载荷打 finalTextReplacesStream 信号，客户端整段替换气泡。
+    let finalTextReplacesStream = false;
     if (finalFeed && finalFeed.trim()) {
       if (realtimeStream && streamedText.trim()) {
         const streamedClean = stripAllTimestampFrameLines(streamedText);
-        const residual = stripSentencesAlreadySaid(streamedClean, finalFeed);
-        if (residual.trim()) streamSegmenter.feed(residual);
+        const residual = stripSentencesAlreadySaid(streamedClean, finalFeed).trim();
+        if (residual) {
+          // 分歧裁决（2026-09-28 说话算话根修）：分泡轮走 BubbleTracker 策略
+          // （残差 ≥40% 且非确认轮 → 弃重写文本、不再触发客户端塌缩）；
+          // 非分泡轮（语音/任务面）保持原语义（≥40% → finalTextReplacesStream）。
+          // belt-and-braces：确认工具若漏走 onExternalToolExecuted，用末次
+          // toolName 兜底补标。
+          if (reply.toolName && CALENDAR_CONFIRM_TOOLS.has(reply.toolName)) {
+            bubbleTracker.confirmationAnchored = true;
+          }
+          const verdict = bubbleTracker.hasBubbles
+            ? bubbleTracker.resolveDivergence(residual.length, finalFeed.trim().length)
+            : residual.length >= finalFeed.trim().length * 0.4
+              ? "replace"
+              : "feed";
+          if (verdict === "replace") {
+            finalTextReplacesStream = true;
+          } else if (verdict === "feed") {
+            streamSegmenter.feed(residual);
+          } else {
+            // 说话算话：已流式分泡即最终回复——真人不会把说出去的话吞回来
+            // 重说。重写版本对展示侧废弃（done.finalText 仍携带重写版供
+            // 记忆/语音链路），客户端永不塌缩，杜绝"泡说出来又被吞"的混乱。
+            console.log(
+              `[bubble-split] 弃出口分歧重写文本（${residual.length}/${finalFeed.trim().length}ch，trace=${batched.originalMessageId}）`,
+            );
+          }
+        }
       } else {
         streamSegmenter.feed(finalFeed);
       }
@@ -1258,6 +1340,8 @@ async function processBatchedMessage(
       scheduleOutcome?.trim() ||
       reply.text.trim() ||
       (chunkSeq > 0 ? "" : "");
+    // 确定性收口（日程/提醒格式化结果）与流式原文整体不同 → 同样走整段替换信号
+    if (scheduleOutcome?.trim()) finalTextReplacesStream = true;
 
     // 错字归一化：模型偶发用单个「—」冒充量词「一」（deepseek 破折号习惯），
     // 发送前修掉（不动合法的「——」）。
@@ -1515,9 +1599,17 @@ async function processBatchedMessage(
         type: ServerEventType.ChatAssistantDone,
         payload: {
           sessionId: msgActor,
-          messageId: assistantMessageId,
+          // 气泡拆分轮指向末泡 id（客户端按泡对账）；普通轮保持 assistant-$traceId
+          messageId: bubbleTracker.outboundDoneMessageId,
           traceId: batched.originalMessageId,
           finalText,
+          // 真·分绿泡（2026-09-28）：各气泡定稿对账数组（id+定稿文本）。
+          // 客户端据此逐泡定稿/补建漏收的泡；finalTextReplacesStream=true 时
+          // 该数组同时是"待塌缩删除"的泡清单。普通轮不下发该字段。
+          ...(bubbleTracker.hasBubbles ? { bubbles: bubbleTracker.snapshot } : {}),
+          // 放流配套（2026-09-28）：最终文本与已流文本分叉（重写/重跑/确定性
+          // 收口）时置 true，客户端收到后用 finalText 整段替换流式气泡。
+          ...(finalTextReplacesStream ? { finalTextReplacesStream: true } : {}),
           toolCalls: reply.toolName ? [reply.toolName] : [],
           // 任务面异步收尾：本轮已把任务派发到后台（无正文），客户端按
           // source=task_plane + traceId 结清前台处理状态、不落正文气泡——
@@ -1557,9 +1649,11 @@ async function processBatchedMessage(
         type: ServerEventType.ChatAssistantDone,
         payload: {
           sessionId: msgActor,
-          messageId: assistantMessageId,
+          // 错误收口：已推出的气泡原样定稿（半截也是用户亲眼所见），不回吞
+          messageId: bubbleTracker.outboundDoneMessageId,
           traceId: batched.originalMessageId,
           finalText: errText,
+          ...(bubbleTracker.hasBubbles ? { bubbles: bubbleTracker.snapshot } : {}),
           toolCalls: [],
         },
       }),

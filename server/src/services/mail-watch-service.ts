@@ -100,7 +100,13 @@ export type MailWatchLogger = (level: "info" | "warn" | "error", message: string
 
 export interface MailWatchDeps {
   /** 每轮 poll 调用一次，产出一个全新连接的客户端（测试注入假实现，不发真网络请求） */
-  clientFactory?: () => MailWatchClient | Promise<MailWatchClient>;
+  clientFactory?: (cfg: {
+    host: string;
+    port: number;
+    user: string;
+    pass: string;
+    mailbox: string;
+  }) => MailWatchClient | Promise<MailWatchClient>;
   /** 新邮件分级完成后的回调（ProactivityHub 主动提醒接线点）；异常被吞掉，不阻断落库 */
   onNewMessage?: (mail: IncomingMail, classification: MailWatchClassification) => void | Promise<void>;
   /** 可选：邮件同步 ingest 进消息聚合中心（bootstrap 传 messageHubService） */
@@ -611,6 +617,7 @@ function emptyState(uidValidity = ""): MailWatchState {
 
 export class MailWatchService {
   private readonly deps: MailWatchDeps;
+  /** 配置（构造固化自 env；applyAutoAccount 可写 host/user/port/actorId/enabled） */
   private readonly cfg: MailWatchConfig;
   private readonly statePath: string;
   private readonly windowSize: number;
@@ -648,7 +655,9 @@ export class MailWatchService {
       return;
     }
     if (!this.isConfigured()) {
-      this.reason = "邮箱盯梢未配置：需要 MAIL_WATCH_HOST / MAIL_WATCH_USER / MAIL_WATCH_PASS";
+      this.reason = this.cfg.host && this.cfg.user
+        ? "等待邮箱授权码：IMAP 需要授权码而非登录密码，请在设置页配置（MAIL_WATCH_PASS）"
+        : "邮箱盯梢未配置：需要 MAIL_WATCH_HOST / MAIL_WATCH_USER / MAIL_WATCH_PASS";
       this.log("info", `未启动：${this.reason}`);
       return;
     }
@@ -673,6 +682,42 @@ export class MailWatchService {
   /** 配置是否齐备（host/user/pass）。 */
   isConfigured(): boolean {
     return Boolean(this.cfg.host && this.cfg.user && this.cfg.pass);
+  }
+
+  /**
+   * 授权码提交（设置页）：配置后即刻尝试启动轮询。返回启动后状态供 UI 刷新。
+   * 本进程内生效；持久化由客户端写 config.env（重启后 runtime 环境注入回来）。
+   */
+  applyPass(pass: string): MailWatchStatus {
+    this.cfg.pass = pass.trim();
+    if (!this.cfg.enabled) this.cfg.enabled = true;
+    this.start();
+    return this.status();
+  }
+
+  /**
+   * 邮箱自动接入（P2 2026-10-01）：用户 env 未显式配 host/user 时，用注册表
+   * 解析出的账号自动补全（host 按域映射、user=email、actorId=账号 id）。
+   * 授权码（pass）服务端无从得知——缺时 start() 仍如实报 needs_pass，
+   * 用户在设置页/env 填一次即全链点亮。已显式配置时本方法不覆盖（env 优先）。
+   */
+  applyAutoAccount(acct: {
+    actorId: string;
+    email: string;
+    imapHost: string;
+    imapPort: number;
+  }): void {
+    if (process.env.MAIL_WATCH_HOST?.trim() || process.env.MAIL_WATCH_USER?.trim()) return;
+    this.cfg.host = acct.imapHost;
+    this.cfg.port = acct.imapPort;
+    this.cfg.user = acct.email;
+    this.cfg.actorId = acct.actorId;
+    // enabled 未显式开启时自动开启（自动接入的语义就是「登录即接入」）
+    if (!this.cfg.enabled) this.cfg.enabled = true;
+    this.log(
+      "info",
+      `邮箱自动接入：${acct.email} → ${acct.imapHost}（actor=${acct.actorId}）${this.cfg.pass ? "" : "；等待授权码（设置页 MAIL_WATCH_PASS）"}`,
+    );
   }
 
   /** 当前快照（管理面/工具查询用；含诚实失败信息）。 */
@@ -720,7 +765,13 @@ export class MailWatchService {
     this.lastPollAt = new Date().toISOString();
     let client: MailWatchClient;
     try {
-      client = await this.deps.clientFactory();
+      client = await this.deps.clientFactory({
+        host: this.cfg.host,
+        port: this.cfg.port,
+        user: this.cfg.user,
+        pass: this.cfg.pass,
+        mailbox: this.cfg.mailbox,
+      });
     } catch (e) {
       const err = `创建 IMAP 客户端失败：${errorMessage(e)}`;
       this.recordFailure(err);

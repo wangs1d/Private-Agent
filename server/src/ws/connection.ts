@@ -213,6 +213,8 @@ export type WsRouteDeps = {
    * 作为 phone_call.start 确认门的权威证据源（LLM 无法伪造）。
    */
   phoneCallCoordinator?: PhoneCallCoordinator;
+  /** 账号服务（可选）：session.init 记录最近活跃（管理后台「最近活跃」指标） */
+  agentAccountService?: { touchLastActive(actorId: string): void } | null;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -246,6 +248,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     eveningDigestScheduler,
     accessAuthService,
     phoneCallCoordinator,
+    agentAccountService,
   } = deps;
 
   // device-bus 处理器依赖（device.* 事件路由）
@@ -719,6 +722,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           boundActorId = actorId;
           initAsDesktopBridge = isDesktopBridgeChannel;
           initAsPhoneBridge = isPhoneBridgeChannel;
+          // 活跃打点：session.init = 应用启动/重连，是「最近活跃」最可靠的信号
+          agentAccountService?.touchLastActive(actorId);
           if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
             // 设备类别随连接登记（2026-09-18）：session.init 自报 platform，
             // critical 升级链据此区分电脑端/移动端触达；旧客户端缺省按桌面端处理

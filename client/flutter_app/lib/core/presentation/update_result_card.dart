@@ -79,12 +79,17 @@ class UpdateResultCard {
   /// - 已是最新 → 右上角玻璃通知卡轻提示（短暂即逝）
   /// - 发现新版本 / 检查失败 → 更新按钮正上方浮卡（非模态）
   /// - 仅强锁（低于 minVersion）保留不可关闭的居中弹窗，与启动检查同一出口
-  static Future<void> runManualUpdateCheck(BuildContext context) async {
-    final ClientUpdateCheckResult? result = await checkClientUpdate();
+  static Future<void> runManualUpdateCheck(
+    BuildContext context, {
+    bool forceRefresh = false,
+  }) async {
+    final ClientUpdateCheckResult? result =
+        await checkClientUpdate(forceRefresh: forceRefresh);
     if (!context.mounted) return;
     if (result == null) {
       showFailure(
-        onRetry: () => unawaited(runManualUpdateCheck(context)),
+        onRetry: () =>
+            unawaited(runManualUpdateCheck(context, forceRefresh: true)),
       );
       return;
     }

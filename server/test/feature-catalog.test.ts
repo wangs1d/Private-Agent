@@ -31,6 +31,15 @@ test("分类器：新功能四条线落对生活域与风险", () => {
   assert.equal(classifyFeatureByName("clock.get_current_time").domain, "system");
   assert.equal(classifyFeatureByName("calendar.create_task").domain, "work");
   assert.equal(classifyFeatureByName("meituan.create_order").domain, "dining");
+  // 只读工具必须压过家族前缀的 spend/outbound（2026-09-28 根修：高危闸曾误拦），
+  // 每个家族补一只代表，防止回退成前缀默认值
+  assert.equal(classifyFeatureByName("social.get_feed").risk, "read");
+  assert.equal(classifyFeatureByName("social.search_posts").risk, "read");
+  assert.equal(classifyFeatureByName("social.post").risk, "outbound");
+  assert.equal(classifyFeatureByName("wallet.get_balance").risk, "read");
+  assert.equal(classifyFeatureByName("wallet.get_transactions").risk, "read");
+  assert.equal(classifyFeatureByName("payment.list_methods").risk, "read");
+  assert.equal(classifyFeatureByName("payment.query_order").risk, "read");
 });
 
 test("分类器：最长前缀优先（booking.travel-pay 不落 travel.* 泛规则）", () => {

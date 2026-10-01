@@ -1,6 +1,7 @@
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import websocket from "@fastify/websocket";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import Fastify from "fastify";
 import {
   A2aOutsourcingService,
@@ -23,6 +24,8 @@ import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
 import { AgentAccountService } from "../services/agent-account-service.js";
+import { BetaWhitelistService } from "../services/beta-whitelist-service.js";
+import { BetaInviteService, BetaWaitlistService } from "../services/beta-invite-service.js";
 import { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { FriendService } from "../services/friend-service.js";
 import { createAgentCore } from "../agent/agent-runtime.js";
@@ -41,6 +44,8 @@ import { createNarrativeHybridRetrievalDefault } from "../services/narrative-hyb
 import { initMemoryManagerService, getMemoryManagerService } from "../services/memory-manager-service.js";
 import { initHumanLikeMemoryService } from "../services/human-like-memory-service.js";
 import { getAgenticMemoryRuntime, registerMemoryComponents } from "../agentic-memory/index.js";
+import { ensureLocalEmbeddingEndpoint } from "../agentic-memory/local-embedding/local-embedding-endpoint.js";
+import { resolveEmbeddingEndpoint } from "../services/openai-embedding-client.js";
 import { createMemoryBridgeIfEnabled } from "../agentic-memory/memory-bridge-service.js";
 import { createAgenticLedgerIfEnabled } from "../agentic-memory/ledger.js";
 import { createCommitmentBoardIfEnabled } from "../agentic-memory/commitment-board.js";
@@ -117,7 +122,10 @@ import {
   VariflightFlightProvider,
 } from "../services/arrival-concierge/index.js";
 import { HabitLoopService } from "../services/habit-loop/index.js";
-import { configureChatSuggestionUsageSource } from "../services/chat-suggestions-service.js";
+import {
+  configureChatSuggestionProfileSource,
+  configureChatSuggestionUsageSource,
+} from "../services/chat-suggestions-service.js";
 import { VoiceDuplexService } from "../services/voice-duplex/index.js";
 import { registerVoiceDuplexWsRoute } from "../ws/voice-duplex-route.js";
 import type { TravelTicketProvider } from "../services/booking/providers/travel-ticket-provider.js";
@@ -151,8 +159,9 @@ import { VoiceMessageService } from "../services/voice-message-service.js";
 import { ImageGenerationService } from "../services/image-generation-service.js";
 import { FileProcessingService } from "../services/file-processing-service.js";
 import { EmailSmsService } from "../services/email-sms-service.js";
+import { EmailOtpService } from "../services/email-otp-service.js";
 import { MediaMusicService } from "../services/media-music-service.js";
-import { MailWatchService } from "../services/mail-watch-service.js";
+import { MailWatchService, createImapflowClient } from "../services/mail-watch-service.js";
 import {
   FinanceBillAutoFetchService,
   createPlaywrightAlipayBillFetcher,
@@ -181,7 +190,6 @@ import {
 import { buildQuoteAggregator } from "../services/booking/quote/index.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
-import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
 import { MiniMaxTTSAdapter } from "../services/voice-dialogue/adapters/minimax-tts-adapter.js";
 import { MiniMaxRealtimeService } from "../services/voice-dialogue/minimax-realtime-service.js";
 import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm-adapter.js";
@@ -334,6 +342,7 @@ import {
   isAgentWorldSocialEnabled,
   isBrainEvolutionEnabled,
   isAccessAuthRequired,
+  isOssEdition,
 } from "../config/env.js";
 import { registerHttpRateLimit } from "../http-rate-limit/http-rate-limit.js";
 import type { AppServices } from "./types.js";
@@ -472,6 +481,29 @@ import {
 } from "../proactivity/mapping-executor.js";
 import { buildBoardRules } from "../proactivity/mapping-rules.js";
 import { WorldBoard, bridgeSensorKernelToBoard } from "../proactivity/world-board.js";
+import { TurnAsideQueue } from "../proactivity/turn-aside-queue.js";
+import { formatCurrentStatePrompt } from "../agent/current-state-prompt.js";
+import { resolveAutoMailAccount } from "../proactivity/auto-mail-account.js";
+
+/** 读 ndjson 尾部 N 行（P3 自诊断用；文件缺失/损坏返回空） */
+function readNdjsonTail(path: string, maxLines: number): unknown[] {
+  try {
+    if (!existsSync(path)) return [];
+    const raw = readFileSync(path, "utf8");
+    const lines = raw.trim().split("\n");
+    const out: unknown[] = [];
+    for (const line of lines.slice(-maxLines)) {
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* 跳过半行 */
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 import { GoalBoard } from "../proactivity/goal-board.js";
 import { GoalPlanner } from "../proactivity/goal-planner.js";
 import { AuditTrailService } from "../proactivity/audit-timeline.js";
@@ -693,22 +725,8 @@ export async function createAppServices(): Promise<AppServices> {
     );
   }
 
-  // 注册硅基流动 TTS provider（MiniMax 未配置时作为默认）
-  const siliconflowTTS = new SiliconFlowTTSAdapter();
-  if (siliconflowTTS.isEnabled()) {
-    voiceDialogueService.registerProvider("siliconflow", {
-      asr: funasrAdapter, // ASR 走 FunASR
-      tts: siliconflowTTS,
-      llm: new OpenAILLMAdapter(),
-    });
-    if (!minimaxTTS.isEnabled()) {
-      voiceDialogueService.setDefaultProvider("siliconflow");
-      app.log.info(
-        `[VoiceDialogue] 硅基流动 TTS 已启用，设为默认提供商（ASR：${funasrAdapter.name}）`,
-      );
-    }
-  } else if (!minimaxTTS.isEnabled()) {
-    app.log.info("[VoiceDialogue] 硅基流动 TTS 未配置或凭证不完整，使用 OpenAI 作为默认提供商");
+  if (!minimaxTTS.isEnabled()) {
+    app.log.info("[VoiceDialogue] MiniMax TTS 未配置，语音对话使用 OpenAI 作为默认提供商");
     voiceDialogueService.setDefaultProvider("openai");
   }
 
@@ -723,7 +741,7 @@ export async function createAppServices(): Promise<AppServices> {
   // 作为 Agent 的底层能力，被 voice.speak 工具、智能提醒、主动消息等场景统一调度。
   const voiceMessageService = new VoiceMessageService();
   voiceMessageService.setTtsService(ttsService);
-  // 初始化图像生成能力服务（硅基流动 text-to-image，下载到本地静态目录）。
+  // 初始化图像生成能力服务（OpenAI 兼容 text-to-image，下载到本地静态目录）。
   // 与语音消息同模式：独立目录 data/images/{actorId}/{imageId}.png，HTTP 走 /agent/images。
   const imageGenerationService = new ImageGenerationService();
   upstreamSearchService.setImageStorageService(imageGenerationService);
@@ -732,6 +750,9 @@ export async function createAppServices(): Promise<AppServices> {
   const fileProcessingService = new FileProcessingService();
   // 初始化邮件/短信主动发送服务（SMTP + 阿里云短信，凭证从环境变量读取）。
   const emailSmsService = new EmailSmsService();
+  // 邮箱所有权验证码（OTP）：注册/登录前向自报邮箱发码证明所有权；
+  // 凭据复用 emailSmsService 的 OUTBOUND_SMTP_*（未配置时 OTP 闸不生效）。
+  const emailOtpService = new EmailOtpService();
   // 初始化媒体音乐服务（搜索 + WS 推送播放控制事件）。
   // 登录音源（2026-09-18）：注入浏览器会话库——用户导入 music.163.com Cookie 并授权后，
   // 播放 URL 解析带用户身份（VIP 曲目用其会员权益）；无会话自动回退匿名。
@@ -967,6 +988,11 @@ export async function createAppServices(): Promise<AppServices> {
   const aipService = new AipService(agentRelayService, wsConnectionRegistry, agentPairingService, auditService);
   const agentAccountService = new AgentAccountService();
   const emailRegistrationService = new EmailRegistrationService();
+  // 内测注册白名单（HTTP 注册闸用；名单文件热读，后台改完即生效）
+  const betaWhitelistService = new BetaWhitelistService();
+  // 内测自助通道：候补申请队列（登录页排队→后台批量审批）+ 邀请码（登录页填码过闸）
+  const betaWaitlistService = new BetaWaitlistService();
+  const betaInviteService = new BetaInviteService();
   const friendService = new FriendService();
   // 财务入站记账服务（构造提前到 skill 注册之前；LLM/推送回调由装配层后置注入）。
   const financeIngestService = new FinanceIngestService({
@@ -991,14 +1017,18 @@ export async function createAppServices(): Promise<AppServices> {
   registerWalletTools(toolRegistry, friendService);
   registerPaymentTools(toolRegistry, paymentService);
   registerMeituanTools(toolRegistry, meituanService);
-  registerAgentLinkTools(toolRegistry, friendService, agentAccountService);
-  registerAgentRelayTools(
-    toolRegistry,
-    agentRelayService,
-    wsConnectionRegistry,
-    agentPairingService,
-  );
-  registerAgentPhoneTools(toolRegistry, virtualPhoneService);
+  // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：好友/中继/虚拟电话工具族
+  if (!isOssEdition()) {
+    registerAgentLinkTools(toolRegistry, friendService, agentAccountService);
+    registerAgentRelayTools(
+      toolRegistry,
+      agentRelayService,
+      wsConnectionRegistry,
+      agentPairingService,
+      agentAccountService,
+    );
+    registerAgentPhoneTools(toolRegistry, virtualPhoneService);
+  }
   registerAgentVoiceTools(toolRegistry, voiceCapabilityService, voiceMessageService);
   // Surface-on-Demand：LLM 可召唤客户端信息面板（语音模式"念+显"双通道）
   registerSurfaceTools(toolRegistry, {
@@ -1116,10 +1146,12 @@ export async function createAppServices(): Promise<AppServices> {
     agentAccountService,
   });
   
-  // 注册虚拟电话内置Skills
-  registerVirtualPhoneBuiltinSkills((skill) => skillManager.register(skill), {
-    virtualPhoneService,
-  });
+  // 注册虚拟电话内置Skills（版本闸：开源版剔除）
+  if (!isOssEdition()) {
+    registerVirtualPhoneBuiltinSkills((skill) => skillManager.register(skill), {
+      virtualPhoneService,
+    });
+  }
 
   // 注册支付宝 AI 支付内置Skills（真实购买能力，封装项目内置 alipay-bot CLI）
   registerAlipayPaymentBuiltinSkills((skill) => skillManager.register(skill), {
@@ -1137,16 +1169,19 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   // 注册旅游规划内置Skills（承接 3D-Travel 项目能力：规则引擎行程生成 + POI 缓存 + 目的地知识库）
+  // 版本闸：开源版剔除 travel.* 技能族（服务本体保留构造——行程路由 deps / shutdown 仍引用）
   const travelPlanningService = new TravelPlanningService(weatherService);
-  registerTravelPlanningBuiltinSkills((skill) => skillManager.register(skill), {
-    travelPlanningService,
-  });
+  if (!isOssEdition()) {
+    registerTravelPlanningBuiltinSkills((skill) => skillManager.register(skill), {
+      travelPlanningService,
+    });
 
-  // 注册出行通勤内置Skills（实时路况出发建议 + 票夹 + 打包清单；复用同一 WeatherService）
-  registerTravelCommuteBuiltinSkills((skill) => skillManager.register(skill), {
-    travelPlanningService,
-    weatherService,
-  });
+    // 注册出行通勤内置Skills（实时路况出发建议 + 票夹 + 打包清单；复用同一 WeatherService）
+    registerTravelCommuteBuiltinSkills((skill) => skillManager.register(skill), {
+      travelPlanningService,
+      weatherService,
+    });
+  }
 
   const worldPartitionWsRegistry = new WorldPartitionWsRegistry();
   worldService.onWorldRevision((ev: WorldRevisionEvent) => {
@@ -1185,6 +1220,17 @@ export async function createAppServices(): Promise<AppServices> {
   // MCP 工具异步加载，onReady 时已就绪）。
   const featureCatalog = new FeatureCatalog(toolRegistry, skillManager, mcpClientService);
   registerCapabilityQueryTools(toolRegistry, { skillManager, worldService, virtualPhoneService, featureCatalog });
+
+  // 本地内置向量引擎（零配置记忆底座）：没有任何远端 Embedding 端点时，
+  // 在记忆系统装配前预热回环 /v1/embeddings；远端显式配置时完全不启动。
+  if (!resolveEmbeddingEndpoint()) {
+    const localEndpoint = await ensureLocalEmbeddingEndpoint();
+    if (localEndpoint) {
+      console.log(
+        `[local-embedding] 零配置向量端点就绪 ${localEndpoint.baseUrl} (model=${localEndpoint.model}, dims=${localEndpoint.dims})`,
+      );
+    }
+  }
 
   const agenticMemoryRuntime = getAgenticMemoryRuntime();
   // 两个内存服务初始化相互独立（narrative 装配只依赖 humanLikeMemory），并行加载。
@@ -2266,6 +2312,9 @@ export async function createAppServices(): Promise<AppServices> {
   // 两者均为 null 时子模块走降级路径（不阻塞主流程）。
   let knowledgeVerificationService: KnowledgeVerificationService | null = null;
   let knowledgeGapExecutor: KnowledgeGapExecutor | null = null;
+  // 顺嘴搭车队列（2026-10-01 P1）：low 级主动意图挂起等下一轮对话织入回复末尾。
+  // 共享单例——主动外发执行器（挂起点）与 ProactivityHub（挂起点+取货口）用同一队列。
+  const turnAsideQueue = new TurnAsideQueue();
   if (brainEnabled) {
     brainCenter = new BrainCenter();
     brainCenter.registerRuntimeKernel(getRuntimeKernel());
@@ -2278,6 +2327,9 @@ export async function createAppServices(): Promise<AppServices> {
     getChatThreadStore().setSessionSystemProvider(() => getRuntimeKernel().buildSessionSystem() ?? null);
     capabilityCortex = new CapabilityCortex();
     awarenessCortex = new AwarenessCortex();
+    // 睡眠样本落盘（2026-10-01 rhythm 断供根修）：重启不丢积累，3 晚即可
+    // 凑齐 SLEEP_WINDOW_MIN_SAMPLES 让节律引擎有真实作息数据
+    awarenessCortex.setPersistPath(join(process.cwd(), "data", "proactivity"));
     proactionCortex = new ProactionCortex();
     // EvolutionCortex 四子系统总开关（BRAIN_EVOLUTION_ENABLED，实验性子系统默认关闭）：
     // 关闭时整个 EvolutionCortex 块跳过装配（evolutionCortex 保持 null），Phase 5
@@ -2582,6 +2634,10 @@ export async function createAppServices(): Promise<AppServices> {
       synapseBus: () => synapseBus,
       proactiveOutbound,
       agentMemorySyncService,
+      // 顺嘴搭车：low 级主动消息挂起等下一轮对话织入（与 hub 共享同一队列实例）
+      turnAsideQueue,
+      // 死信闸：全设备离线时放弃话术生成（省 LLM 调用，不产生假台账）
+      isActorOnline: (actorId) => proactivityPresence.isOnline(actorId),
     });
 
   }
@@ -2662,8 +2718,18 @@ export async function createAppServices(): Promise<AppServices> {
   });
   habitLoopService.start();
   registerHabitLoopBuiltinSkills((skill) => skillManager.register(skill), { habitLoop: habitLoopService });
-  // 「为你推荐」按使用习惯个性化：注入同一份工具执行观察（只读快照）
+  // 「为你推荐」按用户个性化：注入工具执行观察（只读快照，服务端按 actorId 过滤）
+  // 与画像行为信号（按用户加权轮换）。无身份调用完全不个性化。
   configureChatSuggestionUsageSource(() => habitLoopService.getToolUsageObservations());
+  configureChatSuggestionProfileSource((actorId) => {
+    const b = userPersonalizationService.getBehaviorSignals(actorId);
+    return {
+      shoppingInterest: b.shoppingInterest,
+      planningInterest: b.planningInterest,
+      companionNeed: b.companionNeed,
+      privacyConcern: b.privacyConcern,
+    };
+  });
 
   // ── 图片能力套件 skill 化（PictureKit 在上方 data/pictures 根目录创建）──
   // picture.gallery 与 capability-module 工具同名接管执行；
@@ -2690,23 +2756,28 @@ export async function createAppServices(): Promise<AppServices> {
     defaultActorId: process.env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim() || undefined,
   });
   arrivalMonitorService.start();
-  registerArrivalConciergeBuiltinSkills((skill) => skillManager.register(skill), {
-    arrivalMonitor: arrivalMonitorService,
-    bookingService,
-  });
+  // 到站管家技能（版本闸：开源版剔除；监控服务生命周期保持启停对称）
+  if (!isOssEdition()) {
+    registerArrivalConciergeBuiltinSkills((skill) => skillManager.register(skill), {
+      arrivalMonitor: arrivalMonitorService,
+      bookingService,
+    });
+  }
 
-  // ── 旅行票务预订闭环（travel 域结算/出票技能）──
+  // ── 旅行票务预订闭环（travel 域结算/出票技能；版本闸：开源版剔除）──
   const travelTicketProvider =
     (bookingService.providersForDomain("travel")[0] as TravelTicketProvider | undefined) ?? null;
-  if (travelTicketProvider) {
-    registerBookingTravelBuiltinSkills((skill) => skillManager.register(skill), {
-      alipayBotService,
-      bookingOrderStore,
-      travelTicketProvider,
-      audit: auditService,
-    });
-  } else {
-    app.log.warn("[BookingTravel] travel 域 provider 未注册，跳过结算技能装配");
+  if (!isOssEdition()) {
+    if (travelTicketProvider) {
+      registerBookingTravelBuiltinSkills((skill) => skillManager.register(skill), {
+        alipayBotService,
+        bookingOrderStore,
+        travelTicketProvider,
+        audit: auditService,
+      });
+    } else {
+      app.log.warn("[BookingTravel] travel 域 provider 未注册，跳过结算技能装配");
+    }
   }
 
   // ── 全双工实时语音（WS /ws/voice-duplex）──
@@ -3152,7 +3223,7 @@ export async function createAppServices(): Promise<AppServices> {
     bodyCenter.setReflex(reflexModuleAdapter);
     // 6.0 节律感知核心（第 10 个 BodyModule）：连续工作 / 深夜活跃检测，
     //     越过阈值发布 body.rhythm.overwork_detected（ProactivityHub 订阅后干预）。
-    rhythmCore = new RhythmCore({ bodyBus });
+    rhythmCore = new RhythmCore({ bodyBus }, join(process.cwd(), "data", "body"));
     bodyCenter.registerModule(rhythmCore);
 
     // 6.1 工具路由：仅保留仍有 BodyModule 承接的前缀（当前为空——
@@ -3991,6 +4062,11 @@ export async function createAppServices(): Promise<AppServices> {
     frequencyGovernor: proactivityGovernor,
     silenceLog: proactivitySilenceLog,
     pendingConfirmations: proactivityConfirmations,
+    // 顺嘴搭车队列：low 级 speak 挂起等下一轮对话；agent-core 经
+    // takeTurnAsideForTurn 取走织入（与主动外发执行器共享同一实例）
+    turnAsideQueue,
+    // 死信闸：全设备离线的 speak 信号直接放弃（省话术 LLM + 不产生假台账）
+    presence: proactivityPresence,
     // 每用户自主性等级：0=只建议 1=标准 2=高效（客户端设置页可调）
     autonomyLevel: (actorId) => autonomySettings.getLevel(actorId),
     // 对话轮整理进状态板会话层（决策层只看板，不翻聊天原文）
@@ -4533,6 +4609,44 @@ export async function createAppServices(): Promise<AppServices> {
   const worldBoard = new WorldBoard({ dataPath: proactivityFabricPath });
   worldBoardRef.current = worldBoard;
   bridgeSensorKernelToBoard(sensorKernel, worldBoard, primaryActor);
+  // P0 清板（2026-10-01）：板上 actor 坟场一次性清理——7 天无交互的测试/
+  // 历史账号（E2E/bench/profile 全家 143 个）不再常驻每 tick 全量评估；
+  // 幽灵键（历史接线 bug 把函数源码当 actorId）一并移除。
+  // WorldBoard 无删 API，直接操作底层数据文件（板结构稳定：{actors:{id:四层}}）。
+  try {
+    const boardFile = join(proactivityFabricPath, "world-board.json");
+    if (existsSync(boardFile)) {
+      const raw = JSON.parse(readFileSync(boardFile, "utf8")) as {
+        actors?: Record<string, unknown>;
+      };
+      const known = new Map(
+        proactivityHub.exportActors().map((a) => [a.actorId, a.lastInteractionAt]),
+      );
+      const nowMs = Date.now();
+      let removed = 0;
+      for (const id of Object.keys(raw.actors ?? {})) {
+        const isGhost = id.includes("exportActors") || id.startsWith("()=>");
+        const lastAt = known.get(id);
+        const isStale = lastAt == null || nowMs - lastAt > 7 * 24 * 60 * 60_000;
+        if (isGhost || isStale) {
+          delete raw.actors![id];
+          removed++;
+        }
+      }
+      if (removed > 0) {
+        writeFileSync(boardFile, JSON.stringify(raw));
+        console.log(`[Bootstrap] 状态板已清理僵尸 actor：移除 ${removed} 个（7 天无交互/幽灵键）`);
+      }
+    }
+  } catch (err) {
+    console.log(`[Bootstrap] 状态板清理失败（忽略）: ${err}`);
+  }
+  // P0（2026-10-01「顺嘴要贴此刻」）：状态板当下层接进对话面——agent-core 每轮
+  // 读 current（屏幕焦点/在线状态）注入【当下状态】块。此前板只喂映射规则，
+  // 聊天回复对「用户此刻在干嘛」零输入，顺嘴只能拿旧记忆套模板（熬夜→劝睡事故）。
+  agentCore.setCurrentStateProvider((actorId: string) =>
+    formatCurrentStatePrompt(worldBoard, actorId),
+  );
   // 映射执行器（L2）：规则表读状态板 → AttentionEvent（正文模板直出，零 LLM）
   const mappingExecutor = new MappingExecutor({
     board: worldBoard,
@@ -4540,6 +4654,15 @@ export async function createAppServices(): Promise<AppServices> {
     defaultActorId: primaryActor,
     // 规则私有状态 + 事件去重指纹落盘：重启不重发、马拉松计时不清零
     dataPath: proactivityFabricPath,
+    // P0 配额窃取根修（2026-10-01）：板上是测试 actor 坟场（143 个 E2E/bench
+    // 永不过期），规则去重/节流若按插入序全局消费，先到的测试 actor 吃掉当天
+    // 配额——审计实证真实用户 16 天 0 事件。tick 只评估 7 天内交互过的用户。
+    isActiveActor: (actorId) => {
+      const hit = proactivityHub
+        .exportActors()
+        .find((a) => a.actorId === actorId);
+      return !!hit && Date.now() - hit.lastInteractionAt < 7 * 24 * 60 * 60_000;
+    },
   });
   console.log("[Bootstrap] 主动性已装配（传感→状态板→映射规则→仲裁→目标，零 LLM）");
 
@@ -4582,6 +4705,10 @@ export async function createAppServices(): Promise<AppServices> {
   const mailWatchService = new MailWatchService({
     env: process.env,
     messageHub: messageHubService,
+    // 生产 IMAP 客户端（imapflow，每轮 poll 新建连接用完即弃）。此前从未注入——
+    // 邮件链即使填了授权码也会「running=true 但空转」（2026-10-01 补接线）。
+    // cfg 由 service 每轮传入（含运行时 applyPass 设置的授权码）。
+    clientFactory: (cfg) => createImapflowClient(cfg),
     onNewMessage: (mail, classification) => {
       // 财务实时入账：账单/支付类邮件直接喂给财务抽取链路（fire-and-forget，
       // 失败只记日志不打断盯梢；是否真有交易由 ingestText 的 LLM 抽取如实判断）
@@ -4616,7 +4743,10 @@ export async function createAppServices(): Promise<AppServices> {
       proactivityHub.submitIntent({
         actorId: mail.actorId,
         kind: "life_reminder",
-        importance: classification.importance === "critical" ? "high" : "medium",
+        // high/critical → high：验证码/传票/逾期这类邮件时效以分钟计（验证码
+        // 10 分钟作废），降档会被静默时段吞到明早——时效即价值，必须当场提醒。
+        // （governor 静默规则本就给 high 开了豁免通道；medium 留给普通关注件。）
+        importance: classification.importance === "critical" || classification.importance === "high" ? "high" : "medium",
         title: `邮件：${mail.subject || "（无主题）"}`,
         summary:
           `收到来自 ${mail.from} 的${classification.importance === "critical" ? "重要" : "需要关注"}邮件` +
@@ -4629,6 +4759,20 @@ export async function createAppServices(): Promise<AppServices> {
     },
   });
   mailWatchService.start();
+  // P2 邮箱自动接入（2026-10-01）：注册登录留下的邮箱自动接线（host 按域映射、
+  // actorId=账号）。env 显式配置优先不覆盖；IMAP 授权码仍需用户填一次（服务端
+  // 无从得知，status() 如实报等待授权码）。
+  try {
+    const autoMail = resolveAutoMailAccount(agentAccountService);
+    if (autoMail) {
+      mailWatchService.applyAutoAccount(autoMail);
+      if (!mailWatchService.status().running && mailWatchService.isConfigured()) {
+        mailWatchService.start();
+      }
+    }
+  } catch (err) {
+    console.log(`[Bootstrap] 邮箱自动接入失败（忽略）: ${err}`);
+  }
   console.log(
     `[Bootstrap] 邮箱盯梢 ${mailWatchService.status().running ? "已启动" : "未启用（MAIL_WATCH_ENABLED/MAIL_WATCH_HOST/USER/PASS）"}`,
   );
@@ -5473,6 +5617,54 @@ export async function createAppServices(): Promise<AppServices> {
     proactivePushService,
     proactivityFabric: {
       sensorHealth: () => sensorKernel.health(),
+      // 邮件反应链测试注入（2026-10-01）：模拟邮件走真实 handleIncoming 链，
+      // actorId 缺省取邮箱配置的归属用户（自动接入后=注册邮箱账号）
+      mailTestInject: async (mail) =>
+        mailWatchService.handleIncoming({
+          actorId: mail.actorId ?? mailWatchService.status().actorId ?? primaryActor() ?? "local_user",
+          from: mail.from,
+          to: mailWatchService.status().user ?? "",
+          subject: mail.subject,
+          textSnippet: mail.text,
+          date: new Date().toISOString(),
+          uid: mail.uid,
+          ...(mail.source ? { source: mail.source } : {}),
+        }),
+      // 设置页邮箱接入块：状态查询 + 授权码提交（即刻生效，持久化在客户端 config.env）
+      mailWatchStatus: () => mailWatchService.status(),
+      mailWatchApplyPass: (pass: string) => mailWatchService.applyPass(pass),
+      // P3 自诊断（2026-10-01）：「主动性为什么没说话」按 actor 分层快照。
+      // 缺省 actor 取最近活跃用户。全部读内存/落盘文件，零 LLM 零副作用。
+      whySilent: (actorId?: string) => {
+        const id = actorId ?? primaryActor() ?? "local_user";
+        const nowMs = Date.now();
+        const known = proactivityHub
+          .exportActors()
+          .find((a) => a.actorId === id);
+        const board = worldBoard.getBoard(id);
+        const events = readNdjsonTail(join(proactivityFabricPath, "events.ndjson"), 200).filter(
+          (e) => (e as { actorId?: string }).actorId === id,
+        );
+        return {
+          actorId: id,
+          active判定: known
+            ? {
+                lastInteractionAt: known.lastInteractionAt,
+                lastInteractionAtIso: new Date(known.lastInteractionAt).toISOString(),
+                isActive7d: nowMs - known.lastInteractionAt < 7 * 24 * 60 * 60_000,
+              }
+            : { isActive7d: false, note: "不在 known-actors 表（从未对话/已被清板）" },
+          boardCurrent: board?.current ?? null,
+          presenceOnline: proactivityPresence.isOnline(id),
+          recentEvents: events.slice(-5),
+          eventCountAll: events.length,
+          turnAsidePending: turnAsideQueue.pending(id).length,
+          hint:
+            events.length === 0
+              ? "零事件：查信源（screen/presence/schedule 传感器是否 alive）与规则节流状态"
+              : undefined,
+        };
+      },
       arbiterPreview: () => {
         const actorId = primaryActor() ?? "local_user";
         return {
@@ -5548,6 +5740,11 @@ export async function createAppServices(): Promise<AppServices> {
     aipService,
     agentAccountService,
     emailRegistrationService,
+    emailOtpService,
+    emailSmsService,
+    betaWhitelistService,
+    betaWaitlistService,
+    betaInviteService,
     financeIngestService,
     computeQuotaService,
     agentMemorySyncService,
@@ -5622,6 +5819,7 @@ export async function createAppServices(): Promise<AppServices> {
     eveningDigestScheduler,
     accessAuthService,
     phoneCallCoordinator,
+    agentAccountService,
   });
 
   // MCP 工具异步加载，onReady 时已就绪：二次刷新目录（幂等）
@@ -5710,6 +5908,7 @@ export async function createAppServices(): Promise<AppServices> {
     imageGenerationService,
     fileProcessingService,
     emailSmsService,
+    emailOtpService,
     mediaMusicService,
     healthFitnessService,
     financeDeepService,

@@ -163,6 +163,27 @@ export function isBrainEvolutionEnabled(): boolean {
 }
 
 /**
+ * 发行版本（NEXTBOT_EDITION）：
+ *   internal —— 内测版（默认）：能力全量，开发机 / ECS / 内测安装包零变化；
+ *   oss      —— 开源版（GitHub 发行）：剔除内测独占能力家族（旅游 / 虚拟电话 /
+ *               好友社交 / 购物比价 / 社交外联 / 手机桥接），闸口四处：
+ *               capability-modules internalOnly 过滤、create-app-services 家族注册块、
+ *               tool-search core 常驻名单、HTTP 路由注册。
+ *
+ * 默认 internal：存量部署不写该变量，行为不变；开源安装包在 staging 的 server .env
+ * 写 NEXTBOT_EDITION=oss。函数运行时读取（非启动期常量），保证测试与装配层可动态判定。
+ */
+export type ServerEdition = "internal" | "oss";
+
+export function getServerEdition(env: NodeJS.ProcessEnv = process.env): ServerEdition {
+  return (env.NEXTBOT_EDITION ?? "").trim().toLowerCase() === "oss" ? "oss" : "internal";
+}
+
+export function isOssEdition(): boolean {
+  return getServerEdition() === "oss";
+}
+
+/**
  * AGENT_WORLD_SOCIAL_ENABLED：Agent World 社交经济域开关。
  * 实验性子系统，默认 0=关闭：跳过 world-free-market / world-music / world-social /
  * a2a-outsourcing / community-skill-store，保留 identity / pairing / registration 最小集。

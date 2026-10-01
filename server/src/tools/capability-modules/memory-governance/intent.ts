@@ -45,6 +45,29 @@ export const MEMORY_GOVERNANCE_INTENT_RULES: ToolIntentRule[] = [
       negativeExamples: ["帮我订个餐厅", "这事办得怎么样了（单件事查进度）"],
     },
   },
+  {
+    prefix: "profile.update",
+    metadata: {
+      aliases: [
+        "update profile", "remember about me", "my profile",
+        "记住我", "记一下", "记到档案", "存到档案", "我的档案", "用户画像",
+        "更新对我的了解", "你对我的了解",
+      ],
+      negativeAliases: [
+        "别忘了提醒我", "设个提醒", "定个闹钟", "加个日程", "订个闹钟", "定时提醒",
+      ],
+      examples: [
+        "我叫周明远，记一下",
+        "我对花生过敏，这条记到你的档案里",
+        "我换工作了，现在在做产品经理，更新一下对我的了解",
+        "你都知道我哪些事？顺便补一条：我家猫不吃鱼",
+      ],
+      negativeExamples: [
+        "提醒我明天开会（要的是提醒/日程，非画像）",
+        "帮我记一下这事别忘了（同上）",
+      ],
+    },
+  },
 ];
 
 export const MEMORY_GOVERNANCE_CATEGORY_MAPPING: { name: string; keywords: string[] } = {
@@ -53,5 +76,6 @@ export const MEMORY_GOVERNANCE_CATEGORY_MAPPING: { name: string; keywords: strin
     "forget", "delete memory", "activity", "audit", "timeline",
     "忘掉", "忘了它", "删除记忆", "别再关注", "取消关注", "别再盯",
     "你都干了什么", "你做了什么", "最近办了什么", "在忙什么", "等我确认", "行为记录",
+    "记到档案", "我的档案", "用户画像", "记住我",
   ],
 };

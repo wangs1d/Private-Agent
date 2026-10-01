@@ -117,16 +117,23 @@ const DENIED_ACTIONS: DenyRule[] = [
 ];
 
 /**
+ * 高危工具闸的统一文案：AgentTaskSafety 规则表与 RuntimeKernel 兼容入口共用，
+ * 保证两条入口对模型/用户说的是同一句话。
+ */
+export const HIGH_RISK_TOOL_REASON =
+  "资金支付或对外发送类动作需要用户确认后才能执行。";
+
+/**
  * 高危工具名集合(这些工具的某些操作需要人工审批)。
  * 顺序敏感:前面的先判定。
  */
 const HIGH_RISK_TOOL_PATTERNS: HighRiskRule[] = [
   {
-    // 高风险金融/购物类工具:下单/支付/转账/钱包一律需人工审批
+    // 高风险金融/购物类工具:下单/支付/转账/外发一律需人工审批
     // 迁移自原 RuntimeKernel.checkToolAction（工具名硬匹配规则）
     tool: "*",
     match: (args, toolName) => isHighRiskFinancialTool(toolName),
-    reason: "High-risk financial or purchase action requires explicit confirmation before execution.",
+    reason: HIGH_RISK_TOOL_REASON,
   },
   {
     tool: "desktop.run_shell",
@@ -174,6 +181,12 @@ const HIGH_RISK_TOOL_PATTERNS: HighRiskRule[] = [
  * risk=spend（支付/下单/转账）或 risk=outbound（短信/邮件/社交外发/代打电话）
  * 的工具在自主任务通道一律要求人工审批。新工具落地只要分类正确即自动纳管，
  * 不再依赖逐个补本名单。
+ *
+ * 2026-09-28 去掉 includes("payment"/"transfer"/"wallet") 子串规则：子串命中
+ * 不看 risk 轴，把 wallet.get_balance / payment.query_order 等纯只读工具也拦成
+ * 高危（trajectories 实证：social.get_feed 被拦 6 次、wallet 查询 4 次）。
+ * 资金/外发治理以 FeatureCatalog 分类为唯一口径；静态名单只保留需两阶段确认的
+ * 四件套作兜底（与 TWO_PHASE_CONFIRM_TOOLS 同集）。
  */
 function isHighRiskFinancialTool(toolName: string): boolean {
   if (
@@ -181,10 +194,7 @@ function isHighRiskFinancialTool(toolName: string): boolean {
     // 统一预订层（方案 A）：所有真实/模拟下单工具一律人工审批
     toolName === "ride_hailing.book" ||
     toolName === "home_service.book" ||
-    toolName === "restaurant.book" ||
-    toolName.includes("payment") ||
-    toolName.includes("transfer") ||
-    toolName.includes("wallet")
+    toolName === "restaurant.book"
   ) {
     return true;
   }

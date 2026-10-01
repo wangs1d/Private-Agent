@@ -380,7 +380,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   Map<String, int> _unreadByPlatform = <String, int>{};
   Timer? _messagePollTimer;
-  bool _messageBadgeHovering = false;
 
   /// 站内信（平台→用户收件箱）未读数：随消息轮询刷新 + WS 推送即时 +1，
   /// 与消息聚合未读合并进侧栏「站内信」红点角标。
@@ -973,6 +972,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
     // 桌面顶部灵动岛：原生窗口 + 控制器绑定（数据全部来自真实事件源）。
     setDynamicIslandActionHandler((String label) {
+      if (label == '打开消息') {
+        // 岛旁挂件点开的独立消息卡：就地全部标为已读（挂件隐藏，
+        // 新消息再露出）。与应用内隔离——不唤起主窗口。
+        unawaited(_markAllMessageHubRead());
+        return;
+      }
       unawaited(windowManager.show());
       unawaited(windowManager.focus());
     });
@@ -3651,6 +3656,35 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 消息卡行标题：与会话列表同源（title → 参与者 → 渠道）。
+  String _messageRowTitle(Map<String, dynamic> conv) {
+    final String title = (conv["title"] as String?)?.trim() ?? "";
+    if (title.isNotEmpty) return title;
+    final String name = (conv["participantName"] as String?)?.trim() ?? "";
+    if (name.isNotEmpty) return name;
+    final String pid = (conv["participantId"] as String?)?.trim() ?? "";
+    if (pid.isNotEmpty) return pid;
+    return (conv["channelId"] as String? ?? "未命名会话");
+  }
+
+  /// 岛旁挂件点开消息卡 = 已在岛上查看：全部标为已读，
+  /// 挂件随之隐藏，新消息到来再露出。
+  Future<void> _markAllMessageHubRead() async {
+    try {
+      final result = await _worldApi.getMessageConversations(limit: 200);
+      if (result["ok"] != true) return;
+      for (final dynamic c in result["conversations"] ?? <dynamic>[]) {
+        final Map<String, dynamic> conv = c as Map<String, dynamic>;
+        final int unread = (conv["unreadCount"] as num?)?.toInt() ?? 0;
+        final String id = conv["conversationId"] as String? ?? "";
+        if (unread > 0 && id.isNotEmpty) {
+          await _worldApi.markConversationRead(id);
+        }
+      }
+      await _pollUnreadMessages();
+    } catch (_) {}
+  }
+
   Future<void> _pollUnreadMessages() async {
     try {
       final result = await _worldApi.getMessageConversations(limit: 200);
@@ -3667,6 +3701,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }
         if (mounted) {
           setState(() => _unreadByPlatform = byPlatform);
+          // 聊天 AppBar 徽标已退役：聚合未读改由灵动岛旁挂件承载。
+          IslandRealFeeds.setMessageHubUnread(
+              byPlatform.values.fold(0, (int a, int b) => a + b));
+          // 独立消息卡数据：最近 5 个会话预览行（挂件点开即看）。
+          // 预览压成单行——服务端预览常含换行（邮件正文），原生 GDI+
+          // 会照原样画出多行炸开行距。
+          IslandRealFeeds.setMessagesPreview(<Map<String, Object?>>[
+            for (final dynamic c in (result["conversations"] ?? <dynamic>[]).take(5))
+              <String, Object?>{
+                'title': _messageRowTitle(c as Map<String, dynamic>)
+                    .replaceAll(RegExp(r"\s+"), " "),
+                'preview': (c["lastMessagePreview"] as String? ?? "")
+                    .replaceAll(RegExp(r"\s+"), " ")
+                    .trim(),
+                'unread': (c["unreadCount"] as num?)?.toInt() ?? 0,
+              }
+          ]);
+          debugPrint('[msg-poll] aggregated platforms='
+              '${byPlatform.keys.toList()} '
+              'total=${byPlatform.values.fold(0, (int a, int b) => a + b)}');
         }
       }
     } catch (_) {}
@@ -4839,181 +4893,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  Widget _buildMessageNotificationBadge() {
-    if (_unreadByPlatform.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    final int totalUnread =
-        _unreadByPlatform.values.fold(0, (int a, int b) => a + b);
-
-    return MouseRegion(
-      onEnter: (_) {
-        if (mounted) setState(() => _messageBadgeHovering = true);
-      },
-      onExit: (_) {
-        if (mounted) setState(() => _messageBadgeHovering = false);
-      },
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: <Widget>[
-          Tooltip(
-            message: "消息聚合",
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(20),
-                onTap: _openMessagesPanel,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-                  child: Badge(
-                    label: Text(
-                      totalUnread > 99 ? "99+" : totalUnread.toString(),
-                    ),
-                    // State.context 在 MaterialApp 之上，用子树 context 取主题色。
-                    child: Builder(
-                      builder: (BuildContext context) => Icon(
-                        Icons.notifications_outlined,
-                        size: 22,
-                        color: Theme.of(context).colorScheme.onSurface,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          if (_messageBadgeHovering)
-            Positioned(
-              top: 44,
-              left: 4,
-              child: _buildPlatformPopup(),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPlatformPopup() {
-    // State.context 在 MaterialApp 之上，需用子树 context 才能拿到应用主题。
-    return Builder(
-      builder: (BuildContext context) {
-        final ColorScheme cs = Theme.of(context).colorScheme;
-        final List<MapEntry<String, int>> entries = _unreadByPlatform.entries
-            .map(
-              (MapEntry<String, int> e) =>
-                  MapEntry<String, int>(platformDisplayName(e.key), e.value),
-            )
-            .toList();
-
-        return Material(
-          elevation: 8,
-          borderRadius: BorderRadius.circular(12),
-          color: cs.surface,
-          surfaceTintColor: cs.surfaceTint,
-          child: Container(
-            constraints: const BoxConstraints(minWidth: 180),
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  child: Text(
-                    "未读消息",
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: cs.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-                const Divider(height: 8),
-                ...entries.map(
-                  (MapEntry<String, int> entry) => Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 6,
-                    ),
-                    child: Row(
-                      children: <Widget>[
-                        _platformIcon(entry.key),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            entry.key,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: cs.onSurface,
-                            ),
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: cs.primaryContainer,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Text(
-                            entry.value > 99 ? "99+" : entry.value.toString(),
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: cs.onPrimaryContainer,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _platformIcon(String displayName) {
-    IconData icon;
-    Color? color;
-    switch (displayName) {
-      case "微信":
-        icon = Icons.wechat;
-        color = const Color(0xFF07C160);
-        break;
-      case "QQ":
-        icon = Icons.chat;
-        color = const Color(0xFF12B7F5);
-        break;
-      case "飞书":
-        icon = Icons.flutter_dash;
-        color = const Color(0xFF3370FF);
-        break;
-      default:
-        icon = Icons.message;
-        color = null; // 主题色：由下方子树 context 解析
-    }
-    if (color != null) {
-      return Icon(icon, size: 20, color: color);
-    }
-    return Builder(
-      builder: (BuildContext context) => Icon(
-        icon,
-        size: 20,
-        color: Theme.of(context).colorScheme.primary,
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final Widget app = _buildApp();
@@ -5225,18 +5104,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                                   surfaceTintColor: Colors.transparent,
                                   elevation: 0,
                                   scrolledUnderElevation: 0,
-                                  leadingWidth: 160,
-                                  leading: _tabIndex == 0
-                                      ? Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: Padding(
-                                            padding: const EdgeInsets.only(
-                                                left: 4),
-                                            child:
-                                                _buildMessageNotificationBadge(),
-                                          ),
-                                        )
-                                      : null,
                                   title: _buildAppBarTitle(),
                                   actions: _tabIndex == 0
                                       ? <Widget>[

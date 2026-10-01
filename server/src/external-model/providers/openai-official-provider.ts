@@ -135,7 +135,6 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
 
   /**
    * 构造 extraBody：thinking 开关 + fastProfile（对话面轻量档跳过强制 tool_choice）。
-   * 仅用于工具分支（applyExtraBodyToPlainRequest 默认 false，非工具分支不 spread）。
    *
    * deepseek-flash（V4.1-Flash）默认带思考链（实测每轮多 200+ reasoning tokens、明显拖慢快档），
    * 与旧 deepseek-chat 行为不一致：未显式表态时对其下发 thinking:disabled 保持快档语义；
@@ -157,6 +156,18 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
       out.fastProfile = true;
     }
     return Object.keys(out).length > 0 ? out : undefined;
+  }
+
+  /**
+   * 非工具分支请求同样 spread extraBody（2026-09-28 根修）。此前仅工具分支带
+   * thinking 开关，所有纯文本调用（路由/情绪推断/识情/出口重写等 ephemeral）
+   * 实际从未下发 thinking:disabled——deepseek-flash 自适应思考在情绪类文本上
+   * 默默展开（实测 65 次识情调用里 33 次烧 300~1074 reasoning tokens），拖慢
+   * 前置串行调用且抬高同 key 限流压力。fastProfile 仅在 toolExposureProfile
+   * 存在时注入（纯文本调用不携带），spread 安全。
+   */
+  protected applyExtraBodyToPlainRequest(): boolean {
+    return true;
   }
 
   /**
@@ -190,6 +201,7 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
       // 展示形式协议只属于聊天面：ephemeral 工具调用（简报润色/摘要/改写等）
       // 不注入，否则模型声明的 [RENDER_HINT:xxx] 在无剥除层的下游直透用户屏幕。
       includeRenderProtocol: ctx.streamOpts?.ephemeralTurn !== true,
+      sessionId: ctx.sessionId,
     });
 
     return { sysContent: promptPlan.fullSystemPrompt, promptPlan };

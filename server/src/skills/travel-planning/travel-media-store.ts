@@ -16,6 +16,10 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import http from 'http';
+import https from 'https';
+
+const IMAGE_UA = 'TravelPlanner3D/1.0 (Educational Project)';
 
 export type PoiMediaType = 'attraction' | 'hotel' | 'restaurant';
 
@@ -410,37 +414,150 @@ class TravelMediaStore {
    * 背景：封面/POI 图存远程 wikimedia URL 时，Flutter 客户端不走系统代理
    * 直连常被墙，海报永远停在渐变兜底。服务端代抓一次落盘，客户端走本机
    * server 秒开。失败返回 null（调用方回退远程 URL 或渐变兜底）。
+   *
+   * 2026-09-28 根修：抓取走「默认出口 + IPv6 定向」双路竞速。此前单路 fetch
+   * 在国内 IPv4 出口对 wikimedia 图片 CDN 全部 connect timeout（API 通道
+   * wikimediaJson 早已是双路，字节通道漏配），落盘从未成功过，所有封面/条目图
+   * 都以远程 URL 下发 → 客户端一律加载失败 → 海报永远是渐变兜底。
    */
-  async saveRemoteAsset(dirKey: string, remoteUrl: string, timeoutMs = 15_000): Promise<string | null> {
+  async saveRemoteAsset(dirKey: string, remoteUrl: string, timeoutMs = 20_000): Promise<string | null> {
     if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return null;
+    const downloaded = await this.downloadImage(remoteUrl, timeoutMs);
+    if (!downloaded) return null;
+    const ext = mimeToExt(downloaded.mime);
+    const buf = downloaded.buf;
+    if (buf.length < 2048 || buf.length > 10 * 1024 * 1024) return null;
+    const dirName = fileNameFor(dirKey);
+    const dir = path.join(this.assetsRoot, dirName);
+    this.ensureDir(dir);
+    const fileName = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+    fs.writeFileSync(path.join(dir, fileName), buf);
+    return `/travel/media/assets/${dirName}/${fileName}`;
+  }
+
+  /**
+   * 远程图磁盘缓存层（2026-09-28，存量数据兼容通道）：以 sha1(remoteUrl) 为
+   * 确定性键落盘 assets/remote-cache/，命中直接回本地路径；未命中双路抓取后
+   * 落盘。同 URL 并发请求只抓一次（in-flight 去重）。供 /travel/media/remote
+   * 代理路由使用——历史行程/聊天快照里烤死的 wikimedia 远程 URL 由客户端
+   * 重写到本机代理，无需改写任何存量 JSON。
+   */
+  async resolveOrFetchRemote(remoteUrl: string, timeoutMs = 20_000): Promise<{ file: string; mime: string } | null> {
+    if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return null;
+    const key = crypto.createHash('sha1').update(remoteUrl).digest('hex');
+    const dir = path.join(this.assetsRoot, 'remote-cache');
+    const hit = this.probeRemoteCache(dir, key);
+    if (hit) return hit;
+    const inflight = this.remoteFetchInFlight.get(key);
+    if (inflight) return inflight;
+    const task = (async (): Promise<{ file: string; mime: string } | null> => {
+      const downloaded = await this.downloadImage(remoteUrl, timeoutMs);
+      if (!downloaded || downloaded.buf.length < 2048 || downloaded.buf.length > 10 * 1024 * 1024) return null;
+      this.ensureDir(dir);
+      const file = path.join(dir, `${key}.${mimeToExt(downloaded.mime)}`);
+      fs.writeFileSync(file, downloaded.buf);
+      return { file, mime: downloaded.mime };
+    })().finally(() => this.remoteFetchInFlight.delete(key));
+    this.remoteFetchInFlight.set(key, task);
+    return task;
+  }
+
+  /** 远程缓存命中探测：sha1 键 + 任意图片扩展名，命中返回绝对路径与 mime */
+  private probeRemoteCache(dir: string, key: string): { file: string; mime: string } | null {
+    for (const ext of ['jpg', 'png', 'webp', 'gif']) {
+      const file = path.join(dir, `${key}.${ext}`);
+      if (fs.existsSync(file)) {
+        const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+        return { file, mime };
+      }
+    }
+    return null;
+  }
+
+  private remoteFetchInFlight = new Map<string, Promise<{ file: string; mime: string } | null>>();
+
+  /**
+   * 图片字节下载：默认出口 fetch 与 IPv6 定向（node:https family=6）两路并发，
+   * 任一路先拿到合法图片字节即用。与 travel-planning-service wikimediaJson
+   * 同款双路结构（国内 IPv4 到 Wikimedia 常被重置/丢包，IPv6 可达；单路串行
+   * 等失败会把延迟翻倍）。两路都落空返回 null，调用方按抓取失败处理。
+   */
+  private async downloadImage(url: string, timeoutMs: number): Promise<{ buf: Buffer; mime: string } | null> {
+    const winner = await firstNonNull([
+      this.downloadViaDefault(url, timeoutMs),
+      this.downloadViaV6(url, timeoutMs),
+    ]);
+    return winner ?? null;
+  }
+
+  /** 默认网络栈的 fetch：网络层失败或 HTTP ≥400 或非图片 MIME 返回 null */
+  private async downloadViaDefault(url: string, timeoutMs: number): Promise<{ buf: Buffer; mime: string } | null> {
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      const res = await fetch(remoteUrl, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) private-agent-travel-cover' },
+      const res = await fetch(url, {
+        headers: { 'User-Agent': IMAGE_UA },
+        signal: AbortSignal.timeout(timeoutMs),
       });
-      clearTimeout(timer);
       if (!res.ok) return null;
       const mime = (res.headers.get('content-type') || '').toLowerCase();
-      const ext = mime.includes('png')
-        ? 'png'
-        : mime.includes('webp')
-          ? 'webp'
-          : mime.includes('gif')
-            ? 'gif'
-            : 'jpg';
+      if (!mime.startsWith('image/')) return null;
       const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length < 2048 || buf.length > 10 * 1024 * 1024) return null;
-      const dirName = fileNameFor(dirKey);
-      const dir = path.join(this.assetsRoot, dirName);
-      this.ensureDir(dir);
-      const fileName = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
-      fs.writeFileSync(path.join(dir, fileName), buf);
-      return `/travel/media/assets/${dirName}/${fileName}`;
+      return buf.length > 0 ? { buf, mime } : null;
     } catch {
       return null;
     }
+  }
+
+  /** IPv6 定向请求（family=6，跟随最多 3 跳重定向）：无 AAAA 记录或网络不通快速失败返回 null */
+  private downloadViaV6(url: string, timeoutMs: number, redirectsLeft = 3): Promise<{ buf: Buffer; mime: string } | null> {
+    return new Promise((resolve) => {
+      let u: URL;
+      try {
+        u = new URL(url);
+      } catch {
+        return resolve(null);
+      }
+      const mod = u.protocol === 'http:' ? http : https;
+      const req = mod.request(
+        {
+          host: u.hostname,
+          family: 6,
+          path: `${u.pathname}${u.search}`,
+          method: 'GET',
+          headers: { 'User-Agent': IMAGE_UA, Accept: 'image/*' },
+          timeout: timeoutMs,
+        },
+        (res) => {
+          const status = res.statusCode ?? 500;
+          // 重定向逐跳跟进（仍限 family=6；目标主机无 IPv6 时本路自然落空，
+          // 由默认出口路兜住——wikimedia 图片 CDN 各跳主机都有 AAAA）
+          if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
+            res.resume();
+            if (redirectsLeft <= 0) return resolve(null);
+            const next = new URL(res.headers.location, u).toString();
+            return resolve(this.downloadViaV6(next, timeoutMs, redirectsLeft - 1));
+          }
+          if (status >= 400) {
+            res.resume();
+            return resolve(null);
+          }
+          const mime = (res.headers['content-type'] || '').toLowerCase();
+          if (!mime.startsWith('image/')) {
+            res.resume();
+            return resolve(null);
+          }
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            const buf = Buffer.concat(chunks);
+            resolve(buf.length > 0 ? { buf, mime } : null);
+          });
+          res.on('error', () => resolve(null));
+        },
+      );
+      req.on('timeout', () => req.destroy());
+      req.on('error', () => resolve(null));
+      req.end();
+    });
   }
 
   private loadFromFile(poiKey: string): PoiMediaEntry | null {
@@ -468,6 +585,34 @@ class TravelMediaStore {
   private ensureDir(dir: string): void {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   }
+}
+
+/** 任一路先拿到非空结果即胜出；全部落空返回 null（各路按契约不 reject） */
+function firstNonNull<T>(ps: Array<Promise<T | null>>): Promise<T | null> {
+  return new Promise((resolve) => {
+    let pending = ps.length;
+    let settled = false;
+    for (const p of ps) {
+      p.then((v) => {
+        if (settled) return;
+        if (v != null) {
+          settled = true;
+          resolve(v);
+        } else if (--pending === 0) {
+          settled = true;
+          resolve(null);
+        }
+      });
+    }
+  });
+}
+
+/** 响应 MIME → 落盘扩展名（缺省 jpg） */
+function mimeToExt(mime: string): string {
+  if (mime.includes('png')) return 'png';
+  if (mime.includes('webp')) return 'webp';
+  if (mime.includes('gif')) return 'gif';
+  return 'jpg';
 }
 
 export const travelMediaStore = new TravelMediaStore();

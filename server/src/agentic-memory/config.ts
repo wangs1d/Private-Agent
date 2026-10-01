@@ -4,29 +4,38 @@ import { join } from "node:path";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import type { MemoryConfig } from "mem0ai/oss";
 
+import { resolveEmbeddingEndpoint } from "../services/openai-embedding-client.js";
 import {
   getAgenticMemoryCollection,
   getAgenticMemoryCustomInstructions,
   getAgenticMemoryDir,
-  getAgenticMemoryEmbeddingBaseUrl,
   getAgenticMemoryEmbeddingDims,
-  getAgenticMemoryEmbeddingModel,
   getAgenticMemoryLlmModel,
-  resolveEmbeddingApiKey,
   resolveOpenAiApiKey,
 } from "./env.js";
 
-/** 构建 Mem0 OSS 配置；缺少可用 Embedding 端点（如仅配置了 DeepSeek 等纯聊天渠道）时返回 null。 */
+/** 模型名 → 集合名安全段（Qdrant/SQLite 表名都不吃 `/` 等字符） */
+function sanitizeModelTag(model: string): string {
+  return model.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+/**
+ * 向量集合按嵌入模型打标：不同模型 = 不同向量空间，混在一组集合里会静默检索
+ * 出垃圾分。按模型分集合后，切换端点（本地 bge-small ↔ 远端 bge-m3 等）只会
+ * 各自读写自己的集合，旧集合原样保留、互不污染。
+ */
+export function resolveAgenticMemoryCollectionName(embeddingModel: string): string {
+  return `${getAgenticMemoryCollection()}-${sanitizeModelTag(embeddingModel)}`;
+}
+
+/** 构建 Mem0 OSS 配置；无任何可用 Embedding 端点（远端未配置且本地引擎不可用）时返回 null。 */
 export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
-  const embeddingBaseUrl = getAgenticMemoryEmbeddingBaseUrl();
-  const apiKey = resolveEmbeddingApiKey();
-  if (!embeddingBaseUrl || !apiKey) {
+  const endpoint = resolveEmbeddingEndpoint();
+  if (!endpoint) {
     console.warn(
-      "[agentic-memory] 未找到可用的 Embedding 端点，agentic-memory 已禁用。请配置 " +
-        "AGENT_EMBEDDING_BASE_URL + AGENT_EMBEDDING_API_KEY（如硅基流动 https://api.siliconflow.cn/v1，模型 BAAI/bge-m3）。" +
-        "当前 OPENAI_BASE_URL=" +
-        (process.env.OPENAI_BASE_URL ?? "(未设置)") +
-        " 不提供 /embeddings。",
+      "[agentic-memory] 无可用 Embedding 端点，agentic-memory 已禁用。正常安装内置本地向量引擎会自动启用；" +
+        "若需远端可配置 AGENT_EMBEDDING_BASE_URL + AGENT_EMBEDDING_API_KEY，" +
+        "或检查 AGENT_LOCAL_EMBEDDING_DISABLED 与 models/bge-small-zh-v1.5 资产。",
     );
     return null;
   }
@@ -34,10 +43,10 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
   const rootDir = getAgenticMemoryDir();
   mkdirSync(rootDir, { recursive: true });
 
-  const embeddingModel = getAgenticMemoryEmbeddingModel();
+  const embeddingModel = endpoint.model;
   // 向量库需要维度（本地向量库/维度校验），但 embeddingDims 不能传给 mem0ai 的
   // OpenAIEmbedder：它会作为 OpenAI 的 `dimensions` 请求参数，而 BAAI/bge-m3 等模型
-  // 不支持该参数，导致 siliconflow 返回 400（code 20015）。
+  // 不支持该参数，远端会返回 400（code 20015）。
   const embeddingDims = getAgenticMemoryEmbeddingDims(embeddingModel);
   const llmModel = getAgenticMemoryLlmModel();
 
@@ -46,9 +55,9 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
     embedder: {
       provider: "openai",
       config: {
-        apiKey,
+        apiKey: endpoint.apiKey,
         model: embeddingModel,
-        baseURL: embeddingBaseUrl,
+        baseURL: endpoint.baseUrl,
       },
     },
     llm: {
@@ -75,7 +84,7 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
         provider: "qdrant",
         config: {
           client,
-          collectionName: getAgenticMemoryCollection(),
+          collectionName: resolveAgenticMemoryCollectionName(embeddingModel),
           embeddingModelDims: embeddingDims,
         },
       },
@@ -87,9 +96,11 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
     vectorStore: {
       provider: "memory",
       config: {
-        collectionName: getAgenticMemoryCollection(),
+        collectionName: resolveAgenticMemoryCollectionName(embeddingModel),
         dimension: embeddingDims,
-        dbPath: join(rootDir, "vectors.db"),
+        // mem0 的本地 SQLite 库不消费 collectionName（单 vectors 表），防串库
+        // 只能落在文件名上：每模型一个库文件，切换端点互不可见、旧库原样保留
+        dbPath: join(rootDir, `vectors-${sanitizeModelTag(embeddingModel)}.db`),
       },
     },
   };
