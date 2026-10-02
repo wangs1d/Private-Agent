@@ -1072,14 +1072,13 @@ export function getToolResultProcessor(): ToolResultProcessor {
 }
 
 /**
- * 视频抓取媒体标记注入：
- * 当本轮回复的工具是 `video.grab` 且结果带可播放视频流时，
- * 在回复文本上附加 `[RENDER_AS:video]` + `[VIDEO_MEDIA_START]` 媒体标记。
- * 前端解析该标记后，用后端视频代理路由真实内联播放视频（媒体 URL 经代理避免跨域/防盗链）。
+ * 视频媒体标记注入：
+ * 当本轮回复的视频工具（`video.grab` 贴链接解析 / `video.find` 按内容找视频）
+ * 结果带可播放视频流时，在回复文本上附加 `[RENDER_AS:video]` + `[VIDEO_MEDIA_START]`
+ * 媒体标记。前端解析该标记后，用后端视频代理路由真实内联播放视频（媒体 URL 经代理避免跨域/防盗链）。
  *
  * 设计：
  *   - 不依赖 LLM 是否在正文里回显视频地址——直接取工具结果里的 videoUrl，确定性注入
- *   - 文本本身已有 RENDER_AS 标记时不重复包裹，只追加媒体块
  *   - 无视频流（反爬/需登录）时原样返回，前端按普通文本展示播放页链接
  */
 export function attachVideoMediaMarker(
@@ -1087,34 +1086,59 @@ export function attachVideoMediaMarker(
   toolName: string | undefined,
   toolResult: Record<string, unknown> | undefined,
 ): string {
-  if (toolName !== "video.grab" || !toolResult) return text;
-  const videoUrl = String(toolResult.videoUrl ?? "").trim();
-  if (!videoUrl) return text;
+  if (toolName !== "video.grab" && toolName !== "video.find") return text;
+  const source = resolveVideoMediaSource(toolName, toolResult);
+  if (!source) return text;
 
-  const playPageUrl = String(toolResult.playPageUrl ?? "").trim();
+  const videoUrl = String(source.videoUrl ?? "").trim();
+  const playPageUrl = String(source.playPageUrl ?? "").trim();
   const payload: Record<string, unknown> = {
     mediaType: "video",
     mediaUrl: buildProxyMediaUrl(videoUrl, playPageUrl),
   };
-  const thumbnailUrl = String(toolResult.thumbnailUrl ?? "").trim();
+  const thumbnailUrl = String(source.thumbnailUrl ?? "").trim();
   if (thumbnailUrl) payload.thumbnailUrl = buildProxyMediaUrl(thumbnailUrl, playPageUrl);
   if (playPageUrl) payload.pageUrl = playPageUrl;
-  const title = String(toolResult.title ?? "").trim();
+  const title = String(source.title ?? "").trim();
   if (title) payload.title = title;
-  const author = String(toolResult.author ?? "").trim();
+  const author = String(source.author ?? "").trim();
   if (author) payload.author = author;
-  const duration = Number(toolResult.durationSeconds);
+  const duration = Number(source.durationSeconds);
   if (Number.isFinite(duration) && duration > 0) payload.durationSeconds = duration;
-  if (Array.isArray(toolResult.notes)) {
-    const notes = toolResult.notes.map(String).filter((n) => n.trim());
+  if (Array.isArray(source.notes)) {
+    const notes = source.notes.map(String).filter((n: string) => n.trim());
     if (notes.length) payload.notes = notes;
   }
 
   const block = `[VIDEO_MEDIA_START]\n${JSON.stringify(payload)}\n[VIDEO_MEDIA_END]`;
-  if (/^\[RENDER_AS:\w+\]/.test(text.trimStart())) {
-    return `${text.trimEnd()}\n\n${block}`;
+  // 2026-10-02 定稿：视频轮正文只出播放卡（卡面已含标题/作者/封面），模型口播的
+  // 直链/封面图原始地址/保存步骤等冗余文本一律不保留——用户诉求「视频出来就行」。
+  return `[RENDER_AS:video]\n${block}`;
+}
+
+/**
+ * 从视频类工具回执中归一出单个可播放源：
+ *   - video.grab：结果顶层即视频字段；
+ *   - video.find：结果为 items 列表，取第一个带 videoUrl 的条目。
+ * 返回 null 表示无可播放流（调用方按降级路径处理）。
+ */
+export function resolveVideoMediaSource(
+  toolName: string,
+  result: Record<string, unknown> | undefined,
+): Record<string, unknown> | null {
+  if (!result) return null;
+  if (toolName === "video.grab") {
+    return String(result.videoUrl ?? "").trim() ? result : null;
   }
-  return `[RENDER_AS:video]\n${text.trim()}\n\n${block}`;
+  if (toolName === "video.find") {
+    const items = Array.isArray(result.items) ? result.items : [];
+    for (const it of items) {
+      const o = (it ?? {}) as Record<string, unknown>;
+      if (String(o.videoUrl ?? "").trim()) return o;
+    }
+    return null;
+  }
+  return null;
 }
 
 /** 把上游原始媒体地址包装为后端代理 URL（避免前端跨域与防盗链问题） */
@@ -1202,6 +1226,12 @@ export type MediaCardItem = {
   thumbnailUrl: string;
   /** 媒体地址 */
   mediaUrl?: string;
+  /**
+   * 已解析出的可播放视频流（经 /agent/media/proxy 代理，仅视频卡有）。
+   * 前端拿到此字段后点击卡片走右侧双栏面板内联播放，而不是跳外部链接；
+   * 为空表示上游没解析出流（反爬/需登录），前端才降级为打开播放页。
+   */
+  playableUrl?: string;
   /** 来源页 URL */
   pageUrl?: string;
   /** 来源名称 */
@@ -1360,12 +1390,16 @@ export function extractMediaCards(
     const sideRaw = String(it.compareSide ?? "").trim();
     const side = sideRaw === "A" || sideRaw === "B" ? sideRaw : undefined;
     const sideLabel = String(it.compareLabel ?? "").trim();
+    // 可播流：enrichVideosWithPlayable 解析成功后写回 items 的 videoUrl。
+    // 有流就必须下发——前端据此在应用内面板播放，而不是把用户丢去浏览器。
+    const playableUrl = isVideo ? String(it.videoUrl ?? "").trim() : "";
     // 媒体卡片必须是"能看到图/能打开视频"的真实条目：
     // 若没有任何可加载的媒体地址（缩略图/媒体地址都为空），该条对用户无意义，
     // 直接丢弃，避免前端出现"占了位置但 thumbnailUrl 为空"的无效项。
     const hasMedia = !!(
       thumbnailUrl ||
       mediaUrl ||
+      playableUrl ||
       (isVideo && pageUrl && /youtu|bilibili|video/i.test(pageUrl))
     );
     if (!hasMedia) continue;
@@ -1377,6 +1411,7 @@ export function extractMediaCards(
       // 「本地 PNG 优先、其次媒体地址」的旧逻辑。
       thumbnailUrl: isVideo ? thumbnailUrl : thumbnailUrl || mediaUrl || "",
       mediaUrl: mediaUrl || undefined,
+      ...(playableUrl ? { playableUrl: buildProxyMediaUrl(playableUrl, pageUrl) } : {}),
       pageUrl: pageUrl || undefined,
       source: source || undefined,
       ...(Number.isFinite(width) && width > 0 ? { width } : {}),
@@ -1388,9 +1423,16 @@ export function extractMediaCards(
   }
   // 过滤：图片必须有缩略图；视频没有缩略图时只要有可打开的播放页也保留
   //（前端显示占位图标，点击仍可打开播放页），避免视频结果被整体丢弃。
-  return cards.filter(
-    (c) => !!c.thumbnailUrl || (c.type === "video" && !!c.pageUrl),
+  const kept = cards.filter(
+    (c) => !!c.thumbnailUrl || (c.type === "video" && (!!c.pageUrl || !!c.playableUrl)),
   );
+  // 视频卡排序：能播的排前面（稳定排序，组内保持原检索序）。
+  // 否则用户点开列表前几条仍是「解析不出流只能跳站外」的条目——看着像坏掉了。
+  if (!isVideo) return kept;
+  return [
+    ...kept.filter((c) => !!c.playableUrl),
+    ...kept.filter((c) => !c.playableUrl),
+  ];
 }
 
 /**

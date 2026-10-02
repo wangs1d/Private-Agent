@@ -3,6 +3,7 @@ import "package:url_launcher/url_launcher.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
+import "../../core/services/video_preview_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/link_utils.dart";
 import "travel_plan_launcher.dart";
@@ -860,7 +861,8 @@ class _MediaCard extends StatelessWidget {
           String? source,
           String? thumbnailUrl,
           String? openUrl,
-        })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl})>[];
+          String? playableUrl,
+        })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl, String? playableUrl})>[];
     for (final AgentResultItem it in items) {
       final String text = it.text.trim();
       final String? textUrl = LinkUtils.extractFirst(text);
@@ -888,6 +890,7 @@ class _MediaCard extends StatelessWidget {
           source: it.source,
           thumbnailUrl: previewUrl,
           openUrl: openUrl,
+          playableUrl: it.playableUrl,
         ));
       } else {
         final String resolved = LinkUtils.resolveMediaUrl(previewUrl!);
@@ -1669,7 +1672,8 @@ class MediaInlineRow extends StatelessWidget {
           String? source,
           String? thumbnailUrl,
           String? openUrl,
-        })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl})>[];
+          String? playableUrl,
+        })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl, String? playableUrl})>[];
     for (final AgentResultItem it in items) {
       final String text = it.text.trim();
       final String? textUrl = LinkUtils.extractFirst(text);
@@ -1697,6 +1701,7 @@ class MediaInlineRow extends StatelessWidget {
           source: it.source,
           thumbnailUrl: previewUrl,
           openUrl: openUrl,
+          playableUrl: it.playableUrl,
         ));
       } else {
         final String resolved = LinkUtils.resolveMediaUrl(previewUrl!);
@@ -1755,8 +1760,13 @@ class _VideoPanel extends StatelessWidget {
   const _VideoPanel({required this.videos, required this.cs});
 
   final List<
-      ({String title, String? source, String? thumbnailUrl, String? openUrl})>
-      videos;
+      ({
+        String title,
+        String? source,
+        String? thumbnailUrl,
+        String? openUrl,
+        String? playableUrl,
+      })> videos;
   final ColorScheme cs;
 
   @override
@@ -1790,13 +1800,23 @@ class _VideoPanel extends StatelessWidget {
 class _VideoTile extends StatelessWidget {
   const _VideoTile({required this.video, required this.cs, this.hero = false});
 
-  final ({String title, String? source, String? thumbnailUrl, String? openUrl})
-      video;
+  final ({
+    String title,
+    String? source,
+    String? thumbnailUrl,
+    String? openUrl,
+    String? playableUrl,
+  }) video;
   final ColorScheme cs;
   final bool hero;
 
   @override
   Widget build(BuildContext context) {
+    // 有可播流 → 右侧双栏面板内联播放；无流只能打开播放页（角标同步区分，
+    // 避免用户点了才发现被带到浏览器）。
+    final String? playable = (video.playableUrl ?? "").trim().isNotEmpty
+        ? LinkUtils.resolveMediaUrl(video.playableUrl!.trim())
+        : null;
     final Widget thumb = ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: AspectRatio(
@@ -1830,10 +1850,12 @@ class _VideoTile extends StatelessWidget {
                   color: Colors.black.withValues(alpha: 0.45),
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(
-                  Icons.play_arrow_rounded,
+                child: Icon(
+                  playable != null
+                      ? Icons.play_arrow_rounded
+                      : Icons.open_in_new_rounded,
                   color: Colors.white,
-                  size: 26,
+                  size: playable != null ? 26 : 18,
                 ),
               ),
             ),
@@ -1865,9 +1887,17 @@ class _VideoTile extends StatelessWidget {
       ],
     );
 
-    if (video.openUrl == null) return body;
+    // 有可播流 → 右侧双栏面板内联播放（不跳浏览器）；无流才降级打开播放页。
+    final String? openUrl = video.openUrl;
+    if (playable == null && openUrl == null) return body;
     return InkWell(
-      onTap: () => _launchUrl(video.openUrl!),
+      onTap: () {
+        if (playable != null) {
+          VideoPreviewLauncher.open(url: playable, pageUrl: openUrl);
+          return;
+        }
+        _launchUrl(openUrl!);
+      },
       borderRadius: BorderRadius.circular(8),
       child: body,
     );

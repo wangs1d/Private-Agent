@@ -94,6 +94,14 @@ export type HttpRouteDeps = {
   paymentService?: import("../../services/payment-service.js").PaymentService;
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;
+  /** 结构化事实库（简报用户称呼「称呼」字段源）；未装配时称呼走 KV 兜底 */
+  factStore?: {
+    getFact(
+      actorId: string,
+      field: string,
+      entity?: string,
+    ): { field: string; value: string } | null;
+  };
   weatherService: WeatherService;
   weatherPrefsService: WeatherPrefsService;
   /** 位置协调器（客户端 GPS）：简报天气未配置城市时的优先兜底；可选 */

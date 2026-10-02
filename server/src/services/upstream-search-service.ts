@@ -471,10 +471,18 @@ export class UpstreamSearchService {
       ]).catch(() => [] as MediaSearchItem[]),
     ]);
 
+    // 合并名额（2026-10-02 根修）：Bing 视频源产出几乎全是抖音页，而抖音页当前
+    // 解析不出可播流（yby6 MCP 上游恒失败）——若让 Bing 先带满 limit，B站候选会被
+    // 整段挤掉，「按内容找视频」只能回一堆点不开的链接。现在给 Bing/中转各留固定
+    // 份额，B站源在名额内优先占位，剩余额度再由 Bing 补满（保召回也保可播）。
+    const bingQuota = Math.max(2, Math.round(boundedLimit * 0.35));
+    const relayQuota = Math.max(1, Math.round(boundedLimit * 0.15));
     const merged = dedupeMediaByPageUrl([
-      ...bingParsed,
+      ...bingParsed.slice(0, bingQuota),
       ...biliItems,
-      ...relayItems,
+      ...relayItems.slice(0, relayQuota),
+      ...bingParsed.slice(bingQuota),
+      ...relayItems.slice(relayQuota),
     ]).slice(0, boundedLimit);
     if (merged.length >= Math.min(3, boundedLimit)) {
       const sources = [

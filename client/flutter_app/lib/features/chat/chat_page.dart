@@ -4,7 +4,6 @@ import "package:flutter/material.dart";
 import "package:flutter/rendering.dart" show ScrollCacheExtent;
 import "package:flutter/services.dart";
 import "dart:async";
-import "package:url_launcher/url_launcher.dart";
 
 import "../../core/models/chat_models.dart";
 import "../../core/models/turn_state.dart";
@@ -12,7 +11,6 @@ import "../../core/db/local_history_store.dart";
 import "../../core/presentation/agent_avatar_catalog.dart";
 import "../../core/presentation/voice_call_ui_labels.dart";
 import "../../core/utils/agent_result_parser.dart";import "../../core/utils/content_summary_parser.dart";
-import "../../core/utils/link_utils.dart";
 import "../../core/services/speech_service.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
@@ -2652,15 +2650,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                   ),
                 ),
               if (!widget.isUser &&
-                  !_typewriterActive &&
-                  widget.contentSummary?.summary == null &&
-                  AgentResultParser.parse(widget.mainMessage.text).data == null &&
-                  widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: _buildGrayLinksInner(widget.mainMessage.text, context),
-                ),
-              if (!widget.isUser &&
                   widget.mainMessage.playUrl != null &&
                   widget.mainMessage.playUrl!.isNotEmpty)
                 Padding(
@@ -2714,60 +2703,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     );
   }
 
-  /// 构建底部来源链接组件：把正文里的裸 URL 抽出来，
-  /// 显示为可点击的文字链接（纯域名），不再展示原始地址。
-  static Widget _buildGrayLinksInner(String text, BuildContext context) {
-    // 先剥掉 markdown 链接 [文字](url)，它们已在正文中作为文字链接展示，
-    // 底部只保留真正的裸 URL 作为来源。
-    final String stripped =
-        text.replaceAll(RegExp(r'\[[^\]]+\]\([^)]+\)'), ' ');
-    final List<String> urls = LinkUtils.extractAll(stripped);
-
-    if (urls.isEmpty) return const SizedBox.shrink();
-
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final List<Widget> linkWidgets = <Widget>[];
-    for (final String url in urls) {
-      linkWidgets.add(Container(
-        margin: const EdgeInsets.only(bottom: 2),
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-        decoration: BoxDecoration(
-          color: cs.primary.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: cs.primary.withValues(alpha: 0.3)),
-        ),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            final Uri? uri = Uri.tryParse(url);
-            if (uri == null) return;
-            launchUrl(uri, mode: LaunchMode.externalApplication);
-          },
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Icon(Icons.link, size: 11, color: cs.primary),
-              const SizedBox(width: 4),
-              Text(
-                LinkUtils.shortLabel(url),
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: cs.primary,
-                      fontSize: 11,
-                      height: 1.3,
-                      fontWeight: FontWeight.w600,
-                    ),
-              ),
-            ],
-          ),
-        ),
-      ));
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: linkWidgets,
-    );
-  }
+  // 已下线：原「底部来源链接」组件（把正文裸 URL 抽成可点击域名 chip）。
+  // 产品规则：任何卡片/消息下方都不再附来源链接，需要跳转时由卡片自身承载。
 }
 
 

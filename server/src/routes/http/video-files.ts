@@ -44,12 +44,13 @@ export function registerVideoProxyRoutes(app: FastifyInstance): void {
   });
 }
 
-/** 透传代理：转发 Range 并回流上游媒体流 */
+/** 透传代理：转发 Range 并回流上游媒体流（3xx 跟随最多 3 跳——抖音 aweme 播放链接是 302→CDN，不跟随则前端拿到的是重定向体而非视频流） */
 function proxyStream(
   request: FastifyRequest,
   reply: FastifyReply,
   target: URL,
   referer?: string,
+  depth = 0,
 ): Promise<void> {
   return new Promise((resolve) => {
     const transport = target.protocol === "https:" ? httpsRequest : httpRequest;
@@ -67,6 +68,25 @@ function proxyStream(
       { method: "GET", headers },
       (upRes: IncomingMessage) => {
         const status = upRes.statusCode ?? 200;
+        const location = upRes.headers.location;
+        if (status >= 300 && status < 400 && typeof location === "string" && location && depth < 3) {
+          upRes.resume();
+          let next: URL;
+          try {
+            next = new URL(location, target);
+          } catch {
+            reply.code(502).send({ ok: false, reason: "重定向地址无效" });
+            resolve();
+            return;
+          }
+          if (next.protocol !== "http:" && next.protocol !== "https:") {
+            reply.code(502).send({ ok: false, reason: "重定向协议不允许" });
+            resolve();
+            return;
+          }
+          void proxyStream(request, reply, next, referer, depth + 1).then(resolve);
+          return;
+        }
         if (status >= 400) {
           upRes.resume();
           reply.code(502).send({ ok: false, reason: `上游返回 ${status}` });

@@ -188,8 +188,9 @@ class DouyinAdapter implements VideoGrabAdapter {
   }
 
   async grab(url: string): Promise<VideoInfo> {
-    // 1) 优先 mcporter MCP（yby6 单工具适配所有平台）
-    const run = await callMcporter(["yby6-video.share_url_parse_tool_wrapper"], url);
+    // 1) 优先 McpClientService（yby6 stdio 直连，生产可用通道）→ mcporter CLI 兜底（yby6 单工具适配所有平台）
+    const mcpRun = await callMcpClientParser(url);
+    const run = mcpRun.ok ? mcpRun : await callMcporter(["yby6-video.share_url_parse_tool_wrapper"], url);
     if (run.ok) {
       const parsed = parseVideoJson(run.stdout);
       if (parsed && (parsed.title || parsed.video_url)) {
@@ -228,7 +229,7 @@ class DouyinAdapter implements VideoGrabAdapter {
     }
 
     return {
-      ...emptyVideo("douyin", "douyin", run.ok ? "抖音网页解析未命中视频数据" : "mcporter/网页解析均失败，请点击原链接播放"),
+      ...emptyVideo("douyin", "douyin", run.ok ? "抖音网页解析未命中视频数据" : "MCP/网页解析均失败，请点击原链接播放"),
       playPageUrl: url,
     };
   }
@@ -244,8 +245,9 @@ class XiaohongshuAdapter implements VideoGrabAdapter {
   }
 
   async grab(url: string): Promise<VideoInfo> {
-    // 1) 优先 mcporter MCP（yby6 单工具适配所有平台）
-    const run = await callMcporter(["yby6-video.share_url_parse_tool_wrapper"], url);
+    // 1) 优先 McpClientService（yby6 stdio 直连，生产可用通道）→ mcporter CLI 兜底（yby6 单工具适配所有平台）
+    const mcpRun = await callMcpClientParser(url);
+    const run = mcpRun.ok ? mcpRun : await callMcporter(["yby6-video.share_url_parse_tool_wrapper"], url);
     if (run.ok) {
       const parsed = parseVideoJson(run.stdout);
       if (parsed && (parsed.title || parsed.video_url)) {
@@ -284,7 +286,7 @@ class XiaohongshuAdapter implements VideoGrabAdapter {
     }
 
     return {
-      ...emptyVideo("xiaohongshu", "xiaohongshu", run.ok ? "小红书网页解析未命中视频数据" : "mcporter/网页解析均失败，请点击原链接播放"),
+      ...emptyVideo("xiaohongshu", "xiaohongshu", run.ok ? "小红书网页解析未命中视频数据" : "MCP/网页解析均失败，请点击原链接播放"),
       playPageUrl: url,
     };
   }
@@ -321,13 +323,26 @@ class BilibiliAdapter implements VideoGrabAdapter {
     }
 
     // 2) 公开接口兜底：api.bilibili.com 视频信息接口（无需登录，较可靠）
-    const bvid = extractBvid(url);
-    if (bvid) {
-      const apiUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`;
+    //    搜索源返回的 B 站链接多为 av 号格式（/video/avxxxx），view 接口 aid= 同样可用。
+    const { bvid, aid } = extractBilibiliId(url);
+    if (bvid || aid) {
+      const idQuery = bvid ? `bvid=${bvid}` : `aid=${aid}`;
+      const apiUrl = `https://api.bilibili.com/x/web-interface/view?${idQuery}`;
       const text = await this.fetchViaService(apiUrl, 12_000);
       const json = tryParseJson<BilibiliViewResponse>(text);
       const data = json?.data;
       if (data) {
+        // 免登录播放流解析：playurl platform=html5 直出 mp4 durl（无需登录，清晰度
+        // 受限但可内联播放）。这是 video.find 内容搜索的主力可播源——搜索候选大头
+        // 是 B 站页，此前只回信息不出流，整条「按内容找视频」链路会 playable=0。
+        // 流 CDN 校验 Referer（须 bilibili.com 来源）：代理回传时带 playPageUrl 作 referer。
+        let videoUrl: string | undefined;
+        const cid = typeof data.cid === "number" ? data.cid : 0;
+        // playurl 接口不认 aid=（-400），一律用 view 响应回传的 bvid 调用
+        const playBvid = typeof data.bvid === "string" && data.bvid ? data.bvid : bvid;
+        if (cid > 0 && playBvid) {
+          videoUrl = await this.resolveBilibiliStream(playBvid, cid);
+        }
         return {
           provider: "bilibili-api",
           platform: "bilibili",
@@ -335,10 +350,12 @@ class BilibiliAdapter implements VideoGrabAdapter {
           author: data.owner?.name ?? "",
           durationSeconds: typeof data.duration === "number" ? data.duration : undefined,
           description: String(data.desc ?? "").slice(0, 5000),
-          videoUrl: undefined,
+          videoUrl,
           thumbnailUrl: data.pic ?? undefined,
           playPageUrl: url,
-          notes: ["已从 B站公开接口获取视频信息；视频流需登录/水印校验，已保留播放页链接"],
+          notes: videoUrl
+            ? []
+            : ["已从 B站公开接口获取视频信息；视频流解析未命中（可能受限），已保留播放页链接"],
         };
       }
     }
@@ -347,6 +364,31 @@ class BilibiliAdapter implements VideoGrabAdapter {
       ...emptyVideo("bilibili", "bilibili", run.ok ? "B站接口解析失败" : "mcporter/接口均失败，请点击原链接播放"),
       playPageUrl: url,
     };
+  }
+
+  /**
+   * 免登录播放流解析：playurl(platform=html5) 直出 mp4 durl。
+   *
+   * video.find 的主力可播源（搜索候选大头是 B 站页），出流失败整条「按内容找视频」
+   * 链路就退化成只回链接——所以这里做两级韧性：
+   *   1) 清晰度档位降级：qn=32(480P) → 16(360P)，低档位 Availability 更高；
+   *   2) 每档一次退避重试（并发批里偶发 -412/超时会白掉一批候选）。
+   */
+  private async resolveBilibiliStream(bvid: string, cid: number): Promise<string | undefined> {
+    for (const qn of [32, 16]) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 400));
+        const playApi =
+          `https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${cid}&qn=${qn}` +
+          `&platform=html5&high_quality=1`;
+        const playText = await this.fetchViaService(playApi, 10_000);
+        const playJson = tryParseJson<{ code?: number; data?: { durl?: Array<{ url?: string }> } }>(playText);
+        if (playJson?.code !== 0) continue;
+        const firstUrl = playJson.data?.durl?.[0]?.url;
+        if (typeof firstUrl === "string" && firstUrl) return firstUrl;
+      }
+    }
+    return undefined;
   }
 
   private async fetchViaService(url: string, timeoutMs: number): Promise<string> {
@@ -524,6 +566,59 @@ export function setVideoGrabServiceRef(service: VideoGrabService): void {
   currentServiceRef = service;
 }
 
+// ---- McpClientService 直连通道（2026-10-02 根修）----
+// 此前适配器只走 mcporter CLI，但生产机未装 mcporter → yby6 MCP 通道恒空转，
+// 网页兜底又被反爬挡 → video.grab 恒失败。McpClientService（stdio 直连
+// tools/mcp/yby6-video venv）才是项目内真正可用的 MCP 通道，优先走它。
+
+type McpClientLike = {
+  callTool: (
+    serverAlias: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    timeoutMs?: number,
+  ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
+};
+
+let currentMcpClientRef: McpClientLike | null = null;
+
+/** 由 create-app-services 在 McpClientService 装配后注入（MCP 不可用时可传 null） */
+export function setVideoGrabMcpClientRef(client: McpClientLike | null): void {
+  currentMcpClientRef = client;
+}
+
+/** 经 McpClientService 调 yby6 解析工具；命中时把结果对象伪装成 stdout 供 parseVideoJson 复用。
+ * 上游拉平台分享页存在间歇性失败（code!==200，如抖音偶发不下发 _ROUTER_DATA），做一次退避重试。 */
+async function callMcpClientParser(
+  url: string,
+): Promise<{ ok: true; stdout: string } | { ok: false; note: string }> {
+  if (!currentMcpClientRef) return { ok: false, note: "McpClientService 未注入" };
+  const attempt = async (): Promise<{ ok: boolean; result: Record<string, unknown> }> => {
+    try {
+      return await currentMcpClientRef!.callTool(
+        "yby6-video",
+        "share_url_parse_tool_wrapper",
+        { url },
+        30_000,
+      );
+    } catch (e) {
+      return { ok: false, result: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  };
+  const failed = (r: { ok: boolean; result: Record<string, unknown> }): boolean => {
+    if (!r.ok) return true;
+    const code = (r.result as { code?: unknown }).code;
+    return typeof code === "number" && code !== 200;
+  };
+  let res = await attempt();
+  if (failed(res)) {
+    await new Promise((r) => setTimeout(r, 1_200));
+    res = await attempt();
+  }
+  if (!res.ok) return { ok: false, note: `MCP 调用失败: ${JSON.stringify(res.result).slice(0, 160)}` };
+  return { ok: true, stdout: JSON.stringify(res.result) };
+}
+
 /** 解析 mcporter 返回的视频 JSON（容错：尝试多种字段名） */
 function parseVideoJson(stdout: string): {
   title?: string;
@@ -595,10 +690,13 @@ function parseVideoJson(stdout: string): {
   }
 }
 
-/** 从 URL 中提取 bvid */
-function extractBvid(url: string): string | undefined {
-  const m = url.match(/[bB][vV][0-9A-Za-z]{8,}/);
-  return m ? m[0] : undefined;
+/** 从 URL 中提取 B 站视频 id：BV 号或 av 号（搜索源返回的多为 av 号链接）。 */
+function extractBilibiliId(url: string): { bvid?: string; aid?: string } {
+  const bv = url.match(/[bB][vV][0-9A-Za-z]{8,}/);
+  if (bv) return { bvid: bv[0] };
+  const av = url.match(/\/video\/av(\d{6,})/i) ?? url.match(/[?&]aid=(\d{6,})/i);
+  if (av) return { aid: av[1] };
+  return {};
 }
 
 function tryParseJson<T>(text: string): T | null {
@@ -707,6 +805,8 @@ type BilibiliViewResponse = {
     desc?: string;
     pic?: string;
     duration?: number;
+    cid?: number;
+    bvid?: string;
     owner?: { name?: string };
   };
 };

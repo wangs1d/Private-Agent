@@ -206,10 +206,12 @@ import { PERCEPTION_OVERVIEW_TOOL_DEFINITION } from "../tools/perception-tools.j
 import {
   allImageCardsHaveCaption,
   attachTravelItineraryCard,
+  attachVideoMediaMarker,
   buildCaptionedRenderBlocks,
   buildInterleavedRenderBlocks,
   dedupMediaCards,
   extractMediaCards,
+  resolveVideoMediaSource,
   stripResidualRenderDeclarations,
   trimMediaCardsByTopic,
   type MediaCardItem,
@@ -3251,6 +3253,20 @@ if (route.plane === "task") {
               finalText,
               resolvedTravel.toolName,
               resolvedTravel.result,
+            );
+          }
+          // 视频媒体卡（2026-10-02）：video.grab/video.find 回执带可播放流时附
+          // [RENDER_AS:video] 媒体标记，与 WS 对话面 attachDeterministicCards 的
+          // videoResults 同构。任务面此前漏接——贴链接解析出无水印直链只能口头转述，
+          // 客户端出不了内联播放器（真机复现：task_plane_light 轮解析成功但回复是纯文本直链）。
+          const videoReceipt = [...capturedMedia]
+            .reverse()
+            .find((mt) => resolveVideoMediaSource(mt.toolName, mt.result) !== null);
+          if (videoReceipt) {
+            finalText = attachVideoMediaMarker(
+              finalText,
+              videoReceipt.toolName,
+              resolveVideoMediaSource(videoReceipt.toolName, videoReceipt.result) ?? undefined,
             );
           }
           finalText = normalizeReplyCardLayout(finalText);

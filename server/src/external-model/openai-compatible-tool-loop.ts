@@ -364,6 +364,8 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
     // 视频搜索双源并行（Bing 直抓 10s + B站接口 8s），6.5s 共享档会在正常返回前掐断
     "search_videos": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_VIDEOS_MS ?? "12000", 10),
     "video.grab": Number.parseInt(process.env.TOOL_TIMEOUT_VIDEO_GRAB_MS ?? "25000", 10),
+    // video.find = 搜索候选 + 并发解析可播放流，整体耗时高于单链接 grab
+    "video.find": Number.parseInt(process.env.TOOL_TIMEOUT_VIDEO_FIND_MS ?? "45000", 10),
     "fetch_web": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     "info.inspect_webpage": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     "info.navigate_site": Number.parseInt(process.env.TOOL_TIMEOUT_NAVIGATE_MS ?? "20000", 10),

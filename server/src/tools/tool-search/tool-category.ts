@@ -49,7 +49,7 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     name: "media",
     summary: "找图/找视频/壁纸/摄像头画面",
     prefixes: ["photo", "vision.", "media", "image"],
-    secondaryTools: ["search_images", "search_images_batch", "search_videos"],
+    secondaryTools: ["search_images", "search_images_batch", "search_videos", "video.grab"],
   },
   {
     name: "calendar",

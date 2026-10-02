@@ -7,6 +7,7 @@ import "package:url_launcher/url_launcher.dart";
 import "package:video_player/video_player.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/services/video_preview_launcher.dart";
 
 /// 视频媒体数据模型（对应后端 [VIDEO_MEDIA_START] 标记中的 JSON）。
 class VideoMediaData {
@@ -127,14 +128,22 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
     super.dispose();
   }
 
-  /// Windows 桌面：video_player 无原生实现，直接用系统默认播放器打开真实视频流
+  /// Windows 桌面：video_player 无原生实现，打开右侧双栏视频面板
+  /// （WebView2 承载 HTML5 <video>，应用内真内联播放）。
   bool get _shouldUseSystemPlayer =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
+  void _openPanelPlayer() {
+    VideoPreviewLauncher.open(
+      url: _mediaUrl,
+      pageUrl: _pageUrl,
+    );
+  }
 
   void _startPlayback() async {
     if (_playing || _initFuture != null) return;
     if (_shouldUseSystemPlayer) {
-      await _launchUrl(_mediaUrl);
+      _openPanelPlayer();
       return;
     }
     final VideoPlayerController controller =
@@ -181,9 +190,9 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
   }
 
   void _showFullscreen() {
-    // Windows 桌面：video_player 无原生实现，直接交给系统默认播放器
+    // Windows 桌面：video_player 无原生实现，交给右侧视频面板
     if (_shouldUseSystemPlayer) {
-      _launchUrl(_mediaUrl);
+      _openPanelPlayer();
       return;
     }
     Navigator.of(context).push(
@@ -434,7 +443,7 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
                         padding: const EdgeInsets.symmetric(horizontal: 8),
                       ),
                       onPressed: () => _launchUrl(_mediaUrl),
-                      child: const Text("系统播放器打开"),
+                      child: const Text("浏览器打开"),
                     ),
                 ],
               ),
@@ -443,7 +452,7 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                "点击将在系统播放器中打开",
+                "点击将在右侧面板中播放",
                 style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
               ),
             ),

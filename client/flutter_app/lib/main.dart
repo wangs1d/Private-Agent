@@ -51,6 +51,7 @@ import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
+import "core/services/video_preview_launcher.dart";
 import "core/services/content_summary_launcher.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/window_bounds_preference.dart";
@@ -110,6 +111,7 @@ import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
 import "features/schedule/schedule_page.dart";
 import "features/chat/image_preview_panel.dart";
+import "features/chat/video_preview_panel.dart";
 import "features/auth/register_page.dart";
 import "app/app_helpers.dart";
 import "widgets/app_sidebar.dart";
@@ -355,6 +357,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 图片预览面板当前要展示的图片快照（来自媒体卡点击）。
   ImagePreviewSnapshot? _imagePreview;
+
+  /// 视频播放面板当前要播放的视频快照（来自视频卡点击）。
+  VideoPreviewSnapshot? _videoPreview;
 
   /// 内容详情面板当前要展示的摘要数据（来自详情卡点击）。
   ContentSummaryDataV2? _contentSummary;
@@ -678,6 +683,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
     // 右侧双栏「图片预览」面板：媒体卡点击 → 打开右栏大图
     ImagePreviewLauncher.setHandler(_openImagePreview);
+    // 右侧双栏「视频播放」面板：视频卡点击 → WebView2 内联播放
+    VideoPreviewLauncher.setHandler(_openVideoPreview);
     // 预览面板「在照片墙中查看」：全屏打开图库 + 3D 墙飞到该照片
     ImagePreviewLauncher.onOpenInWall = (String photoId) {
       _openGalleryPanel();
@@ -944,13 +951,34 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
     }
 
+    // 简报落聊天流退役自愈（2026-10-02 用户定稿）：对话流不再出现简报消息
+    // （早上由桌面悬浮窗卡片直接展示），assistant-briefing-* 历史残留启动即清。
+    final Set<String> retiredBriefingIds = <String>{
+      for (final ChatMessage m in healedMessages)
+        if (m.messageId.startsWith("assistant-briefing-")) m.messageId,
+    };
+    final List<ChatMessage> displayMessages = retiredBriefingIds.isEmpty
+        ? healedMessages
+        : healedMessages
+            .where((m) => !retiredBriefingIds.contains(m.messageId))
+            .toList();
+    for (final String messageId in retiredBriefingIds) {
+      try {
+        await _store.deleteMessage(messageId);
+        debugPrint("[briefing] retired chat landing cleaned: $messageId");
+      } catch (e) {
+        debugPrint(
+            "[briefing] retired briefing cleanup failed for $messageId: $e");
+      }
+    }
+
     final List<AgentRelayMessage> cachedRelay =
         await _store.listRelayInbound(ApiConfig.effectiveActorId);
 
     final bool? visionConsent = await _store.getVisionCameraConsent();
 
     setState(() {
-      _messages.addAll(healedMessages);
+      _messages.addAll(displayMessages);
       // 关键：从缓存恢复后必须重建 assistant 消息索引，
       // 否则后续 chat.assistant_chunk / chat.assistant_done 事件按 messageId
       // 去重时找不到记录，会把同一条 agent 消息重复入列表，造成「同一条回复渲染两次」。
@@ -3771,6 +3799,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 视频播放入口：视频卡点击 → 右侧双栏 WebView2 内联播放。
+  void _openVideoPreview(VideoPreviewSnapshot item) {
+    setState(() {
+      _tabIndex = 0;
+      _videoPreview = item;
+      _rightPanel = RightPanelKind.videoPreview;
+      _previousSplitRatio = _splitRatio;
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.videoPreview.defaultSplitRatio;
+    });
+  }
+
   /// 内容详情入口：详情卡（科技新闻等长内容折叠卡）点击 →
   /// 复用右侧双面板继续展示完整内容（书签导航 + markdown 正文）。
   /// 窗口过窄无法分栏时回退为居中弹窗，保证功能可达。
@@ -5369,13 +5409,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _ => "卡片",
     };
 
-    // 岛上简报条目已退役：各触达渠道（悬浮窗/系统通知/对话框）自证「已就绪」，
-    // 简报本体以卡片落聊天流（_landBriefingInChat），岛上不再重复通知。
-    await _landBriefingInChat(
-      briefing: briefing,
-      narrationText: narrationText,
-      modeLabel: modeLabel,
-    );
+    // 简报不落聊天流（2026-10-02 用户定稿）：对话里不再出现简报消息，
+    // 早上由桌面悬浮窗卡片直接展示；历史残留见加载自愈清理。
     if (markDesktopShown) {
       _lastDesktopBriefingAt = DateTime.now();
     }
@@ -5689,58 +5724,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  /// 简报卡片落聊天流（岛上简报条目退役后的持久找回入口）。
-  ///
-  /// - messageId 按日期键控（assistant-briefing-YYYYMMDD）：同日多次事件
-  ///   天然去重，重启后也不会重复落卡；
-  /// - 卡体走 mediaCards（随消息落盘），cardType=morning_briefing 由
-  ///   AgentResultCard 分发到 MorningBriefingCard 渲染；
-  /// - 全渠道落地（桌面悬浮窗/移动通知/对话框之外，聊天流始终有一份）。
-  Future<void> _landBriefingInChat({
-    required Map<String, dynamic> briefing,
-    required String narrationText,
-    required String modeLabel,
-  }) async {
-    final DateTime now = DateTime.now();
-    final String yyyymmdd =
-        "${now.year.toString().padLeft(4, '0')}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}";
-    final String messageId = "assistant-briefing-$yyyymmdd";
-    if (_messageIndexById(messageId) != null) return;
-
-    final ChatMessage message = ChatMessage(
-      messageId: messageId,
-      sessionId: ApiConfig.effectiveActorId,
-      role: "assistant",
-      text: "今日简报已生成，点击卡片可回看全文。",
-      timestamp: now,
-      mediaCards: <Map<String, dynamic>>[
-        <String, dynamic>{
-          "cardType": "morning_briefing",
-          "title": "今日简报",
-          "speak": "high",
-          "extra": <String, dynamic>{
-            "briefing": briefing,
-            "narrationText": narrationText,
-            "modeLabel": modeLabel,
-          },
-        },
-      ],
-    );
-    void apply() {
-      _messages.add(message);
-      _assistantMessageIndexById[messageId] = _messages.length - 1;
-    }
-
-    if (mounted) {
-      setState(apply);
-    } else {
-      apply();
-    }
-    await _store.saveMessage(message).catchError((Object e) {
-      debugPrint("[briefing] saveMessage failed: $e");
-    });
-  }
-
   Future<void> _loadAgentProfile() async {
     try {
       final Map<String, dynamic> prefs =
@@ -5973,6 +5956,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           urls: urls,
           index: item.index < urls.length ? item.index : 0,
           source: item.source,
+        );
+      case RightPanelKind.videoPreview:
+        // 视频播放面板：WebView2 承载 HTML5 <video>（Windows 无 video_player 原生实现）
+        final VideoPreviewSnapshot? video = _videoPreview;
+        if (video == null) return const SizedBox.shrink();
+        return VideoPreviewPanel(
+          key: ValueKey<String>(video.url),
+          url: video.url,
+          pageUrl: video.pageUrl,
         );
       case RightPanelKind.browser:
         // 用户与 Agent 共用的内嵌浏览器（WebView2 进程级单例，页面常驻）；

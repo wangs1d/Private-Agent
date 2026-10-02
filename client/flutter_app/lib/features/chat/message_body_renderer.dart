@@ -409,6 +409,8 @@ AgentResultItem _cardToItem(Map<String, dynamic> m) {
     mediaType: m["mediaType"]?.toString() ?? m["type"]?.toString() ?? "image",
     thumbnailUrl: m["thumbnailUrl"]?.toString(),
     mediaUrl: m["mediaUrl"]?.toString(),
+    // 服务端解析出的可播流：非空时视频卡点击走右侧面板，不再跳外部链接。
+    playableUrl: m["playableUrl"]?.toString(),
     pageUrl: m["pageUrl"]?.toString(),
     source: m["source"]?.toString(),
     caption: m["caption"]?.toString(),

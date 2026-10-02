@@ -95,13 +95,51 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_videos",
       description:
-        "搜索公开视频结果并返回标题、播放页 pageUrl、缩略图 thumbnailUrl 与来源。\n" +
-        "适用场景：用户明确要「搜视频」「找视频」「教程视频」「B站/YouTube 视频」「视频素材」等。回答时给出可点击播放页，必要时附缩略图；不要重复用普通 search_web 搜同一视频需求。",
+        "搜索公开视频结果并返回标题、播放页 pageUrl、缩略图 thumbnailUrl 与来源（只是链接列表，不能内联播放）。\n" +
+        "适用场景：用户明确要「视频链接」「视频资源列表」「自己去找视频」等只要链接/列表的诉求。注意：用户想直接看/播放视频内容时**不要用本工具**——用 video.find（返回可直接播放的视频流，点开即看）。",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "视频搜索词，完整具体，按要找的视频内容描述" },
           limit: { type: "integer", description: "返回数量，1-12，默认 8" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "video.grab",
+      description:
+        "解析用户消息里的短视频/视频链接，返回无水印视频流 videoUrl、封面 thumbnailUrl、标题与作者；前端会以内联播放器直接播放视频流。\n" +
+        "适用场景：用户消息中带视频分享链接（v.douyin.com / douyin.com / 抖音短链、xiaohongshu.com / xhslink.com、b23.tv / bilibili.com、kuaishou.com、weibo.com 等），或明确要求「解析这个视频」「提取无水印」「保存/下载这个视频」时调用本工具。\n" +
+        "不要误触发：找新视频内容用 search_videos（本工具只解析用户给定的链接）；普通网页文章链接用 fetch_web。",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "用户消息中的视频分享链接或播放页链接，原样传入" },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "video.find",
+      description:
+        "按内容找视频并直接解析出可内联播放的视频流（无需用户提供链接），返回 items（首条最优先，带 videoUrl/封面/标题）。前端渲染成播放卡，用户点开即在右侧面板全屏播放（画面不带任何文案）。\n" +
+        "适用场景：用户想看/想播/想找视频内容时**必须优先用本工具**——「来个/找个/放个 xxx 的视频」「我想看 xxx」「搜个视频看看」「有没有 xxx 的视频」「xxx 的视频看看」等一切想直接观看的诉求都用本工具（search_videos 只回链接列表不能播放，别用错）。\n" +
+        "不要误触发：用户已贴视频链接时用 video.grab；只要文字资讯用 search_web。\n" +
+        "回复口径：本轮由前端确定性出播放卡，正文不要再复述标题/链接/作者等文案（会被整段丢弃），一句话带过即可。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "要找的视频内容描述，具体完整（如「王者荣耀 李白 精彩操作」「苹果手机 隐藏功能 教学」）" },
+          limit: { type: "integer", description: "返回可播放视频条数，1-3，默认 2" },
         },
         required: ["query"],
         additionalProperties: false,

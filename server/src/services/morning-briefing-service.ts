@@ -130,6 +130,15 @@ export interface ImportantDaysStoreLike {
   };
 }
 
+/** 结构化事实库的最小依赖接口（读「称呼」字段，避免重类型耦合） */
+export interface BriefingFactStoreLike {
+  getFact(
+    actorId: string,
+    field: string,
+    entity?: string,
+  ): { field: string; value: string } | null;
+}
+
 export type MorningBriefingDeps = {
   weatherService?: WeatherService;
   weatherPrefsService?: WeatherPrefsService;
@@ -157,6 +166,12 @@ export type MorningBriefingDeps = {
   interestWatchPath?: string;
   /** 重要日子存储（第五源；读 care.set_important_date 写入的 important_dates KV） */
   agentMemorySyncService?: ImportantDaysStoreLike;
+  /**
+   * 结构化事实库（用户称呼源）：与首启向导/聊天面同走 factStore 的「称呼」
+   * 字段（agent 叫用户的称呼，如「王哥」）。绝不回退账号 displayName——
+   * 那是 agent 的网络名（用户叫 agent），方向反了会拿 agent 名称呼用户。
+   */
+  factStore?: BriefingFactStoreLike;
   /**
    * 当天命中重要日子回调（Task 17 人情关系）：每日扫描挂晨报调度，
    * 当天命中（daysUntil=0）且当日未触发过时回调一次（内部按 sessionId|id 去重）。
@@ -793,12 +808,21 @@ export class MorningBriefingService {
   }
 
   /**
-   * 用户称呼：读记忆同步 KV 的 user_profile「称呼」行，交给共享的
-   * resolvePoliteAppellation 做得体化（用户指定的称呼优先；大名转
-   * 「王先生」式称呼——问候绝不直呼大名）。缺失/异常 → 空串
-   * （省略该字段，问候不带称呼，也绝不回退成大名）。
+   * 用户称呼：与首启向导/聊天面同源——factStore 的「称呼」字段（agent 叫
+   * 用户的称呼，如「王哥」），交给共享的 resolvePoliteAppellation 做得体化
+   * （用户指定优先；大名转「王先生」式称呼——问候绝不直呼大名）。
+   * factStore 未装配/无记录时兜底读记忆同步 KV 的 user_profile「称呼」行；
+   * 都取不到 → 空串（省略该字段，问候不带称呼，也绝不回退成大名，更绝不
+   * 回退账号 displayName——那是 agent 的网络名）。
    */
   private resolveAppellation(sessionId: string): string {
+    try {
+      const fact = this.deps.factStore?.getFact(sessionId, "称呼");
+      const value = fact?.value?.trim();
+      if (value) return resolvePoliteAppellation(value);
+    } catch {
+      /* fall through 到 KV 兜底 */
+    }
     const { agentMemorySyncService } = this.deps;
     if (!agentMemorySyncService) return "";
     try {

@@ -196,7 +196,7 @@ import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm
 import { FunAsrAdapter } from "../services/voice-dialogue/adapters/funasr-asr-adapter.js";
 import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
-import { VideoGrabService, setVideoGrabServiceRef } from "../services/video-grab-service.js";
+import { VideoGrabService, setVideoGrabServiceRef, setVideoGrabMcpClientRef } from "../services/video-grab-service.js";
 import { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { SkillManager } from "../skills/index.js";
 import { registerAgentWorldIdentityBuiltinSkills } from "../skills/builtin/agent-world-identity-skills.js";
@@ -627,8 +627,8 @@ export async function createAppServices(): Promise<AppServices> {
   // 技能管理工具（skill.list / skill.view / skill.manage）：让 LLM 自主查询/沉淀/修补 procedural 技能
   registerSkillManageTools(toolRegistry, skillManager);
 
-  registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
-  registerVideoTools(toolRegistry, videoGrabService);
+  registerWebTools(toolRegistry, infoHubService, upstreamSearchService, videoGrabService);
+  registerVideoTools(toolRegistry, videoGrabService, upstreamSearchService);
   registerInternetIntelligenceTools(toolRegistry, internetIntelligenceService);
   registerHttpTools(toolRegistry);
 
@@ -641,6 +641,8 @@ export async function createAppServices(): Promise<AppServices> {
     : Promise.resolve();
   // 统一等待全部启动期异步任务（MCP 工具注册依赖 discover 结果）
   await Promise.all([...bootLoads, mcpDiscoverTask]);
+  // video.grab 的抖音/小红书适配器优先经 McpClientService 直连 yby6（mcporter CLI 生产机不可用）
+  setVideoGrabMcpClientRef(mcpClientService);
   const mcpToolCount = mcpClientService.listTools().length;
   if (mcpToolCount > 0) {
     registerMcpTools(toolRegistry, mcpClientService);
@@ -1708,6 +1710,9 @@ export async function createAppServices(): Promise<AppServices> {
     requestClientLocation: briefingClientLocation,
     // 第五源：近期重要日子（读 care.set_important_date 写入的 KV）
     agentMemorySyncService,
+    // 用户称呼源：结构化事实库「称呼」字段（与首启向导/聊天面同源；
+    // 绝不回退账号 displayName——那是 agent 的网络名，方向会反）
+    factStore: structuredFactStore ?? undefined,
     onImportantDayToday: (sessionId, day) => onImportantDayToday?.(sessionId, day),
     onSevereWeatherAlert: (sessionId, alerts, scheduleCount) =>
       onSevereWeatherAlert?.(sessionId, alerts, scheduleCount),
@@ -5714,6 +5719,8 @@ export async function createAppServices(): Promise<AppServices> {
     scheduleIntentService,
     proactivitySuppressionStore,
     proactivePipeline,
+    // 简报用户称呼第一事实源（与调度推送路径同源）
+    factStore: structuredFactStore ?? undefined,
     proactivePushService,
     proactivityFabric: {
       sensorHealth: () => sensorKernel.health(),

@@ -3,7 +3,7 @@
 ///   设置同样不在此列：它以独立全屏界面打开，见 SettingsPage。
 ///   图库不在此列：2026-09-29 起退出一级 tab，走常用工具入口以全屏路由
 ///   打开（见 GalleryWorkbenchPage），右面板窄栏放不下 3D 照片墙。）
-enum RightPanelKind { friends, messages, devices, schedule, imagePreview, browser, catalog, approvals, contentSummary, agentHome }
+enum RightPanelKind { friends, messages, devices, schedule, imagePreview, videoPreview, browser, catalog, approvals, contentSummary, agentHome }
 
 /// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
 const double kWideLayoutBreakpoint = 820;
@@ -26,6 +26,8 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.45; // 日程：日历周视图 + 事项列表，需要较大空间
       case RightPanelKind.imagePreview:
         return 0.52; // 图片预览：右栏显示原图，需较大空间
+      case RightPanelKind.videoPreview:
+        return 0.42; // 视频播放：16:9 画面需要较大宽度
       case RightPanelKind.browser:
         return 0.42; // 浏览器：网页内容需要较大空间
       case RightPanelKind.catalog:
@@ -95,6 +97,8 @@ String rightPanelTitle(RightPanelKind kind) {
       return "日程";
     case RightPanelKind.imagePreview:
       return "图片预览";
+    case RightPanelKind.videoPreview:
+      return "视频播放";
     case RightPanelKind.browser:
       return "浏览器";
     case RightPanelKind.catalog:

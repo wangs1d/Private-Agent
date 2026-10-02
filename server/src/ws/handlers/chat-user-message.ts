@@ -209,6 +209,19 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
     }
     return "";
   }
+  // 按内容找视频（video.find）：有可播流时播放卡已经是完整形态，正文再拼一遍
+  // 标题/链接就是噪音（「面板纯视频、不带文案」定稿）→ 直接空串，只留卡片；
+  // 全无可播流时才降级成「标题 + 播放页链接」，保证至少有东西可点。
+  if (t === "video.find" || t.includes("video_find")) {
+    const items = (result.items ?? []) as Array<Record<string, unknown>>;
+    const playable = items.find((it) => String(it?.videoUrl ?? "").trim());
+    if (playable) return "";
+    const first = items[0];
+    if (!first) return "";
+    const title = String(first.title ?? "").trim();
+    const pageUrl = String(first.pageUrl ?? "").trim();
+    return [title ? `视频：${title}` : "", pageUrl].filter(Boolean).join("\n");
+  }
   // 视频抓取：列出标题/作者/链接，播放页链接供点击
   if (t === "video.grab" || t.includes("video_grab") || t.includes("video.grab")) {
     const title = (result.title ?? "") as string;
@@ -1042,8 +1055,13 @@ async function processBatchedMessage(
             result: info.result as Record<string, unknown>,
           });
         }
-        // 捕获视频抓取的真实结果，供 done 阶段附加 [RENDER_AS:video] 媒体标记
-        if (info.ok && info.result && info.toolName === "video.grab") {
+        // 捕获视频工具的真实结果，供 done 阶段附加 [RENDER_AS:video] 媒体标记
+        // （video.grab=贴链接解析 / video.find=按内容找视频直接出可播流）
+        if (
+          info.ok &&
+          info.result &&
+          (info.toolName === "video.grab" || info.toolName === "video.find")
+        ) {
           executedVideoToolResults.push({
             toolName: info.toolName,
             result: info.result as Record<string, unknown>,
@@ -1405,7 +1423,7 @@ async function processBatchedMessage(
     const videoReceipts: Array<ExecutedToolReceipt> =
       executedVideoToolResults.length > 0
         ? executedVideoToolResults
-        : reply.toolName === "video.grab" && toolResult?.result
+        : (reply.toolName === "video.grab" || reply.toolName === "video.find") && toolResult?.result
           ? [{ toolName: reply.toolName, result: toolResult.result as Record<string, unknown> }]
           : [];
     // 搜索卡让位仲裁：本轮搜索类媒体有真实产出（照片/视频卡已组装得出）→

@@ -19,6 +19,9 @@ class AgentResultItem {
     this.url,
     this.mediaType,
     this.mediaUrl,
+    /// 已解析出的可播放视频流（经后端 /agent/media/proxy 代理的绝对/相对地址）。
+    /// 非空时视频卡点击走右侧双栏面板内联播放，为空才降级为打开播放页。
+    this.playableUrl,
     this.thumbnailUrl,
     this.pageUrl,
     this.source,
@@ -43,6 +46,10 @@ class AgentResultItem {
   /// 可选媒体元数据（图片/视频搜索结果卡片使用）。
   final String? mediaType;
   final String? mediaUrl;
+
+  /// 可播放视频流地址（服务端解析成功时下发，指向视频代理路由）。
+  /// 非空 = 应用内可播，点击不再跳浏览器。
+  final String? playableUrl;
   final String? thumbnailUrl;
   final String? pageUrl;
   final String? source;
@@ -80,6 +87,7 @@ class AgentResultItem {
       url: json["url"]?.toString(),
       mediaType: json["mediaType"]?.toString() ?? json["kind"]?.toString(),
       mediaUrl: json["mediaUrl"]?.toString() ?? json["imageUrl"]?.toString(),
+      playableUrl: json["playableUrl"]?.toString(),
       thumbnailUrl: json["thumbnailUrl"]?.toString() ?? json["thumbUrl"]?.toString(),
       pageUrl: json["pageUrl"]?.toString() ?? json["sourceUrl"]?.toString(),
       source: json["source"]?.toString(),
@@ -99,6 +107,7 @@ class AgentResultItem {
         if (url != null) "url": url,
         if (mediaType != null) "mediaType": mediaType,
         if (mediaUrl != null) "mediaUrl": mediaUrl,
+        if (playableUrl != null) "playableUrl": playableUrl,
         if (thumbnailUrl != null) "thumbnailUrl": thumbnailUrl,
         if (pageUrl != null) "pageUrl": pageUrl,
         if (source != null) "source": source,

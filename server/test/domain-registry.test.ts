@@ -62,10 +62,13 @@ test("束投影等价性：域投影 ⊇ 旧前缀表；media/write/desktop 精�
     // 有意识超集（评审过的增益，锁进测试防漂移）：
     //   search + internet.*（realtime 轮可用情报核实）
     //   write + budget.calculate（钱包域副成员，预算计算属写族）
+    //   media + video.grab（2026-10-02 补模型入口：视频链接解析归 media 域，
+    //   delegate 束投影与延迟目录按域召回需要它）
     const conscious: Record<string, string[]> = {
       search: ["internet."],
       write: ["budget.calculate"],
       desktop: ["browser.session.list"],
+      media: ["video.grab"],
     };
     const allowed = conscious[cap] ?? [];
     const stray = extra.filter((n) => !allowed.some((a) => n === a || n.startsWith(a)));

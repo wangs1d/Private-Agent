@@ -1,6 +1,8 @@
 import type { InfoHubService } from "../services/info-hub-service.js";
 import type { UpstreamSearchService } from "../services/upstream-search-service.js";
+import type { VideoGrabService } from "../services/video-grab-service.js";
 import type { ToolRegistry } from "./tool-registry.js";
+import { enrichVideosWithPlayable } from "./video-tools.js";
 import { resolveActorId } from "../agent/actor-id.js";
 import { fetchHotRankings, type HotRankSource } from "../services/hot-rankings.js";
 
@@ -21,6 +23,7 @@ export function registerWebTools(
   toolRegistry: ToolRegistry,
   infoHubService: InfoHubService,
   upstreamSearchService: UpstreamSearchService,
+  videoGrabService?: VideoGrabService,
 ): void {
   toolRegistry.register("search_web", async (input) => {
     const query = String(input.query ?? "").trim();
@@ -73,7 +76,22 @@ export function registerWebTools(
     const query = String(input.query ?? "").trim();
     const limit = toBoundedLimit(input.limit, 8);
     if (!query) return { provider: "none", mediaType: "video", items: [], notes: ["query 不能为空"] };
-    return upstreamSearchService.searchVideos(query, limit);
+    const search = await upstreamSearchService.searchVideos(query, limit);
+    // 装配了视频抓取服务时对候选做可播流解析（与 video.find 同链路）——模型无论选
+    // 哪个视频工具，带 videoUrl 的条目都能被确定性附成内联播放卡（2026-10-02 根修：
+    // 模型习惯性选 search_videos 导致「看视频」只出链接列表）。
+    if (!videoGrabService) return search;
+    const { items, playable } = await enrichVideosWithPlayable(search, videoGrabService, 3);
+    return {
+      ...search,
+      items,
+      notes: [
+        ...search.notes,
+        ...(playable.length > 0
+          ? ["items 中带 videoUrl 的条目可内联播放（前端会自动渲染播放卡）"]
+          : []),
+      ],
+    };
   });
 
   toolRegistry.register("fetch_web", async (input) => {

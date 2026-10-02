@@ -36,6 +36,8 @@ test("dynamic mode strips stable prompt fields and keeps dynamic ones", () => {
     "search_images",
     "search_videos",
     "fetch_web",
+    "video.grab",
+    "video.find",
   ]);
   assert.equal(sanitized?.persona, undefined);
   assert.equal(sanitized?.values, undefined);
@@ -83,7 +85,35 @@ test("scoped tool exposure keeps only the pinned tool suite", () => {
     "search_images",
     "search_videos",
     "search_web",
+    "video.find",
+    "video.grab",
   ]);
+});
+
+test("纯内容看片诉求：pin video.find 且剔除只出链接的 search_videos（动词与「视频」隔着片名也要命中）", () => {
+  const kernel = new RuntimeKernel();
+  kernel.update({ enabled: true, promptMode: "dynamic" });
+
+  // 关键词表只认「看视频/找个视频」这类动词紧贴的说法，真实说法是动词与「视频」
+  // 之间隔着整段片名——这些必须命中，否则 search_videos 剔不掉，模型会只回链接列表。
+  for (const text of [
+    "来个王者荣耀李白打野教学的视频看看",
+    "我想看刘德华演唱会现场的视频",
+    "有没有讲量子力学的视频",
+    "推荐个做红烧肉的视频",
+    "给我放个猫猫搞笑视频",
+  ]) {
+    const pins = kernel.planTurn(text).pinnedToolNames;
+    assert.ok(pins.includes("video.find"), `${text} 未 pin video.find：${pins.join(",")}`);
+    assert.ok(!pins.includes("search_videos"), `${text} 仍暴露 search_videos：${pins.join(",")}`);
+  }
+});
+
+test("贴链接要求解析时保留 search 束，不误判成看片诉求", () => {
+  const kernel = new RuntimeKernel();
+  kernel.update({ enabled: true, promptMode: "dynamic" });
+  const pins = kernel.planTurn("帮我解析一下这个视频，我要无水印的 https://v.douyin.com/abc/").pinnedToolNames;
+  assert.ok(pins.includes("video.grab"), `链接解析未 pin video.grab：${pins.join(",")}`);
 });
 
 test("high-risk tools are blocked by runtime safety policy", () => {

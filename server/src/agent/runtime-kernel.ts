@@ -225,7 +225,57 @@ const KEYWORDS = {
     "\u7167\u7247",
     "\u89c6\u9891",
   ],
+  videoParse: [
+    "\u65e0\u6c34\u5370",
+    "\u89e3\u6790\u89c6\u9891",
+    "\u89c6\u9891\u89e3\u6790",
+    "\u4fdd\u5b58\u89c6\u9891",
+    "\u4e0b\u8f7d\u89c6\u9891",
+    "\u89c6\u9891\u94fe\u63a5",
+    "\u5206\u4eab\u94fe\u63a5",
+  ],
+  videoWatch: [
+    "\u627e\u4e2a\u89c6\u9891",
+    "\u627e\u89c6\u9891",
+    "\u641c\u4e2a\u89c6\u9891",
+    "\u641c\u89c6\u9891",
+    "\u6765\u4e2a\u89c6\u9891",
+    "\u770b\u4e2a\u89c6\u9891",
+    "\u770b\u89c6\u9891",
+    "\u653e\u4e2a\u89c6\u9891",
+    "\u653e\u89c6\u9891",
+    "\u60f3\u770b\u89c6\u9891",
+    "\u64ad\u4e2a\u89c6\u9891",
+    "\u641c\u4e2a\u89c6\u9891\u770b\u770b",
+    "\u641c\u89c6\u9891\u770b\u770b",
+  ],
 } as const;
+
+/**
+ * 「想看视频」句式（关键词表盖不住的语序变体）。
+ *
+ * 关键词表只能命中「看视频/找个视频」这类**动词紧贴视频**的说法，真实说法是
+ * 「来个王者荣耀李白打野教学的视频看看」——动词与「视频」之间隔着整段片名，
+ * 命中不了 → watchIntent 为假 → search_videos 剔不掉 → 模型照旧只回链接列表
+ * （「按内容找视频」链路就断在这）。这里用两条宽松句式补上：
+ *   1) 观看动词 + 任意短串 + 视频；
+ *   2) 视频 + 观看尾缀（看看/看一下/来着…）。
+ * 标点处断开，避免跨句误判（如「帮我解析一下这个视频」不含观看动词，不误命中）。
+ */
+const VIDEO_WATCH_PATTERNS: readonly RegExp[] = [
+  /(?:看|观看|看看|找|找个|找一找|搜|搜个|搜一下|来|来个|来点|放|播放|播|推|推荐|刷|给|给我|整|弄|想要|想看|要看|有没有)[^。！？；;\n]{0,16}视频/,
+  /视频[^。！？；;\n]{0,8}(?:看看|看一下|瞅瞅|来着|给我|推荐|来一个|来一部)/,
+];
+
+/** 是否「想看/找视频内容」的纯内容诉求（相对：贴链接要求解析） */
+function hasVideoWatchIntent(text: string): boolean {
+  if (hasAnyKeyword(text, KEYWORDS.videoWatch)) return true;
+  return VIDEO_WATCH_PATTERNS.some((re) => re.test(text));
+}
+
+/** 短视频/视频平台链接（抖音/小红书/B站/快手/微博等，VideoGrabService 适配器同源名单） */
+const VIDEO_LINK_PATTERN =
+  /(?:v\.douyin\.com|douyin\.com|iesdouyin\.com|xiaohongshu\.com|xhslink\.com|b23\.tv|bilibili\.com|kuaishou\.com|weibo\.com|weibo\.cn|pipixia\.com)/i;
 
 function envFalsy(raw: string | undefined): boolean {
   const v = raw?.trim().toLowerCase();
@@ -452,6 +502,25 @@ export class RuntimeKernel {
     }
     if (hasAnyKeyword(text, KEYWORDS.search)) {
       pins.push("search_web", "search_images", "search_videos", "fetch_web");
+      // 「解析/保存视频」类消息会命中 search 关键词（含「视频」），链接解析与
+      // 按内容找视频（直接出可播流）一并纳入 scoped 集
+      pins.push("video.grab", "video.find");
+    }
+    // 消息带视频平台链接或解析意图时精准 pin video.grab（此前缺 schema 缺 pin，
+    // 工具对 LLM 永久不可见，「给链接→解析→内联播放」链路从未触发过）
+    if (VIDEO_LINK_PATTERN.test(text) || hasAnyKeyword(text, KEYWORDS.videoParse)) {
+      pins.push("video.grab");
+    }
+    // 「看/找/来个 xxx 视频」类纯内容诉求（无链接）→ video.find
+    const watchIntent = hasVideoWatchIntent(text);
+    if (watchIntent) {
+      pins.push("video.find");
+    }
+    // 纯看片诉求（不带链接）时从 scoped 集剔除 search_videos：它只出链接列表不可
+    // 内联播放，与 video.find 并存时模型必选错（真机 17:58/18:00 两轮实证，描述
+    // 定位调不动）——只留 video.find 一个视频出口，确定性收敛。
+    if (watchIntent && !VIDEO_LINK_PATTERN.test(text)) {
+      return unique(pins.filter((n) => n !== "search_videos"));
     }
 
     return unique(pins);

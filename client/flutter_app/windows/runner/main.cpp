@@ -5,12 +5,23 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "embedded_font.h"
 #include "flutter_window.h"
 #include "utils.h"
 #include "webview_ghost_window_guardian.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
+  // 岛字体（HarmonyOS/Noto）必须抢在本进程第一次 GDI+ 字体操作之前以
+  // AddFontResourceExW 注册进会话（本机实证 2026-10-02 开机后必现：玻璃
+  // 通知预热等先行文字绘制让 GDI+ 进程级字体表提前定型，之后才注册的族
+  // 对 GDI+ 永不可见——Gdiplus::Font 构造静默失败，岛上中文全部画空，
+  // 只剩矢量图标和系统字体字形（MDL2）。GDI 侧不受影响，故 CreateFontW
+  // 选字成功、字体文件也确在会话表里，极具迷惑性）。入口处注册即保证
+  // 无论字体表在 GdiplusStartup 还是首次字体操作时定型，都已包含它们。
+  LoadIslandHarmonyosFonts();
+  LoadIslandNotoFonts();
+
   // Attach to console when present (e.g., 'flutter run') or create a
   // new console when running with a debugger.
   if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
