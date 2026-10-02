@@ -7,7 +7,7 @@
  *   - gateway/forced-tool.ts：强制工具路由（phone/clock/search_web）
  *
  * 网关职责：
- *   1. prepareTools：core/deferred 工具切分 + 意图预召回 + tool_discover 桥注入（trace: tool_prepare）
+ *   1. prepareTools：core/deferred 工具切分 + tool_discover 桥注入（trace: tool_prepare）
  *   2. resolveForcedTool：事实型问题强制工具选择（trace: forced_tool）
  *   3. executeBridge：tool_discover / tool_call 桥接执行（trace: bridge_execute）
  *   4. searchResources：直接检索延迟目录（诊断/管理端，trace: resource_search）
@@ -26,12 +26,12 @@ import {
   executeToolSearchBridge,
   prepareToolsWithToolSearch,
   type DeferredToolCatalog,
+  type ResidentToolInfo,
   type ToolSearchBridgeResult,
   type ToolSearchPreparedTurn,
 } from "../tools/tool-search/index.js";
 import { adaptiveSearchDeferredTools, type AdaptiveDeferredToolSearchMatch } from "../tools/tool-search/adaptive-catalog.js";
 import { resolveForcedToolChoice, type ForcedToolChoice } from "./forced-tool.js";
-import { ROUTER_FIRST_LANE_MAX_VISIBLE } from "../external-model/lane-tool-sets.js";
 import { recordGatewayTrace } from "./gateway-trace.js";
 
 let _traceCounter = 0;
@@ -105,75 +105,6 @@ async function tracedAsync<T>(
   }
 }
 
-// ===== 意图预召回（speculative preload）=====
-// 用用户文本提前跑一次延迟目录检索（进程内 adaptive，短超时），top-1 高置信
-// 命中时直接把该工具 schema 注入 visibleTools——LLM 无需再走 tool_discover →
-// tool_call 两轮往返即可直接调用。失败/超时/低置信度一律静默跳过，LLM 仍可走
-// tool_discover 兜底。
-//
-// 收敛（2026-10-01）：只对 router-first 轮（可见集 ≤ ROUTER_FIRST_LANE_MAX_VISIBLE，
-// 即"业务工具主力在延迟目录"的轮）投机。chat 轮（Core 常驻）与意图束轮（束确定性
-// 覆盖主力）不跑——最坏 600ms 阻塞第一波 LLM 请求，纯加 TTFT 无命中收益。
-
-function parsePrerecallTimeoutMs(): number {
-  const raw = Number.parseInt(process.env.GATEWAY_PRERECALL_TIMEOUT_MS ?? "", 10);
-  // 默认 600ms：进程内 adaptive 检索（BM25+embedding 混合）常规远低于此；
-  // 超时则静默走 tool_discover 兜底，不影响正确性。
-  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 2000) : 600;
-}
-
-function parsePrerecallMinScore(): number {
-  const raw = Number.parseFloat(process.env.GATEWAY_PRERECALL_MIN_SCORE ?? "");
-  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.5;
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
-}
-
-function visibleToolNames(tools: ChatCompletionTool[]): Set<string> {
-  const names = new Set<string>();
-  for (const tool of tools) {
-    if (tool.type === "function" && tool.function?.name) names.add(tool.function.name);
-  }
-  return names;
-}
-
-async function preloadTopDeferredTool(
-  prepared: ToolSearchPreparedTurn,
-  userText: string,
-): Promise<string | null> {
-  try {
-    const matches = await withTimeout(
-      adaptiveSearchDeferredTools(prepared.deferredCatalog, userText, 1, {
-        includeSchema: true,
-      }),
-      parsePrerecallTimeoutMs(),
-    );
-    const top = matches?.[0];
-    if (!top || top.score < parsePrerecallMinScore()) return null;
-
-    const catalog = prepared.deferredCatalog;
-    const entry =
-      catalog.byName.get(top.name) ??
-      catalog.byApiName.get(top.name.replace(/\./g, "_"));
-    if (!entry) return null;
-    if (visibleToolNames(prepared.visibleTools).has(entry.registryName)) return null;
-
-    prepared.visibleTools = [...prepared.visibleTools, entry.tool];
-    return entry.registryName;
-  } catch {
-    // 预召回失败静默：LLM 仍可通过 tool_discover 桥接发现该工具
-    return null;
-  }
-}
-
 /**
  * 工具准备：core 工具直接暴露，其余进 deferred catalog（由 tool-router 召回），
  * 激活时注入 tool_discover / tool_call 桥接工具。
@@ -184,33 +115,20 @@ async function preloadTopDeferredTool(
 export async function prepareTools(
   visibleCandidateTools: ChatCompletionTool[],
   searchableSourceTools: ChatCompletionTool[] = visibleCandidateTools,
-  options?: { userText?: string },
 ): Promise<ToolSearchPreparedTurn> {
   const traceId = nextTraceId();
   const startedAt = Date.now();
   try {
+    // 2026-10-01 S2 预召回退役：轻任务束（路由确定性投影）与域信号预载覆盖其
+    // 全部价值场景，能力面经域卡+域拉取可达，投机检索不再有存在必要。
     const prepared = prepareToolsWithToolSearch(visibleCandidateTools, searchableSourceTools);
-    const userText = options?.userText?.trim();
-    let prerecall: string | null = null;
-    if (
-      prepared.toolSearchActive &&
-      userText &&
-      prepared.deferredCatalog.entries.length > 0 &&
-      prepared.visibleTools.length <= ROUTER_FIRST_LANE_MAX_VISIBLE
-    ) {
-      prerecall = await preloadTopDeferredTool(prepared, userText);
-    }
     recordGatewayTrace({
       traceId,
       phase: "tool_prepare",
-      decision:
-        `visible=${prepared.visibleTools.length} deferred=${prepared.deferredToolCount}` +
-        (prerecall ? ` prerecall=${prerecall}` : ""),
-      reasons: prerecall
-        ? [`预召回注入 ${prerecall}（省 tool_discover 发现往返）`]
-        : prepared.toolSearchActive
-          ? ["延迟目录激活，预召回未命中（LLM 走 tool_discover 兜底）"]
-          : ["延迟目录未激活（小工具集/阈值未达）"],
+      decision: `visible=${prepared.visibleTools.length} deferred=${prepared.deferredToolCount}`,
+      reasons: prepared.toolSearchActive
+        ? ["延迟目录激活（能力面经域卡+域拉取可达）"]
+        : ["延迟目录未激活（小工具集/阈值未达）"],
       durationMs: Date.now() - startedAt,
       timestamp: startedAt,
     });
@@ -250,12 +168,13 @@ export function executeBridge(
   bridgeName: string,
   args: Record<string, unknown>,
   catalog: DeferredToolCatalog,
+  residentTools?: ResidentToolInfo[],
 ): Promise<ToolSearchBridgeResult> {
   return tracedAsync(
     "bridge_execute",
     `bridge=${bridgeName}`,
     [`catalog=${catalog.entries.length}`],
-    () => executeToolSearchBridge(bridgeName, args, catalog),
+    () => executeToolSearchBridge(bridgeName, args, catalog, residentTools),
   );
 }
 

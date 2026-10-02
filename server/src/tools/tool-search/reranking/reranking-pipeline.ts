@@ -1,4 +1,4 @@
-import type { QueryConstraints } from "../intent-router/intent-router.js";
+import type { QueryConstraints } from "../retrieval-intent.js";
 import type { HybridRetrievedResource } from "../retrieval/hybrid-retrieval.js";
 import { tokenize } from "../bm25.js";
 

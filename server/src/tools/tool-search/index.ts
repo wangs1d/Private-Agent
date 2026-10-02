@@ -9,7 +9,7 @@ import {
   type DeferredToolSearchMatch,
 } from "./catalog.js";
 import { getToolSearchConfig } from "./env.js";
-import { getPromotableCoreTools } from "./handlers.js";
+import { domainsForTool } from "./tool-category.js";
 
 export type ToolSearchPreparedTurn = {
   visibleTools: ChatCompletionTool[];
@@ -56,6 +56,39 @@ type FullCatalogCache = {
 
 let _fullCatalogCache: FullCatalogCache | null = null;
 const FULL_CATALOG_TTL_MS = 5 * 60 * 1000; // 5 分钟 TTL，防止长期持有过期引用
+
+/**
+ * 域信号探测（2026-10-01 S2 域信号预载的判定原语）：全量 BM25 词面 top-5 领先者
+ * 的域多数票，≥3 票（60% 浓度）才算强信号。实测校准：真信号 5/5~3/5（行程→
+ * travel、摄像头→media）；噪声票分散在 2/5 以下（"嗯嗯好的"→voice 2、
+ * "开灯"→search 2）——BM25 绝对分区分不了噪声（均在 ~0.05），浓度才行。
+ * 确定性（同语料同 query 恒同结果），复用跨轮 catalog 缓存——泛化替代此前
+ * travel 一域的硬编码预载。
+ */
+export function dominantDomainForQuery(
+  query: string,
+  searchableTools: ChatCompletionTool[],
+): string | null {
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+  const catalog = getOrCreateFullCatalog(searchableTools);
+  const hits = catalog.index.search(trimmed, 5, catalog.entries);
+  const counts = new Map<string, number>();
+  for (const hit of hits) {
+    for (const domain of domainsForTool(hit.id)) {
+      counts.set(domain, (counts.get(domain) ?? 0) + 1);
+    }
+  }
+  let top: string | null = null;
+  let topCount = 0;
+  for (const [domain, count] of counts) {
+    if (count > topCount) {
+      top = domain;
+      topCount = count;
+    }
+  }
+  return top !== null && topCount >= 3 ? top : null;
+}
 
 function computeToolsSignature(tools: ChatCompletionTool[]): string {
   const names = tools
@@ -107,11 +140,6 @@ function deriveDeferredCatalog(
     byApiName,
     embeddingIndex: full.embeddingIndex,
     embeddingReady: full.embeddingReady,
-    // 两层架构：类别路由字段（由全量 catalog 构建，每轮共享）
-    categoryIndex: full.categoryIndex,
-    categories: full.categories,
-    categoryBm25: full.categoryBm25,
-    categorySearches: full.categorySearches,
   };
 }
 
@@ -135,29 +163,6 @@ export function prepareToolsWithToolSearch(
     return Boolean(name) && !visibleNames.has(name as string);
   });
 
-  // 动态晋升：高频调用的 deferred 工具自动晋升为 core（省 2 轮 LLM round trip）
-  const promotedNames = getPromotableCoreTools();
-  if (promotedNames.length > 0) {
-    const promotedToolSchemas: ChatCompletionTool[] = [];
-    const remainingDeferred: ChatCompletionTool[] = [];
-    for (const tool of deferred) {
-      const name = isFunctionName(tool);
-      if (name && promotedNames.includes(name)) {
-        promotedToolSchemas.push(tool);
-        visibleNames.add(name);
-      } else {
-        remainingDeferred.push(tool);
-      }
-    }
-    if (promotedToolSchemas.length > 0) {
-      const allVisible = uniqueTools([...visibleTools, ...promotedToolSchemas]);
-      visibleTools.length = 0;
-      visibleTools.push(...allVisible);
-      // 替换 deferred 为剩余未晋升部分
-      deferred.length = 0;
-      deferred.push(...remainingDeferred);
-    }
-  }
   // 复用全量 BM25 索引（跨轮缓存），每轮只过滤 entries
   const fullCatalog = getOrCreateFullCatalog(searchableTools);
   const deferredCatalog = deriveDeferredCatalog(fullCatalog, visibleNames);
@@ -223,9 +228,8 @@ export {
   type AdaptiveDeferredToolSearchMatch,
   type AdaptiveSearchOptions,
 } from "./adaptive-catalog.js";
-export { executeToolSearchBridge, type ToolSearchBridgeResult } from "./handlers.js";
+export { executeToolSearchBridge, type ResidentToolInfo, type ToolSearchBridgeResult } from "./handlers.js";
 export * from "./registry/index.js";
-export * from "./intent-router/intent-router.js";
 export * from "./retrieval/history-score.js";
 export * from "./retrieval/hybrid-retrieval.js";
 export * from "./top-p-selector/top-p-selector.js";

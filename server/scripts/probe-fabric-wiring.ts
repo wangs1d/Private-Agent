@@ -62,7 +62,7 @@ for (let i = 0; i < 3; i++) {
 presenceFeeder({ at, fingerprint: `probe:presence:${at}`, salience: "low", payload: { state: "active" } });
 
 void (async () => {
-  await executor.tickActorWithServices("probe_user", services);
+  await executor.tickActor("probe_user");
   const kinds = received.map((e) => e.kind);
   console.log(`\n[probe] 模式=${legacy ? "legacy（无桥接，复现缺线）" : "wired（生产桥接）"}`);
   console.log(`[probe] 信号入板 → 规则产出事件 ${received.length} 个: ${kinds.join(", ") || "（无）"}`);

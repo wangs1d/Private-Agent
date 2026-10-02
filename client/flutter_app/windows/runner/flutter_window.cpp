@@ -1005,6 +1005,16 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
     return;
   }
 
+  if (method == "suppressCheck") {
+    // Dart 看门狗兜底：原生 WM_TIMER 心跳失效时由 Dart 直推抑制检查，
+    // 保证退出全屏后岛必然恢复（不再依赖原生定时器存活）。
+    if (dynamic_island_window_) {
+      dynamic_island_window_->CheckSuppression();
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
   if (method == "setAgentSteps") {
     // 展开卡「任务动态」：agent 工具步骤流（labels/states 等长对齐）。
     std::vector<DynamicIslandWindow::AgentStep> steps;

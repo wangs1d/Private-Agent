@@ -1,4 +1,5 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import { toolInCapabilityDomains } from "../tools/tool-search/tool-category.js";
 
 import {
   mergeChatToolsForAccessMode,
@@ -298,41 +299,7 @@ function applyToolRankingHint(
   });
 }
 
-/**
- * 能力束 → 工具名/命名空间前缀映射（delegate 裁剪用）。
- * 轻任务能力（realtime_lookup→search、media_retrieval→media+search）与
- * 写能力（action_write→write，2026-09-05 起路由层直给 write 不再给 full）
- * 走前缀裁剪；只有 multi_step_task 仍给 full 不走此表。
- * 前缀匹配规则：工具名等于前缀或以 prefix 开头（"calendar." 匹配 calendar.create_task）。
- */
-const CAPABILITY_TOOL_PREFIXES: Record<string, string[]> = {
-  search: [
-    "search_web",
-    "search",
-    "fetch_web",
-    "deep_search",
-    "hot_rankings",
-    "info.",
-    "weather.",
-    "clock.",
-  ],
-  media: ["search_images", "search_videos", "photo", "vision.", "media", "image"],
-  // write 束：写数据/有副作用的工具族。wallet（下单/支付/转账）、agent（好友
-  // 中继发消息）、surface（召唤/收起桌面悬浮卡，语音"念+显"依赖）均为写动作
-  // 常配能力；未列全的长尾由 tool_discover/tool_call 延迟目录桥按需召回。
-  write: [
-    "calendar.",
-    "reminder",
-    "voice.",
-    "phone.",
-    "shopping.",
-    "commitment.",
-    "wallet.",
-    "agent.",
-    "surface.",
-  ],
-  desktop: ["desktop", "agent_browser", "shared_browser", "screen"],
-};
+/** 能力束 → 域投影判定统一走域注册表（2026-10-01 S0：删本地重复前缀表）。 */
 
 /** 元工具/能力查询桥：任何裁剪集合都保留，保证延迟目录（tool_discover→tool_call）可达。 */
 const CAPABILITY_BRIDGE_TOOLS = new Set([
@@ -343,12 +310,6 @@ const CAPABILITY_BRIDGE_TOOLS = new Set([
   "agent.query_capabilities",
 ]);
 
-function toolMatchesCapability(toolName: string, capability: string): boolean {
-  const prefixes = CAPABILITY_TOOL_PREFIXES[capability];
-  if (!prefixes) return false;
-  return prefixes.some((p) => toolName === p || toolName.startsWith(p));
-}
-
 function filterToolsByCapabilities(
   tools: ChatCompletionTool[],
   capabilities: string[],
@@ -357,7 +318,7 @@ function filterToolsByCapabilities(
     const name = tool.type === "function" ? tool.function?.name ?? "" : "";
     if (!name) return true;
     if (CAPABILITY_BRIDGE_TOOLS.has(name)) return true;
-    return capabilities.some((cap) => toolMatchesCapability(name, cap));
+    return toolInCapabilityDomains(name, capabilities);
   });
 }
 

@@ -440,7 +440,8 @@ export const AGENT_RELAY_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "agent.send_to_peer",
-      description: "向好友或其它已配对 Agent 发送中继消息（可与 agent.link 好友配合）。",
+      description:
+        "给站内好友发消息（内置好友系统，不是短信/QQ/微信；用户说「给好友发消息/回复好友」就是它）。targetSessionId 填 agent.link.list_friends 里的 friendActorId 或对方身份短号 agentNumber，无需配对、无需对方同意接收；对方在线即时送达，离线存收件箱。",
       parameters: {
         type: "object",
         properties: {

@@ -36,7 +36,7 @@ function mkExecutor(clock: MockClock, ruleId: string, services: Parameters<typeo
       { stream, at: clock.t, fingerprint: `${stream}:${clock.t}:${Math.random()}`, salience: "low", payload },
       "u1",
     );
-  const tick = () => executor.tickActorWithServices("u1", services, clock.t);
+  const tick = () => executor.tickActor("u1", clock.t);
   return { board, executor, events, feed, tick };
 }
 

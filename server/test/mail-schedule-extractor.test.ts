@@ -20,7 +20,17 @@ import { extractMailCalendarParts } from "../src/services/mail-watch-service.js"
 import { ScheduleTaskService } from "../src/services/schedule-task-service.js";
 import type { ProactiveIntent } from "../src/proactivity/proactivity-types.js";
 
-const NOW = "2026-09-25T00:00:00Z";
+// 时间炸弹根修（2026-10-01）：固定日历日期会随时间过期（parseRunAt 拒过去时刻，
+// 2026-10-01 当天真实炸过）——全部行程 fixture 改为「今天 +20 天」动态基准，
+// 断言从同一基准推导；过去行程用例保持固定过去日期（永远成立）
+const NOW = new Date().toISOString();
+const TRIP_BASE = Date.now() + 20 * 24 * 3600_000;
+const cnDate = (offsetDays: number): string => {
+  const d = new Date(TRIP_BASE + offsetDays * 24 * 3600_000);
+  return `${d.getUTCFullYear()}年${d.getUTCMonth() + 1}月${d.getUTCDate()}日`;
+};
+const isoDay = (offsetDays: number): string =>
+  new Date(TRIP_BASE + offsetDays * 24 * 3600_000).toISOString().slice(0, 10);
 
 function mime(from: string, subject: string, body: string, bodyContentType = 'text/plain; charset="utf-8"'): Buffer {
   return Buffer.from(
@@ -45,7 +55,7 @@ const MAIL_12306_BUY = mime(
     "尊敬的旅客：",
     "您已成功购买车票，订单号 E987654321。",
     "车次：G101次",
-    "乘车日期：2026年10月1日 09:15开",
+    "乘车日期：" + cnDate(0) + " 09:15开",
     "北京南站 至 南京南站",
     "二等座 01车05F号",
   ].join("\r\n"),
@@ -58,7 +68,7 @@ const MAIL_12306_RESCHEDULE = mime(
     "尊敬的旅客：",
     "您的车票已改签，订单号 E987654321。",
     "新票信息：G102次",
-    "乘车日期：2026年10月2日 10:30开",
+    "乘车日期：" + cnDate(1) + " 10:30开",
     "北京南站 至 南京南站",
   ].join("\r\n"),
 );
@@ -75,7 +85,7 @@ const MAIL_FLIGHT = mime(
   [
     "订单号：C12345678",
     "航班号：MU5101",
-    "起飞时间：2026年10月2日 08:00 起飞",
+    "起飞时间：" + cnDate(1) + " 08:00 起飞",
     "上海虹桥机场 至 北京首都机场",
   ].join("\r\n"),
 );
@@ -86,8 +96,8 @@ const MAIL_HOTEL = mime(
   [
     "订单号：H88888888",
     "您已成功预订：上海全季酒店虹桥店",
-    "入住日期：2026年10月3日",
-    "退房日期：2026年10月4日",
+    "入住日期：" + cnDate(2) + ",",
+    "退房日期：" + cnDate(3) + ",",
   ].join("\r\n"),
 );
 
@@ -98,8 +108,8 @@ const SAMPLE_ICS = [
   "UID:kickoff@company.com",
   "SUMMARY:项目启动会",
   "LOCATION:A栋3楼会议室",
-  "DTSTART:20261008T020000Z",
-  "DTEND:20261008T030000Z",
+  "DTSTART:" + isoDay(13).replace(/-/g, "") + "T020000Z",
+  "DTEND:" + isoDay(13).replace(/-/g, "") + "T030000Z",
   "END:VEVENT",
   "END:VCALENDAR",
 ].join("\r\n");
@@ -151,7 +161,7 @@ test("extractMailScheduleDrafts：12306 购票草案字段", () => {
   assert.equal(d.matchKey, "rail-12306:E987654321");
   assert.equal(d.intent, "create");
   assert.equal(d.title, "【火车票】G101次 北京南站→南京南站");
-  assert.equal(d.runAtIso, new Date(Date.parse("2026-10-01T01:15:00Z")).toISOString(), "本地 09:15 +08 → epoch");
+  assert.equal(d.runAtIso, new Date(Date.parse(`${isoDay(0)}T01:15:00Z`)).toISOString(), "本地 09:15 +08 → epoch");
   assert.equal(d.location, "北京南站");
 });
 
@@ -169,12 +179,12 @@ test("extractMailScheduleDrafts：航司/OTA 出票与酒店确认", () => {
   const flight = extractMailScheduleDrafts({ from: "noreply@mail.ctrip.com", subject: "出票成功：您的机票已出票", bodyText: extractMailCalendarParts(MAIL_FLIGHT).fullText, icsTexts: [] })[0]!;
   assert.equal(flight.matchKey, "flight-ticket:C12345678");
   assert.equal(flight.title, "【航班】MU5101 上海虹桥机场→北京首都机场");
-  assert.equal(flight.runAtIso, new Date(Date.parse("2026-10-02T00:00:00Z")).toISOString());
+  assert.equal(flight.runAtIso, new Date(Date.parse(`${isoDay(1)}T00:00:00Z`)).toISOString());
 
   const hotel = extractMailScheduleDrafts({ from: "noreply@huazhu.com", subject: "预订成功通知", bodyText: extractMailCalendarParts(MAIL_HOTEL).fullText, icsTexts: [] })[0]!;
   assert.equal(hotel.matchKey, "hotel-confirm:H88888888");
   assert.ok(hotel.title.includes("全季酒店"));
-  assert.equal(hotel.runAtIso, new Date(Date.parse("2026-10-03T06:00:00Z")).toISOString(), "入住日 14:00 +08");
+  assert.equal(hotel.runAtIso, new Date(Date.parse(`${isoDay(2)}T06:00:00Z`)).toISOString(), "入住日 14:00 +08");
 });
 
 test("extractMailScheduleDrafts：ICS 附件产出草案（窗口内）", () => {
@@ -231,7 +241,7 @@ test("桥全生命周期：购票建 → 改签改期 → 退票软取消，每�
     const re = await bridge.onMail({ actorId: actor, from: "12306@rails.com.cn", subject: "改签成功", source: MAIL_12306_RESCHEDULE });
     assert.equal(re!.updated, 1);
     assert.equal(re!.created, 0);
-    assert.equal(tasks.getTask(created.taskId)!.runAt, new Date(Date.parse("2026-10-02T02:30:00Z")).toISOString(), "改期同步到同一任务");
+    assert.equal(tasks.getTask(created.taskId)!.runAt, new Date(Date.parse(`${isoDay(1)}T02:30:00Z`)).toISOString(), "改期同步到同一任务");
 
     const refund = await bridge.onMail({ actorId: actor, from: "12306@rails.com.cn", subject: "退票成功", source: MAIL_12306_REFUND });
     assert.equal(refund!.cancelled, 1);

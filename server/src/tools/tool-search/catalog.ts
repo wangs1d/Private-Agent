@@ -4,22 +4,14 @@ import { Bm25Index, buildToolSearchText, buildCharacterTrigrams, tokenize } from
 import { isCoreToolRegistryName } from "./core-tool-library.js";
 import { getToolSearchConfig } from "./env.js";
 import { getToolIntentMetadata } from "./intent-metadata.js";
-import { ToolEmbeddingIndex, rankAllByEmbedding, filterByDynamicThreshold } from "./tool-embedding-index.js";
+import { ToolEmbeddingIndex } from "./tool-embedding-index.js";
 import {
   buildEmbeddingInput,
   ensureToolEmbeddings,
   getToolEmbeddingsForCatalog,
   isEmbeddingSearchEnabled,
 } from "./tool-embedding.js";
-import {
-  TOOL_CATEGORIES,
-  type ToolCategoryDef,
-  type ToolCategoryInfo,
-  populateCategoryIndex,
-  routeToCategory,
-  getCategoryToolNames,
-  getCategoryBm25Index,
-} from "./tool-category.js";
+
 
 function isFunctionTool(tool: ChatCompletionTool): tool is ChatCompletionTool & {
   type: "function";
@@ -60,18 +52,6 @@ export type DeferredToolCatalog = {
    * false 表示后台还有 in-flight 补全任务，第二次 search 时会更大。
    */
   embeddingReady: boolean;
-  // ===== 两层架构：Level 1 类别路由 =====
-  /** 类别向量索引（每个类别 = 该类工具 embedding 加权平均） */
-  categoryIndex: ToolEmbeddingIndex;
-  /** 类别元数据（类别名 → 工具名列表 + BM25 搜索文本） */
-  categories: Map<string, ToolCategoryInfo>;
-  /** 类别 BM25 索引（降级路由用） */
-  categoryBm25: Bm25Index;
-  /**
-   * 每类别的 Bm25 子索引（Level 2 类内搜索直接用，省全量扫描 + 消除跨类挤占）。
-   * 无 embedding 时类别路由降级为类别级 BM25，这里依然可用。
-   */
-  categorySearches: Map<string, Bm25Index>;
 };
 
 export type DeferredToolSearchMatch = {
@@ -192,38 +172,6 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
     }
   }
 
-  // === 类别索引（Level 1 路由） ===
-  // 任何时候都构建：有 embedding 时用向量路由，无时用 BM25 降级
-  const categoryBm25 = getCategoryBm25Index(TOOL_CATEGORIES);
-  const { categoryIndex, categories: catInfo } = populateCategoryIndex(
-    TOOL_CATEGORIES,
-    entries.map((e) => ({
-      registryName: e.registryName,
-      embeddingInput: e.embeddingInput,
-      searchText: e.searchText,
-    })),
-    (name) => {
-      const vec = getToolEmbeddingsForCatalog([name]).get(name);
-      return vec ? new Float32Array(vec) : null;
-    },
-  );
-
-  // === 每类别 Bm25 子索引（Level 2 只搜子集） ===
-  // 类别内工具越多，收益越大：搜索复杂度从 O(全量) 降到 O(类别内)
-  const categorySearches = new Map<string, Bm25Index>();
-  for (const [catName, info] of catInfo) {
-    const catEntries = info.toolNames
-      .map((n) => byName.get(n))
-      .filter((e): e is DeferredToolEntry => e != null);
-    if (catEntries.length === 0) continue;
-    categorySearches.set(
-      catName,
-      new Bm25Index(
-        catEntries.map((e) => ({ id: e.registryName, text: e.searchText })),
-      ),
-    );
-  }
-
   return {
     entries,
     index,
@@ -231,10 +179,6 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
     byApiName,
     embeddingIndex,
     embeddingReady,
-    categoryIndex,
-    categories: catInfo,
-    categoryBm25,
-    categorySearches,
   };
 }
 
@@ -287,278 +231,44 @@ export function searchDeferredTools(
   limit: number,
   options?: SearchDeferredOptions,
 ): DeferredToolSearchMatch[] {
-  const cfg = getToolSearchConfig();
-
-  // ===== Level 1: 路由到类别 =====
-  const categoryNames = routeToCategory(
-    query,
-    (options?.queryVector as Float32Array | undefined) ?? null,
-    catalog.categoryIndex,
-    catalog.categoryBm25,
-    catalog.categories,
-  );
-  if (categoryNames.length === 0) {
-    // 无命中类别 → 降级到全量 BM25（兜底）
-    return searchWithinTools(catalog, query, limit, catalog.entries, options);
-  }
-
-  // ===== Level 2: 类别内搜索 =====
-  // 多类别路由时（gap < 0.1 触发 top-2）→ 并行搜两个类别后 RRF 合并
-  let results: DeferredToolSearchMatch[];
-  if (categoryNames.length > 1) {
-    results = searchMultiCategory(catalog, query, limit, categoryNames, options);
-  } else {
-    const catName = categoryNames[0]!;
-    const toolNames = catalog.categories.get(catName)?.toolNames ?? [];
-    const categoryEntries = toolNames
-      .map((n) => catalog.byName.get(n))
-      .filter((e): e is DeferredToolEntry => e != null);
-
-    if (categoryEntries.length === 0) {
-      // 类别为空 → 降级全量搜索
-      results = searchWithinTools(catalog, query, limit, catalog.entries, options);
-    } else {
-      // 单类别：优先用该类别的 Bm25 子索引搜索（只扫子集，消除跨类工具挤占排名）
-      const subIndex = catalog.categorySearches.get(catName);
-      results = searchWithinTools(catalog, query, limit, categoryEntries, options, subIndex);
-    }
-  }
-
-  // ===== Level 3: 全量兜底（杜绝漏检）=====
-  // 类别路由只是"倾向"，不是硬排除：
-  //   1. 未分类 / 新注册工具（如 misc）可能不在任何命中类别内
-  //   2. 路由到错类别时，类别内结果要么不足 limit、要么 top-1 分数很低
-  // 此时合并全量召回，按分数取 top-limit，任何工具都不会被永久排除在检索之外。
-  if (results.length < limit || results[0]?.score < MIN_CATEGORY_TOP_SCORE) {
-    const fullResults = searchWithinTools(catalog, query, limit, catalog.entries, options);
-    results = mergeToolMatches(results, fullResults, limit);
-  }
-
-  return results;
+  // 2026-10-01 类别路由退役（单评分器归一）：此函数只剩 adaptive 管线异常时的
+  // 纯 BM25 兜底职责——全量召回 + 正/负例先验（applyIntentPrior），一次排序。
+  return searchWithinTools(catalog, query, limit, catalog.entries, options);
 }
 
-/**
- * 类别内结果 top-1 的最低可接受分数（rrf 融合后的综合分）。
- * 低于该值视为"类别路由不自信"，触发全量兜底合并。
- */
-const MIN_CATEGORY_TOP_SCORE = 0.02;
-
-/**
- * 合并两批匹配：类别内结果(a)优先保序，全量兜底结果(b)只补位去重。
- * 这样类别路由命中"强相关"永远排前面，兜底只填充类别内没有的工具，
- * 不会把无关工具（如 wallet）插进类别结果前排造成干扰。
- */
-function mergeToolMatches(
-  a: DeferredToolSearchMatch[],
-  b: DeferredToolSearchMatch[],
-  limit: number,
-): DeferredToolSearchMatch[] {
-  const seen = new Set(a.map((m) => m.name));
-  const merged = [...a];
-  for (const m of b) {
-    if (merged.length >= limit) break;
-    if (!seen.has(m.name)) {
-      merged.push(m);
-      seen.add(m.name);
-    }
-  }
-  return merged;
-}
-
-/**
- * 在指定工具子集内搜索（BM25 + embedding 动态阈值 → RRF 融合）。
- * 与原有逻辑相同，但限制搜索空间。
- *
- * @param subIndex 类别子索引（传入时只在子集内做 BM25，不再全量扫描后过滤）
- */
+/** 兜底检索（仅 adaptive 管线异常时使用）：全量 BM25 + 意图先验（正/负例），一次排序。 */
 function searchWithinTools(
   catalog: DeferredToolCatalog,
   query: string,
   limit: number,
   entries: DeferredToolEntry[],
   options?: SearchDeferredOptions,
-  subIndex?: Bm25Index,
 ): DeferredToolSearchMatch[] {
-  // 有子索引时搜索空间天然是子集，无需放大 BM25 limit；
-  // 全量索引时放大避免其他类工具挤占本类工具排名
-  const isSubset = entries.length < catalog.entries.length;
-  const bm25Limit = subIndex
-    ? Math.max(limit * 2, 8)
-    : isSubset
-      ? Math.max(limit * 4, 20)
-      : limit;
-  const bm25Hits = (subIndex ?? catalog.index).search(query, bm25Limit, entries);
-  const useEmbedding =
-    options?.queryVector &&
-    catalog.embeddingIndex.size > 0 &&
-    getToolSearchConfig().embedding !== "off";
-
-  let hits: Bm25HitLike[] = bm25Hits;
-
-  if (useEmbedding) {
-    const cfg = getToolSearchConfig();
-    // 子集内余弦排序（N4）：只扫类别/过滤子集而非全目录，阈值相对子集内 max——
-    // 弱类别不再被全局 max 压制，千级目录上也是数量级的扫描量下降
-    const subsetNames = new Set(entries.map((e) => e.registryName));
-    const filteredEmb = catalog.embeddingIndex.rankAllWithin(subsetNames, options!.queryVector!);
-    const embHits = filterByDynamicThreshold(filteredEmb, {
-      absoluteFloor: cfg.embeddingDynamicFloor,
-      relativeRatio: cfg.embeddingDynamicRatio,
-      maxKeep: cfg.embeddingDynamicMaxKeep,
+  void options;
+  if (entries.length === 0 || limit <= 0) return [];
+  const ids = new Set(entries.map((e) => e.registryName));
+  const hits = catalog.index.search(query, Math.max(entries.length, limit), catalog.entries);
+  const out: DeferredToolSearchMatch[] = [];
+  for (const hit of hits) {
+    if (!ids.has(hit.id)) continue;
+    const entry = catalog.byName.get(hit.id);
+    if (!entry || !isFunctionTool(entry.tool)) continue;
+    out.push({
+      name: entry.registryName,
+      description: entry.tool.function.description ?? "",
+      score: Math.round(applyIntentPrior(entry, query, hit.score) * 1000) / 1000,
+      parameterNames: entry.parameterNames,
+      requiredParameters: entry.requiredParameters,
     });
-    // 权重自适应：BM25 与 embedding 的 top-1 不一致时，降低 embedding 权重，
-    // 避免 embedding 通道把 BM25 的正确结果拉下去（query 表述偏差场景）
-    let effWeight = cfg.embeddingRankWeight;
-    const bm25Top1 = bm25Hits[0]?.id;
-    const embTop1 = embHits[0]?.id;
-    if (bm25Top1 && embTop1 && bm25Top1 !== embTop1) {
-      effWeight = Math.min(effWeight, 0.35);
-    }
-    hits = fuseHybridRankings(bm25Hits, embHits, effWeight, Math.max(limit * 4, 12));
+    if (out.length >= limit) break;
   }
-
-  return hits
-    .map((hit) => {
-      const entry = catalog.byName.get(hit.id);
-      if (!entry || !isFunctionTool(entry.tool)) return null;
-      // 如果不在 entries 子集内，跳过
-      if (!entries.includes(entry)) return null;
-
-      const match: DeferredToolSearchMatch = {
-        name: entry.registryName,
-        description: entry.tool.function.description ?? "",
-        score: Math.round(applyIntentPrior(entry, query, hit.score) * 1000) / 1000,
-        parameterNames: entry.parameterNames,
-        requiredParameters: entry.requiredParameters,
-      };
-
-      if (options?.includeSchema && isFunctionTool(entry.tool)) {
-        match.parameters =
-          (entry.tool.function.parameters as Record<string, unknown> | undefined) ?? {
-            type: "object",
-            properties: {},
-          };
-      }
-
-      return match;
-    })
-    .filter((v): v is DeferredToolSearchMatch => v != null)
-    .slice(0, limit);
+  return out;
 }
 
 /**
- * 多类别搜索：并行搜两个类别后 RRF 合并。
+ * 意图先验（legacy 兜底通道的正/负例打分，与 adaptive 主通道 negative_match 同源
+ * 数据：intent-metadata 的 aliases/examples 加分、negativeAliases/negativeExamples 减分）。
  */
-function searchMultiCategory(
-  catalog: DeferredToolCatalog,
-  query: string,
-  limit: number,
-  categoryNames: string[],
-  options?: SearchDeferredOptions,
-): DeferredToolSearchMatch[] {
-  const allResults: Array<{ name: string; score: number; rank: number; categoryRank: number }> = [];
-  let rank = 0;
-
-  for (const catName of categoryNames) {
-    const toolNames = catalog.categories.get(catName)?.toolNames ?? [];
-    const catEntries = toolNames
-      .map((n) => catalog.byName.get(n))
-      .filter((e): e is DeferredToolEntry => e != null);
-
-    if (catEntries.length === 0) continue;
-
-    const subIndex = catalog.categorySearches.get(catName);
-    const catResults = searchWithinTools(catalog, query, limit, catEntries, options, subIndex);
-    for (const r of catResults) {
-      allResults.push({
-        name: r.name,
-        score: r.score,
-        rank: rank++,
-        categoryRank: rank,
-      });
-    }
-  }
-
-  // RRF 融合：按类别内 score 降序做 rank 归一
-  const scoreById = new Map<string, number>();
-  const catGroups = new Map<string, Array<{ name: string; score: number }>>();
-  for (const r of allResults) {
-    const group = catGroups.get(r.name) ?? [];
-    group.push(r);
-    catGroups.set(r.name, group);
-  }
-
-  for (const [, group] of catGroups) {
-    // 按 score 降序，取所属类别内 rank
-    group.sort((a, b) => b.score - a.score);
-    group.forEach((item, idx) => {
-      const rrf = 1 / (60 + idx + 1);
-      scoreById.set(item.name, (scoreById.get(item.name) ?? 0) + rrf);
-    });
-  }
-
-  return [...scoreById.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map(([name, rrfScore]) => {
-      const entry = catalog.byName.get(name);
-      if (!entry) return null;
-      const desc = isFunctionTool(entry.tool) ? (entry.tool.function.description ?? "") : "";
-      return {
-        name: entry.registryName,
-        description: desc,
-        // 回填真实 RRF 融合分（原实现置 0，导致 LLM/下游拿不到相对相关性）
-        score: Math.round(rrfScore * 1000) / 1000,
-        parameterNames: entry.parameterNames,
-        requiredParameters: entry.requiredParameters,
-      } as DeferredToolSearchMatch;
-    })
-    .filter((v): v is DeferredToolSearchMatch => v != null);
-}
-
-/** 与 Bm25Index 输出一致的 hit 形态 */
-type Bm25HitLike = { id: string; score: number };
-
-/**
- * Hybrid 召回 RRF 融合：把 BM25 综合 ranking 与 embedding ranking 按权重合并。
- *
- * 与 catalog.index.search 内部的多路 RRF 不同——这里 embedding 是独立通道，
- * 权重由 cfg.embeddingRankWeight 决定。权重越高，embedding 通道在最终 ranking
- * 中占比越大。
- *
- * @param bm25Hits  BM25 + overlap + trigram + registryName 4 路 RRF 融合后的结果（含 rrf-like score）
- * @param embHits   Embedding 余弦 top-20
- * @param weight    embedding 通道权重（0~1），剩余权重给 BM25
- * @param topN      融合后保留 top-N（默认 limit*4，足够 RRF 排序后取 limit 个）
- */
-function fuseHybridRankings(
-  bm25Hits: Bm25HitLike[],
-  embHits: Bm25HitLike[],
-  weight: number,
-  topN: number,
-): Bm25HitLike[] {
-  const bm25Weight = 1 - weight;
-  const scoreById = new Map<string, number>();
-
-  // BM25 综合 ranking：按原 score 算 rank（score 越高 rank 越前）
-  const bm25Sorted = [...bm25Hits].sort((a, b) => b.score - a.score);
-  bm25Sorted.forEach((h, rank) => {
-    const rrf = 1 / (60 + rank + 1);
-    scoreById.set(h.id, (scoreById.get(h.id) ?? 0) + rrf * bm25Weight);
-  });
-
-  // Embedding ranking：直接按相似度排序
-  embHits.forEach((h, rank) => {
-    const rrf = 1 / (60 + rank + 1);
-    scoreById.set(h.id, (scoreById.get(h.id) ?? 0) + rrf * weight);
-  });
-
-  return [...scoreById.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, topN)
-    .map(([id, score]) => ({ id, score }));
-}
-
 function applyIntentPrior(
   entry: DeferredToolEntry,
   query: string,

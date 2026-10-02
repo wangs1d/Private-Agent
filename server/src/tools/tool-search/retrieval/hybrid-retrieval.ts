@@ -14,6 +14,8 @@ export type HybridScoreComponents = {
   domain_match: number;
   /** 意图能力与候选能力的重合度（Python retrieval.py 的 capability_match） */
   capability_match: number;
+  /** 负例命中度（0~1）：声明的 negativeAliases/negativeExamples 被_query 命中的短语数归一 */
+  negative_match: number;
 };
 
 export type HybridRetrievedResource = {
@@ -45,6 +47,13 @@ export type HybridRetrievalInput = {
   intentDomains?: string[];
   /** 意图解析出的候选能力（驱动 capability_match 打分） */
   intentCapabilities?: string[];
+  /**
+   * 负例短语表（resource_id → negativeAliases+negativeExamples）。声明的负例
+   * 是"该工具经常被错误召回的 query 表达"，作为一价评分分量参与最终排序——
+   * 此前负例只被 legacy 通道消费、adaptive 主通道从不读（死数据），干扰工具
+   * （calendar.find_free_slots 抢"取消提醒/到家提醒"）长期霸榜的机制根源。
+   */
+  negativePhrasesById?: Map<string, string[]>;
 };
 
 export type HybridRetrievalWeights = {
@@ -55,6 +64,8 @@ export type HybridRetrievalWeights = {
   failure: number;
   domain: number;
   capability: number;
+  /** 负例惩罚权重（不参与正数归一，与 failure 同为直接减项） */
+  negative: number;
 };
 
 export type HybridRetrievalOptions = {
@@ -103,6 +114,10 @@ export class HybridRetrievalEngine {
         base_score: record.level1.base_score,
         domain_match: overlapRatio(record.level1.domain, input.intentDomains),
         capability_match: overlapRatio(record.level1.capability, input.intentCapabilities),
+        negative_match: negativeMatch(
+          input.negativePhrasesById?.get(record.level1.resource_id),
+          input.query,
+        ),
       };
       const raw =
         components.embedding_score * weights.embedding +
@@ -111,7 +126,8 @@ export class HybridRetrievalEngine {
         components.latency_score * weights.latency +
         components.domain_match * weights.domain +
         components.capability_match * weights.capability -
-        components.failure_penalty * weights.failure;
+        components.failure_penalty * weights.failure -
+        components.negative_match * weights.negative;
       out.push({
         resource: record,
         final_score: round4(clamp01(raw)),
@@ -147,6 +163,7 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
   // 相关性（实测把 commitment.list 顶到「今天有什么热搜」top-1），按 TS 分布校准。
   const domain = envFloat("AGENT_TOOL_SEARCH_DOMAIN_WEIGHT", 0.06, 0, 1);
   const capability = envFloat("AGENT_TOOL_SEARCH_CAPABILITY_WEIGHT", 0.1, 0, 1);
+  const negative = envFloat("AGENT_TOOL_SEARCH_NEGATIVE_WEIGHT", 0.35, 0, 1);
   if (!hasQueryVector) {
     return normalizeWeights({
       embedding: 0,
@@ -156,6 +173,7 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
       failure,
       domain,
       capability,
+      negative,
     });
   }
   const tokenCount = tokenize(query).length;
@@ -169,6 +187,7 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
       failure,
       domain,
       capability,
+      negative,
     });
   }
   return normalizeWeights({
@@ -179,6 +198,7 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
     failure,
     domain,
     capability,
+    negative,
   });
 }
 
@@ -264,7 +284,27 @@ function normalizeWeights(weights: HybridRetrievalWeights): HybridRetrievalWeigh
     domain: weights.domain / positive,
     capability: weights.capability / positive,
     failure: weights.failure,
+    negative: weights.negative,
   };
+}
+
+/**
+ * 负例命中度：query 命中的负例短语数归一到 0~1（每条 0.5，两条封顶）。
+ * 命中判定 = 负例短语与 query 存在 token 重合（短语级软命中，非整串匹配）——
+ * 与 applyIntentPrior 的 legacy 口径一致，短语 token 化后任一 token 出现即算。
+ */
+function negativeMatch(phrases: string[] | undefined, query: string): number {
+  if (!phrases || phrases.length === 0) return 0;
+  const qTokens = new Set(tokenize(query));
+  if (qTokens.size === 0) return 0;
+  let hits = 0;
+  for (const phrase of phrases) {
+    const tokens = tokenize(phrase);
+    if (tokens.length === 0) continue;
+    if (tokens.some((t) => qTokens.has(t))) hits += 1;
+    if (hits >= 2) break;
+  }
+  return Math.min(1, hits * 0.5);
 }
 
 /** 意图集合与候选集合的重合度：|交| / |意图集|（意图集为空返回 0，不参与打分）。 */

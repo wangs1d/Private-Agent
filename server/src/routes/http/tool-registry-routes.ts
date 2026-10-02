@@ -14,7 +14,6 @@ import {
   type Level3ToolSchema,
   type RegisterInput,
 } from "../../tools/tool-search/registry/index.js";
-import { IntentRouter, type ParsedIntent } from "../../tools/tool-search/intent-router/intent-router.js";
 import { HybridRetrievalEngine, type HybridRetrievedResource } from "../../tools/tool-search/retrieval/hybrid-retrieval.js";
 import { AdaptiveTopPSelector } from "../../tools/tool-search/top-p-selector/top-p-selector.js";
 import { HistoryScoreStore } from "../../tools/tool-search/retrieval/history-score.js";
@@ -29,7 +28,6 @@ import { toolSearchMetrics } from "../../tools/tool-search/observability/metrics
 type ToolSearchRuntime = {
   store: ToolRegistryStore;
   registry: RegistryService;
-  intentRouter: IntentRouter;
   retrieval: HybridRetrievalEngine;
   topP: AdaptiveTopPSelector;
   history: HistoryScoreStore;
@@ -83,13 +81,6 @@ const registerBodySchema = z
         }),
       )
       .optional(),
-  })
-  .strict();
-
-const intentBodySchema = z
-  .object({
-    raw_user_query: z.string().min(1),
-    agent_context_hash: z.string().default("default"),
   })
   .strict();
 
@@ -155,17 +146,6 @@ export function registerToolRegistryRoutes(app: FastifyInstance): void {
     return reply.code(201).send(envelope(true, tenant, started, result));
   });
 
-  app.post("/api/intent/decompose", async (request, reply) => {
-    const started = Date.now();
-    const parsed = intentBodySchema.safeParse(request.body);
-    if (!parsed.success) return validationError(reply, parsed.error);
-    const tenant = resolveTenantId(request);
-    if (!tenant) return tenantError(reply);
-    const runtime = await getRuntime();
-    const intent = await runtime.intentRouter.decompose(parsed.data);
-    return envelope(true, tenant, started, { intent });
-  });
-
   app.post("/api/resource/search", async (request, reply) => {
     const started = Date.now();
     const parsed = searchBodySchema.safeParse(request.body);
@@ -174,14 +154,18 @@ export function registerToolRegistryRoutes(app: FastifyInstance): void {
     if (!tenant) return tenantError(reply);
     const runtime = await getRuntime();
     toolSearchMetrics.recordSearch();
-    const intent = await runtime.intentRouter.decompose({
-      raw_user_query: parsed.data.raw_user_query,
-      agent_context_hash: parsed.data.agent_context_hash,
+    // 2026-10-01 单评分器归一：诊断检索直接走 hybrid 引擎（与主链路同评分核心），
+    // 规则意图分解层已退役。
+    const candidates = await runtime.registry.listByTenant(tenant);
+    const retrieved = await runtime.retrieval.search({
+      query: parsed.data.raw_user_query,
+      candidates,
+      queryVector: parsed.data.query_vector,
+      limit: parsed.data.limit,
     });
-    const result = await searchForIntent(runtime, tenant, intent, parsed.data);
     return envelope(true, tenant, started, {
-      parsed_intent: intent,
-      ...result,
+      candidates: retrieved.map(toCandidateWire),
+      candidate_count: retrieved.length,
     });
   });
 
@@ -326,7 +310,6 @@ async function getRuntime(): Promise<ToolSearchRuntime> {
       return {
         store,
         registry: new RegistryService(store),
-        intentRouter: new IntentRouter(),
         retrieval,
         topP: new AdaptiveTopPSelector(),
         history,
@@ -339,95 +322,6 @@ async function getRuntime(): Promise<ToolSearchRuntime> {
     })();
   }
   return runtimePromise;
-}
-
-async function searchForIntent(
-  runtime: ToolSearchRuntime,
-  tenant: string,
-  intent: ParsedIntent,
-  input: z.infer<typeof searchBodySchema>,
-): Promise<Record<string, unknown>> {
-  if (intent.is_compound_task && intent.sub_intents.length > 0) {
-    const merged = new Map<string, HybridRetrievedResource>();
-    for (const subIntent of intent.sub_intents) {
-      const single = await searchSingleIntent(runtime, tenant, subIntent, input);
-      for (const candidate of single.candidates) {
-        const id = candidate.resource.level1.resource_id;
-        const prev = merged.get(id);
-        if (!prev || candidate.final_score > prev.final_score) merged.set(id, candidate);
-      }
-    }
-    const selected = [...merged.values()].sort((a, b) => b.final_score - a.final_score);
-    return {
-      candidates: selected.map(toCandidateWire),
-      candidate_count: selected.length,
-      compound: true,
-    };
-  }
-
-  const single = await searchSingleIntent(runtime, tenant, intent, input);
-  return {
-    route: single.route,
-    top_p: single.top_p,
-    candidates: single.candidates.map(toCandidateWire),
-    candidate_count: single.candidates.length,
-    compound: false,
-  };
-}
-
-async function searchSingleIntent(
-  runtime: ToolSearchRuntime,
-  tenant: string,
-  intent: ParsedIntent,
-  input: z.infer<typeof searchBodySchema>,
-): Promise<{
-  route: unknown;
-  top_p: number;
-  candidates: HybridRetrievedResource[];
-}> {
-  // 2026-10-01：hierarchical-router 已删（仅本诊断面引用，主链路从未经过）——
-  // 诊断检索直接以租户全量资源为候选，评估口径与 adaptive 主链路一致。
-  const candidates = await runtime.registry.listByTenant(tenant);
-  const retrieved = await runtime.retrieval.search({
-    query: intent.intent,
-    candidates,
-    queryVector: input.query_vector,
-    limit: input.limit * 4,
-  });
-  const topPOverride = await runtime.history.getIntentTopPOverride(
-    intent.primary_capability,
-  );
-  const topPSelected = runtime.topP.select(
-    retrieved.map((item) => ({ item, score: item.final_score })),
-    { confidence: intent.confidence, topPOverride },
-  );
-  const expandedResources = await runtime.graph.expandCandidates(
-    topPSelected.selected.map((s) => s.item.resource),
-    25,
-  );
-  const expandedRetrieved = await runtime.retrieval.search({
-    query: intent.intent,
-    candidates: expandedResources,
-    queryVector: input.query_vector,
-    limit: input.limit * 2,
-  });
-  const reranked = await runtime.reranker.rerank({
-    raw_query: input.raw_user_query,
-    agent_context_hash: input.agent_context_hash,
-    previous_tool_result: input.previous_tool_result,
-    query_constraints: intent.query_constraints,
-    candidates: expandedRetrieved,
-    blacklist_resource_ids: input.blacklist_resource_ids,
-  });
-  return {
-    route: {
-      candidate_count: candidates.length,
-      rule_filtered_count: reranked.rule_filtered_count,
-      llm_seen_count: reranked.llm_seen_count,
-    },
-    top_p: topPSelected.top_p,
-    candidates: reranked.candidates.slice(0, input.limit),
-  };
 }
 
 async function executeResource(

@@ -197,3 +197,38 @@ test("reconcile：任务台账缺失的 doing 步骤如实标失败", () => {
   assert.equal(steps[0]!.status, "failed");
   assert.equal(steps[1]!.status, "todo");
 });
+
+test("轻步骤判定：纯加工步骤标 light，含查询/外部动作的不标", async () => {
+  const { isLightStep } = await import("../src/proactivity/goal-planner.js");
+  assert.equal(isLightStep("总结一下目前的进展"), true);
+  assert.equal(isLightStep("先整理这两天的结果"), true, "前导词容许");
+  assert.equal(isLightStep("回顾这周做了什么"), true);
+  assert.equal(isLightStep("起草一份给房东的留言"), true);
+  assert.equal(isLightStep("查一下明天去大理的机票"), false, "含查询词");
+  assert.equal(isLightStep("整理并搜索相关资料"), false, "含搜索词");
+  assert.equal(isLightStep("预约周四的看房时间"), false, "外部动作");
+  assert.equal(isLightStep("下单购买打印机"), false);
+  assert.equal(isLightStep(""), false);
+});
+
+test("轻步骤走小预算车道：launchTask 收到 light 标记", () => {
+  const board = makeBoard();
+  const seen: Array<{ goal: string; light?: boolean }> = [];
+  const planner = new GoalPlanner({
+    goalBoard: board,
+    launchTask: (input) => {
+      seen.push({ goal: input.goal, light: input.light });
+      return `task-${seen.length}`;
+    },
+  });
+  const r = planner.createPlan({
+    actorId: "u1",
+    title: "搬家准备",
+    steps: ["总结现在的房间物品", "查搬家公司报价"],
+  });
+  assert.ok(r.ok);
+  planner.advance(r.goal.goalId, "u1");
+  assert.equal(seen[0]!.light, true, "纯加工步骤带 light 标记");
+  const steps = planner.stepsOf(planner.getPlan(r.goal.goalId)!);
+  assert.equal(steps[1]!.light, false, "查询步骤不标 light");
+});

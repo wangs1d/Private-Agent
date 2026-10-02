@@ -13,7 +13,8 @@ import {
 } from "../src/external-model/prefix-cache.js";
 import { formatTurnAddressingBlock } from "../src/agent/prompt-context-builder.js";
 import {
-  pickTravelPlanningTools,
+  slimToolSchema,
+  toolsMatchingCapabilityBeam,
 } from "../src/external-model/lane-tool-sets.js";
 import { compactToolOutputForLlm } from "../src/tokenjuice/compactor.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -121,7 +122,7 @@ describe("P0-2 旅游规划族恒注入", () => {
   // 2026-10-01 架构替换：goal 正则+会话 latch 抖动大（"对了酒店呢"不命中），
   // 改为旅游规划族瘦身 schema 恒注入 router-first 任务轮——无会话状态，
   // 工具集合同 intent 恒同集，前缀缓存天然稳定。
-  it("语料中的旅游规划族被恒定取出且瘦身，无会话状态参与", () => {
+  it("域信号预载/束注入恒同集（无状态，前缀缓存前提）", () => {
     const corpus: ChatCompletionTool[] = [
       {
         type: "function",
@@ -132,12 +133,12 @@ describe("P0-2 旅游规划族恒注入", () => {
         function: { name: "search_web", description: "搜索", parameters: { type: "object", properties: {} } },
       },
     ];
-    const picked = pickTravelPlanningTools(corpus);
-    assert.equal(picked.length, 1);
-    assert.equal(picked[0]!.function!.name, "travel.plan-itinerary");
-    // 恒注入=无状态：同一语料重复取结果一致
-    assert.deepEqual(pickTravelPlanningTools(corpus), picked);
-    assert.deepEqual(pickTravelPlanningTools([]), []);
+    // 束投影确定性：同语料重复投影恒同集（travel 硬编码已由域信号预载泛化替代）
+    const beam = toolsMatchingCapabilityBeam(corpus, ["search"]);
+    assert.deepEqual(toolsMatchingCapabilityBeam(corpus, ["search"]), beam);
+    assert.deepEqual(toolsMatchingCapabilityBeam(corpus, []), []);
+    // 瘦身恒等：同输入恒同输出
+    assert.deepEqual(slimToolSchema(corpus[0]!), slimToolSchema(corpus[0]!));
   });
 });
 

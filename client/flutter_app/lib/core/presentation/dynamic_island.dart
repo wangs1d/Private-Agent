@@ -363,7 +363,15 @@ class DynamicIslandLauncher {
       } catch (_) {
         return;  // 通道瞬时异常：交给下一轮
       }
-      if (alive) return;
+      if (alive) {
+        // 抑制检查兜底：原生 WM_TIMER 心跳会失效（2026-10-01 实证：全屏
+        // 游戏期间创建的岛心跳永久停摆，退出全屏后卡死隐藏），由看门狗
+        // 每 15s 直推一次抑制检查，退出全屏 ≤15s 必然恢复。
+        try {
+          await _channel.invokeMethod<void>('suppressCheck');
+        } catch (_) {}
+        return;
+      }
       debugPrint('[dynamic-island] 原生窗口失活，触发重建');
       _nativeReady = false;
       _createAttempts = 0;

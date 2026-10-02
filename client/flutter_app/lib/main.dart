@@ -3718,8 +3718,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 'unread': (c["unreadCount"] as num?)?.toInt() ?? 0,
               }
           ]);
-          debugPrint('[msg-poll] aggregated platforms='
-              '${byPlatform.keys.toList()} '
+          debugPrint('[msg-poll] actor=${ApiConfig.effectiveActorId} '
+              'convs=${conversations.length} '
+              'platforms=${byPlatform.keys.toList()} '
               'total=${byPlatform.values.fold(0, (int a, int b) => a + b)}');
         }
       }

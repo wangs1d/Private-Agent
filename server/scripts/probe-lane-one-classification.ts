@@ -30,9 +30,11 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 
 const { createExternalChatProviderFromEnv } = await import("../src/external-model/resolve-provider.js");
 const { routeTurnByLlm } = await import("../src/agent/llm-task-router.js");
-const { toolsMatchingCapabilityBeam, pickTravelPlanningTools, slimToolSchema } = await import(
+const { toolsMatchingCapabilityBeam, slimToolSchema } = await import(
   "../src/external-model/lane-tool-sets.js"
 );
+const { dominantDomainForQuery } = await import("../src/tools/tool-search/index.js");
+const { toolsInDomain } = await import("../src/tools/tool-search/tool-category.js");
 const { getBuiltinAgentChatTools } = await import("../src/external-model/openai-compatible-tool-loop.js");
 const { ToolRegistry } = await import("../src/tools/tool-registry.js");
 const { InfoHubService } = await import("../src/services/info-hub-service.js");
@@ -97,6 +99,15 @@ function buildToolContext() {
       ],
     },
   }));
+  // 域卡让模型"看见"全族并按名直呼——桩须同族齐备（生产这些工具都有真执行器），
+  // 否则直呼全 fail 会诱发重试循环，测的是桩不是架构。
+  for (const [n, r] of [
+    ["travel.search-poi", { ok: true, result: { pois: [{ name: "洱海生态廊道", rating: 4.7 }, { name: "崇圣寺三塔", rating: 4.6 }] } }],
+    ["travel.destination-info", { ok: true, result: { destination: "大理", best_season: "3-5月", tips: "紫外线强，注意防晒" } }],
+    ["travel.compute-route", { ok: true, result: { distance_km: 35, duration_min: 55 } }],
+  ] as const) {
+    registry.register(n, async () => r);
+  }
   const stub = async (name: string) => ({ ok: false, result: { error: `probe: ${name} 未接执行器` } });
   for (const name of [
     "hot_rankings", "internet.research", "info.inspect_webpage", "info.navigate_site",
@@ -160,7 +171,11 @@ async function runScenario(
     chatToolsBuiltin = toolsMatchingCapabilityBeam(corpus, decision.capabilities).map(slimToolSchema);
   } else {
     mode = "task";
-    chatToolsBuiltin = pickTravelPlanningTools(corpus);
+    // 镜像 agent-core 2026-10-01 S2 域信号预载
+    const domain = dominantDomainForQuery(userText, corpus);
+    chatToolsBuiltin = domain
+      ? toolsInDomain(corpus, domain).slice(0, 12).map(slimToolSchema)
+      : [];
   }
 
   const tracesBefore = turnTraces.length;
@@ -224,8 +239,9 @@ async function runScenario(
       }
     } else if (variant === "new") {
       // full 轮：travel 规划族恒注入 + 真被调用（大理轮回归）
+      // 域信号预载校验：词面浓度达阈值（travel 5/5）时族必须可见（s3 原硬编码场景的泛化回归）
       add(
-        "travel_promoted",
+        "domain_preload",
         visible.includes("travel.plan-itinerary"),
         `visible=${visible.join(",")}`,
       );

@@ -27,6 +27,8 @@ export interface PlanStep {
   status: PlanStepStatus;
   /** 敏感分级（创建时按标题判定；external 步骤不自动派发） */
   sensitivity: ActionSensitivity;
+  /** 轻步骤标记（总结/整理/回顾类：派发走小预算快车道省 token，2026-10-01） */
+  light?: boolean;
   /** doing 状态时关联的后台任务 id（TaskHub 终态回调推进的钥匙） */
   taskId?: string;
   /** 结果/原因备注（完成摘要、失败原因、重排原因都落这里） */
@@ -48,7 +50,7 @@ export interface GoalPlannerDeps {
    * 后台任务派发（bootstrap 晚绑定 agentCore.dispatchBackgroundTask；
    * LLM 未启用/预算超限时返回 null——步骤如实停在 todo，不假装推进）。
    */
-  launchTask?: (input: { actorId: string; sessionId?: string; goal: string; note?: string }) => string | null;
+  launchTask?: (input: { actorId: string; sessionId?: string; goal: string; note?: string; light?: boolean }) => string | null;
   /**
    * 步骤事件落代办足迹台账（可选注入）：awaiting_confirm / failed / 计划完成
    * 三类事件主动告知用户，复用 AgentActivityStore + activity_new 推送。
@@ -74,6 +76,21 @@ const MAX_STEPS = 12;
 /** 自动放行外部步骤的总开关（默认关：外部动作必须用户确认） */
 function autoExternalEnabled(): boolean {
   return process.env.GOAL_PLAN_AUTO_EXTERNAL === "1";
+}
+
+/** 轻步骤动词：纯信息加工（无外部动作），可走小预算快车道（容许先/再/把等前导词） */
+const LIGHT_STEP_RE = /^(?:先|再|然后|把|请|帮我?)?(总结|整理|梳理|回顾|复盘|草拟|起草|拟一|想一|构思|列[出个一]|盘点|归纳)/;
+/** 排除词：步骤描述含外部动作/查询时不算轻步骤（宁可全额预算） */
+const LIGHT_STEP_EXCLUDE_RE = /(查|搜|找|订|买|支付|下单|发|下载|打开|浏览|对比|比价|联系|预约|创建|添加|删除|修改|设置|上传|安装|调用)/;
+
+/**
+ * 轻步骤判定（确定性规则，零 LLM）：「总结一下进展」「整理成一段话」类纯
+ * 加工步骤按小预算快档派发；含查询/外部动作词的一律全额预算。
+ */
+export function isLightStep(title: string): boolean {
+  const t = String(title ?? "").trim();
+  if (t.length === 0 || LIGHT_STEP_EXCLUDE_RE.test(t)) return false;
+  return LIGHT_STEP_RE.test(t);
 }
 
 export class GoalPlanner {
@@ -105,6 +122,7 @@ export class GoalPlanner {
       title: s.slice(0, 200),
       status: "todo",
       sensitivity: classifyTextSensitivity(s),
+      light: isLightStep(s),
       updatedAt: now,
     }));
 
@@ -270,6 +288,7 @@ export class GoalPlanner {
         title: s.slice(0, 200),
         status: "todo" as const,
         sensitivity: classifyTextSensitivity(s),
+        light: isLightStep(s),
         updatedAt: now,
       })),
     ];
@@ -378,6 +397,7 @@ export class GoalPlanner {
       actorId: goal.actorId,
       ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
       goal: `【计划推进】${goal.title}｜第 ${steps.indexOf(step) + 1} 步：${step.title}`,
+      ...(step.light ? { light: true } : {}),
     });
     if (!taskId) {
       return {

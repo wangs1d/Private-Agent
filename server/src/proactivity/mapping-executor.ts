@@ -52,7 +52,8 @@ export type RuleServices = {
   recallMemory?: (query: string, limit: number) => Promise<string[]> | string[];
 };
 
-/** 规则执行上下文：只看状态板 + 服务查询 + 自己的私有状态 */
+/** 规则执行上下文：只看状态板 + 自己的私有状态（查询型服务经 buildBoardRules
+ *  闭包注入，不走 ctx——历史 ctx.services 字段零消费已删） */
 export type RuleContext = {
   actorId: string;
   now: Date;
@@ -61,7 +62,6 @@ export type RuleContext = {
   board: Partial<Record<BoardLayerName, Record<string, unknown>>>;
   /** 规则私有状态（跨 tick 保留，落盘） */
   state: Map<string, unknown>;
-  services: RuleServices;
 };
 
 /** 规则产出（执行器补 id/at/kind 后成为 AttentionEvent；kind 缺省用规则 id，
@@ -250,7 +250,6 @@ export class MappingExecutor {
           nowMs: now,
           board: board ?? {},
           state: this.stateFor(rule.id, actorId),
-          services: {},
         });
         for (const outcome of outcomes ?? []) this.dispatch(rule.id, outcome, actorId, now);
       } catch (err) {
@@ -287,34 +286,6 @@ export class MappingExecutor {
       ruleState.set(nsKey, slice);
     }
     return slice;
-  }
-
-  /**
-   * 带 services 的 tick（生产装配注入查询型数据源：日程/承诺/天气/未读/兴趣/记忆）。
-   * 与 tickActor 相同逻辑，仅 ctx.services 不同——拆开是为了测试注入方便。
-   */
-  async tickActorWithServices(actorId: string, services: RuleServices, now: number = this.nowFn()): Promise<void> {
-    const board = this.opts.board.getBoard(actorId) ?? undefined;
-    const nowDate = new Date(now);
-    for (const rule of this.opts.rules) {
-      const every = rule.tickEveryMs ?? this.tickIntervalMs;
-      const last = this.lastRunAt.get(rule.id) ?? 0;
-      if (now - last < every) continue;
-      this.lastRunAt.set(rule.id, now);
-      try {
-        const outcomes = await rule.eval({
-          actorId,
-          now: nowDate,
-          nowMs: now,
-          board: board ?? {},
-          state: this.stateFor(rule.id, actorId),
-          services,
-        });
-        for (const outcome of outcomes ?? []) this.dispatch(rule.id, outcome, actorId, now);
-      } catch (err) {
-        console.log(`[MappingExecutor] 规则 ${rule.id} 失败（忽略）: ${err}`);
-      }
-    }
   }
 
   private dispatch(ruleId: string, outcome: RuleOutcome, actorId: string, at: number): void {

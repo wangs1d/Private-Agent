@@ -594,6 +594,31 @@ test("message_watch: 同会话 10 分钟冷却 + 同文本指纹去重", async (
   assert.equal(submitted[0]!.dedupKey, submitted[1]!.dedupKey);
 });
 
+test("message_watch: 提案带 ask_first 效用声明与「让助手处理」确认入口", async () => {
+  const { MessageWatchTrigger } = await import("../src/proactivity/triggers/message-watch-trigger.js");
+  const { evaluateActionUtility, deriveNotifyValue } = await import("../src/proactivity/action-utility.js");
+  const submitted: ProactiveProposal[] = [];
+  const trigger = new MessageWatchTrigger({ submitProposal: (p) => submitted.push(p) });
+  trigger.handleInbound({
+    actorId: "user-a", platform: "email", channelId: "from@example.com",
+    text: "各位，明天的项目评审会议改到周四下午三点",
+    participantName: "项目经理",
+  });
+  assert.equal(submitted.length, 1);
+  const p = submitted[0]!;
+  assert.ok(p.confirmAction, "带确认入口");
+  assert.equal(p.confirmAction!.label, "让助手处理");
+  assert.ok(p.utility, "带效用声明");
+  const u = evaluateActionUtility({
+    kind: p.kind,
+    title: p.title,
+    risk: p.utility!.risk,
+    authorization: p.utility!.authorization,
+    value: p.utility!.value ?? deriveNotifyValue(p.importance),
+  });
+  assert.equal(u.branch, "ask_first", "效用分支必须是 ask_first（代用户做事先问）");
+});
+
 // ─── 方案 A/B：效用评估前置 + silenced 判定 + 沉默日志 ───
 
 test("arbiter: 未声明 utility 的提案不评估（既有行为不变）", () => {

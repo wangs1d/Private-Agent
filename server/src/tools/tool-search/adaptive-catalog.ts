@@ -9,7 +9,7 @@ import {
   type DeferredToolSearchMatch,
 } from "./catalog.js";
 import { Bm25Index, tokenize } from "./bm25.js";
-import { IntentRouter, type ParsedIntent, type QueryConstraints } from "./intent-router/intent-router.js";
+import { DEFAULT_QUERY_CONSTRAINTS, type ParsedIntent, type QueryConstraints } from "./retrieval-intent.js";
 import {
   getSkillDependencies,
   isRegisteredSkillChatToolName,
@@ -34,26 +34,28 @@ import {
 } from "./retrieval/hybrid-retrieval.js";
 import { AdaptiveTopPSelector } from "./top-p-selector/top-p-selector.js";
 import { ToolRerankingPipeline } from "./reranking/reranking-pipeline.js";
+import { firstSentence, slimJsonSchema } from "./schema-slim.js";
 import { createNeuralLlmReranker } from "./reranking/neural-reranker.js";
-import { createNeuralIntentRouter } from "./intent-router/neural-intent-router.js";
 import { sharedHistoryStore } from "./retrieval/history-score.js";
 import {
   getCompiledRecallBoosts,
   getToolClassification,
 } from "./classification-overrides.js";
 
+/** 一次检索的共享路由/评分视图（顶层单份，不再每条 match 重复内联）。 */
+export type AdaptiveSearchRouting = {
+  intent: string;
+  confidence: number;
+  top_p: number;
+  domain_groups: string[];
+  domain_candidates: string[];
+  primary_capability: string;
+};
+
 export type AdaptiveDeferredToolSearchMatch = DeferredToolSearchMatch & {
   resource_type: ResourceType;
   domain: string[];
   capability: string[];
-  routing: {
-    intent: string;
-    confidence: number;
-    top_p: number;
-    domain_groups: string[];
-    domain_candidates: string[];
-    primary_capability: string;
-  };
 };
 
 export type AdaptiveSearchOptions = {
@@ -72,34 +74,15 @@ export type AdaptiveCatalogSummary = {
   capabilities: Record<string, number>;
 };
 
-type RouteResult = {
-  domain_groups: string[];
-  domains: string[];
-  capabilities: string[];
-  resources: ResourceRecord[];
-  cache_hit: boolean;
-  filtered_count: number;
-};
 
-type RouteCacheEntry = {
-  expiresAt: number;
-  resourceIds: string[];
-  filteredCount: number;
-};
 
 type AdaptiveCatalogIndex = {
   signature: string;
   recordsById: Map<string, ResourceRecord>;
   entriesById: Map<string, DeferredToolEntry>;
   bm25Index: Bm25Index; // 预构建全局 BM25 索引，复用避免每次 search 重建
-  byDomainGroup: Map<string, string[]>;
-  byDomainGroupDomain: Map<string, string[]>;
-  byDomain: Map<string, string[]>;
-  byCapability: Map<string, string[]>;
-  byDomainCapability: Map<string, string[]>;
-  domainGroupsByDomain: Map<string, string[]>;
-  byActionKey: Map<string, string[]>;
-  routeCache: Map<string, RouteCacheEntry>;
+  /** 负例短语表（registryName → negativeAliases+negativeExamples），喂 hybrid 评分核心 */
+  negativePhrasesById: Map<string, string[]>;
   summary: AdaptiveCatalogSummary;
 };
 
@@ -111,7 +94,6 @@ type FunctionToolDefinition = {
 
 const DEFAULT_TENANT_ID = "default";
 const DEFAULT_CONTEXT_HASH = "tool-search-bridge";
-const ROUTE_CACHE_TTL_MS = 300_000; // 5 分钟（原 20s），session 级复用
 const INTENT_CACHE_TTL_MS = 300_000; // 意图分解缓存 5 分钟
 const MAX_INDEX_CACHE = 32;
 /** 路由-召回融合时并入候选集的全量词面 top-N（99 个工具下 BM25 毫秒级，取 12 足够覆盖同义簇）。 */
@@ -119,15 +101,16 @@ const GLOBAL_LEXICAL_FLOOR_N = 12;
 // 神经注入点（N2/N3）：重排钩子 = sidecar /rerank（失败管线自动回退词面序）；
 // 意图分类 = sidecar /classify-intent（低置信采纳，正则 fast-path 与降级路径保留）。
 // env 各自一键关闭（AGENT_NEURAL_RERANK_ENABLED / AGENT_NEURAL_INTENT_ENABLED=off）。
-const intentRouter = new IntentRouter({
-  redisUrl: undefined,
-  semanticRouter: createNeuralIntentRouter(),
-});
 const retrievalEngine = new HybridRetrievalEngine({ historyStore: sharedHistoryStore });
+/** catalog 级挂载：最近一次检索的路由/评分视图（顶层单份，随 catalog 隔离并发）。 */
+type RoutingCarrier = DeferredToolCatalog & { lastSearchRouting?: AdaptiveSearchRouting | null };
+
+export function getAdaptiveSearchRouting(catalog: DeferredToolCatalog): AdaptiveSearchRouting | null {
+  return (catalog as RoutingCarrier).lastSearchRouting ?? null;
+}
 const topPSelector = new AdaptiveTopPSelector();
 const rerankingPipeline = new ToolRerankingPipeline({ llmReranker: createNeuralLlmReranker() });
 const indexCache = new Map<string, { index: AdaptiveCatalogIndex; createdAt: number }>();
-const intentCache = new Map<string, { intent: ParsedIntent; expiresAt: number }>();
 const graphServiceCache = new Map<
   string,
   Promise<{ store: ToolRegistryStore; graph: ToolKnowledgeGraphService }>
@@ -239,11 +222,7 @@ export async function reinforceAdaptiveTopPForQuery(query: string): Promise<void
   hydrateFeedbackStateOnce();
   const trimmed = query.trim();
   if (!trimmed) return;
-  let intent = tryFastPathIntent(trimmed);
-  if (!intent) {
-    const cached = intentCache.get(`${trimmed}|${DEFAULT_CONTEXT_HASH}`);
-    if (cached && cached.expiresAt > Date.now()) intent = cached.intent;
-  }
+  const intent = tryFastPathIntent(trimmed);
   if (!intent) return;
   const key = topPIntentKey(intent);
   const base = topPForIntent(intent);
@@ -300,120 +279,67 @@ export async function adaptiveSearchDeferredTools(
   const index = getOrCreateAdaptiveCatalogIndex(catalog);
   const contextHash = options?.agentContextHash?.trim() || DEFAULT_CONTEXT_HASH;
 
-  // Fast path：常见 query 跳过 IntentRouter
+  // ── 单评分器（2026-10-01 分类归一）──
+  // 退役 IntentRouter 规则分解、域路由、17 类 embedding 类别路由三层——124 工具
+  // 规模下全量 BM25 毫秒级，"先分类再在子集里检索"是为不存在的规模付的复杂度，
+  // 且规则层判错域时正确工具根本不进候选（route-or-recall 并集补丁的根源）。
+  // 新流程：全量在线候选 → hybrid 单评分（词面+embedding+历史+负例）→ boost →
+  // top-p →（低置信才）图扩展+二次检索+神经重排。域先验从词面领先者自派生，
+  // 置信度从词面边际自派生；fast-path 正则保留为纯性能短路（策展置信仍享短路）。
   const fastPathIntent = tryFastPathIntent(trimmedQuery);
-  let parsedIntent: ParsedIntent;
-  if (fastPathIntent) {
-    parsedIntent = fastPathIntent;
-  } else {
-    // 意图分解本地缓存（session 级，基于 query + contextHash 去重）
-    const intentCacheKey = `${trimmedQuery}|${contextHash}`;
-    let cached = intentCache.get(intentCacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      parsedIntent = cached.intent;
-    } else {
-      if (cached) intentCache.delete(intentCacheKey);
-      parsedIntent = await intentRouter.decompose({
-        raw_user_query: trimmedQuery,
-        agent_context_hash: contextHash,
-      });
-      intentCache.set(intentCacheKey, {
-        intent: parsedIntent,
-        expiresAt: Date.now() + INTENT_CACHE_TTL_MS,
-      });
-    }
-  }
 
-  const subIntents =
-    parsedIntent.is_compound_task && parsedIntent.sub_intents.length > 0
-      ? parsedIntent.sub_intents
-      : [parsedIntent];
+  const candidates = allFilteredRecords(index, options?.tenantId);
+  if (candidates.length === 0) return [];
 
-  // 复意图并行：子意图路由（同步）+ 检索（异步并行）
-  const intentRoutes = subIntents.map((intent) => {
-    const route = routeAdaptiveCatalog(index, intent, options?.tenantId);
-    return { intent, route };
-  });
-
-  const routingParts: Array<{
-    intent: ParsedIntent;
-    route: RouteResult;
-    topP: number;
-  }> = [];
-  const selectedById = new Map<string, HybridRetrievedResource>();
-
-  // 路由-召回融合（route-or-recall）：域路由只是"倾向"，不是硬排除。
-  // 意图分解/域推断建立在英文正则启发式上，中文口语（"比特币现在什么价"→ shopping/clock）
-  // 判错域时正确工具根本不在候选集里，后面再怎么打分都救不回来。
-  // 这里用全量 BM25（含别名扩展）取词面最相关的 top-N 与路由候选取并集，
-  // 保证词面上最明显的工具永远在场——与 legacy 通道的 Level-3 全量兜底对齐。
-  const lexicalFloor = globalLexicalCandidates(index, catalog, trimmedQuery, GLOBAL_LEXICAL_FLOOR_N);
-  // 全量词面兜底同样旁路 rate_limited 资源（与路由过滤一致）
-  const onlineLexicalFloor = lexicalFloor.filter((r) => !isResourceRateLimited(r.level1.resource_id));
-
-  await Promise.all(
-    intentRoutes.map(async ({ intent, route }) => {
-      const candidates = mergeCandidateRecords(route.resources, onlineLexicalFloor);
-      if (candidates.length === 0) {
-        routingParts.push({ intent, route, topP: topPForIntent(intent) });
-        return;
-      }
-
-      // 统一走 hybrid 检索（关键词+历史+基础分）——旧实现对 <10 候选的"小路由"
-      // 只按 base_score 静态排序、完全不看 query，导致路由到 wallet 域后固定返回
-      // wallet.recharge 而不是 get_balance。99 个工具的 BM25 只有毫秒级成本，没必要短路。
-      const retrieved = await retrievalEngine.search({
-        query: intent.intent || trimmedQuery,
-        candidates,
-        queryVector: options?.queryVector,
-        limit: Math.min(50, Math.max(10, limit * 4)),
-        prebuiltIndex: index.bm25Index,
-        aliasEntries: catalog.entries,
-        intentDomains: route.domains,
-        intentCapabilities: route.capabilities,
-      });
-      const boostedRetrieved = applyAdaptiveIntentBoost(index, retrieved, intent.intent || trimmedQuery);
-      const topP = topPSelector.select(
-        boostedRetrieved.map((item) => ({ item, score: item.final_score })),
-        { confidence: intent.confidence, topPOverride: getTopPOverride(intent) },
-      );
-      routingParts.push({ intent, route, topP: topP.top_p });
-
-      for (const selected of topP.selected) {
-        const id = selected.item.resource.level1.resource_id;
-        const prev = selectedById.get(id);
-        if (!prev || selected.item.final_score > prev.final_score) {
-          selectedById.set(id, selected.item);
-        }
-      }
-    }),
-  );
-
-  if (selectedById.size === 0) return [];
-
-  const primaryRoute = routingParts[0];
-  const routing = {
-    intent: parsedIntent.intent,
-    confidence: parsedIntent.confidence,
-    top_p: primaryRoute?.topP ?? topPForIntent(parsedIntent),
-    domain_groups: primaryRoute?.route.domain_groups ?? [],
-    domain_candidates: primaryRoute?.route.domains ?? parsedIntent.domain_candidates,
-    primary_capability: parsedIntent.primary_capability,
+  const lexicalLeaders = globalLexicalCandidates(index, catalog, trimmedQuery, GLOBAL_LEXICAL_FLOOR_N);
+  const derivedDomains = majorityDomains(lexicalLeaders);
+  const intent: ParsedIntent = fastPathIntent ?? {
+    intent: trimmedQuery,
+    domain_candidates: derivedDomains,
+    primary_capability: derivedDomains[0] ? `${derivedDomains[0]}.query` : "",
+    confidence: marginConfidence(lexicalLeaders),
+    query_constraints: DEFAULT_QUERY_CONSTRAINTS,
+    param_extract: {},
+    is_compound_task: false,
+    sub_intents: [],
   };
 
-  // 高置信 short-circuit：top-1 置信度 >= 0.85 时跳过后处理（图扩展 + 二次检索 + rerank）
-  // 直接返回 topP 选中的结果，省 40-60% 的 discover 延迟
-  if (parsedIntent.confidence >= 0.85) {
-    const selected = [...selectedById.values()];
-    const boosted = applyAdaptiveIntentBoost(index, selected, trimmedQuery);
-    return boosted
+  const retrieved = await retrievalEngine.search({
+    query: trimmedQuery,
+    candidates,
+    queryVector: options?.queryVector,
+    limit: Math.min(50, Math.max(10, limit * 4)),
+    prebuiltIndex: index.bm25Index,
+    aliasEntries: catalog.entries,
+    intentDomains: intent.domain_candidates,
+    intentCapabilities: [],
+    negativePhrasesById: index.negativePhrasesById,
+  });
+  const boosted = applyAdaptiveIntentBoost(index, retrieved, trimmedQuery);
+  const topP = topPSelector.select(
+    boosted.map((item) => ({ item, score: item.final_score })),
+    { confidence: intent.confidence, topPOverride: getTopPOverride(intent) },
+  );
+  (catalog as RoutingCarrier).lastSearchRouting = {
+    intent: intent.intent,
+    confidence: intent.confidence,
+    top_p: topP.top_p,
+    domain_groups: derivedDomains,
+    domain_candidates: intent.domain_candidates,
+    primary_capability: intent.primary_capability,
+  };
+
+  // 高置信短路：跳过图扩展+二次检索+重排（省 40-60% discover 延迟）。
+  // fast-path 策展置信（0.85-0.95）与词面边际显著（top1 一眼领先）的轮直达。
+  if (intent.confidence >= 0.85) {
+    return topP.selected
       .slice(0, Math.max(1, limit))
-      .map((candidate) => matchFromCandidate(catalog, index, candidate, routing, options));
+      .map((s, rank) => matchFromCandidate(catalog, index, s.item, options, rank));
   }
 
   const expandedRecords = await expandWithKnowledgeGraph(
     index,
-    [...selectedById.values()].map((hit) => hit.resource),
+    topP.selected.map((s) => s.item.resource),
     25,
   );
   const expandedRetrieved = await retrievalEngine.search({
@@ -423,32 +349,79 @@ export async function adaptiveSearchDeferredTools(
     limit: 25,
     prebuiltIndex: index.bm25Index,
     aliasEntries: catalog.entries,
-    intentDomains: primaryRoute?.route.domains,
-    intentCapabilities: primaryRoute?.route.capabilities,
+    intentDomains: intent.domain_candidates,
+    intentCapabilities: [],
+    negativePhrasesById: index.negativePhrasesById,
   });
   const reranked = await rerankingPipeline.rerank({
     raw_query: trimmedQuery,
     agent_context_hash: contextHash,
     previous_tool_result: options?.previousToolResult,
-    query_constraints: parsedIntent.query_constraints,
+    query_constraints: intent.query_constraints,
     candidates: expandedRetrieved,
     blacklist_resource_ids: options?.blacklistResourceIds,
-    intent_domains: subIntents.flatMap((i) => i.domain_candidates),
-    intent_capabilities: [...new Set(subIntents.map((i) => i.primary_capability).filter(Boolean))],
+    intent_domains: intent.domain_candidates,
+    intent_capabilities: [],
   });
 
   // llm_seen_count > 0 = 神经重排已定序：boost 只校正展示分、不再重排（否则会
   // 推翻神经顺序——2026-09-12 A/B 实证）；= 0 时维持基线行为（boost 排序）。
-  const boosted = applyAdaptiveIntentBoost(
+  const finalBoosted = applyAdaptiveIntentBoost(
     index,
     reranked.candidates,
     trimmedQuery,
     reranked.llm_seen_count === 0,
   );
-
-  return boosted
+  return finalBoosted
     .slice(0, Math.max(1, limit))
-    .map((candidate) => matchFromCandidate(catalog, index, candidate, routing, options));
+    .map((candidate, rank) => matchFromCandidate(catalog, index, candidate, options, rank));
+}
+
+/** 全量在线候选（online + 非限流 + 租户过滤，与原路由层出候选同口径）。 */
+function allFilteredRecords(
+  index: AdaptiveCatalogIndex,
+  tenantId?: string,
+): ResourceRecord[] {
+  const out: ResourceRecord[] = [];
+  for (const record of index.recordsById.values()) {
+    if (passesRouteFilters(record, DEFAULT_QUERY_CONSTRAINTS, tenantId)) out.push(record);
+  }
+  return out;
+}
+
+/**
+ * 词面领先者的域多数票（频次 ≥2，最多 4 个），作为 hybrid 的 domain 先验——
+ * 替代规则分类器的 domain_candidates：先验来自"词面已经很强的工具归属哪些域"，
+ * 是评分的自我修正，不再依赖英文正则判域。
+ */
+function majorityDomains(
+  leaders: Array<{ record: ResourceRecord; score: number }>,
+): string[] {
+  const counts = new Map<string, number>();
+  for (const { record } of leaders) {
+    for (const domain of record.level1.domain) {
+      counts.set(domain, (counts.get(domain) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, n]) => n >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([domain]) => domain);
+}
+
+/**
+ * 词面边际置信：top1 与 top2 的归一分差映射到 0.5~0.97。词面一眼领先（边际
+ * ≥0.744）才达高置信短路门槛——短路资格由检索结果自证，不再由规则分类器颁证。
+ */
+function marginConfidence(
+  leaders: Array<{ record: ResourceRecord; score: number }>,
+): number {
+  const s1 = leaders[0]?.score ?? 0;
+  const s2 = leaders[1]?.score ?? 0;
+  if (s1 <= 0) return 0.5;
+  const margin = Math.max(0, (s1 - s2) / s1);
+  return Math.min(0.97, 0.5 + margin * 0.47);
 }
 
 export function summarizeAdaptiveCatalog(
@@ -457,19 +430,22 @@ export function summarizeAdaptiveCatalog(
   return getOrCreateAdaptiveCatalogIndex(catalog).summary;
 }
 
-/** 全量 BM25（含别名扩展）词面 top-N → 在线资源记录，供路由-召回融合兜底。 */
+/**
+ * 全量 BM25（含别名扩展）词面 top-N 领先者（带原始分）。单评分器下的双重输入：
+ * 域先验多数票 + 边际置信的来源，同时其名次也是词面通道的结果基线。
+ */
 function globalLexicalCandidates(
   index: AdaptiveCatalogIndex,
   catalog: DeferredToolCatalog,
   query: string,
   topN: number,
-): ResourceRecord[] {
+): Array<{ record: ResourceRecord; score: number }> {
   if (tokenize(query).length === 0) return [];
   const hits = index.bm25Index.search(query, topN, catalog.entries);
-  const out: ResourceRecord[] = [];
+  const out: Array<{ record: ResourceRecord; score: number }> = [];
   for (const hit of hits) {
     const record = index.recordsById.get(hit.id);
-    if (record && record.level1.status === "online") out.push(record);
+    if (record && record.level1.status === "online") out.push({ record, score: hit.score });
   }
   return out;
 }
@@ -537,14 +513,7 @@ function buildAdaptiveCatalogIndex(
     recordsById: new Map(),
     entriesById: new Map(),
     bm25Index: new Bm25Index([]), // 占位，下面重建
-    byDomainGroup: new Map(),
-    byDomainGroupDomain: new Map(),
-    byDomain: new Map(),
-    byCapability: new Map(),
-    byDomainCapability: new Map(),
-    domainGroupsByDomain: new Map(),
-    byActionKey: new Map(),
-    routeCache: new Map(),
+    negativePhrasesById: new Map(),
     summary: emptySummary(),
   };
 
@@ -552,36 +521,11 @@ function buildAdaptiveCatalogIndex(
     const record = resourceRecordFromEntry(entry, embeddings.get(entry.registryName));
     index.recordsById.set(record.level1.resource_id, record);
     index.entriesById.set(record.level1.resource_id, entry);
+    const negatives = [...entry.negativeAliases, ...entry.negativeExamples];
+    if (negatives.length > 0) index.negativePhrasesById.set(entry.registryName, negatives);
     countSummary(index.summary, record);
     const domainGroups = inferDomainGroups(record.level1.domain, record.level1.resource_type);
 
-    for (const domainGroup of domainGroups) {
-      pushIndex(index.byDomainGroup, domainGroup, record.level1.resource_id);
-    }
-    for (const domain of record.level1.domain) {
-      pushIndex(index.byDomain, domain, record.level1.resource_id);
-      for (const domainGroup of domainGroups) {
-        pushIndex(
-          index.byDomainGroupDomain,
-          routeKey(domainGroup, domain),
-          record.level1.resource_id,
-        );
-        pushIndex(index.domainGroupsByDomain, domain, domainGroup);
-      }
-      for (const capability of record.level1.capability) {
-        pushIndex(
-          index.byDomainCapability,
-          routeKey(domain, capability),
-          record.level1.resource_id,
-        );
-      }
-    }
-    for (const capability of record.level1.capability) {
-      pushIndex(index.byCapability, capability, record.level1.resource_id);
-    }
-    for (const key of actionKeys(record)) {
-      pushIndex(index.byActionKey, key, record.level1.resource_id);
-    }
   }
 
   // 预构建全局 BM25 索引（复用，避免每次检索时重新构建）
@@ -611,92 +555,6 @@ function searchableTextForRecord(record: ResourceRecord): string {
     ...record.level2.limitations,
     ...record.level2.preconditions,
   ].join(" ");
-}
-
-function routeAdaptiveCatalog(
-  index: AdaptiveCatalogIndex,
-  intent: ParsedIntent,
-  tenantId?: string,
-): RouteResult {
-  const domainGroups = resolveRouteDomainGroups(index, intent);
-  const domains = resolveRouteDomains(index, intent, domainGroups);
-  const capabilities = resolveRouteCapabilities(intent, domains);
-  const constraints = intent.query_constraints;
-  const cacheKey = [
-    tenantId || DEFAULT_TENANT_ID,
-    domainGroups.join(","),
-    domains.join(","),
-    capabilities.join(","),
-    constraints.auth_level,
-    constraints.read_only ? "ro" : "rw",
-    constraints.file_type ?? "",
-  ].join("|");
-  const cached = index.routeCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return {
-      domain_groups: domainGroups,
-      domains,
-      capabilities,
-      resources: idsToFilteredRecords(index, cached.resourceIds, constraints, tenantId),
-      cache_hit: true,
-      filtered_count: cached.filteredCount,
-    };
-  }
-
-  const ids = new Set<string>();
-  for (const domainGroup of domainGroups) {
-    for (const domain of domains) {
-      const groupedIds = index.byDomainGroupDomain.get(routeKey(domainGroup, domain));
-      if (!groupedIds?.length) continue;
-      const groupedIdSet = new Set(groupedIds);
-      for (const capability of capabilities) {
-        for (const id of index.byDomainCapability.get(routeKey(domain, capability)) ?? []) {
-          if (groupedIdSet.has(id)) ids.add(id);
-        }
-      }
-    }
-  }
-
-  if (ids.size === 0) {
-    for (const domainGroup of domainGroups) {
-      for (const id of index.byDomainGroup.get(domainGroup) ?? []) ids.add(id);
-    }
-  }
-
-  if (ids.size === 0) {
-    for (const domain of domains) {
-      for (const id of index.byDomain.get(domain) ?? []) ids.add(id);
-    }
-  }
-
-  if (ids.size === 0) {
-    for (const capability of capabilities) {
-      for (const id of index.byCapability.get(capability) ?? []) ids.add(id);
-    }
-  }
-
-  if (ids.size === 0) {
-    for (const key of queryActionKeys(intent.intent)) {
-      for (const id of index.byActionKey.get(key) ?? []) ids.add(id);
-    }
-  }
-
-  const allIds = [...ids].slice(0, 500);
-  const resources = idsToFilteredRecords(index, allIds, constraints, tenantId);
-  index.routeCache.set(cacheKey, {
-    expiresAt: Date.now() + ROUTE_CACHE_TTL_MS,
-    resourceIds: allIds,
-    filteredCount: allIds.length - resources.length,
-  });
-
-  return {
-    domain_groups: domainGroups,
-    domains,
-    capabilities,
-    resources,
-    cache_hit: false,
-    filtered_count: allIds.length - resources.length,
-  };
 }
 
 async function expandWithKnowledgeGraph(
@@ -898,34 +756,38 @@ function lexicalToolBoost(
   return boost;
 }
 
+const DISCOVER_WIRE_DESC_CHARS = 90;
+/** includeSchema 时附瘦身参数 schema 的最大条数——top-3 覆盖 golden top3≈100% 的选择面。 */
+const DISCOVER_SCHEMA_TOP_N = 3;
+
 function matchFromCandidate(
   catalog: DeferredToolCatalog,
   index: AdaptiveCatalogIndex,
   candidate: HybridRetrievedResource,
-  routing: AdaptiveDeferredToolSearchMatch["routing"],
   options?: AdaptiveSearchOptions,
+  rank = 0,
 ): AdaptiveDeferredToolSearchMatch {
   const record = candidate.resource;
   const entry = index.entriesById.get(record.level1.resource_id);
   const match: AdaptiveDeferredToolSearchMatch = {
     name: record.level1.resource_id,
-    description: record.level1.description,
+    // 线格式瘦身（2026-10-01）：与 Core 注入同口径（首句 120 字符）。检索索引
+    // 仍用全文（buildToolSearchText 独立构建），只瘦"喂给 LLM 的视图"。
+    description: firstSentence(record.level1.description, DISCOVER_WIRE_DESC_CHARS),
     score: Math.round(candidate.final_score * 1000) / 1000,
     parameterNames: entry?.parameterNames ?? [],
     requiredParameters: entry?.requiredParameters ?? [],
     resource_type: record.level1.resource_type,
     domain: record.level1.domain,
     capability: record.level1.capability,
-    routing,
   };
-  if (options?.includeSchema) {
+  if (options?.includeSchema && rank < DISCOVER_SCHEMA_TOP_N) {
     const schema = describeDeferredTool(catalog, record.level1.resource_id);
     if (schema) {
-      match.parameters =
-        (schema.parameters as Record<string, unknown> | undefined) ?? {
-          type: "object",
-          properties: {},
-        };
+      match.parameters = (slimJsonSchema(schema.parameters) as Record<string, unknown>) ?? {
+        type: "object",
+        properties: {},
+      };
     }
   }
   return match;
@@ -1227,72 +1089,6 @@ function isLikelyWriteResource(record: ResourceRecord): boolean {
   );
 }
 
-function resolveRouteDomainGroups(index: AdaptiveCatalogIndex, intent: ParsedIntent): string[] {
-  const groups = new Set<string>();
-  const add = (value: string | null | undefined): void => {
-    const normalized = cleanDomainGroup(value);
-    if (normalized) groups.add(normalized);
-  };
-
-  const domains = dedupe([
-    ...intent.domain_candidates.map((domain) => cleanDomain(domain)),
-    primaryCapabilityDomain(intent.primary_capability),
-    ...domainsFromQuery(intent.intent),
-  ]).filter(Boolean);
-
-  for (const domain of domains) {
-    for (const group of groupsForDomain(index, domain)) add(group);
-  }
-  for (const group of domainGroupsFromQuery(intent.intent)) add(group);
-
-  const available = [...groups].filter((group) => index.byDomainGroup.has(group));
-  if (available.length > 0) return dedupe(available);
-  if (index.byDomainGroup.has("general")) return ["general"];
-  return dedupe([...groups]);
-}
-
-function resolveRouteDomains(
-  index: AdaptiveCatalogIndex,
-  intent: ParsedIntent,
-  domainGroups: string[],
-): string[] {
-  const queryDomains = domainsFromQuery(intent.intent).filter((domain) =>
-    index.byDomain.has(domain),
-  );
-  const groupedQueryDomains = queryDomains.filter((domain) => domainMatchesAnyGroup(index, domain, domainGroups));
-  if (groupedQueryDomains.length > 0) return dedupe(groupedQueryDomains);
-
-  const domains = new Set<string>();
-  for (const domain of intent.domain_candidates) {
-    const cleaned = cleanDomain(domain);
-    if (cleaned) domains.add(cleaned);
-  }
-  const capDomain = intent.primary_capability.split(".")[0];
-  if (capDomain) domains.add(cleanDomain(capDomain));
-  for (const domain of domainsFromQuery(intent.intent)) domains.add(domain);
-
-  const available = [...domains].filter((domain) =>
-    index.byDomain.has(domain) && domainMatchesAnyGroup(index, domain, domainGroups),
-  );
-  if (available.length > 0) return dedupe(available);
-  if (index.byDomain.has("misc")) return ["misc"];
-  return dedupe([...domains]);
-}
-
-function resolveRouteCapabilities(intent: ParsedIntent, domains: string[]): string[] {
-  const capabilities = new Set<string>();
-  if (intent.primary_capability) capabilities.add(cleanCapability(intent.primary_capability));
-  const capSuffix = intent.primary_capability.split(".")[1];
-  for (const domain of domains) {
-    capabilities.add(`${domain}.general`);
-    if (capSuffix) capabilities.add(`${domain}.${cleanCapability(capSuffix)}`);
-  }
-  for (const key of queryActionKeys(intent.intent)) {
-    for (const domain of domains) capabilities.add(`${domain}.${key}`);
-  }
-  return dedupe([...capabilities].filter(Boolean));
-}
-
 function domainsFromQuery(query: string): string[] {
   const q = query.toLowerCase();
   const out = new Set<string>();
@@ -1314,10 +1110,6 @@ function domainsFromQuery(query: string): string[] {
     for (const domain of domains) out.add(domain);
   }
   return [...out];
-}
-
-function domainGroupsFromQuery(query: string): string[] {
-  return inferDomainGroups(domainsFromQuery(query), ResourceType.Tool);
 }
 
 function inferDomainGroups(domains: string[], resourceType: ResourceType): string[] {
@@ -1376,52 +1168,8 @@ function inferDomainGroups(domains: string[], resourceType: ResourceType): strin
   return [...groups];
 }
 
-function domainMatchesAnyGroup(
-  index: AdaptiveCatalogIndex,
-  domain: string,
-  domainGroups: string[],
-): boolean {
-  if (domainGroups.length === 0) return true;
-  const groups = new Set(groupsForDomain(index, domain));
-  return domainGroups.some((group) => groups.has(group));
-}
-
 function primaryCapabilityDomain(primaryCapability: string): string {
   return cleanDomain(primaryCapability.split(".")[0]);
-}
-
-function groupsForDomain(index: AdaptiveCatalogIndex, domain: string): string[] {
-  const cleaned = cleanDomain(domain);
-  if (!cleaned) return [];
-  return index.domainGroupsByDomain.get(cleaned) ?? inferDomainGroups([cleaned], ResourceType.Tool);
-}
-
-function queryActionKeys(query: string): string[] {
-  const q = query.toLowerCase();
-  const out = new Set<string>();
-  const rules: Array<[RegExp, string]> = [
-    [/\bsearch\b|\bfind\b|\bquery\b|\blook up\b|\blist\b|\bshow\b|\bread\b|\bfetch\b/, "query"],
-    [/\bopen\b|\bnavigate\b|\bbrowse\b/, "navigate"],
-    [/\bcreate\b|\badd\b|\bschedule\b|\bplan\b|\bset\b/, "create"],
-    [/\bsend\b|\bcall\b|\bdial\b|\bdispatch\b/, "call"],
-    [/\brun\b|\bexecute\b|\bshell\b|\bautomation\b/, "execute"],
-    [/\bscreenshot\b|\bscreen\b/, "screenshot"],
-  ];
-  for (const [pattern, key] of rules) {
-    if (pattern.test(q)) out.add(key);
-  }
-  return [...out];
-}
-
-function actionKeys(record: ResourceRecord): string[] {
-  const keys = new Set<string>();
-  for (const capability of record.level1.capability) {
-    const suffix = capability.split(".")[1];
-    if (suffix) keys.add(suffix);
-  }
-  const nameParts = record.level1.name.split(/[._-]+/).filter(Boolean);
-  for (const part of nameParts) keys.add(cleanCapability(part));
-  return [...keys].filter(Boolean);
 }
 
 function buildToolSchema(entry: DeferredToolEntry): Level3ToolSchema {
@@ -1637,21 +1385,12 @@ function firstNamespace(name: string): string {
   return name.split(/[._-]/)[0]?.toLowerCase() ?? "misc";
 }
 
-function cleanDomainGroup(value: string | null | undefined): string {
-  const normalized = value?.toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
-  return normalized || "";
-}
-
 function cleanDomain(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "misc";
 }
 
 function cleanCapability(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
-}
-
-function routeKey(domain: string, capability: string): string {
-  return `${domain}\0${capability}`;
 }
 
 function pushIndex(map: Map<string, string[]>, key: string, id: string): void {

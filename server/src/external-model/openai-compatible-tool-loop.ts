@@ -67,6 +67,7 @@ import {
   isToolSearchBridgeName,
   prepareTools,
   searchResources,
+  type ResidentToolInfo,
 } from "../gateway/index.js";
 import {
   getCapabilityModuleCategoryMappings,
@@ -112,6 +113,7 @@ import {
 import { evaluateAndSelectStrategy } from "../agent/synthesis-strategy.js";
 import { isDirectFactQuery } from "../agent/direct-fact-query.js";
 import { isStaticToolArchEnabled, ROUTER_FIRST_LANE_MAX_VISIBLE } from "./lane-tool-sets.js";
+import { buildDomainCards } from "../tools/tool-search/domain-cards.js";
 import { recordTurnTrace, type ToolCallTraceEntry } from "./turn-trace.js";
 import {
   fenceUntrustedToolContent,
@@ -160,7 +162,9 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   "search": 5000,
   "describe": 800,
   "tool_search": 800,
-  "tool_discover": 800,
+  // 2026-10-01 瘦身后实测 p50 1509 字符（top-3 瘦身 schema 全保）。旧 800 预算
+  // 配 4k 胖载荷=常态截断（LLM 从未见过完整结果）；现预算覆盖瘦身后载荷 → 零截断。
+  "tool_discover": 1600,
   "tool_call": 1200,
   "shopping.order.search": 1500,
   "shopping.order.place": 1000,
@@ -378,6 +382,28 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
 }
 
 /**
+ * 当轮可见 apiTools → 常驻工具描述索引（discover/describe 回退查询用）。
+ * registry 名 + LLM 名双口径，模型两种写法都能命中。
+ * 非 function 形态的工具（custom 等）跳过——discover 回退只描述 function 工具。
+ */
+function toResidentToolIndex(
+  apiTools: ChatCompletionTool[],
+  resolveRegistryToolName: (name: string) => string,
+): ResidentToolInfo[] {
+  const out: ResidentToolInfo[] = [];
+  for (const t of apiTools) {
+    if (t.type !== "function" || !t.function?.name) continue;
+    out.push({
+      name: resolveRegistryToolName(t.function.name),
+      alias: t.function.name,
+      description: t.function.description ?? "",
+      parameters: (t.function.parameters ?? {}) as Record<string, unknown>,
+    });
+  }
+  return out;
+}
+
+/**
  * 桥接调用（tool_discover / tool_search / tool_describe / tool_call 解析）超时上限。
  * 桥接只做检索与参数解析（真实工具执行另有 TOOL_TIMEOUT 竞速），但底层走
  * 桥接为纯进程内检索（毫秒级），此超时仅为极端情况下的兜底保险。
@@ -392,13 +418,14 @@ function executeBridgeWithTimeout(
   bridgeName: string,
   args: Record<string, unknown>,
   catalog: Parameters<typeof executeBridge>[2],
+  residentTools?: ResidentToolInfo[],
 ): Promise<Awaited<ReturnType<typeof executeBridge>>> {
   const timeoutMs = resolveToolBridgeTimeoutMs();
   return new Promise<Awaited<ReturnType<typeof executeBridge>>>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`tool bridge timeout: ${bridgeName} exceeded ${timeoutMs}ms`));
     }, timeoutMs);
-    executeBridge(bridgeName, args, catalog).then(
+    executeBridge(bridgeName, args, catalog, residentTools).then(
       (result) => {
         clearTimeout(timer);
         resolve(result);
@@ -1695,11 +1722,7 @@ export async function streamCompletionWithTools(
   );
   
   const mergedRegistryTools = options?.tools ?? getBuiltinAgentChatTools();
-  const toolSearchPrepared = await prepareTools(
-    mergedRegistryTools,
-    options?.toolSearchSourceTools,
-    { userText },
-  );
+  const toolSearchPrepared = await prepareTools(mergedRegistryTools, options?.toolSearchSourceTools);
   const registryTools = toolSearchPrepared.visibleTools;
   const deferredToolCatalog = toolSearchPrepared.deferredCatalog;
 
@@ -1716,6 +1739,12 @@ export async function streamCompletionWithTools(
   // 避免多分类检索的顺序抖动破坏 DeepSeek/Kimi 等 provider 的前缀上下文缓存。
   // let：请求卡（tool_request）命中后按会话基准追加转正工具。
   let stableApiTools = stabilizeToolOrderForSession(apiTools, options?.audit?.sessionId);
+  // 首波可见集快照（acquisition 观测基准；不含波间动态转正的请求卡工具）
+  const visibleAtStart = new Set(
+    stableApiTools
+      .map((t) => (t.type === "function" ? resolveRegistryToolName(t.function?.name ?? "") : ""))
+      .filter(Boolean),
+  );
   const staticToolArch = isStaticToolArchEnabled();
   // ── 轮级 trace 收集（[turn-trace] 一行 JSON，见 turn-trace.ts）──
   const traceStartTs = Date.now();
@@ -1806,13 +1835,39 @@ export async function streamCompletionWithTools(
     toolSearchPrepared.toolSearchActive &&
     toolSearchPrepared.coreToolCount <= ROUTER_FIRST_LANE_MAX_VISIBLE &&
     toolSearchPrepared.deferredToolCount > 0;
+
+/** 域卡语料去重（名字优先者胜，保序）。 */
+function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
+  const seen = new Set<string>();
+  const out: ChatCompletionTool[] = [];
+  for (const t of tools) {
+    const n = t.type === "function" ? t.function?.name : "";
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    out.push(t);
+  }
+  return out;
+}
+
+  // 域卡（2026-10-01 S1）：延迟目录激活时，全能力面（域+工具名）常驻指导语位置。
+  // 治"不知道有这个能力所以不搜"的元认知盲区——检索再准也只能回应已想找的查询。
+  // 确定性派生（同语料签名恒同字节），位于消息尾部动态区，前缀缓存不受影响。
+  const domainCards = toolSearchPrepared.toolSearchActive
+    ? buildDomainCards(
+        dedupeToolsByName([
+          ...registryTools,
+          ...deferredToolCatalog.entries.map((e) => e.tool),
+        ]),
+      )
+    : "";
   if (stableApiTools.length > 0) {
     messages.push({
       role: "system",
       content:
+        (domainCards ? domainCards + "\n\n" : "") +
         "工具调用原则（Plan-and-Execute）：\n" +
         (routerFirstLane
-          ? "0. 本轮业务工具都在延迟目录中（可见的只有 tool_discover/tool_call）：先用 tool_discover 检索出要用的工具（可并行多个 query；include_schema=true 可一次拿多个 schema），再用 tool_call 执行；常用能力直接按注册名 discover（如 search_web）。发现和执行加起来也在总波次预算内，别一次 discover 完就收尾。\n"
+          ? "0. 本轮业务工具都在延迟目录中（可见的只有 tool_discover/tool_call）：优先按上方【能力域目录】按名直呼 tool_call 或 tool_discover({domain:\"域名\"}) 拉取该域参数 schema；需要语义检索时再用 tool_discover({query})。发现和执行加起来也在总波次预算内，别一次 discover 完就收尾。\n"
           : "") +
         "1. 一次性规划：把本轮需要的所有工具调用放在同一次回复里并行发出（独立的信息需求拆成多个并行调用），不要拆成多轮串行。\n" +
         "2. 不要用完全相同的 query 重复搜索；但对比/多主题/盘点类需求，或首轮结果覆盖不全时，应换角度拆多个 query 补搜，或用 fetch_web / deep_search 深读，把信息收齐再回答，不要急着收尾。\n" +
@@ -2546,11 +2601,25 @@ export async function streamCompletionWithTools(
         let targetArgs = item.parsedArgs;
 
         if (isToolSearchBridgeName(item.registryToolName)) {
-          const bridge = await executeBridgeWithTimeout(
-            item.registryToolName,
-            item.parsedArgs,
-            deferredToolCatalog,
-          );
+          // 桥检索执行去重（2026-10-01）：tool_discover/tool_search 同参数轮内只真查
+          // 一次（此前桥分支绕过 turnDedupeCache，同波并行重复 query 会重复执行检索）。
+          // tool_call 不在此去重——它只做参数解析，真正执行在下方与普通工具共享去重。
+          const bridgeKey = `bridge::${item.registryToolName}::${stableArgsKey(item.parsedArgs)}`;
+          const inflightBridge = turnDedupeCache.get(bridgeKey) as
+            | Promise<Awaited<ReturnType<typeof executeBridgeWithTimeout>>>
+            | undefined;
+          const bridge = await (inflightBridge ??
+            (() => {
+              const p = executeBridgeWithTimeout(
+                item.registryToolName,
+                item.parsedArgs,
+                deferredToolCatalog,
+                toResidentToolIndex(stableApiTools, resolveRegistryToolName),
+              );
+              // ToolSearchBridgeResult 运行时含 {ok, result} 超集，可安全复用去重缓存
+              turnDedupeCache.set(bridgeKey, p as unknown as Promise<ToolExecOutcome>);
+              return p;
+            })());
           if (bridge.kind === "search" || bridge.kind === "describe" || bridge.kind === "discover") {
             const compacted = await compactToolOutputForLlm({
               toolName: item.registryToolName,
@@ -2884,6 +2953,11 @@ export async function streamCompletionWithTools(
         ok: exec.ok,
         ms: callStart ? Date.now() - callStart : 0,
         viaRequestCard: requestCardLoadedNames.has(wireToolName),
+        acquisition: isToolSearchBridgeName(wireToolName)
+          ? "bridge"
+          : visibleAtStart.has(wireToolName)
+            ? "visible"
+            : "deferred",
       });
       if (isInteractiveToolName(wireToolName)) {
         waveUsedInteractiveTool = true;

@@ -16,6 +16,8 @@
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import { firstSentence } from "../tools/tool-search/schema-slim.js";
+import { toolInCapabilityDomains } from "../tools/tool-search/tool-category.js";
 
 export type LaneId = "chat" | "task";
 
@@ -164,13 +166,6 @@ export function isTaskLaneRouterFirst(): boolean {
   return raw !== "core";
 }
 
-function firstSentence(text: string, maxChars: number): string {
-  const trimmed = text.trim().replace(/\s+/g, " ");
-  const m = /^.{1,200}?[。！？.!?\n]/.exec(trimmed);
-  const head = m ? m[0] : trimmed;
-  return head.length > maxChars ? `${head.slice(0, maxChars)}…` : head;
-}
-
 /** 确定性 schema 瘦身：同输入恒同输出，不引入任何每轮变化。 */
 export function slimToolSchema(tool: ChatCompletionTool): ChatCompletionTool {
   if (tool.type !== "function") return tool;
@@ -239,32 +234,6 @@ export function buildLaneCoreTools(
 }
 
 /**
- * 任务面 router-first 旅游规划族常驻保底（2026-09-24 大理轮；2026-10-01 从
- * goal 语义+latch 改为恒注入）。旅游是模型"自觉会写"的域：拿不到 schema 就
- * 凭常识自写行程，行程卡整卡漏发。goal 正则判定会抖动（"对了酒店呢"不命中），
- * 与其维护正则+会话 latch 的点补状态，不如恒注入瘦身 schema（≈4 工具首句
- * 描述，token 可忽略）——集合同 intent 恒同集，前缀缓存天然稳定。编辑/回查
- * 类跟随轮操作不提，仍走 discover。
- */
-export const TRAVEL_PLANNING_PROMOTED_NAMES: ReadonlySet<string> = new Set([
-  "travel.plan-itinerary",
-  "travel.search-poi",
-  "travel.destination-info",
-  "travel.compute-route",
-]);
-
-/** 从语料中取旅游规划族工具（瘦身 schema，恒注入 router-first 任务轮）。 */
-export function pickTravelPlanningTools(
-  corpus: ChatCompletionTool[],
-): ChatCompletionTool[] {
-  return corpus
-    .filter(
-      (d) => d.type === "function" && TRAVEL_PLANNING_PROMOTED_NAMES.has(d.function?.name ?? ""),
-    )
-    .map(slimToolSchema);
-}
-
-/**
  * router-first 车道判定口径（2026-10-01 统一）：可见工具数 ≤ 此值且延迟目录
  * 非空 = "业务工具主力在延迟目录、本轮依赖检索召回"的轮。两个消费方共享：
  *   - agent-gateway 意图预召回（只对这类轮投机，chat/束轮 Core 已覆盖主力）
@@ -274,41 +243,6 @@ export function pickTravelPlanningTools(
  */
 export const ROUTER_FIRST_LANE_MAX_VISIBLE = 6;
 
-/**
- * 能力束 → 工具名/命名空间前缀映射（Tier-2 确定性增量注入）。
- * 由路由层 TurnPlan.capabilities 驱动——同一声明恒同一集合，属于"路由决策
- * 的确定性投影"，不是按 userText 关键词的每轮重算。自 resolve-chat-tools
- * 迁移至此作为唯一事实源。
- */
-export const CAPABILITY_TOOL_PREFIXES: Record<string, string[]> = {
-  search: [
-    "search_web",
-    "search",
-    "fetch_web",
-    "deep_search",
-    "hot_rankings",
-    "info.",
-    "weather.",
-    "clock.",
-  ],
-  media: ["search_images", "search_videos", "photo", "vision.", "media", "image"],
-  write: [
-    "calendar.",
-    "reminder",
-    "voice.",
-    "phone.",
-    "shopping.",
-    "commitment.",
-    "wallet.",
-    "agent.",
-    "surface.",
-    // 设备/家电控制是有副作用的写动作（2026-09-19 live 验证补充）：
-    // "把空调调到26度"路由到 task 面 write 束时，smart_home 必须确定性可达。
-    "smart_home.",
-  ],
-  desktop: ["desktop", "agent_browser", "shared_browser", "screen"],
-};
-
 /** 元工具/能力查询桥：任何集合都保留，保证延迟目录可达。 */
 export const CAPABILITY_BRIDGE_TOOLS: ReadonlySet<string> = new Set([
   "tool_search",
@@ -317,12 +251,6 @@ export const CAPABILITY_BRIDGE_TOOLS: ReadonlySet<string> = new Set([
   "tool_call",
   "agent.query_capabilities",
 ]);
-
-export function toolMatchesCapability(toolName: string, capability: string): boolean {
-  const prefixes = CAPABILITY_TOOL_PREFIXES[capability];
-  if (!prefixes) return false;
-  return prefixes.some((p) => toolName === p || toolName.startsWith(p));
-}
 
 /**
  * Tier-2：从语料中取出路由能力束覆盖的工具（增量注入用，不做减法）。
@@ -340,7 +268,7 @@ export function toolsMatchingCapabilityBeam(
     const name = tool.type === "function" ? tool.function?.name ?? "" : "";
     if (!name || seen.has(name)) continue;
     if (CAPABILITY_BRIDGE_TOOLS.has(name)) continue;
-    if (caps.some((cap) => toolMatchesCapability(name, cap))) {
+    if (toolInCapabilityDomains(name, caps)) {
       seen.add(name);
       out.push(tool);
     }

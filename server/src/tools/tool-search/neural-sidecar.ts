@@ -30,11 +30,6 @@ export type NeuralRerankResult = {
   scores: number[];
 };
 
-export type NeuralIntentResult = {
-  domain: string;
-  confidence: number;
-  scores: Record<string, number>;
-};
 
 /**
  * 域标签向量缓存（N3 热路径优化）：labels 是静态词表（TOOL_CATEGORIES 派生），
@@ -46,28 +41,6 @@ export type NeuralIntentResult = {
 const _labelVectorCache = new Map<string, Record<string, number[]>>();
 const _labelVectorInflight = new Map<string, Promise<Record<string, number[]> | null>>();
 
-async function labelVectorsFor(modelHint: string, labels: Record<string, string>): Promise<Record<string, number[]> | null> {
-  const cached = _labelVectorCache.get(modelHint);
-  if (cached) return cached;
-  let inflight = _labelVectorInflight.get(modelHint);
-  if (!inflight) {
-    inflight = neuralEmbedTextsBulk(Object.values(labels)).then((res) => {
-      _labelVectorInflight.delete(modelHint);
-      if (!res || res.dim <= 0) return null;
-      const out: Record<string, number[]> = {};
-      Object.keys(labels).forEach((domain, i) => {
-        const vec = res.vectors[i];
-        if (vec) out[domain] = vec;
-      });
-      if (Object.keys(out).length === Object.keys(labels).length) {
-        _labelVectorCache.set(modelHint, out);
-      }
-      return out;
-    });
-    _labelVectorInflight.set(modelHint, inflight);
-  }
-  return inflight;
-}
 
 /**
  * 按特性独立的熔断器：连续 threshold 次失败开闸 cooldown 毫秒，
@@ -141,8 +114,7 @@ export function resetNeuralBreakers(): void {
 export function isNeuralFeatureEnabled(feature: NeuralFeature): boolean {
   const cfg = getToolSearchConfig();
   if (feature === "embed") return cfg.neuralEmbedEnabled !== "off";
-  if (feature === "rerank") return cfg.neuralRerankEnabled !== "off";
-  return cfg.neuralIntentEnabled !== "off";
+  return cfg.neuralRerankEnabled !== "off";
 }
 
 function isTimedOut(error: unknown): boolean {
@@ -258,46 +230,6 @@ export async function neuralRerank(
   return guardedCall("rerank", () =>
     postJson<NeuralRerankResult>("/rerank", { query, documents, top_k: topK }, timeoutMs),
   );
-}
-
-/**
- * 神经域分类（N3）：labels 为 { domain: 域描述文本 }，由 TS 侧持有词表
- * （状态归 Node 军规）。热路径自动改传预编码 label_vectors（sidecar 仅编码
- * query，~5ms）；预编码未就绪时回退文本形态（sidecar 全量编码，~100ms）。
- * label 缓存键含当前模型提示——provider 切换时向量与 embed 模型保持一致。
- */
-export async function neuralClassifyIntent(
-  query: string,
-  labels: Record<string, string>,
-): Promise<NeuralIntentResult | null> {
-  const entries = Object.entries(labels).filter(([key, text]) => key && text.trim());
-  if (entries.length === 0) return null;
-  const cleanLabels = Object.fromEntries(entries);
-  const timeoutMs = getToolSearchConfig().neuralIntentTimeoutMs;
-
-  // 预编码 label 向量（bulk 预算 10s，与工具向量补全同款；缓存后零成本）。
-  // 若在飞（首查询恰好撞上首次编码）则等待——inflight 去重保证只编一次。
-  const modelHint = getToolSearchConfig().neuralEmbedModel;
-  const labelVectors = await labelVectorsFor(modelHint, cleanLabels);
-
-  return guardedCall("intent", () =>
-    postJson<NeuralIntentResult>(
-      "/classify-intent",
-      labelVectors
-        ? { query, label_vectors: labelVectors }
-        : { query, labels: cleanLabels },
-      timeoutMs,
-    ),
-  );
-}
-
-/** 提前预热域标签向量（路由器构造时调用）：首个真实查询到达时缓存已就绪。 */
-export function warmLabelVectors(labels: Record<string, string>): void {
-  if (!isNeuralFeatureEnabled("intent")) return;
-  const modelHint = getToolSearchConfig().neuralEmbedModel;
-  const entries = Object.entries(labels).filter(([key, text]) => key && text.trim());
-  if (entries.length === 0) return;
-  void labelVectorsFor(modelHint, Object.fromEntries(entries)).catch(() => {});
 }
 
 /** 健康探测（测试/运维用）：模型已加载返回 true，不可达/未就绪返回 false。 */

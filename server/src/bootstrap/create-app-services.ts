@@ -466,6 +466,7 @@ import { AgentActivityStore } from "../proactivity/activity-store.js";
 import { AttentionStore } from "../proactivity/attention-store.js";
 import { ReachRouter, type ReachChannelDeps } from "../proactivity/reach-router.js";
 import { OutcomeStore } from "../proactivity/outcome-store.js";
+import { TopicDismissTracker } from "../proactivity/topic-dismiss-tracker.js";
 // ─── 五层主动性架构（传感→评估→仲裁→目标→表达）───
 import { SensorKernel, registerFeeder } from "../proactivity/sensors/kernel.js";
 import { ScreenSensor } from "../proactivity/sensors/screen-sensor.js";
@@ -4063,7 +4064,10 @@ export async function createAppServices(): Promise<AppServices> {
     silenceLog: proactivitySilenceLog,
     pendingConfirmations: proactivityConfirmations,
     // 顺嘴搭车队列：low 级 speak 挂起等下一轮对话；agent-core 经
-    // takeTurnAsideForTurn 取走织入（与主动外发执行器共享同一实例）
+    // takeTurnAsideForTurn 取走织入（与主动外发执行器共享同一实例）。
+    // medium 过期升级（2026-10-01 扩面）：6h 没搭上车就重投正常通道——
+    // source=turn_aside_expiry 让 hub 跳过再次搭车（防回环），走直达车道
+    // 的 ArbiterV2 正常择时
     turnAsideQueue,
     // 死信闸：全设备离线的 speak 信号直接放弃（省话术 LLM + 不产生假台账）
     presence: proactivityPresence,
@@ -4132,6 +4136,19 @@ export async function createAppServices(): Promise<AppServices> {
 
     // 负反馈抑制表：用户「别再提醒」意愿优先于时间冷却，发送前检查
     suppressionStore: proactivitySuppressionStore,
+  });
+  // 顺嘴 medium 过期升级接线：6h 没搭上车的中优消息重投正常通道（hub 内
+  // source=turn_aside_expiry 防再次搭车回环；走 ArbiterV2 正常择时投递）
+  turnAsideQueue.setOnExpire((item) => {
+    proactivityHub.submitIntent({
+      actorId: item.actorId,
+      kind: item.kind as Parameters<typeof proactivityHub.submitIntent>[0]["kind"],
+      importance: item.importance,
+      title: item.title,
+      summary: item.hint || item.title,
+      mode: "speak",
+      source: "turn_aside_expiry",
+    });
   });
   // 接线 1：agent-core（对话内触发 + advise 注入 + 编排器任务完成恭喜随内部传递）
   agentCore.setProactivityHub(proactivityHub);
@@ -4262,8 +4279,11 @@ export async function createAppServices(): Promise<AppServices> {
   // ─── InterestWatcher 兴趣话题追踪装配（对标扣子主动推送体验）───
   // 用户长期关注的话题从对话中被 LLM 挖出（interest.manage 工具入库），
   // 后台每 tick 拉一次实时热搜（微博/百度/知乎/B站聚合），命中用户兴趣 →
-  // 指纹去重 + 2h 间隔 → onInterestAlert → ProactionCortex speak 闭环主动推。
+  // 指纹去重 + 2h 间隔 → onInterestAlert → hub 直达车道模板直投（零 LLM）。
   // 频控双层：本模块同兴趣去重 + FrequencyGovernor（interest_alert 4h 冷却/每日预算）。
+  // 语义兜底（2026-10-01）：字面包含未命中时复用本地 bge-small-zh ONNX 引擎
+  // 做余弦匹配（「苹果手机」对「iPhone 17」类换说法），本地推理零边际成本；
+  // 引擎不可用/INTEREST_SEMANTIC_MATCH=0 时自动退回纯字面。
   const interestWatcher = new InterestWatcher({
     persistPath:
       process.env.INTEREST_WATCH_FILE ??
@@ -4276,6 +4296,19 @@ export async function createAppServices(): Promise<AppServices> {
         url: item.url,
         hot: item.hot,
       }));
+    },
+    embed: async (texts) => {
+      try {
+        const { initLocalEmbeddingEngine } = await import(
+          "../agentic-memory/local-embedding/local-embedding-engine.js"
+        );
+        const engine = await initLocalEmbeddingEngine();
+        if (!engine) return null;
+        return await engine.embed(texts);
+      } catch (err) {
+        console.log(`[InterestWatcher] 本地嵌入引擎不可用（退回字面匹配）: ${err}`);
+        return null;
+      }
     },
     onHit: (actorId, interest, hit) => {
       proactivityHub.onInterestAlert(actorId, interest.name, hit);
@@ -4539,9 +4572,17 @@ export async function createAppServices(): Promise<AppServices> {
     receptivity: (actorId) => {
       try {
         const hour = new Date().getHours();
+        // 节律画像（行为作息推导）× 真实投递接受率（按时段，Laplace 平滑）融合：
+        // 用户在该时段「实际接不接受主动消息」比推导画像更硬——样本 ≥3 时
+        // 六四开加权（outcome 为主），不足时维持节律画像原值（零样本零影响）
         const byHour = rhythmEngine?.getProfile(actorId)?.dimensions?.receptivity?.byHour;
-        const v = byHour?.[hour];
-        return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.5;
+        const rhythmV = byHour?.[hour];
+        const base =
+          typeof rhythmV === "number" && Number.isFinite(rhythmV) ? Math.max(0, Math.min(1, rhythmV)) : 0.5;
+        const outcomes = outcomesStoreForCalibrator ?? (outcomesStoreForCalibrator = new OutcomeStore(join(process.cwd(), "data", "proactivity", "outcomes.json")));
+        const stat = outcomes.hourlyReceptivity(actorId).get(hour);
+        if (stat && stat.samples >= 3) return Math.max(0, Math.min(1, 0.6 * stat.rate + 0.4 * base));
+        return base;
       } catch {
         return 0.5;
       }
@@ -5033,14 +5074,45 @@ export async function createAppServices(): Promise<AppServices> {
   // ─── 计划推进（2026-09-24，对标 Muse 大目标模式）+ 行为审计时间线 ───
   // plan 型目标拆步 → 逐步派后台任务（agentCore.dispatchBackgroundTask）→
   // TaskHub 终态回调自动推进下一步；外部副作用步骤转「等你确认」（敏感动作分级闸）。
+  // 成本治理（2026-10-01）：goal 步骤是全量后台 agent 任务、不占社交预算，
+  // 是主动性链路唯一可能失控的 LLM 花费口——三层闸：
+  //   ① 每日派发上限 PROACTIVITY_GOAL_DAILY_BUDGET（默认 24）——超出返回 null，
+  //     步骤停在 todo（goal-planner 如实标注「预算超限」）
+  //   ② 轻步骤车道（总结/整理类，goal-planner.isLightStep）按小预算快档派发
+  //   ③ token 审计单列 goal_plan_stage（usage 台账可见主动性执行成本）
+  const goalDailyBudget = (() => {
+    const raw = process.env.PROACTIVITY_GOAL_DAILY_BUDGET;
+    const n = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : 24;
+  })();
+  const goalLaneState = { day: "", dispatched: 0 };
+  const goalLaneEnabled = () => process.env.GOAL_PLAN_LIGHT_LANE !== "0";
   const goalPlanner = new GoalPlanner({
     goalBoard,
-    launchTask: (input) =>
-      agentCore.dispatchBackgroundTask(input.actorId, {
+    launchTask: (input) => {
+      const today = new Date().toISOString().slice(0, 10);
+      if (goalLaneState.day !== today) {
+        goalLaneState.day = today;
+        goalLaneState.dispatched = 0;
+      }
+      if (goalLaneState.dispatched >= goalDailyBudget) {
+        console.warn(
+          `[GoalPlanner] 当日 goal 步骤派发已达上限 ${goalDailyBudget}（PROACTIVITY_GOAL_DAILY_BUDGET），步骤保持待办`,
+        );
+        return null;
+      }
+      const taskId = agentCore.dispatchBackgroundTask(input.actorId, {
         ...(input.sessionId ? { sessionId: input.sessionId } : {}),
         goal: input.goal,
         source: "goal_plan",
-      }),
+        auditStage: "goal_plan_stage",
+        ...(input.light && goalLaneEnabled()
+          ? { turnPlan: { budget: 2, capabilities: ["full"], tier: "flash" } }
+          : {}),
+      });
+      if (taskId) goalLaneState.dispatched += 1;
+      return taskId;
+    },
     recordActivity: (input) => {
       agentActivityStore.record({
         actorId: input.actorId,
@@ -5145,6 +5217,9 @@ export async function createAppServices(): Promise<AppServices> {
     governor: proactivityGovernor,
     suppression: proactivitySuppressionStore,
     presence: proactivityPresence,
+    // 话题级 dismiss 追踪（2026-10-01）：同话题连续划掉 3 条 → 投「要不要少提这类」建议；
+    // 真正的静音仍只走用户明说（proactivity.feedback mute_topic / 抑制表）
+    topicDismiss: new TopicDismissTracker({ dataPath: join(process.cwd(), "data", "proactivity") }),
     // 对话进行中判定走对话时刻（hub 记录的最近交互）：桌面同步会持续刷新设备活跃，
     // 若用活跃时刻判定，用户在电脑前的每一分钟都像"对话中"，社交提案将被无限顺延
     lastConversationAt: (actorId) => proactivityHub.lastInteractionAtOf(actorId),
@@ -5209,6 +5284,27 @@ export async function createAppServices(): Promise<AppServices> {
           .catch((err) => {
             console.log(`[commitment-board] 代发催促失败（忽略）: ${err}`);
           });
+        return;
+      }
+      // 消息/邮件日程变动的「让助手处理」确认（2026-10-01）：派后台任务起草
+      // 处理建议（改日程的具体改法 / 回复草稿），结果经任务面推回对话。
+      // 只起草不外发——对外动作仍需用户自己过目，LLM 只花在用户点头之后。
+      if (p.kind === "action.schedule_change" && p.source === "message_watch") {
+        const taskId = agentCore.dispatchBackgroundTask(p.actorId, {
+          goal:
+            `【消息处理】${p.summary}。来源：${p.detail?.["来源"] ?? "消息"}。` +
+            `请基于这条消息起草处理建议：若涉及日程变动，给出具体调整方案（改到什么时间/取消/新增）；` +
+            `若适合回复，给出一条可直接发送的回复草稿。只起草，不要执行任何发送/修改类外部动作。`,
+          source: "message_watch_confirm",
+        });
+        agentActivityStore.record({
+          actorId: p.actorId,
+          kind: p.kind,
+          title: taskId ? "已开始起草处理建议" : "处理建议起草排队中（通道不可用）",
+          summary: p.summary,
+          dedupKey: `approved:${p.dedupKey}`,
+          status: taskId ? "pending" : "failed",
+        });
         return;
       }
       agentActivityStore.record({
@@ -5388,6 +5484,8 @@ export async function createAppServices(): Promise<AppServices> {
               sessionId: actorId,
               facts: { title: event.title, body: event.body },
               fallback: event.body,
+              // 重要性分配：低于门槛（默认 high）的提醒直接模板直投，不花润色调用
+              importance: event.importance,
             });
             submit(polished);
           })().catch((err) => {
@@ -5457,6 +5555,8 @@ export async function createAppServices(): Promise<AppServices> {
               verb: (p.evidence.find((e) => e.startsWith("keyword:")) ?? "").slice(8),
             },
             fallback: p.directText,
+            // 重要性分配：低于门槛（默认 high）的消息提醒直接模板直投
+            importance: p.importance,
           }).catch(() => p.directText!);
         }
         proactivePipeline.submitProposal(p);

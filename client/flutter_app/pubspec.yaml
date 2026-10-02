@@ -52,6 +52,9 @@ flutter:
     - assets/fonts/noto/NotoSansSC-Medium.otf
     - assets/fonts/noto/NotoSansSC-Bold.otf
     - assets/fonts/noto/LICENSE.txt
+    - assets/fonts/harmonyos/HarmonyOS_Sans_SC_Medium.ttf
+    - assets/fonts/harmonyos/HarmonyOS_Sans_SC_Bold.ttf
+    - assets/fonts/harmonyos/LICENSE.txt
     # 旅游行程地图模块（内嵌 MapLibre GL JS 单文件页面）
     # MapLibre 本地化副本（装载时内联进 html，WebView 零 CDN 等待）
     # emotion-ball 小球表情动画（自包含宿主页，来源 aora-bot，见目录内 ATTRIBUTION.md）

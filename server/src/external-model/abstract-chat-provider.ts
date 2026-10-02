@@ -245,9 +245,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         ? toolPlan?.visibleTools
         : toolPlan?.searchableTools;
     const toolSearchPrepared: ToolSearchPrepared | null = toolPlan
-      ? await prepareTools(toolPlan.visibleTools, searchableForTurn, {
-          userText: userTurn.text,
-        })
+      ? await prepareTools(toolPlan.visibleTools, searchableForTurn)
       : null;
 
     // 子类构建 sysContent + promptPlan（含 tools 信息，两个分支共用，避免 Kimi 式重复构建）

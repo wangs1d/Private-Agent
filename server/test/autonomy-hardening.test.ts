@@ -85,7 +85,7 @@ test("桥接后传感信号入板并产出规则事件（L1→L2 连通）", asy
     fabric.feed({ stream: "schedule", fingerprint: `s1:${at}`, payload: { nextRunAt: at + 10 * 60_000, nextTitle: "周会" } });
     fabric.feed({ stream: "goal", fingerprint: `g1:${at}`, payload: { goalId: "g1", title: "准备包", body: "好了", status: "ready" } });
     for (let i = 0; i < 3; i++) fabric.feed({ stream: "message", fingerprint: `m${i}:${at}`, payload: { sender: `c${i}` } });
-    await fabric.executor.tickActorWithServices("u1", {}, at);
+    await fabric.executor.tickActor("u1", at);
     const kinds = fabric.events.map((e) => e.kind);
     assert.ok(kinds.includes("meeting_soon"), `应有 meeting_soon，实际 ${kinds.join(",")}`);
     assert.ok(kinds.includes("goal_ready"), `应有 goal_ready，实际 ${kinds.join(",")}`);
@@ -102,7 +102,7 @@ test("无桥接时信号不入板，规则零事件（复现断线行为）", as
     const at = Date.now();
     fabric.feed({ stream: "schedule", fingerprint: `s1:${at}`, payload: { nextRunAt: at + 10 * 60_000, nextTitle: "周会" } });
     fabric.feed({ stream: "goal", fingerprint: `g1:${at}`, payload: { goalId: "g1", title: "x", status: "ready" } });
-    await fabric.executor.tickActorWithServices("u1", {}, at);
+    await fabric.executor.tickActor("u1", at);
     assert.equal(fabric.events.length, 0, "缺桥接时板是空的，规则不应有事件");
   } finally {
     rmSync(dir, { recursive: true, force: true });

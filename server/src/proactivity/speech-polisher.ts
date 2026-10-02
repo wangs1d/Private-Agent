@@ -7,9 +7,14 @@
 // 用量纪律（不乱调用 LLM）：
 //  - 只服务内容型 kind（message_watch / unread_burst / meeting_soon），
 //    晨间简报/心跳回顾等数据拼装场景仍走零 LLM 模板
+//  - 按重要性分配：低于 PROACTIVITY_PHRASE_MIN_IMPORTANCE（默认 high）的
+//    提案直接走模板——低优提醒不值得花一次润色调用（2026-10-01）
 //  - 每日调用熔断（PROACTIVITY_MAX_PHRASE_PER_DAY，默认 30）
 //  - 8s 超时 / 任何失败 / 输出异常 → 静默回退模板（表达永不因 LLM 失败而中断）
 //  - PROACTIVITY_PHRASE_LLM=0 一键关闭（全模板模式）
+//  - 模型钉位：PROACTIVITY_PHRASE_MODEL > PROACTIVITY_MODEL > provider 默认。
+//    未配 env 时静默跟主聊天模型走（当前 deepseek-flash 足够便宜）；主模型
+//    将来升级时务必显式配 PROACTIVITY_PHRASE_MODEL，防止润色层跟着变贵。
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { recordLlmUsageByChars } from "../services/llm-token-audit.js";
 
@@ -67,6 +72,15 @@ export type SpeechPolisherDeps = {
 
 export type PhraseStats = { enabled: boolean; callsToday: number; cap: number; lastFallback?: string };
 
+/** 重要度排序值（重要性分配闸的比较基准） */
+const IMPORTANCE_RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+
+/** 润色的重要性门槛（env PROACTIVITY_PHRASE_MIN_IMPORTANCE，默认 high） */
+function phraseMinImportance(): string {
+  const raw = process.env.PROACTIVITY_PHRASE_MIN_IMPORTANCE?.trim().toLowerCase();
+  return raw && IMPORTANCE_RANK[raw] !== undefined ? raw : "high";
+}
+
 export class SpeechPolisher {
   private readonly nowFn: () => number;
   private readonly timeoutMs: number;
@@ -102,17 +116,26 @@ export class SpeechPolisher {
   /**
    * 生成主动话术。任何失败/超时/输出异常都回退 fallback（调用方无需处理失败）。
    * @param sessionId 会话标识（provider 线程隔离；ephemeral 不落线程）
+   * @param importance 提案重要度：低于门槛（默认 high）直接走模板不花 LLM
    */
   async polish(input: {
     kind: string;
     sessionId: string;
     facts: Record<string, unknown>;
     fallback: string;
+    importance?: "critical" | "high" | "medium" | "low";
   }): Promise<string> {
     if (!this.isEnabled()) {
       this.lastFallback =
         process.env.PROACTIVITY_PHRASE_LLM === "0" ? "kill_switch" : "cap_or_no_provider";
       return input.fallback;
+    }
+    if (input.importance !== undefined) {
+      const rank = IMPORTANCE_RANK[input.importance] ?? 2;
+      if (rank < IMPORTANCE_RANK[phraseMinImportance()]) {
+        this.lastFallback = `low_importance(${input.importance})`;
+        return input.fallback;
+      }
     }
     const chat = this.deps.chat();
     if (!chat) return input.fallback;

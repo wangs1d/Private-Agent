@@ -211,7 +211,7 @@ test("顺嘴搭车：low 级 submitIntent 挂起不即时推送，takeTurnAsideF
   assert.equal(hub.takeTurnAsideForTurn(ACTOR), null, "每轮至多一条");
 });
 
-test("顺嘴搭车：medium/high 不拦，照旧即时推送", async () => {
+test("顺嘴搭车：medium 默认搭车挂起；扩面开关关闭时回退即时；high 恒即时", async () => {
   const { deps, signals } = makeDeps();
   const hub = new ProactivityHub({ ...deps, turnAsideQueue: new TurnAsideQueue() });
   hub.submitIntent({
@@ -224,7 +224,36 @@ test("顺嘴搭车：medium/high 不拦，照旧即时推送", async () => {
     source: "finance",
   });
   await flush();
-  assert.equal(signals.length, 1, "medium 走原即时路径");
+  assert.equal(signals.length, 0, "medium 默认搭车挂起（2026-10-01 扩面），不即时推");
+
+  process.env.PROACTIVITY_TURN_ASIDE_MEDIUM = "0";
+  try {
+    hub.submitIntent({
+      actorId: ACTOR,
+      kind: "budget_alert",
+      importance: "medium",
+      title: "预算提醒",
+      summary: "本月餐饮超预算",
+      mode: "speak",
+      source: "finance",
+    });
+    await flush();
+    assert.equal(signals.length, 1, "扩面关闭时 medium 回退即时推送");
+
+    hub.submitIntent({
+      actorId: ACTOR,
+      kind: "weather_alert",
+      importance: "high",
+      title: "暴雨预警",
+      summary: "今天有暴雨",
+      mode: "speak",
+      source: "weather",
+    });
+    await flush();
+    assert.equal(signals.length, 2, "high 恒即时，不受扩面影响");
+  } finally {
+    delete process.env.PROACTIVITY_TURN_ASIDE_MEDIUM;
+  }
 });
 
 test("顺嘴搭车：未注入队列时 low 照旧即时推送（回退兼容）", async () => {

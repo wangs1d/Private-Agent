@@ -7,7 +7,9 @@
 // 该不该说、怎么说由两端的既有闸门与主模型负责。
 //
 // 治理参数：
-//   - TTL：挂起 6 小时无人接话即作废（低价值消息不值得隔夜补刀）
+//   - TTL：挂起 6 小时无人接话——low 作废（低价值消息不值得隔夜补刀），
+//     medium 升级回正常通道（超时升级，2026-10-01 扩面）：等不到搭车就自己弹，
+//     不能因为用户没聊天就永远不说
 //   - 同 kind 最小间隔 4 小时（同一类关怀一天最多顺嘴一次）
 //   - 每 actor 队列上限 3 条（防堆积后一轮连塞多条）
 //   - 每轮最多取 1 条（回复尾巴只挂一个旁注）
@@ -16,7 +18,8 @@
 // 与 pending 确认/提醒等必达语义不同，不落盘）。
 //
 // 回滚开关：PROACTIVITY_TURN_ASIDE=0 全局关闭，两条挂起点（hub.speakFeedback /
-// proactive-outreach-executor）回退为即时推送的旧行为。
+// proactive-outreach-executor）回退为即时推送的旧行为；
+// PROACTIVITY_TURN_ASIDE_MEDIUM=0 收窄回 low-only（扩面回滚开关）。
 
 /** 挂起条目 TTL（毫秒） */
 const ASIDE_TTL_MS = 6 * 60 * 60_000;
@@ -24,6 +27,8 @@ const ASIDE_TTL_MS = 6 * 60 * 60_000;
 const ASIDE_KIND_GAP_MS = 4 * 60 * 60_000;
 /** 每 actor 挂起上限 */
 const ASIDE_QUEUE_CAP = 3;
+/** 过期扫描周期（medium 超时升级不能依赖用户恰好聊天触发 take） */
+const ASIDE_SWEEP_MS = 5 * 60_000;
 
 export type TurnAsideItem = {
   id: string;
@@ -32,6 +37,8 @@ export type TurnAsideItem = {
   title: string;
   /** 织入提示：给主模型的事实依据（来自意图 summary，确定性数据） */
   hint: string;
+  /** 挂起前的重要度（medium 过期升级回正常通道；low 过期直接作废） */
+  importance: "low" | "medium";
   createdAt: number;
   expiresAt: number;
 };
@@ -40,6 +47,12 @@ export type TurnAsideItem = {
 export function isTurnAsideEnabled(): boolean {
   const raw = process.env.PROACTIVITY_TURN_ASIDE?.trim().toLowerCase();
   return raw !== "0" && raw !== "false" && raw !== "off";
+}
+
+/** medium 扩面开关（默认开；PROACTIVITY_TURN_ASIDE_MEDIUM=0 收窄回 low-only） */
+export function isTurnAsideMediumEnabled(): boolean {
+  const raw = process.env.PROACTIVITY_TURN_ASIDE_MEDIUM?.trim().toLowerCase();
+  return !(raw === "0" || raw === "false" || raw === "off");
 }
 
 /** 旁注形态定稿（P2）：块正文给主模型的织入指令与事实 */
@@ -58,20 +71,30 @@ export class TurnAsideQueue {
   /** 最近一次实际织入（take 交付）的时间：actorId → kind → at */
   private readonly lastDelivered = new Map<string, Map<string, number>>();
   private readonly nowFn: () => number;
+  /** medium 条目过期升级回调（装配层接 hub 重投正常通道） */
+  private onExpire: ((item: TurnAsideItem) => void) | null = null;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts?: { nowFn?: () => number }) {
     this.nowFn = opts?.nowFn ?? Date.now;
   }
 
+  /** 升级回调晚接线（队列先于 hub 构造；hub 就绪后再挂） */
+  setOnExpire(fn: ((item: TurnAsideItem) => void) | null): void {
+    this.onExpire = fn;
+  }
+
   /**
-   * 挂起一条 low 主动意图。同 kind 已在挂起中、或距上次织入不足间隔时拒绝
-   * （返回 false，调用方回退原有即时推送路径——不静默吞消息）。
+   * 挂起一条 low/medium 主动意图。同 kind 已在挂起中、或距上次织入不足间隔时
+   * 拒绝（返回 false，调用方回退原有即时推送路径——不静默吞消息）。
    */
   tryEnqueue(intent: {
     actorId: string;
     kind: string;
     title: string;
     summary?: string;
+    /** 调用方可能传完整重要度联合（ProactiveIntent 直接透传）；仅 low/medium 落队列 */
+    importance?: "low" | "medium" | "high" | "critical";
   }): boolean {
     const now = this.nowFn();
     const list = this.queue.get(intent.actorId) ?? [];
@@ -84,11 +107,13 @@ export class TurnAsideQueue {
       kind: intent.kind,
       title: intent.title,
       hint: (intent.summary ?? "").slice(0, 160),
+      importance: intent.importance === "medium" ? "medium" : "low",
       createdAt: now,
       expiresAt: now + ASIDE_TTL_MS,
     });
     if (list.length > ASIDE_QUEUE_CAP) list.length = ASIDE_QUEUE_CAP;
     this.queue.set(intent.actorId, list);
+    this.ensureSweep();
     return true;
   }
 
@@ -100,10 +125,13 @@ export class TurnAsideQueue {
     const now = this.nowFn();
     const list = this.queue.get(actorId);
     if (!list || list.length === 0) return null;
-    // 越靠前越新，取第一条未过期的；过期的就地作废
+    // 越靠前越新，取第一条未过期的；过期的就地出队（medium 走升级回调）
     while (list.length > 0) {
       const item = list.shift()!;
-      if (now > item.expiresAt) continue;
+      if (now > item.expiresAt) {
+        this.expireItem(item);
+        continue;
+      }
       const byKind = this.lastDelivered.get(actorId) ?? new Map<string, number>();
       byKind.set(item.kind, now);
       this.lastDelivered.set(actorId, byKind);
@@ -118,16 +146,49 @@ export class TurnAsideQueue {
     return [...this.queue.values()].flat();
   }
 
-  /** 清理全部过期条目（诊断/测试用；takeForTurn 自身已惰性过期） */
+  /** 清理全部过期条目（诊断/测试用；low 丢弃、medium 升级回调） */
   prune(): number {
     const now = this.nowFn();
-    let removed = 0;
+    const expired: TurnAsideItem[] = [];
     for (const [actorId, list] of this.queue) {
-      const kept = list.filter((x) => now <= x.expiresAt);
-      removed += list.length - kept.length;
+      const kept = list.filter((x) => {
+        if (now <= x.expiresAt) return true;
+        expired.push(x);
+        return false;
+      });
       if (kept.length === 0) this.queue.delete(actorId);
       else this.queue.set(actorId, kept);
     }
-    return removed;
+    for (const item of expired) this.expireItem(item);
+    return expired.length;
+  }
+
+  /** 停机/测试：停掉过期扫描定时器 */
+  stop(): void {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
+  }
+
+  /** 过期收口：low 静默作废（原语义），medium 交升级回调（超时升级） */
+  private expireItem(item: TurnAsideItem): void {
+    if (item.importance !== "medium" || !this.onExpire) return;
+    try {
+      this.onExpire(item);
+    } catch (err) {
+      console.log(`[TurnAsideQueue] 过期升级回调失败（忽略）kind=${item.kind}: ${err}`);
+    }
+  }
+
+  /** 首次入队后启动过期扫描（medium 升级不能依赖用户恰好触发 take） */
+  private ensureSweep(): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => {
+      try {
+        this.prune();
+      } catch (err) {
+        console.log(`[TurnAsideQueue] 过期扫描失败（忽略）: ${err}`);
+      }
+    }, ASIDE_SWEEP_MS);
+    if (typeof this.sweepTimer.unref === "function") this.sweepTimer.unref();
   }
 }

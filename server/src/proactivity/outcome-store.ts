@@ -9,9 +9,19 @@ export type OutcomeRecord = {
   channel: string;
   outcome: ProactiveOutcome;
   at: number;
+  /** 话题键（2026-10-01：投递时从提案标题归一，话题级 dismiss 追踪用） */
+  topic?: string;
 };
 
 const POSITIVE_OUTCOMES = new Set<ProactiveOutcome>(["accepted", "replied", "snoozed"]);
+/** 已产生用户决策的 outcome（delivered/viewed 只是展示事实，不进时段画像） */
+const DECIDED_OUTCOMES = new Set<ProactiveOutcome>([
+  "accepted",
+  "replied",
+  "snoozed",
+  "dismissed",
+  "ignored",
+]);
 
 export class OutcomeStore {
   private records: OutcomeRecord[] = [];
@@ -60,5 +70,33 @@ export class OutcomeStore {
 
   recent(limit = 30): OutcomeRecord[] {
     return this.records.slice(-limit);
+  }
+
+  /**
+   * 按小时接受率画像（2026-10-01，零 LLM 统计）：近 withinMs 内该 actor 各时段
+   * 的已决策 outcome 接受率（Laplace 平滑，样本 ≥3 才值得信）。
+   * 只统计已决策记录（accepted/replied/snoozed 正、dismissed/ignored 负），
+   * delivered/viewed 不进分母。供 ArbiterV2 receptivity 与 rhythm 画像融合。
+   */
+  hourlyReceptivity(
+    actorId: string,
+    now = Date.now(),
+    withinMs = 30 * 24 * 60 * 60 * 1000,
+  ): Map<number, { rate: number; samples: number }> {
+    const buckets = new Map<number, { pos: number; total: number }>();
+    for (const r of this.records) {
+      if (r.actorId !== actorId || now - r.at > withinMs) continue;
+      if (!DECIDED_OUTCOMES.has(r.outcome)) continue;
+      const hour = new Date(r.at).getHours();
+      const b = buckets.get(hour) ?? { pos: 0, total: 0 };
+      b.total += 1;
+      if (POSITIVE_OUTCOMES.has(r.outcome)) b.pos += 1;
+      buckets.set(hour, b);
+    }
+    const out = new Map<number, { rate: number; samples: number }>();
+    for (const [hour, b] of buckets) {
+      out.set(hour, { rate: (b.pos + 1) / (b.total + 2), samples: b.total });
+    }
+    return out;
   }
 }

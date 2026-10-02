@@ -17,6 +17,13 @@ export type ToolCallTraceEntry = {
   ms: number;
   /** 是否经请求卡（tool_request）转正后才可达 */
   viaRequestCard?: boolean;
+  /**
+   * 工具到达通道（2026-10-01 S2 通道收敛观测）：
+   *   visible    = 首波可见（Core/束投影/域信号预载）
+   *   bridge     = 桥自身（tool_discover/tool_call 解析层）
+   *   deferred   = 经桥按名/检索调回的延迟工具
+   */
+  acquisition?: "visible" | "bridge" | "deferred";
 };
 
 export type TurnTraceRecord = {

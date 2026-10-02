@@ -100,3 +100,41 @@ test("polish: kill switch 与无 provider 直接模板（零调用）", async ()
   assert.equal(await polisher2.polish({ kind: "message_watch", sessionId: "u1", facts: {}, fallback: FALLBACK }), FALLBACK);
   assert.equal(polisher2.stats().enabled, false);
 });
+
+test("polish: 重要性分配——低于门槛直接模板不花调用，高优照常润色", async () => {
+  const chat = mockChat("李雷说会议推迟，要我帮你改到周四吗？");
+  const polisher = makePolisher(chat);
+  // low（unread_burst 默认档）→ 模板直出，零调用
+  const low = await polisher.polish({
+    kind: "unread_burst",
+    sessionId: "u1",
+    facts: {},
+    fallback: FALLBACK,
+    importance: "low",
+  });
+  assert.equal(low, FALLBACK);
+  assert.equal(chat.calls, 0);
+  assert.equal(polisher.stats().lastFallback, "low_importance(low)");
+  // high（message_watch 默认档）→ 正常润色
+  const high = await polisher.polish({
+    kind: "message_watch",
+    sessionId: "u1",
+    facts: { sender: "李雷" },
+    fallback: FALLBACK,
+    importance: "high",
+  });
+  assert.equal(chat.calls, 1);
+  assert.ok(high.includes("李雷"));
+  // 门槛可放宽到 medium（env）
+  process.env.PROACTIVITY_PHRASE_MIN_IMPORTANCE = "medium";
+  const med = await polisher.polish({
+    kind: "unread_burst",
+    sessionId: "u1",
+    facts: {},
+    fallback: FALLBACK,
+    importance: "medium",
+  });
+  delete process.env.PROACTIVITY_PHRASE_MIN_IMPORTANCE;
+  assert.equal(chat.calls, 2, "门槛放宽后 medium 也润色");
+  assert.notEqual(med, FALLBACK);
+});

@@ -114,6 +114,9 @@ class DynamicIslandWindow {
   void SetVoiceTalkMode(bool enabled);
   void StartAttention(const std::string& title, const std::string& trailing);
   void SetDpiScale(double scale);
+  /// Dart 看门狗兜底：直推一次全屏抑制检查（原生 WM_TIMER 心跳失效时，
+  /// 退出全屏后岛卡在隐藏态的恢复全靠这条）。
+  void CheckSuppression();
   void SetEventCallback(EventCallback cb) { event_callback_ = std::move(cb); }
 
  private:

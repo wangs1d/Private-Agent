@@ -14,10 +14,11 @@ function mergedBridgeTools(deferredCount: number): ChatCompletionTool[] {
       function: {
         name: "tool_discover",
         description:
-          `发现并加载延迟工具（合并 search+describe）。${countHint} 用法：① 仅 query — 搜索，top-1 默认带完整 schema；② 仅 name — 直接拉取该工具 schema；③ query+name — 先搜索再校验 name。随后用 tool_call 执行。`,
+          `发现并加载延迟工具（合并 search+describe）。${countHint} 用法：① 仅 domain — 确定性拉取该能力域全部工具（见系统提示【能力域目录】）；② 仅 query — 语义检索；③ 仅 name — 直接拉取该工具 schema；④ query+name — 先搜索再校验 name。随后用 tool_call 执行。`,
         parameters: {
           type: "object",
           properties: {
+            domain: { type: "string", description: "能力域名（如 travel/search/smart_home），拉取该域全部工具" },
             query: { type: "string", description: "自然语言或关键词" },
             name: { type: "string", description: "已知注册名时直接加载 schema，可省略 query" },
             limit: { type: "integer", description: "搜索条数上限，默认 5" },

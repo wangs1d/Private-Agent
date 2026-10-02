@@ -9,6 +9,7 @@ import {
   InterestWatcher,
   normalizeFp,
   interestMatches,
+  cosineSimilarity,
   type InterestHit,
 } from "../src/proactivity/interest-watcher.js";
 
@@ -192,4 +193,110 @@ test("applyDecay：30 天未提及降权（enabled=false），60 天移除", asy
   // 降权后不参与推送，但 touchInterest 可重新激活
   await watcher.touchInterest("u1", "旧兴趣A");
   assert.equal(watcher.listInterests("u1")[0].enabled, true);
+});
+// ─── 语义兜底匹配（2026-10-01）───
+
+/** 维度=3 的玩具嵌入：把文本哈希进固定平面，同义对人工给高相似 */
+function toyEmbed(texts: string[]): number[][] {
+  return texts.map((t) => {
+    // 「苹果手机」与「iPhone 17 发布」人工映射到相近向量；其余随机但不稳也不影响断言
+    if (t.includes("苹果手机")) return [0.9, 0.1, 0.2];
+    if (/iphone\s*17/i.test(t)) return [0.85, 0.15, 0.25];
+    if (t.includes("刘浩存")) return [0.1, 0.95, 0.1];
+    if (t.includes("新电影定档")) return [0.15, 0.9, 0.15];
+    return [0.1, 0.1, 0.99];
+  });
+}
+
+function makeSemanticWatcher(opts: {
+  hits: InterestHit[] | (() => InterestHit[]);
+  onHit?: (actorId: string, name: string, title: string) => void;
+  embed?: (texts: string[]) => Promise<number[][] | null>;
+  minPushIntervalMs?: number;
+}) {
+  const watcher = new InterestWatcher({
+    fetchHot: async () => (typeof opts.hits === "function" ? opts.hits() : opts.hits),
+    embed: opts.embed ?? (async (texts) => toyEmbed(texts)),
+    minPushIntervalMs: opts.minPushIntervalMs ?? 0,
+    persistPath: join(tmpdir(), `iw-sem-${Date.now()}-${Math.random().toString(36).slice(2)}.json`),
+  });
+  if (opts.onHit) {
+    watcher.setOnHit((actorId, interest, hit) => opts.onHit!(actorId, interest.name, hit.title));
+  }
+  return watcher;
+}
+
+test("语义兜底：字面未命中的换说法热点经 embedding 命中", async () => {
+  const pushed: string[] = [];
+  const watcher = makeSemanticWatcher({
+    hits: [{ title: "iPhone 17 全系发布", platform: "微博" }],
+    onHit: (_a, name, title) => pushed.push(`${name}→${title}`),
+  });
+  await watcher.addInterest("u1", "苹果手机", "brand");
+  // 字面包含不命中（标题无「苹果手机」），但语义相似度高
+  const n = await watcher.checkAll();
+  assert.equal(n, 1, "语义兜底命中");
+  assert.ok(pushed[0]!.includes("iPhone 17"), pushed[0]);
+});
+
+test("语义兜底：相似度低于阈值不推（宁缺勿滥）", async () => {
+  const pushed: string[] = [];
+  const watcher = makeSemanticWatcher({
+    hits: [{ title: "某地迎来大范围降雨", platform: "百度" }],
+    onHit: (_a, name, title) => pushed.push(`${name}→${title}`),
+  });
+  await watcher.addInterest("u1", "苹果手机", "brand");
+  const n = await watcher.checkAll();
+  assert.equal(n, 0, "不相关向量（[0.1,0.1,0.99]，实测 cos≈0.32）低于阈值不推");
+  assert.equal(pushed.length, 0);
+});
+
+test("语义兜底：embed 返回 null（引擎不可用）退回纯字面，静默不推", async () => {
+  const watcher = makeSemanticWatcher({
+    hits: [{ title: "iPhone 17 全系发布", platform: "微博" }],
+    embed: async () => null,
+  });
+  await watcher.addInterest("u1", "苹果手机", "brand");
+  const n = await watcher.checkAll();
+  assert.equal(n, 0);
+});
+
+test("语义兜底：INTEREST_SEMANTIC_MATCH=0 一键关闭", async () => {
+  process.env.INTEREST_SEMANTIC_MATCH = "0";
+  try {
+    const pushed: string[] = [];
+    const watcher = makeSemanticWatcher({
+      hits: [{ title: "iPhone 17 全系发布", platform: "微博" }],
+      onHit: (_a, name, title) => pushed.push(`${name}→${title}`),
+    });
+    await watcher.addInterest("u1", "苹果手机", "brand");
+    assert.equal(await watcher.checkAll(), 0);
+    assert.equal(pushed.length, 0);
+  } finally {
+    delete process.env.INTEREST_SEMANTIC_MATCH;
+  }
+});
+
+test("语义兜底：与字面命中共用指纹去重/间隔闸", async () => {
+  let ts = 1_000_000;
+  let current: InterestHit[] = [{ title: "iPhone 17 全系发布", platform: "微博" }];
+  const watcher = makeSemanticWatcher({
+    hits: () => current,
+    minPushIntervalMs: 2 * HOUR,
+  });
+  watcher.setOnHit(() => {});
+  await watcher.addInterest("u1", "苹果手机", "brand");
+  assert.equal(await watcher.checkAll(ts), 1, "首轮语义命中一条");
+  assert.equal(await watcher.checkAll(ts + 60_000), 0, "间隔内同指纹不推");
+  current = [{ title: "iPhone 17 Pro 曝光", platform: "知乎" }];
+  assert.equal(await watcher.checkAll(ts + 60_000), 0, "间隔内换了新热点也不推（间隔闸优先）");
+  assert.equal(await watcher.checkAll(ts + 3 * HOUR), 1, "间隔过后新热点（指纹不同）可再推");
+  assert.equal(await watcher.checkAll(ts + 3 * HOUR + 60_000), 0, "同指纹不重复推");
+});
+
+test("cosineSimilarity：正交为零、同向为一、未归一向量正确除模", () => {
+  assert.ok(Math.abs(cosineSimilarity([1, 0], [0, 1])) < 1e-9);
+  assert.ok(Math.abs(cosineSimilarity([2, 0], [5, 0]) - 1) < 1e-9);
+  assert.ok(Math.abs(cosineSimilarity([1, 1], [1, 0]) - Math.SQRT1_2) < 1e-9);
+  assert.equal(cosineSimilarity([1], [1, 2]), 0, "维度不匹配按 0 处理");
 });

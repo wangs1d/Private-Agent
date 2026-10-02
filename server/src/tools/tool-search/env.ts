@@ -118,7 +118,6 @@ function buildToolSearchConfig() {
     /** N1/N2/N3 各自独立开关（off = 注入点直接不挂载，回滚用） */
     neuralEmbedEnabled: parseNeuralFeatureMode(process.env.AGENT_NEURAL_EMBED_ENABLED),
     neuralRerankEnabled: parseNeuralFeatureMode(process.env.AGENT_NEURAL_RERANK_ENABLED),
-    neuralIntentEnabled: parseNeuralFeatureMode(process.env.AGENT_NEURAL_INTENT_ENABLED),
     /** 各端点独立超时预算（方案 §1/§2：embed 300ms、rerank 400ms、intent 300ms） */
     neuralEmbedTimeoutMs: clampInt(process.env.AGENT_NEURAL_EMBED_TIMEOUT_MS, 300, 50, 5_000),
     /**
@@ -132,7 +131,6 @@ function buildToolSearchConfig() {
      * （预算是保险丝不是目标；换 GPU/更小模型后可调回）。
      */
     neuralRerankTimeoutMs: clampInt(process.env.AGENT_NEURAL_RERANK_TIMEOUT_MS, 600, 50, 5_000),
-    neuralIntentTimeoutMs: clampInt(process.env.AGENT_NEURAL_INTENT_TIMEOUT_MS, 300, 50, 5_000),
     /** 熔断：连续失败 N 次开闸、冷却 M ms（沿用 router-endpoint-guard 数值经验） */
     neuralBreakerThreshold: clampInt(process.env.AGENT_NEURAL_BREAKER_THRESHOLD, 2, 1, 10),
     neuralBreakerCooldownMs: clampInt(process.env.AGENT_NEURAL_BREAKER_COOLDOWN_MS, 60_000, 1_000, 600_000),

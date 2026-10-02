@@ -7,6 +7,9 @@ import {
   reinforceAdaptiveTopPForQuery,
   type AdaptiveDeferredToolSearchMatch,
 } from "./adaptive-catalog.js";
+import { slimJsonSchema, firstSentence } from "./schema-slim.js";
+import { DOMAIN_REGISTRY, domainDefByName, domainsForTool } from "./tool-category.js";
+import { getAdaptiveSearchRouting } from "./adaptive-catalog.js";
 import { getToolSearchConfig } from "./env.js";
 import { getQueryEmbedding, getQueryEmbeddingBounded, peekQueryEmbedding } from "./tool-embedding.js";
 import { sharedHistoryStore, type HistoryScoreStore } from "./retrieval/history-score.js";
@@ -18,6 +21,22 @@ import { loadFeedbackState, saveFeedbackState } from "./feedback-state-persisten
 import { isRegisteredSkillChatToolName } from "../../skills/skill-openai-bridge.js";
 
 const historyStore: HistoryScoreStore = sharedHistoryStore;
+
+/**
+ * 常驻（车道可见）工具的描述信息，供 discover/describe 回退查询。
+ * 由工具循环在每轮从当轮可见 apiTools 构建：registry 名 + LLM 名双字段，
+ * 两种写法都能命中（模型有时混用点号/下划线）。
+ */
+export type ResidentToolInfo = {
+  /** 注册表名（点号形态，如 agent.send_to_peer） */
+  name: string;
+  /** LLM 可见名（下划线形态），无别名时与 name 相同 */
+  alias: string;
+  description: string;
+  parameters?: Record<string, unknown>;
+};
+
+const RESIDENT_HINT = "常驻工具：无需 discover 加载 schema，直接 tool_call 即可执行";
 
 const ADAPTIVE_AGENT_SEARCH_PATH = [
   "intent_router",
@@ -59,12 +78,13 @@ export async function executeToolSearchBridge(
   bridgeName: string,
   args: Record<string, unknown>,
   catalog: DeferredToolCatalog,
+  residentTools?: ResidentToolInfo[],
 ): Promise<ToolSearchBridgeResult> {
   const normalized = normalizeBridgeName(bridgeName);
   const cfg = getToolSearchConfig();
 
   if (normalized === "tool_discover") {
-    return executeToolDiscover(args, catalog, cfg);
+    return executeToolDiscover(args, catalog, cfg, residentTools);
   }
 
   if (normalized === "tool_search") {
@@ -98,6 +118,10 @@ export async function executeToolSearchBridge(
     }
     const schema = describeDeferredTool(catalog, name);
     if (!schema) {
+      const resident = describeResidentTool(residentTools, name);
+      if (resident) {
+        return { kind: "describe", ok: true, result: { ...resident, resident: true, hint: RESIDENT_HINT } };
+      }
       return { kind: "describe", ok: false, result: { error: `未找到延迟工具: ${name}` } };
     }
     return { kind: "describe", ok: true, result: schema };
@@ -168,6 +192,11 @@ function resolveSearchLimit(
     : cfg.searchDefaultLimit;
 }
 
+/** 域拉取：单次返回的族规模上限（族内注册表序+目录序确定性排列）。 */
+const DOMAIN_PULL_LIMIT = 12;
+const DISCOVER_DOMAIN_DESC_CHARS = 90;
+const DISCOVER_SCHEMA_TOP_N = 3;
+
 function resolveTenantArg(args: Record<string, unknown>): string {
   return String(args.tenant_id ?? args.tenantId ?? "default");
 }
@@ -176,25 +205,105 @@ function resolveContextHashArg(args: Record<string, unknown>): string {
   return String(args.agent_context_hash ?? args.context_hash ?? "tool-search-bridge");
 }
 
+/**
+ * 常驻工具描述回退：延迟目录查不到时，按注册名/LLM 名双口径匹配当轮可见工具。
+ * 未传入 residentTools（理论不会发生）或未命中返回 null。
+ */
+function describeResidentTool(
+  residentTools: ResidentToolInfo[] | undefined,
+  name: string,
+): { name: string; description: string; parameters: Record<string, unknown> } | null {
+  if (!residentTools?.length) return null;
+  const target = name.trim();
+  if (!target) return null;
+  const hit = residentTools.find((t) => t.name === target || t.alias === target);
+  if (!hit) return null;
+  return {
+    name: hit.name,
+    description: hit.description,
+    parameters: hit.parameters ?? { type: "object", properties: {} },
+  };
+}
+
 function executeToolDiscover(
   args: Record<string, unknown>,
   catalog: DeferredToolCatalog,
   cfg: ReturnType<typeof getToolSearchConfig>,
+  residentTools?: ResidentToolInfo[],
 ): Promise<ToolSearchBridgeResult> {
   const name = String(args.name ?? "").trim();
   const query = String(args.query ?? "").trim();
+  const domain = String(args.domain ?? "").trim();
 
+  if (domain) {
+    return executeToolDiscoverByDomain(catalog, domain);
+  }
   if (name) {
-    return executeToolDiscoverByName(args, catalog, cfg, name, query);
+    return executeToolDiscoverByName(args, catalog, cfg, name, query, residentTools);
   }
   if (!query) {
     return Promise.resolve({
       kind: "discover",
       ok: false,
-      result: { error: "请提供 query（搜索）或 name（直接加载 schema）" },
+      result: { error: "请提供 domain（按域拉取）、query（搜索）或 name（直接加载 schema）" },
     });
   }
   return executeToolDiscoverByQuery(args, catalog, cfg, query);
+}
+
+/**
+ * 按域确定性拉取（2026-10-01 S1 主通道）：域全族瘦身视图，注册表序+目录序
+ * （同目录恒同输出字节）。前 3 名附瘦身参数 schema（与 query 通道同口径），
+ * 其余 name+描述+参数名——模型按名直呼或继续 name 模式拉单个 schema。
+ * 未知域名返回可用域清单（自纠错，不静默失败）。
+ */
+function executeToolDiscoverByDomain(
+  catalog: DeferredToolCatalog,
+  domain: string,
+): Promise<ToolSearchBridgeResult> {
+  const def = domainDefByName(domain);
+  if (!def) {
+    const available = DOMAIN_REGISTRY.filter((d) => d.name !== "misc")
+      .map((d) => d.name)
+      .join("、");
+    return Promise.resolve({
+      kind: "discover",
+      ok: false,
+      result: { error: `未知能力域: ${domain}`, available_domains: available },
+    });
+  }
+  const members = catalog.entries
+    .map((e) => e.registryName)
+    .filter((n) => domainsForTool(n).includes(domain));
+  const wire = members.slice(0, DOMAIN_PULL_LIMIT).map((memberName, rank) => {
+    const entry = catalog.byName.get(memberName);
+    const fn = entry && entry.tool.type === "function" ? entry.tool.function : undefined;
+    const match: Record<string, unknown> = {
+      name: memberName,
+      description: firstSentence(fn?.description ?? "", DISCOVER_DOMAIN_DESC_CHARS),
+      parameterNames: entry?.parameterNames ?? [],
+      requiredParameters: entry?.requiredParameters ?? [],
+    };
+    if (rank < DISCOVER_SCHEMA_TOP_N && fn?.parameters) {
+      match.parameters = slimJsonSchema(fn.parameters);
+    }
+    return match;
+  });
+  return Promise.resolve({
+    kind: "discover",
+    ok: true,
+    result: {
+      mode: "domain",
+      domain,
+      summary: def.summary,
+      count: members.length,
+      matches: wire,
+      ...(members.length > DOMAIN_PULL_LIMIT
+        ? { more: members.length - DOMAIN_PULL_LIMIT, hint_more: "用 name 模式拉取未列出的工具 schema" }
+        : {}),
+      hint: "matches 内工具可直接 tool_call 按名调用；前 3 名已附参数 schema，其余需要时用 name 模式补拉。",
+    },
+  });
 }
 
 async function executeToolDiscoverByName(
@@ -203,9 +312,24 @@ async function executeToolDiscoverByName(
   cfg: ReturnType<typeof getToolSearchConfig>,
   name: string,
   query: string,
+  residentTools?: ResidentToolInfo[],
 ): Promise<ToolSearchBridgeResult> {
   const schema = describeDeferredTool(catalog, name);
   if (!schema) {
+    // 延迟目录未命中时回退查常驻工具：车道常驻（chat/task core）本就直接可调，
+    // 不给 schema 描述会把模型逼进「搜不到=不存在」的死胡同（真机实证）。
+    const resident = describeResidentTool(residentTools, name);
+    if (resident) {
+      const result: Record<string, unknown> = { mode: "describe", tool: resident, resident: true, hint: RESIDENT_HINT };
+      if (query) {
+        const limit = resolveSearchLimit(args.limit, cfg);
+        result.search = await searchAdaptiveAgentPath(catalog, query, limit, {
+          tenantId: resolveTenantArg(args),
+          agentContextHash: resolveContextHashArg(args),
+        });
+      }
+      return { kind: "discover", ok: true, result };
+    }
     return { kind: "discover", ok: false, result: { error: `未找到延迟工具: ${name}` } };
   }
   const result: Record<string, unknown> = { mode: "describe", tool: schema };
@@ -244,11 +368,10 @@ async function executeToolDiscoverByQuery(
       matches = [
         {
           ...matches[0],
-          parameters:
-            (topSchema.parameters as Record<string, unknown> | undefined) ?? {
-              type: "object",
-              properties: {},
-            },
+          parameters: (slimJsonSchema(topSchema.parameters) as Record<string, unknown>) ?? {
+            type: "object",
+            properties: {},
+          },
         },
         ...matches.slice(1),
       ];
@@ -257,14 +380,24 @@ async function executeToolDiscoverByQuery(
 
   // 高置信只读 top-1 预执行标记：省 1 轮 tool_call round trip
   // 条件：top-1 置信度 >= 0.85、无必需参数、工具名不涉写操作
+  const routing = getAdaptiveSearchRouting(catalog);
   const preExecution =
     matches.length > 0 &&
-    matches[0].routing.confidence >= 0.85 &&
+    (routing?.confidence ?? 0) >= 0.85 &&
     matches[0].requiredParameters.length === 0 &&
     !isWriteToolName(matches[0].name)
       ? { tool_name: matches[0].name, inferred_args: {} as Record<string, unknown>, status: "ready" as const }
       : undefined;
-
+  // LLM 视图剥离：resource_type/domain/capability 是内部诊断字段（每条重复展开
+  // 数十至数百字符），模型选择工具用不到——name/description/score/参数骨架已足够。
+  const wireMatches = matches.map((m) => ({
+    name: m.name,
+    description: m.description,
+    score: m.score,
+    ...(m.parameterNames.length > 0 ? { parameterNames: m.parameterNames } : {}),
+    ...(m.requiredParameters.length > 0 ? { requiredParameters: m.requiredParameters } : {}),
+    ...(m.parameters != null ? { parameters: m.parameters } : {}),
+  }));
   return {
     kind: "discover",
     ok: true,
@@ -272,9 +405,19 @@ async function executeToolDiscoverByQuery(
       mode: "search",
       query,
       count: matches.length,
-      matches,
+      // hint/routing 前置：载荷超压缩预算时截断从尾部发生，先保指导语与评分视图
+      hint: "前 3 名已附瘦身参数 schema：对比后选最贴合用户诉求的一个直接 tool_call；若都不贴合，换更具体的 query 再 discover。",
+      ...(routing
+        ? {
+            routing: {
+              confidence: routing.confidence,
+              top_p: routing.top_p,
+              primary_capability: routing.primary_capability,
+            },
+          }
+        : {}),
       search_path: ADAPTIVE_AGENT_SEARCH_PATH,
-      hint: "首选 matches[0]；已含 schema 时可直接 tool_call。",
+      matches: wireMatches,
       ...(preExecution ? { pre_execution: preExecution } : {}),
     },
   };
@@ -325,53 +468,7 @@ function recordSearchContext(
   ctx.lastSearchMatches = matches.slice(0, 5).map((m) => m.name);
 }
 
-// ---- 动态高频工具晋升（高频工具自动晋升 core，省 2 轮 LLM round trip） ----
-
-const _toolCallFrequency = new Map<string, number>();
-const PROMOTE_THRESHOLD = 3; // 累计调用 >= 3 次自动晋升 core
-const PROMOTION_STATE_KEY = "promotion-counts";
-let promotionHydrated = false;
-let promotionSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** 记录一次工具调用（用于晋升统计）。计数经 redis 持久化（可选），重启不丢晋升进度。 */
-export function recordToolCallForPromotion(toolName: string): void {
-  if (!promotionHydrated) {
-    promotionHydrated = true;
-    void loadFeedbackState<[string, number][]>(PROMOTION_STATE_KEY).then((restored) => {
-      if (!restored) return;
-      for (const [name, count] of restored) {
-        const existing = _toolCallFrequency.get(name) ?? 0;
-        if (count > existing) _toolCallFrequency.set(name, count);
-      }
-    });
-  }
-  const count = (_toolCallFrequency.get(toolName) ?? 0) + 1;
-  _toolCallFrequency.set(toolName, count);
-  // 节流持久化：10s 窗口内合并写（晋升计数是低频热数据，无需每次落盘）
-  if (promotionSaveTimer) return;
-  promotionSaveTimer = setTimeout(() => {
-    promotionSaveTimer = null;
-    saveFeedbackState(PROMOTION_STATE_KEY, [..._toolCallFrequency.entries()]);
-  }, 10_000);
-  promotionSaveTimer.unref?.();
-}
-
-/** 获取当前应晋升到 core 的 deferred 工具名列表。 */
-export function getPromotableCoreTools(): string[] {
-  return [..._toolCallFrequency.entries()]
-    .filter(([, count]) => count >= PROMOTE_THRESHOLD)
-    .map(([name]) => name);
-}
-
-/** 清空晋升统计（测试/重置用）。 */
-export function clearPromotionStats(): void {
-  _toolCallFrequency.clear();
-}
-
 function recordToolCallFeedback(catalog: DeferredToolCatalog, chosen: string): void {
-  // 记录工具调用频率（动态晋升用）
-  recordToolCallForPromotion(chosen);
-
   const ctx = catalog as DeferredToolCatalog & {
     lastSearchQuery?: string;
     lastSearchMatches?: string[];
@@ -488,20 +585,11 @@ async function searchWithAdaptiveFallback(
     return fallback.map((match) => {
       const resourceType = inferFallbackResourceType(match.name);
       const domain = inferFallbackDomain(match.name, resourceType);
-      const domainGroups = inferFallbackDomainGroups(domain, resourceType);
       return {
         ...match,
         resource_type: resourceType,
         domain,
         capability: domain.map((item) => `${item}.general`),
-        routing: {
-          intent: query,
-          confidence: 0.5,
-          top_p: 0.95,
-          domain_groups: domainGroups,
-          domain_candidates: domain,
-          primary_capability: `${domain[0] ?? "misc"}.general`,
-        },
       } satisfies AdaptiveDeferredToolSearchMatch;
     });
   }
@@ -514,46 +602,6 @@ function inferFallbackDomain(name: string, resourceType: ResourceType): string[]
   return [name.split(/[._-]/)[0]?.toLowerCase() || "misc"];
 }
 
-function inferFallbackDomainGroups(domains: string[], resourceType: ResourceType): string[] {
-  if (resourceType === ResourceType.McpServer) return ["integration"];
-  if (resourceType === ResourceType.Skill) return ["productivity"];
-  const first = domains[0] ?? "general";
-  switch (first) {
-    case "search":
-    case "browser":
-      return ["information"];
-    case "calendar":
-    case "reminder":
-    case "self":
-      return ["productivity"];
-    case "phone":
-    case "agent":
-      return ["communication"];
-    case "world":
-    case "aip":
-      return ["coordination"];
-    case "wallet":
-    case "budget":
-    case "shopping":
-      return ["commerce"];
-    case "desktop":
-    case "embodiment":
-    case "device":
-    case "smart_home":
-    case "vision":
-      return ["execution"];
-    case "weather":
-    case "clock":
-      return ["signals"];
-    default:
-      return ["general"];
-  }
-}
-
-/**
- * 判断工具名是否涉及写操作（预执行跳过）。
- * 与 adaptive-catalog.ts / reranking-pipeline.ts 的 isLikelyWriteResource 逻辑一致。
- */
 function isWriteToolName(name: string): boolean {
   return /(?:^|[._-])(?:accept|call|comment|create|delete|deliver|dispatch|execute|like|pay|post|purchase|reject|remove|respond|run|send|submit|transfer|update|upload|write)(?:[._-]|$)/.test(name);
 }

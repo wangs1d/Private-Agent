@@ -29,6 +29,8 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
   bool _serverOffline = false;
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _allRequests = [];
+  // 当前选中的好友（双面板形态：选中后面板内切换到聊天视图，不再全屏路由）
+  Map<String, dynamic>? _selectedFriend;
   // 站内信（平台→用户收件箱；服务端 InboxService 落盘，在线时经 WS 实时提醒）
   final InboxApi _inboxApi = InboxApi();
   List<InboxMessageItem> _inboxMessages = [];
@@ -62,6 +64,19 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
     // 收到新站内信：刷新列表（全局提醒由 main.dart 的 inbox.message 处理）
     if (type == "inbox.message") {
       _loadInbox();
+    }
+    // 收到好友的站内消息（agent.peer_message）：若在列表里则直接切到该聊天
+    if (type == "agent.peer_message") {
+      final payload = event["payload"] as Map<String, dynamic>? ?? const {};
+      final fromSessionId = payload["fromSessionId"] as String? ?? "";
+      final friend = _friends.firstWhere(
+        (f) => (f["friendActorId"] as String? ?? "") == fromSessionId,
+        orElse: () => const {},
+      );
+      if (friend.isNotEmpty && mounted) {
+        setState(() => _selectedFriend = friend);
+      }
+      if (friend.isNotEmpty) _loadData();
     }
   }
 
@@ -267,6 +282,22 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
+    // 双面板形态：选中好友后面板内切换到聊天视图（返回键回列表），不再全屏路由
+    final selected = _selectedFriend;
+    if (selected != null) {
+      final displayName =
+          selected["displayName"] as String? ?? selected["friendActorId"] as String;
+      return Container(
+        color: theme.colorScheme.surface,
+        child: FriendChatPage(
+          api: widget.api,
+          friendActorId: selected["friendActorId"] as String,
+          friendName: displayName,
+          onBack: () => setState(() => _selectedFriend = null),
+        ),
+      );
+    }
+
     return Container(
       color: theme.colorScheme.surface,
       child: Column(
@@ -354,6 +385,7 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
           final email = friend["email"] as String?;
 
           return ListTile(
+            selected: _selectedFriend?["friendActorId"] == friend["friendActorId"],
             leading: CircleAvatar(
               backgroundColor: theme.colorScheme.primaryContainer,
               child: Text(
@@ -365,21 +397,8 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
             subtitle: email != null && email.isNotEmpty
                 ? Text(email, style: theme.textTheme.bodySmall)
                 : null,
-            trailing: IconButton(
-              icon: const Icon(Icons.chat_bubble_outline),
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => FriendChatPage(
-                      api: widget.api,
-                      friendActorId: friend["friendActorId"] as String,
-                      friendName: displayName,
-                    ),
-                  ),
-                );
-              },
-            ),
+            // 整行即点选目标：面板内切到该好友的聊天视图
+            onTap: () => setState(() => _selectedFriend = friend),
           );
         },
       ),

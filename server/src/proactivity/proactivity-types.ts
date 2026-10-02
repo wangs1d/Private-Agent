@@ -68,7 +68,8 @@ export type ProactiveIntent = {
     | "relationship"  // 人情关系（重要日子扫描/祝福草稿）
     | "health"        // 健康关怀（节律提醒等）
     | "location"      // 位置场景（围栏事件 / 到达常去地点）
-    | "confirmation_expiry"; // ask_first 确认超时未回复的作废告知
+    | "confirmation_expiry" // ask_first 确认超时未回复的作废告知
+    | "turn_aside_expiry"; // 顺嘴搭车 6h 未上车，过期升级重投正常通道（防再搭车回环）
 };
 
 // ─── 通用主动性层（感知 → LLM 自主决策 → 通用执行） ───

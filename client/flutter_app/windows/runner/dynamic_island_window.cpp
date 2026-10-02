@@ -522,11 +522,18 @@ void DynamicIslandWindow::UpdateAnimations() {
   if (window_handle_ != nullptr) Render();
 }
 
+// Dart 看门狗兜底入口：直推一次抑制检查。本机实证（2026-10-01）：岛在
+// 全屏游戏期间创建后，原生 WM_TIMER 心跳会永久停摆（75 分钟零心跳），
+// 退出全屏后恢复分支再无人执行——岛卡死隐藏。看门狗每 15s 直推本方法，
+// 保证退出全屏 ≤15s 内必然恢复。
+void DynamicIslandWindow::CheckSuppression() {
+  UpdateFullscreenSuppression();
+}
+
 // 由 kSuppressTimerId 常开心跳驱动（与动画心跳无关，窗口存活期间一直跑）。
 // 注意：窗口定时器随窗口同死——窗口被销毁后本心跳也随之消失，
 // 「窗口失活后的重建」由 Dart 侧看门狗（周期 ping）负责，不在这里。
-void DynamicIslandWindow::UpdateFullscreenSuppression() {
-  QUERY_USER_NOTIFICATION_STATE state;
+void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATION_STATE state;
   if (FAILED(SHQueryUserNotificationState(&state))) return;
   const bool busy = state == QUNS_RUNNING_D3D_FULL_SCREEN ||
                     state == QUNS_PRESENTATION_MODE || state == QUNS_BUSY;
@@ -912,8 +919,8 @@ void DynamicIslandWindow::Render() {
                 ? attention_trailing_
                 : Utf8ToWide(entry_.trailing);
         Gdiplus::Font icon_font(mem_dc, MakeIslandGlyphFont(S(15)));
-        Gdiplus::Font title_font(mem_dc, MakeIslandFont(S(17), 600));
-        Gdiplus::Font trail_font(mem_dc, MakeIslandFont(S(14), 600));
+        Gdiplus::Font title_font(mem_dc, MakeIslandFont(S(18), 650));
+        Gdiplus::Font trail_font(mem_dc, MakeIslandFont(S(15), 650));
 
         // 声明档宽下排版：尾注封顶 40%，标题吃剩余，超档截断加省略号。
         Gdiplus::RectF m_icon, m_title, m_trail;
@@ -963,7 +970,7 @@ void DynamicIslandWindow::Render() {
                          10.0f * s);
             } else {
               Gdiplus::SolidBrush icon_brush(
-                  Gdiplus::Color(ea * 215 / 255, 255, 255, 255));
+                  Gdiplus::Color(ea * 230 / 255, 255, 255, 255));
             g.DrawString(glyph, -1, &icon_font,
                          Gdiplus::PointF(x, header_cy - m_icon.Height / 2.0f),
                          &icon_brush);
@@ -986,10 +993,9 @@ void DynamicIslandWindow::Render() {
                              255, 255, 255));
           g.FillEllipse(&dot_brush, x, header_cy - dot_r, dot_r * 2, dot_r * 2);
         } else if (!trailing.empty()) {
-          // 尾注数字（「N 条未读」「25 分钟后」）加深：2026-10-01 用户反馈
-          // 文字偏淡，150→220。
+          // 尾注数字（「N 条未读」「25 分钟后」）全白：两轮加深 150→220→255。
           Gdiplus::SolidBrush trail_brush(
-              Gdiplus::Color(ea * 220 / 255, 255, 255, 255));
+              Gdiplus::Color(ea, 255, 255, 255));
           g.DrawString(trailing.c_str(), -1, &trail_font,
                        Gdiplus::PointF(x, header_cy - m_trail.Height / 2.0f),
                        &trail_brush);
@@ -1055,7 +1061,7 @@ void DynamicIslandWindow::Render() {
         dx += static_cast<float>(kHoverDotPitch) * s;
       }
       const std::wstring line = BuildHoverLine();
-      Gdiplus::Font line_font(mem_dc, MakeIslandFont(S(14), 500));
+      Gdiplus::Font line_font(mem_dc, MakeIslandFont(S(16), 650));
       const float line_x = dx - 4.0f * s;
       const float line_max = cap_x + cur_w - 18.0f * s - line_x;
       const std::wstring fitted = FitText(g, line, line_font, line_max);
@@ -1063,7 +1069,7 @@ void DynamicIslandWindow::Render() {
       g.MeasureString(fitted.c_str(), -1, &line_font, Gdiplus::PointF(0, 0),
                       &m_line);
       Gdiplus::SolidBrush line_brush(
-          Gdiplus::Color(static_cast<BYTE>(ha * 90 / 100), 255, 255, 255));
+          Gdiplus::Color(ha, 255, 255, 255));
       g.DrawString(fitted.c_str(), -1, &line_font,
                    Gdiplus::PointF(line_x, dot_cy - m_line.Height / 2.0f),
                    &line_brush);
@@ -1080,19 +1086,19 @@ void DynamicIslandWindow::Render() {
       g.FillRectangle(&div_brush, cap_x + pad, y, cur_w - pad * 2, 1.0f * s);
       y += 6.0f * s;
 
-      Gdiplus::Font label_font(mem_dc, MakeIslandFont(S(13), 700));
+      Gdiplus::Font label_font(mem_dc, MakeIslandFont(S(14), 700));
       const std::wstring label = L"接下来";
       Gdiplus::SolidBrush label_brush(
-          Gdiplus::Color(static_cast<BYTE>(fade * 70 / 100), 255, 255, 255));
+          Gdiplus::Color(static_cast<BYTE>(fade * 85 / 100), 255, 255, 255));
       g.DrawString(label.c_str(), -1, &label_font,
                    Gdiplus::PointF(cap_x + pad, y), &label_brush);
       y += 20.0f * s;
 
       if (!agenda_.empty()) {
-        Gdiplus::Font time_font(mem_dc, MakeIslandFont(S(14), 700));
-        Gdiplus::Font title_font(mem_dc, MakeIslandFont(S(18), 600));
+        Gdiplus::Font time_font(mem_dc, MakeIslandFont(S(15), 700));
+        Gdiplus::Font title_font(mem_dc, MakeIslandFont(S(18), 650));
         Gdiplus::Font done_font(mem_dc, MakeIslandFont(S(18), 600, true));
-        Gdiplus::Font hint_font(mem_dc, MakeIslandFont(S(14), 500));
+        Gdiplus::Font hint_font(mem_dc, MakeIslandFont(S(15), 650));
         const int rows = std::min(static_cast<int>(agenda_.size()), kMaxRows);
         for (int i = 0; i < rows; i++) {
           const AgendaItem& it = agenda_[i];
@@ -1104,7 +1110,7 @@ void DynamicIslandWindow::Render() {
           g.MeasureString(time_w.c_str(), -1, &time_font,
                           Gdiplus::PointF(0, 0), &m_t);
           Gdiplus::SolidBrush time_brush(Gdiplus::Color(
-              static_cast<BYTE>(fade * (is_near ? 85 : 36) / 100), 255, 255, 255));
+              static_cast<BYTE>(fade * (is_near ? 95 : 36) / 100), 255, 255, 255));
           g.DrawString(time_w.c_str(), -1, &time_font,
                        Gdiplus::PointF(cap_x + pad, y), &time_brush);
           Gdiplus::SolidBrush title_brush(Gdiplus::Color(
@@ -1117,7 +1123,7 @@ void DynamicIslandWindow::Render() {
             g.MeasureString(hint_w.c_str(), -1, &hint_font,
                             Gdiplus::PointF(0, 0), &m_hint);
             Gdiplus::SolidBrush hint_brush(Gdiplus::Color(
-                static_cast<BYTE>(fade * 62 / 100), 255, 255, 255));
+                static_cast<BYTE>(fade * 75 / 100), 255, 255, 255));
             g.DrawString(
                 hint_w.c_str(), -1, &hint_font,
                 Gdiplus::PointF(cap_x + cur_w - pad - m_hint.Width, y),
@@ -1138,14 +1144,14 @@ void DynamicIslandWindow::Render() {
                         1.0f * s);
         y += 6.0f * s;
 
-        Gdiplus::Font step_label_font(mem_dc, MakeIslandFont(S(13), 700));
+        Gdiplus::Font step_label_font(mem_dc, MakeIslandFont(S(14), 700));
         Gdiplus::SolidBrush step_label_brush(
-            Gdiplus::Color(static_cast<BYTE>(fade * 70 / 100), 255, 255, 255));
+            Gdiplus::Color(static_cast<BYTE>(fade * 85 / 100), 255, 255, 255));
         g.DrawString(L"任务动态", -1, &step_label_font,
                      Gdiplus::PointF(cap_x + pad, y), &step_label_brush);
         y += 20.0f * s;
 
-        Gdiplus::Font step_font(mem_dc, MakeIslandFont(S(14), 500));
+        Gdiplus::Font step_font(mem_dc, MakeIslandFont(S(15), 650));
         for (int i = 0; i < step_rows; i++) {
           const AgentStep& st = agent_steps_[i];
           const float glyph_cx = cap_x + pad + 5.0f * s;
@@ -1164,7 +1170,7 @@ void DynamicIslandWindow::Render() {
               g, Utf8ToWide(st.label), step_font,
               cur_w - pad * 2 - 16.0f * s);
           Gdiplus::SolidBrush step_brush(
-              Gdiplus::Color(static_cast<BYTE>(fade * 88 / 100), 255, 255, 255));
+              Gdiplus::Color(static_cast<BYTE>(fade), 255, 255, 255));
           g.DrawString(step_text.c_str(), -1, &step_font,
                        Gdiplus::PointF(cap_x + pad + 14.0f * s, y),
                        &step_brush);
@@ -1174,7 +1180,7 @@ void DynamicIslandWindow::Render() {
       }
 
       // 快捷按钮行
-      Gdiplus::Font btn_font(mem_dc, MakeIslandFont(S(15), 600));
+      Gdiplus::Font btn_font(mem_dc, MakeIslandFont(S(16), 650));
       const float btn_h = 26.0f * s;
       float bx = cap_x + 10.0f * s;
       for (int i = 0; i < kActionCount; i++) {
@@ -1190,7 +1196,7 @@ void DynamicIslandWindow::Render() {
           RoundedPath(&btn_path, Gdiplus::RectF(bx, y, btn_w, btn_h), 8.0f * s);
           g.FillPath(&btn_hover, &btn_path);
         }
-        const BYTE a = static_cast<BYTE>(fade * (hov ? 100 : 85) / 100);
+        const BYTE a = static_cast<BYTE>(fade);
         Gdiplus::SolidBrush btn_brush(Gdiplus::Color(a, 255, 255, 255));
         g.DrawString(kActionLabels[i], -1, &btn_font,
                      Gdiplus::PointF(bx + 10.0f * s, y + (btn_h - m_btn.Height) / 2.0f),
@@ -1216,7 +1222,7 @@ void DynamicIslandWindow::Render() {
         _snwprintf_s(cnt, _countof(cnt), _TRUNCATE, L"%d",
                      messages_unread_ > 99 ? 99 : messages_unread_);
         if (messages_unread_ > 99) wcscat_s(cnt, L"+");
-        Gdiplus::Font cnt_font(mem_dc, MakeIslandFont(S(13), 600));
+        Gdiplus::Font cnt_font(mem_dc, MakeIslandFont(S(14), 650));
         Gdiplus::RectF m_cnt;
         g.MeasureString(cnt, -1, &cnt_font, Gdiplus::PointF(0, 0), &m_cnt);
         const float bh = 24.0f * s;
@@ -1272,30 +1278,30 @@ void DynamicIslandWindow::Render() {
 
       float ty = cy0 + 8.0f * s;
       {
-        Gdiplus::Font head_font(mem_dc, MakeIslandFont(S(13), 700));
-        Gdiplus::SolidBrush head_brush(Gdiplus::Color(153, 255, 255, 255));
+        Gdiplus::Font head_font(mem_dc, MakeIslandFont(S(14), 700));
+        Gdiplus::SolidBrush head_brush(Gdiplus::Color(230, 255, 255, 255));
         g.DrawString(L"消息", -1, &head_font, Gdiplus::PointF(cx0 + pad_c, ty),
                      &head_brush);
       }
       ty += head_h;
       if (message_rows_.empty()) {
         Gdiplus::Font empty_font(mem_dc, MakeIslandFont(S(13), 500));
-        Gdiplus::SolidBrush empty_brush(Gdiplus::Color(90, 255, 255, 255));
+        Gdiplus::SolidBrush empty_brush(Gdiplus::Color(170, 255, 255, 255));
         g.DrawString(L"暂无消息", -1, &empty_font,
                      Gdiplus::PointF(cx0 + pad_c, ty + 3.0f * s),
                      &empty_brush);
       }
       for (const MessageRow& row : message_rows_) {
         const float iy = ty + 3.0f * s;
-        Gdiplus::Font t_font(mem_dc, MakeIslandFont(S(13), 600));
-        Gdiplus::SolidBrush t_brush(Gdiplus::Color(224, 255, 255, 255));
+        Gdiplus::Font t_font(mem_dc, MakeIslandFont(S(14), 650));
+        Gdiplus::SolidBrush t_brush(Gdiplus::Color(255, 255, 255, 255));
         const std::wstring title = Utf8ToWide(row.title);
         const float t_max = cw - pad_c * 2 - 34.0f * s;
         const std::wstring fitted_t = FitText(g, title, t_font, t_max);
         g.DrawString(fitted_t.c_str(), -1, &t_font,
                      Gdiplus::PointF(cx0 + pad_c, iy), &t_brush);
-        Gdiplus::Font p_font(mem_dc, MakeIslandFont(S(12), 400));
-        Gdiplus::SolidBrush p_brush(Gdiplus::Color(112, 255, 255, 255));
+        Gdiplus::Font p_font(mem_dc, MakeIslandFont(S(13), 600));
+        Gdiplus::SolidBrush p_brush(Gdiplus::Color(215, 255, 255, 255));
         const std::wstring preview = Utf8ToWide(row.preview);
         const float p_max =
             cw - pad_c * 2 - (row.unread > 0 ? 44.0f : 22.0f) * s;
@@ -1307,10 +1313,10 @@ void DynamicIslandWindow::Render() {
           _snwprintf_s(uc, _countof(uc), _TRUNCATE, L"%d",
                        row.unread > 99 ? 99 : row.unread);
           if (row.unread > 99) wcscat_s(uc, L"+");
-          Gdiplus::Font u_font(mem_dc, MakeIslandFont(S(11), 600));
+          Gdiplus::Font u_font(mem_dc, MakeIslandFont(S(12), 650));
           Gdiplus::RectF m_u;
           g.MeasureString(uc, -1, &u_font, Gdiplus::PointF(0, 0), &m_u);
-          Gdiplus::SolidBrush u_brush(Gdiplus::Color(235, 255, 130, 120));
+          Gdiplus::SolidBrush u_brush(Gdiplus::Color(255, 255, 130, 120));
           g.DrawString(uc, -1, &u_font,
                        Gdiplus::PointF(cx0 + cw - pad_c - m_u.Width - 2.0f * s,
                                        iy + 3.0f * s),

@@ -121,7 +121,8 @@ test("golden 汇总：top-1 命中率不低于基线（防整体退化）", asyn
   }
   const rate = top1 / GOLDEN.length;
   // 基线：写死当前实测下限；提升后可上调，不允许下调。
-  const BASELINE = 0.7;
+  // 2026-10-01 单评分器归一（IntentRouter/类别路由退役+负例入评分核心）后实测 21/21。
+  const BASELINE = 0.9;
   assert.ok(
     rate >= BASELINE,
     `top-1 命中率 ${(rate * 100).toFixed(0)}% < 基线 ${BASELINE * 100}%；未命中：\n  ${misses.join("\n  ")}`,

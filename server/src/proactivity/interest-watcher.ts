@@ -5,7 +5,7 @@
 //
 // 职责（与 ProactivityHub 分工）：
 //  - 本模块：兴趣池管理（持久化 + 衰减）+ 后台轮询 + 命中判定（数据层）
-//  - ProactivityHub.onInterestAlert：命中后 speak 闭环话术生成（决策层，复用）
+//  - ProactivityHub.onInterestAlert：命中后直达车道模板直投（零 LLM）
 //
 // 实现路径（对齐扣子 Database + 定期触发）：
 //  1. 采集：LLM 在对话中识别出用户的长期兴趣 → 调 interest.manage 工具入库
@@ -66,6 +66,13 @@ export interface InterestWatcherDeps {
   fetchHot?: (limit: number) => Promise<InterestHit[]>;
   /** 命中回调（装配层接 ProactivityHub.onInterestAlert） */
   onHit?: (actorId: string, interest: WatchInterest, hit: InterestHit) => void;
+  /**
+   * 语义匹配嵌入（2026-10-01，可选注入）：本地 bge-small-zh ONNX 引擎薄包装。
+   * 注入且 INTEREST_SEMANTIC_MATCH 未关闭时，字面包含未命中的兴趣走
+   * 余弦相似度兜底（阈值默认 0.45，实测标定）——「iPhone 17」对「苹果手机」这类
+   * 换说法的热点也能命中。返回 null = 引擎不可用，纯字面匹配。
+   */
+  embed?: (texts: string[]) => Promise<number[][] | null>;
   /** 持久化文件路径（默认 data/interest-watch.json） */
   persistPath?: string;
   /** 同兴趣两次推送的最小间隔（默认 2h，防连续新热点刷屏） */
@@ -93,6 +100,38 @@ function readEnvInt(name: string, fallback: number): number {
 function readTickIntervalMs(): number {
   const ms = readEnvInt("INTEREST_WATCH_TICK_MS", 20 * 60 * 1000);
   return Math.max(ms, 60_000); // 不小于 1 分钟
+}
+
+/** 语义匹配开关（默认开；INTEREST_SEMANTIC_MATCH=0 退回纯字面包含） */
+function isSemanticMatchEnabled(): boolean {
+  const raw = process.env.INTEREST_SEMANTIC_MATCH?.trim().toLowerCase();
+  return !(raw === "0" || raw === "false" || raw === "off");
+}
+
+/**
+ * 语义命中余弦阈值（默认 0.45，2026-10-01 实测标定：真实 bge-small-zh int8
+ * 分布=无关负例 0.27-0.32 / 换说法正例 0.49-0.66 / 字面正例 0.79——0.45 恰在
+ * 最弱正例（0.49）与最强负例（0.32）之间的空带里，两侧各留 ~0.13 边际）
+ */
+function semanticThreshold(): number {
+  const raw = process.env.INTEREST_SEMANTIC_THRESHOLD;
+  const v = raw ? Number.parseFloat(raw) : NaN;
+  return Number.isFinite(v) && v > 0 && v < 1 ? v : 0.45;
+}
+
+/** 余弦相似度（bge 输出未归一，须显式除模） */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!;
+    na += a[i]! * a[i]!;
+    nb += b[i]! * b[i]!;
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
 /** 指纹归一化：去符号 + 小写（中文人名/词条直接比较，等价于 title 词法包含） */
@@ -134,16 +173,20 @@ type PersistedShape = { interests?: WatchInterest[] };
 export class InterestWatcher {
   private readonly interests = new Map<string, WatchInterest>();
   private readonly fetchHot: InterestWatcherDeps["fetchHot"];
+  private readonly embed: InterestWatcherDeps["embed"];
   private readonly persistPath: string;
   private readonly minPushIntervalMs: number;
   private readonly clock: () => number;
   /** 命中回调（装配层晚接线；构造时也可注入） */
   private onHit: InterestWatcherDeps["onHit"];
+  /** 兴趣名向量缓存：`${interestId}:${normalizeFp(name)}` → 向量（跨轮复用） */
+  private readonly nameVecCache = new Map<string, number[]>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private started = false;
 
   constructor(deps: InterestWatcherDeps = {}) {
     this.fetchHot = deps.fetchHot;
+    this.embed = deps.embed;
     this.persistPath = deps.persistPath ?? process.env.INTEREST_WATCH_FILE ?? "data/interest-watch.json";
     this.minPushIntervalMs = deps.minPushIntervalMs ?? readEnvInt("INTEREST_WATCH_MIN_INTERVAL_MS", 2 * 60 * 60 * 1000);
     this.clock = deps.now ?? Date.now;
@@ -337,6 +380,7 @@ export class InterestWatcher {
 
   /**
    * 一轮全量检查（单次拉热搜，匹配全部用户的全部启用兴趣）。
+   * 匹配双层：字面包含（主，精确）→ 语义相似度（兜底，需注入 embed 引擎）。
    * 热搜拉取失败/为空时本轮静默跳过（不误推，下个 tick 重试）。
    */
   async checkAll(nowMs: number = this.clock()): Promise<number> {
@@ -359,15 +403,35 @@ export class InterestWatcher {
       return 0;
     }
 
+    // 语义层惰性初始化：有兴趣需要兜底时才嵌入一次本轮全部标题
+    let titleVecs: number[][] | null = null;
+    let titleVecsTried = false;
+    const ensureTitleVecs = async (): Promise<number[][] | null> => {
+      if (titleVecsTried) return titleVecs;
+      titleVecsTried = true;
+      if (!this.embed || !isSemanticMatchEnabled()) return null;
+      try {
+        titleVecs = await this.embed(hits.map((h) => h.title));
+      } catch (err) {
+        console.log(`[InterestWatcher] 语义嵌入失败（本轮退回字面匹配）: ${err}`);
+        titleVecs = null;
+      }
+      return titleVecs;
+    };
+
     let pushed = 0;
     for (const interest of enabled) {
-      if (this.checkInterest(interest, hits, nowMs)) pushed += 1;
+      if (this.checkInterest(interest, hits, nowMs)) {
+        pushed += 1;
+        continue;
+      }
+      if (await this.checkInterestSemantic(interest, hits, ensureTitleVecs, nowMs)) pushed += 1;
     }
     return pushed;
   }
 
   /**
-   * 单兴趣命中判定：
+   * 单兴趣命中判定（字面包含）：
    *  - 在当轮热搜中找「rank 最靠前且 title 包含兴趣名」的一条
    *  - 指纹去重：与最近推送过的同指纹（同一条热点）→ 跳过
    *  - 间隔冷却：距上次推送 < minPushIntervalMs → 跳过（防新热点连推）
@@ -385,8 +449,63 @@ export class InterestWatcher {
 
     const chosen = hits.find((h) => fp(h).includes(ownFp));
     if (!chosen) return false;
+    return this.commitHit(interest, chosen, nowMs);
+  }
 
-    const chosenFp = fp(chosen);
+  /**
+   * 语义兜底命中（2026-10-01）：字面未命中时按余弦相似度选最优标题。
+   * 阈值默认 0.62（宁缺勿滥）；命中后走与字面命中完全相同的指纹/间隔闸与
+   * 推送链路。本地 ONNX 推理零边际成本，无外部调用。
+   */
+  private async checkInterestSemantic(
+    interest: WatchInterest,
+    hits: InterestHit[],
+    ensureTitleVecs: () => Promise<number[][] | null>,
+    nowMs: number,
+  ): Promise<boolean> {
+    if (normalizeFp(interest.name).length < 2) return false;
+    const vecKey = `${interest.id}:${normalizeFp(interest.name)}`;
+    let nameVec = this.nameVecCache.get(vecKey);
+    if (!nameVec) {
+      try {
+        const vecs = await this.embed?.([interest.name]);
+        if (!vecs || vecs.length !== 1 || !Array.isArray(vecs[0])) return false;
+        nameVec = vecs[0];
+        this.nameVecCache.set(vecKey, nameVec);
+        if (this.nameVecCache.size > 200) {
+          // 缓存上限：淘汰最旧（兴趣改名/移除后的孤儿向量自然出局）
+          const oldest = this.nameVecCache.keys().next().value;
+          if (oldest !== undefined) this.nameVecCache.delete(oldest);
+        }
+      } catch {
+        return false;
+      }
+    }
+    const titleVecs = await ensureTitleVecs();
+    if (!titleVecs || titleVecs.length !== hits.length) return false;
+
+    const threshold = semanticThreshold();
+    let bestIdx = -1;
+    let bestScore = 0;
+    for (let i = 0; i < hits.length; i++) {
+      // 字面已能命中的标题不必重复评估（该兴趣若字面命中根本不会走到这）
+      const score = cosineSimilarity(nameVec, titleVecs[i]!);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0 || bestScore < threshold) return false;
+    const chosen = hits[bestIdx]!;
+    console.log(
+      `[InterestWatcher] 语义命中 interest=${interest.name} hit="${chosen.title.slice(0, 24)}" sim=${bestScore.toFixed(3)}`,
+    );
+    return this.commitHit(interest, chosen, nowMs);
+  }
+
+  /** 命中后的统一收口：指纹去重 + 间隔冷却 + 状态更新 + onHit + 落盘 */
+  private commitHit(interest: WatchInterest, chosen: InterestHit, nowMs: number): boolean {
+    const chosenFp = normalizeFp(chosen.title);
     if (interest.lastPushedFp === chosenFp) return false; // 同一条热点不重复推
     if (interest.lastPushedAt !== null && nowMs - interest.lastPushedAt < this.minPushIntervalMs) {
       return false; // 间隔内不连续推（哪怕换了新热点）

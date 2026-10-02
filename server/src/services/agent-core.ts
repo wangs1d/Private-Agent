@@ -160,10 +160,11 @@ import {
   buildLaneCoreTools,
   isStaticToolArchEnabled,
   isTaskLaneRouterFirst,
-  pickTravelPlanningTools,
   slimToolSchema,
   toolsMatchingCapabilityBeam,
 } from "../external-model/lane-tool-sets.js";
+import { dominantDomainForQuery } from "../tools/tool-search/index.js";
+import { toolsInDomain } from "../tools/tool-search/tool-category.js";
 import {
   getBuiltinAgentChatTools,
   selectForegroundCapabilityToolAdditions,
@@ -216,6 +217,9 @@ import {
 import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
 import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
+
+/** 域信号预载的族规模上限（与域拉取 DOMAIN_PULL_LIMIT 对齐）。 */
+const DOMAIN_PRELOAD_CAP = 12;
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
 import { claimsWebSearch, composeRealtimeSearchQuery } from "../agent/realtime-search-query.js";
 import {
@@ -2046,6 +2050,12 @@ if (route.plane === "task") {
       turnPlan?: { budget: number; capabilities: string[]; tier: string };
       /** TaskHub 任务记录 id（任务面传入，用于进度摘要回写） */
       taskHubTaskId?: string;
+      /**
+       * token 审计 stage 覆盖（2026-10-01 goal 车道归因）：后台派发方指定时
+       * 优先于 task_plane_light/full——goal 步骤任务单列 goal_plan_stage，
+       * 主动性成本线在 usage 台账里可见。
+       */
+      auditStageOverride?: string;
       /** 路由意图标签（对话面误判转任务的自检输入） */
       routeIntent?: string;
       /** 路由置信度（2026-09-23 观测补全，透传 turn-trace） */
@@ -2498,15 +2508,21 @@ if (route.plane === "task") {
             chatToolsExtra: corpusSafe,
           };
         } else {
-          // router-first（2026-09-23 token 优化）：可见集 = 桥工具（tool_discover/
-          // tool_call 由 prepareToolsWithToolSearch 自动注入）+ travel 规划族保底
-          // （恒注入瘦身 schema，2026-10-01 替代 goal 正则+会话 latch 点补），全量
-          // 语料进 BM25 目录按需召回。质量护栏：意图预召回 + <tool_request> 请求卡
-          // + 高频自动晋升。回滚：AGENT_TASK_LANE=core（下方静态 Core 路径）。
+          // router-first（2026-09-23 token 优化）：可见集 = 桥工具 + 域信号预载
+          // （2026-10-01 S2：词面 top-5 域多数票 ≥2 → 预载该域全族瘦身 schema，
+          // travel 硬编码的泛化——所有"模型自觉会写"的域统一覆盖），其余全量语料
+          // 进 BM25 目录按需召回（能力面经域卡+域拉取可达）。回滚：
+          // AGENT_TASK_LANE=core（下方静态 Core 路径）。
+          const preloadDomain = dominantDomainForQuery(text, corpusSafe);
+          const domainPreload = preloadDomain
+            ? toolsInDomain(corpusSafe, preloadDomain)
+                .slice(0, DOMAIN_PRELOAD_CAP)
+                .map(slimToolSchema)
+            : [];
           execStreamOpts = {
             ...streamOpts,
             toolExposureProfile: "explicit",
-            chatToolsBuiltin: pickTravelPlanningTools(corpusSafe),
+            chatToolsBuiltin: domainPreload,
             chatToolsExtra: corpusSafe,
           };
         }
@@ -2624,13 +2640,16 @@ if (route.plane === "task") {
               // 由 dispatchBackgroundTask 以单条任务记录显式并入（防 user 消息重复）
               ...(ctx.ephemeralTurn ? { ephemeralTurn: true } : {}),
               // B1 度量打标：任务面按档位分 stage（fast=先轻后重段1，complex=升级段/完整通道）；
-              // 前台对话轮不传，由 provider 按分支落 main_chat / main_chat_tools
-              ...(ctx.taskHubTaskId
-                ? {
-                    auditStage:
-                      ctx.turnPlan?.tier === "flash" ? "task_plane_light" : "task_plane_full",
-                  }
-                : {}),
+              // 前台对话轮不传，由 provider 按分支落 main_chat / main_chat_tools；
+              // 派发方显式指定（goal 车道归因）时优先
+              ...(ctx.auditStageOverride
+                ? { auditStage: ctx.auditStageOverride }
+                : ctx.taskHubTaskId
+                  ? {
+                      auditStage:
+                        ctx.turnPlan?.tier === "flash" ? "task_plane_light" : "task_plane_full",
+                    }
+                  : {}),
               agentAccessMode: ctx.orchestrateToolCtx?.agentAccessMode,
               desktopBridgeOnline: ctx.orchestrateToolCtx?.desktopBridgeOnline,
               phoneBridgeOnline: ctx.orchestrateToolCtx?.phoneBridgeOnline,
@@ -2929,6 +2948,11 @@ if (route.plane === "task") {
        * 传入（上一代 +1），TaskHub 台账据此累计，达上限不再自动重跑。
        */
       restartCount?: number;
+      /**
+       * token 审计 stage 覆盖（2026-10-01）：goal 计划步骤传 "goal_plan_stage"
+       * 单列归因（usage 台账可见主动性执行成本），缺省按任务面 light/full 分档。
+       */
+      auditStage?: string;
     },
   ): string | null {
     const provider = this.externalChat;
@@ -3097,6 +3121,7 @@ if (route.plane === "task") {
               input.turnPlan ?? { budget: TASK_PLANE_FALLBACK_BUDGET, capabilities: ["full"], tier: "flash" },
             taskHubTaskId: taskId,
             ephemeralTurn: true,
+            ...(input.auditStage ? { auditStageOverride: input.auditStage } : {}),
             // 记忆注入（2026-09-09）：ephemeral 不读 thread，上下文全靠外部轮透传。
             ...carriedTurnCtx,
             // 媒体捕获必须挂 ctx.backgroundOnToolExecuted：runStandardLlmPath 的
@@ -3148,6 +3173,7 @@ if (route.plane === "task") {
               turnPlan: { budget: 3, capabilities: ["full"], tier: "pro" },
               taskHubTaskId: taskId,
               ephemeralTurn: true,
+              ...(input.auditStage ? { auditStageOverride: input.auditStage } : {}),
               // 升级段同样透传外部轮上下文（失忆执行会在升级段复发）。
               ...carriedTurnCtx,
               backgroundOnToolExecuted: (info) => {

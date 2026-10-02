@@ -11,6 +11,7 @@ import {
   TurnAsideQueue,
   formatTurnAsidePrompt,
   isTurnAsideEnabled,
+  isTurnAsideMediumEnabled,
 } from "../src/proactivity/turn-aside-queue.js";
 
 const T0 = 1_790_000_000_000;
@@ -96,4 +97,56 @@ test("P2 旁注形态：织入指令含括号旁注形态与不搭不提约束",
   assert.match(block, /（顺嘴一句：…）/);
   assert.match(block, /不搭就别提|绝不硬塞/);
   assert.match(block, /最近入睡偏晚/);
+});
+
+// ─── medium 扩面 + 超时升级（2026-10-01）───
+
+test("medium 扩面开关：默认开，PROACTIVITY_TURN_ASIDE_MEDIUM=0 收窄", () => {
+  const prev = process.env.PROACTIVITY_TURN_ASIDE_MEDIUM;
+  try {
+    delete process.env.PROACTIVITY_TURN_ASIDE_MEDIUM;
+    assert.equal(isTurnAsideMediumEnabled(), true, "默认开");
+    process.env.PROACTIVITY_TURN_ASIDE_MEDIUM = "0";
+    assert.equal(isTurnAsideMediumEnabled(), false);
+  } finally {
+    if (prev === undefined) delete process.env.PROACTIVITY_TURN_ASIDE_MEDIUM;
+    else process.env.PROACTIVITY_TURN_ASIDE_MEDIUM = prev;
+  }
+});
+
+test("medium 过期升级：6h 没搭上车走 onExpire 回调，low 仍静默作废", () => {
+  let now = T0;
+  const q = new TurnAsideQueue({ nowFn: () => now });
+  const expired: string[] = [];
+  q.setOnExpire((item) => expired.push(`${item.importance}:${item.kind}`));
+  q.tryEnqueue({ actorId: "u1", kind: "interest_alert", title: "中优", importance: "medium" });
+  q.tryEnqueue({ actorId: "u1", kind: "care", title: "低优", importance: "low" });
+  now = T0 + 6 * HOUR + 60_000;
+  // take 触发的过期：medium 升级、low 丢弃
+  const got = q.takeForTurn("u1");
+  assert.ok(got === null || got.kind !== "interest_alert");
+  assert.deepEqual(expired, ["medium:interest_alert"], "只有 medium 条目走升级回调");
+});
+
+test("prune 触发的过期同样升级 medium（不依赖用户聊天）", () => {
+  let now = T0;
+  const q = new TurnAsideQueue({ nowFn: () => now });
+  const expired: string[] = [];
+  q.setOnExpire((item) => expired.push(item.kind));
+  q.tryEnqueue({ actorId: "u1", kind: "monthly_report", title: "月报", importance: "medium" });
+  now = T0 + 7 * HOUR;
+  assert.equal(q.prune(), 1);
+  assert.deepEqual(expired, ["monthly_report"]);
+  assert.equal(q.pending("u1").length, 0);
+});
+
+test("升级回调抛异常不外溢（吞掉并继续）", () => {
+  let now = T0;
+  const q = new TurnAsideQueue({ nowFn: () => now });
+  q.setOnExpire(() => {
+    throw new Error("boom");
+  });
+  q.tryEnqueue({ actorId: "u1", kind: "digest", title: "t", importance: "medium" });
+  now = T0 + 7 * HOUR;
+  assert.doesNotThrow(() => q.prune());
 });

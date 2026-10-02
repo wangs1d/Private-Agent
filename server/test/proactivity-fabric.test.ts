@@ -128,7 +128,7 @@ function makeExecutor(clock: MockClock, services: Record<string, unknown> = {}, 
       "user-1",
     );
   };
-  const tick = () => executor.tickActorWithServices("user-1", services, clock.t);
+  const tick = () => executor.tickActor("user-1", clock.t);
   return { board, executor, events, feed, tick };
 }
 
@@ -228,7 +228,7 @@ test("映射规则: 传感信号入板（桥接映射）——meeting/unread/goa
   for (let i = 0; i < 3; i++) {
     board.ingestSignal(sig("message", { sender: `联系人${i}` }), "user-1");
   }
-  await executor.tickActorWithServices("user-1", {}, clock.t);
+  await executor.tickActor("user-1", clock.t);
   const kinds = events.map((e) => e.kind);
   assert.ok(kinds.includes("meeting_soon"), `临会提醒: ${kinds}`);
   assert.ok(kinds.includes("goal_ready"), `目标就绪: ${kinds}`);
@@ -362,14 +362,14 @@ test("映射规则状态持久化: 去重指纹跨实例恢复（重启不重发
   const first = mk();
   const got1: AttentionEvent[] = [];
   first.executor.onEvent((e) => got1.push(e));
-  await first.executor.tickActorWithServices("user-1", services, clock.t);
+  await first.executor.tickActor("user-1", clock.t);
   assert.equal(got1.length, 1);
   first.executor.stop(); // 强制落盘（去重指纹 + 规则状态）
   // 实例 2：同数据目录恢复 → 同 dedupKey 同日不得重发
   const second = mk();
   const got2: AttentionEvent[] = [];
   second.executor.onEvent((e) => got2.push(e));
-  await second.executor.tickActorWithServices("user-1", services, clock.t);
+  await second.executor.tickActor("user-1", clock.t);
   assert.equal(got2.length, 0, "恢复的去重指纹必须拦住同日同键重发");
   rmSync(dir, { recursive: true, force: true });
 });

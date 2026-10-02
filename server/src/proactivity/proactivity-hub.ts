@@ -37,6 +37,7 @@ import {
   TurnAsideQueue,
   formatTurnAsidePrompt,
   isTurnAsideEnabled,
+  isTurnAsideMediumEnabled,
 } from "./turn-aside-queue.js";
 import {
   buildConversationIntent,
@@ -400,8 +401,9 @@ export class ProactivityHub {
   /**
    * 用户兴趣话题热议推送（InterestWatcher 后台轮询命中接线）。
    * 例：用户长期关注「刘浩存」，热搜出现她的新动态 → 主动 tell。
-   * 走 speak 闭环（ProactionCortex 话术生成），频控由 FrequencyGovernor
-   * interest_alert 冷却（4h）+ 每日预算兜底；同兴趣指纹去重在 watcher 层已完成。
+   * 直达车道模板直投（零 LLM；PROACTIVITY_DIRECT_LANE=0 才回退 ProactionCortex
+   * 闭环），频控由 FrequencyGovernor interest_alert 冷却（4h）+ 每日预算兜底；
+   * 同兴趣指纹去重在 watcher 层已完成。
    */
   onInterestAlert(actorId: string, name: string, hit: InterestHit): void {
     this.knownActors.add(actorId);
@@ -568,14 +570,22 @@ export class ProactivityHub {
 
   /**
    * 顺嘴搭车拦截（仅 route() 的 speak/advise 主动开口分支使用）：low 级意图
-   * 挂起等下一轮对话织入回复末尾。接受=true 时调用方跳过即时投递；拒绝
-   * （同 kind 挂起中/间隔不足/通道关闭）返回 false 走原路径——不静默吞消息。
+   * 挂起等下一轮对话织入回复末尾；medium 级在扩面开关开启时同样挂起
+   * （2026-10-01 扩面：中优消息「先搭车、6h 没搭上再自己弹」，砍打扰不砍
+   * 主动性——medium 过期由队列 onExpire 升级回正常通道，不会静默丢）。
+   * 接受=true 时调用方跳过即时投递；拒绝（同 kind 挂起中/间隔不足/通道关闭）
+   * 返回 false 走原路径——不静默吞消息。
    *
    * 边界：只拦「主动开口」（location_arrival/节律关怀等可延迟的轻提醒）；
-   * speakFeedback 的行为反馈（act 结果/确认请求）有时效，一律即时，不走此路。
+   * speakFeedback 的行为反馈（act 结果/确认请求）有时效，一律即时，不走此路；
+   * turn_aside_expiry 来源（过期升级重投）不得再进搭车队列（防无限回环）。
    */
   private tryDeferToTurnAside(intent: ProactiveIntent): boolean {
-    if (intent.importance !== "low" || !isTurnAsideEnabled()) return false;
+    if (intent.source === "turn_aside_expiry") return false;
+    if (!isTurnAsideEnabled()) return false;
+    if (intent.importance === "medium" ? !isTurnAsideMediumEnabled() : intent.importance !== "low") {
+      return false;
+    }
     if (!this.deps.turnAsideQueue?.tryEnqueue(intent)) return false;
     this.silenceLog.record({
       at: Date.now(),

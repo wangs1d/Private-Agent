@@ -2,6 +2,7 @@ import "dart:async";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
+import "package:url_launcher/url_launcher.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/services/app_auto_start.dart";
@@ -435,6 +436,7 @@ class _SettingsPageState extends State<SettingsPage> {
       ((_mailStatus?["user"] ?? "") as String).codeUnits,
     );
     final String reason = (_mailStatus?["reason"] ?? "") as String;
+    final String? guideUrl = _mailGuideUrl(user);
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -471,6 +473,53 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 4),
               Text(reason, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
             ],
+            const SizedBox(height: 10),
+            // 授权码获取引导：按邮箱域给官方入口直达 + 三步说明
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  const Text(
+                    "如何获取授权码？",
+                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _mailGuideSteps(user),
+                    style: const TextStyle(fontSize: 12, height: 1.5),
+                  ),
+                  if (guideUrl != null) ...<Widget>[
+                    const SizedBox(height: 6),
+                    InkWell(
+                      onTap: () => launchUrl(
+                        Uri.parse(guideUrl),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          Icon(Icons.open_in_new, size: 13, color: cs.primary),
+                          const SizedBox(width: 4),
+                          Text(
+                            "打开邮箱设置页",
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: cs.primary,
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
             const SizedBox(height: 14),
             TextField(
               controller: _mailPassCtrl,
@@ -505,6 +554,49 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       ),
     );
+  }
+
+  /// 按接入邮箱的域返回授权码生成的分步说明（未知域给通用说明）。
+  String _mailGuideSteps(String user) {
+    final String domain = user.split("@").last.toLowerCase();
+    if (domain == "qq.com" || domain == "foxmail.com") {
+      return "① 电脑浏览器登录 mail.qq.com → 设置 → 账号与安全；\n"
+          "② 找到「IMAP/SMTP 服务」点开启，按提示用绑定手机发短信验证；\n"
+          "③ 验证通过后生成 16 位授权码（只显示一次），复制填到下面。";
+    }
+    if (domain == "163.com" || domain == "126.com" || domain == "yeah.net") {
+      return "① 电脑浏览器登录 mail.163.com → 设置（顶部）→ POP3/SMTP/IMAP；\n"
+          "② 开启 IMAP/SMTP 服务，按提示短信验证；\n"
+          "③ 生成授权码（只显示一次），复制填到下面。";
+    }
+    if (domain == "gmail.com") {
+      return "① Google 账号 → 安全性 → 应用专用密码（需先开两步验证）；\n"
+          "② 生成应用密码（16 位），复制填到下面。";
+    }
+    return "① 登录邮箱网页版 → 设置里找「IMAP/SMTP 服务」；\n"
+        "② 开启并生成授权码，复制填到下面。";
+  }
+
+  /// 按域返回官方入口页链接（设置页需登录后跳转，故落官网首页/帮助中心——
+  /// 已实测 200 稳定可达；三步说明卡片内嵌，链接只是辅助）。未知域不显示链接。
+  String? _mailGuideUrl(String user) {
+    final String domain = user.split("@").last.toLowerCase();
+    switch (domain) {
+      case "qq.com":
+      case "foxmail.com":
+        return "https://service.mail.qq.com/";
+      case "163.com":
+      case "126.com":
+      case "yeah.net":
+        return "https://help.mail.163.com/";
+      case "gmail.com":
+        return "https://myaccount.google.com/security";
+      case "outlook.com":
+      case "hotmail.com":
+        return "https://account.microsoft.com/security";
+      default:
+        return null;
+    }
   }
 
   Widget _buildModelCard() {

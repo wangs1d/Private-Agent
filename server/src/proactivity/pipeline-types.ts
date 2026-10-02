@@ -11,7 +11,8 @@ export type PresenceState = "active" | "idle" | "offline";
 export type ProposalUtilityMeta = {
   risk: RiskDimensions;
   authorization: AuthorizationLevel;
-  value: ValueDimensions;
+  /** 价值维度缺省时仲裁层按重要度派生（deriveNotifyValue） */
+  value?: ValueDimensions;
 };
 
 /** 一次主动提案：发现"值得主动"的唯一提交格式（提案-仲裁分离，源只举证不投递） */

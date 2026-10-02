@@ -36,6 +36,7 @@ export {
   isToolSearchBridgeName,
   invalidateFullCatalogCache,
   type DeferredToolCatalog,
+  type ResidentToolInfo,
   type ToolExposureTier,
   type ToolSearchBridgeResult,
   type ToolSearchPreparedTurn,

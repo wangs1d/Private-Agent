@@ -106,6 +106,20 @@ export class MessageWatchTrigger {
           发件人: sender ?? "未知",
           原文: excerpt,
         },
+        // 待确认动作（2026-10-01）：通知升半级——不只弹提醒，附「让助手处理」
+        // 确认入口。效用声明走 ask_first 分支（代用户对外做事必须先问），
+        // 批准经管道 onProposalApproved 派后台任务起草处理建议（LLM 只花在
+        // 用户点头之后，决策链仍零 LLM）。
+        utility: {
+          risk: {
+            reversible: true,
+            financialImpact: "none",
+            dataSensitivity: "personal",
+            thirdPartyImpact: true,
+          },
+          authorization: "none",
+        },
+        confirmAction: { label: "让助手处理" },
       });
     } catch {
       /* 监控失败不影响消息主链路 */

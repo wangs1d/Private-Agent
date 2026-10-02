@@ -14,6 +14,7 @@ import type { PresenceService } from "./presence-service.js";
 import { ProposalStore } from "./proposal-store.js";
 import { SilenceLog } from "./silence-log.js";
 import { CONFIRMATION_TTL_MS, type PendingConfirmation, PendingConfirmationStore } from "./pending-confirmation-store.js";
+import { topicKeyOfProposal, TopicDismissTracker } from "./topic-dismiss-tracker.js";
 
 export type ProactivePipelineDeps = {
   /** 数据目录（默认 data/proactivity）：proposals.json / frequency.json / known-actors.json */
@@ -31,7 +32,8 @@ export type ProactivePipelineDeps = {
   lastConversationAt?: (actorId: string) => number | null;
   delivery: ProactiveDeliveryService;
   outcomes: OutcomeStore;
-  /** 无 directText 提案的 speak 兜底（现有 ProactionCortex 闭环——全管道唯一 LLM 调用点） */
+  /** 无 directText 提案的 speak 兜底（装配层接线 hub.submitIntent；直达车道
+   *  常开时渲染模板零 LLM，仅 PROACTIVITY_DIRECT_LANE=0 回退 ProactionCortex 闭环才花 LLM） */
   speak?: (p: ProactiveProposal) => void;
   flushIntervalMs?: number;
   /** known actor 持久化（重启恢复主动性资格，hub 状态的存取薄包装） */
@@ -65,6 +67,12 @@ export type ProactivePipelineDeps = {
    * 监听，用户确认（reminder.acknowledge）即停链。未注入 = 无升级链（仅投递）。
    */
   escalate?: (p: ProactiveProposal, deliveryId: string) => void;
+  /**
+   * 话题级 dismiss 追踪（2026-10-01）：同话题连续 dismiss 达阈值时投一条
+   * 「要不要少提这类」建议（不自动静音，静音仍走用户明说的抑制表）。
+   * 未注入 = 无话题维度学习。
+   */
+  topicDismiss?: TopicDismissTracker;
 };
 
 /** 正反馈 outcome 集合（自适应冷却的方向判定） */
@@ -157,10 +165,42 @@ export class ProactivePipeline {
     // 也不进接受率分母（outcome-store.acceptanceRate 排除），避免污染学习信号
     if (!POSITIVE.has(outcome) && outcome !== "delivered" && outcome !== "viewed") {
       this.deps.governor.noteOutcome(prev.kind, false);
+      // 话题维度学习（2026-10-01）：同话题连续 dismiss 达阈值 → 投一条
+      // 低打扰建议（不自动静音；正反馈清零 streak）
+      if (prev.topic) {
+        const suggestion = this.deps.topicDismiss?.note(prev.actorId, prev.topic);
+        if (suggestion) this.submitMuteSuggestion(suggestion);
+      }
+    } else if (POSITIVE.has(outcome) && prev.topic) {
+      this.deps.topicDismiss?.resetTopic(prev.actorId, prev.topic);
     }
     const rate = this.deps.outcomes.acceptanceRate(prev.kind);
     if (rate !== null && rate > 0.6) this.deps.governor.noteOutcome(prev.kind, true);
     return true;
+  }
+
+  /** 话题静音建议（fire-and-forget）：正常走仲裁链，频控/静默/抑制语义全部继承 */
+  private submitMuteSuggestion(s: { actorId: string; topic: string; count: number }): void {
+    const display = s.topic.startsWith("发件人:") ? s.topic.slice(4) : `「${s.topic}」相关`;
+    const decision = this.submitProposal({
+      proposalId: `mute_${Date.now().toString(36)}`,
+      actorId: s.actorId,
+      kind: "mute_suggest",
+      tier: "social",
+      importance: "medium",
+      dedupKey: `mute_suggest:${s.actorId}:${s.topic}`,
+      title: `少提「${display}」？`,
+      summary: `连续 ${s.count} 条相关提醒被划掉`,
+      evidence: [`topic:${s.topic}`, `dismissed:${s.count}`],
+      directText:
+        `连着几条${display}提醒都被你划掉了。以后少提这类的话，直接跟我说` +
+        `「别再提醒我这个」；想继续就当我没说。`,
+      createdAt: Date.now(),
+      source: "topic_dismiss",
+    });
+    console.log(
+      `[ProactivePipeline] 话题 dismiss 建议已提交 kind=mute_suggest topic=${s.topic} verdict=${decision.verdict}`,
+    );
   }
 
   /** 反馈端点用：按 deliveryId 取投递记录（actorId/kind），供话题静音等关联动作 */
@@ -222,6 +262,7 @@ export class ProactivePipeline {
           channel: "mobile_push",
           outcome: "delivered",
           at: Date.now(),
+          ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
         });
         console.log(`[ProactivePipeline] 离线推送已送达 kind=${p.kind} provider=${result.provider} actor=${p.actorId}`);
       })
@@ -358,8 +399,8 @@ export class ProactivePipeline {
 
   /**
    * 执行投递：directText 直推全部在线设备（电脑端 + 手机端 fan-out）；无 directText 走
-   * speak 闭环（唯一 LLM 点，一次调用）。投递失败（两端都不在线）返回 false，由 decide
-   * 改判重试——预算计数与 outcome 都只在真正送达后记录。
+   * speak 兜底（装配层 → hub 直达车道模板直投，零 LLM）。投递失败（两端都不在线）
+   * 返回 false，由 decide 改判重试——预算计数与 outcome 都只在真正送达后记录。
    */
   private dispatch(p: ProactiveProposal): boolean {
     if (p.directText) {
@@ -372,6 +413,7 @@ export class ProactivePipeline {
         channel: "in_app",
         outcome: "delivered",
         at: Date.now(),
+        ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
       });
       if (p.tier === "social") this.deps.governor.record(p.actorId, p.kind);
       // critical 提案挂起升级链（送达 ≠ 被看到；fire-and-forget 不影响投递主链路）
@@ -411,6 +453,7 @@ export class ProactivePipeline {
   private persist(): void {
     this.store.flush();
     this.deps.outcomes.flush();
+    this.deps.topicDismiss?.flush();
     writeJson(`${this.deps.dataPath}/frequency.json`, this.deps.governor.snapshot());
     const actors = this.deps.exportActors?.();
     if (actors?.length) writeJson(`${this.deps.dataPath}/known-actors.json`, actors);

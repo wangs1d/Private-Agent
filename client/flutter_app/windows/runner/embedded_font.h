@@ -92,21 +92,56 @@ inline void LoadIslandNotoFonts() {
   }
 }
 
+inline bool g_harmonyos_ready = false;        // Bold 基础族注册成功
+inline bool g_harmonyos_medium_ready = false; // Medium 独立族注册成功
+
+// 岛专用主字体：HarmonyOS Sans SC（2026-10-01 用户定调换字体——比思源
+// 黑体字腔大、x-height 高，小字号黑底更清晰饱满）。加载方式与 Noto 同：
+// 必须 AddFontResourceExW(0) 会话级全局加载——GDI+ 族名解析不认进程私有
+// 内存注册（画空，见 LoadIslandNotoFonts 注释）。
+inline void LoadIslandHarmonyosFonts() {
+  static bool tried = false;
+  if (tried) return;
+  tried = true;
+  wchar_t exe_path[MAX_PATH]{};
+  if (GetModuleFileNameW(nullptr, exe_path, MAX_PATH) == 0) return;
+  std::wstring dir(exe_path);
+  const size_t slash = dir.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return;
+  dir.resize(slash + 1);
+  const wchar_t* kWeightFiles[] = {
+      L"HarmonyOS_Sans_SC_Medium.ttf", L"HarmonyOS_Sans_SC_Bold.ttf"};
+  for (const wchar_t* name : kWeightFiles) {
+    const std::wstring full =
+        dir + L"data\\flutter_assets\\assets\\fonts\\harmonyos\\" + name;
+    if (AddFontResourceExW(full.c_str(), 0, nullptr) > 0) {
+      if (wcsstr(name, L"Medium") != nullptr) {
+        g_harmonyos_medium_ready = true;
+      } else {
+        g_harmonyos_ready = true;
+      }
+    }
+  }
+}
+
 inline const wchar_t* IslandFontFamily() {
+  LoadIslandHarmonyosFonts();
   LoadIslandNotoFonts();
-  // 族名以字体文件 name 表为准（GDI 按 nameID1 匹配）：这三份 OTF 的
-  // 基础族是 "Noto Sans CJK SC"（Regular+Bold 两面）。"Noto Sans SC" 这
-  // 个名字只在系统恰好装过 Noto 时存在——普通用户机器上不存在，一律
-  // 回落宋体（细且糊），即岛文字「又细又浅」的根因。
+  // 族名以字体文件 name 表为准（PrivateFontCollection 实测 2026-10-01）：
+  // HarmonyOS Bold TTF 基础族 = "HarmonyOS Sans SC"（单 Bold 面，GDI
+  // 任意字重请求都匹配到它）。
+  if (g_harmonyos_ready) return L"HarmonyOS Sans SC";
   if (g_noto_ready) return L"Noto Sans CJK SC";
   return UiFontFamily();  // 回退 MiSans → Microsoft YaHei
 }
 
-// Medium 在 GDI 的 RIBBI 规则下是独立族名（nameID1="Noto Sans CJK SC
-// Medium"），不走族内字重匹配：基础族收到 <600 的字重请求会掉回
-// Regular。500 字重的文字必须显式点名这个族（探针实证可选真 Medium）。
+// Medium 在 GDI 的 RIBBI 规则下是独立族名（nameID1，实测
+// "HarmonyOS Sans SC Medium"）：基础族收到 <600 的字重请求不会选出
+// Medium。<550 的字重文字必须显式点名这个族。
 inline const wchar_t* IslandFontFamilyMedium() {
+  LoadIslandHarmonyosFonts();
   LoadIslandNotoFonts();
+  if (g_harmonyos_medium_ready) return L"HarmonyOS Sans SC Medium";
   if (g_noto_medium_ready) return L"Noto Sans CJK SC Medium";
   return IslandFontFamily();
 }

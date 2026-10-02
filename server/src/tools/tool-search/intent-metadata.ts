@@ -341,6 +341,8 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     metadata: {
       aliases: ["到家提醒", "离家提醒", "位置提醒", "围栏", "到家的时候", "离开公司"],
       examples: ["到家的时候提醒我拿快递", "离开公司提醒我打卡"],
+      negativeAliases: ["定时提醒", "十分钟后"],
+      negativeExamples: ["明天早上九点提醒我开会", "十分钟后提醒我", "定个提醒"],
     },
   },
   {
@@ -352,6 +354,22 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
   },
   // ── calendar 族内区分（2026-09-08 新增 update_task/find_free_slots 后黄金回归防挤占）──
   // 前缀别名让所有 calendar.* 共享「日程/提醒/待办」，族内排名靠各自专属词。
+  {
+    exact: "reminder.plan",
+    metadata: {
+      aliases: ["提醒我", "定时提醒", "定个提醒", "设个提醒", "到点提醒"],
+      examples: ["明天早上九点提醒我开会", "十分钟后提醒我", "提醒我交周报"],
+      negativeAliases: ["取消提醒", "删除提醒"],
+      negativeExamples: ["取消明天那个提醒", "把提醒删了"],
+    },
+  },
+  {
+    exact: "care.rhythm_reminder",
+    metadata: {
+      negativeAliases: ["取消提醒", "删除提醒", "暂停提醒", "改期提醒"],
+      negativeExamples: ["取消明天那个提醒", "把提醒关掉", "那个提醒不要了"],
+    },
+  },
   {
     exact: "calendar.list_tasks",
     metadata: {
