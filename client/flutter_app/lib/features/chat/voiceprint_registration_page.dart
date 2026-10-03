@@ -32,12 +32,14 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
   String _statusText = "点击麦克风开始";
   double _recordElapsed = 0;
   Timer? _recordTimer;
-  static const Duration _clipDuration = Duration(seconds: 4);
+  static const Duration _clipDuration = Duration(seconds: 5);
 
+  /// 固定照读句：文本无关引擎不挑内容，固定文本只为采集一致——
+  /// 音素覆盖广（平翘舌/前后鼻音/语气词）、每句约 18 字 ≈ 5 秒、口语自然。
   static const List<String> _prompts = <String>[
-    "随便说一句你日常会说的话",
-    "例如：明天早上八点叫我起床",
-    "最后一句，像平时聊天一样自然",
+    "今天天气真好，我们一起去公园散步吧。",
+    "明天早上七点叫我起床，我八点要赶高铁。",
+    "晚上记得给妈妈打个电话，周末回家吃饭。",
   ];
 
   @override
@@ -57,7 +59,7 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
     setState(() {
       _isRecording = true;
       _recordElapsed = 0;
-      _statusText = _prompts[_clips.length.clamp(0, 2)];
+      _statusText = "请照着读下面的句子";
     });
     const Duration tickDur = Duration(milliseconds: 100);
     _recordTimer?.cancel();
@@ -173,6 +175,22 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
                     style: const TextStyle(color: Colors.white, fontSize: 44, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 14),
+                  Text(
+                    "第 ${(_clips.length + 1).clamp(1, 3)} 句 · 请照着读",
+                    style: TextStyle(color: Colors.white.withValues(alpha: 0.55), fontSize: 12.5),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _prompts[_clips.length.clamp(0, 2)],
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 19,
+                      height: 1.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 14),
                   LinearProgressIndicator(
                     value: _progress,
                     backgroundColor: Colors.white.withValues(alpha: 0.15),
@@ -240,10 +258,10 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
                   const Text("注册说明", style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 10),
                   Text(
-                    "1. 点击麦克风按钮开始录制\n"
-                    "2. 每次录制约 4 秒，请自然说话\n"
-                    "3. 完成 3 次录制后自动注册\n"
-                    "4. 注册后，语音对话与控制只响应你的声音",
+                    "1. 点击麦克风，照着屏幕上的句子朗读\n"
+                    "2. 每句约 5 秒，用平时说话的音量和语速\n"
+                    "3. 完成 3 句后自动注册\n"
+                    "4. 验证时不用背这些句子，正常说话即可",
                     style: TextStyle(color: Colors.white.withValues(alpha: 0.65), fontSize: 13.5, height: 1.7),
                   ),
                 ],

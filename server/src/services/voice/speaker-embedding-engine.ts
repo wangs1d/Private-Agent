@@ -1,12 +1,15 @@
 /**
  * 本地说话人向量引擎（声纹底座）。
  *
- * 打包随附 wespeaker cnceleb_resnet34 ONNX（~26MB，256 维），onnxruntime-node
- * 纯 CPU 推理。输入 16k 单声道 PCM16（>0.25s），输出 L2 归一化 256 维说话人
- * embedding——同一人不同语句余弦相近、不同人相远，注册/验证共用同一实现保证
- * 系统内一致（不与 pyannote 等外部实现互认）。
+ * 打包随附 3D-Speaker CAM++ 中文版 ONNX（~28MB，192 维，CN-Celeb+CN-Common
+ * ~20 万说话人训练，官方 checkpoint 导出），onnxruntime-node 纯 CPU 推理。
+ * 输入 16k 单声道 PCM16（>0.25s），输出 L2 归一化 192 维说话人 embedding——
+ * 同一人不同语句余弦相近、不同人相远，注册/验证共用同一实现保证系统内一致
+ * （不与 pyannote 等外部实现互认）。
  *
- * 前端见 speaker-fbank.ts（kaldi fbank80 + 逐句 CMVN，模型图内不含 CMVN）。
+ * 前端见 speaker-fbank.ts（kaldi fbank80 + 逐句减均值）。归一口径经官方样本
+ * 实证标定（scripts/probe-campplus-frontend.ts）：mean margin 0.78 ≫ cmvn 0.30，
+ * 与 3D-Speaker 官方 CAM++ 推理一致；模型图内不含 CMVN。
  */
 
 import { existsSync } from "node:fs";
@@ -15,10 +18,11 @@ import { fileURLToPath } from "node:url";
 
 import type { InferenceSession, Tensor } from "onnxruntime-node";
 
-import { computeFbankWithCmvn, pcm16ToFloat, resampleTo16k } from "./speaker-fbank.js";
+import { computeFbank, pcm16ToFloat, resampleTo16k } from "./speaker-fbank.js";
 
-export const SPEAKER_MODEL_ID = "speaker-cnceleb-resnet34";
-export const SPEAKER_EMBEDDING_DIMS = 256;
+export const SPEAKER_MODEL_ID = "speaker-campplus-zh";
+export const SPEAKER_EMBEDDING_DIMS = 192;
+export const SPEAKER_MODEL_FILE = "campplus_zh_cn_common_200k.onnx";
 
 export type SpeakerEmbeddingEngine = {
   model: string;
@@ -41,7 +45,7 @@ export function resolveSpeakerModelDir(): string | null {
     join(process.cwd(), "models", SPEAKER_MODEL_ID),
   ];
   for (const dir of candidates) {
-    if (existsSync(join(dir, "cnceleb_resnet34.onnx"))) return dir;
+    if (existsSync(join(dir, SPEAKER_MODEL_FILE))) return dir;
   }
   return null;
 }
@@ -58,7 +62,7 @@ async function doInit(): Promise<SpeakerEmbeddingEngine | null> {
   if (isSpeakerEmbeddingDisabled()) return null;
   const dir = resolveSpeakerModelDir();
   if (!dir) {
-    console.warn("[voiceprint] 说话人模型缺失（models/speaker-cnceleb-resnet34），声纹能力不可用");
+    console.warn("[voiceprint] 说话人模型缺失（models/speaker-campplus-zh），声纹能力不可用");
     return null;
   }
 
@@ -66,7 +70,7 @@ async function doInit(): Promise<SpeakerEmbeddingEngine | null> {
   const ort = await import("onnxruntime-node");
   let session: InferenceSession;
   try {
-    session = await ort.InferenceSession.create(join(dir, "cnceleb_resnet34.onnx"), {
+    session = await ort.InferenceSession.create(join(dir, SPEAKER_MODEL_FILE), {
       executionProviders: ["cpu"],
       graphOptimizationLevel: "all",
     });
@@ -87,7 +91,8 @@ async function doInit(): Promise<SpeakerEmbeddingEngine | null> {
     async embedPcm16(pcm: Int16Array, sampleRate = 16000): Promise<Float32Array> {
       const run = chain.then(async () => {
         const wave = resampleTo16k(pcm16ToFloat(pcm), sampleRate);
-        const fbank = computeFbankWithCmvn(wave);
+        // CAM++ 推理口径：逐句减均值（标定 margin 0.78，见文件头）
+        const fbank = computeFbank(wave, "mean");
         const feeds: Record<string, Tensor> = {
           feats: new ort.Tensor("float32", fbank.data, [1, fbank.frames, fbank.dims]),
         };

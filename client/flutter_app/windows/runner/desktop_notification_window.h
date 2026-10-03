@@ -8,12 +8,13 @@
 #include <memory>
 #include <string>
 
-// ── 桌面通知弹窗（v4 全透明玻璃版） ──
-//    玻璃背景 = 弹出前抓拍弹窗将覆盖的桌面像素 → 降采样模糊 → 全窗绘制，
-//    再叠一层极薄渐变托住文字对比度。不依赖系统 Acrylic/"透明效果"开关
-//    （未公开的 AccentPolicy 接口在部分 Win11 版本上已失效），任何环境下
-//    都呈现"透明玻璃盖在桌面上"的效果；DWM 系统级圆角；
-//    形状与文字全部 GDI+ 抗锯齿渲染。
+// ── 桌面通知弹窗（真透明玻璃版） ──
+//    卡片 = 恒定半透明深渐变（逐像素 alpha），WS_EX_LAYERED +
+//    UpdateLayeredWindow 上屏，DWM 实时合成——背后桌面/窗口变化、
+//    弹窗存活期内始终透出当下画面（旧版弹出前抓拍桌面当假玻璃，
+//    背景永远停在抓拍帧，已废）。玻璃视觉原语与通话弹窗家族同源
+//    （call_visuals.h）；形状与文字全部 GDI+ 抗锯齿渲染进 PARGB 表面；
+//    DWM 系统级圆角。
 class DesktopNotificationWindow {
  public:
   using ConfirmCallback = std::function<void()>;
@@ -43,10 +44,8 @@ class DesktopNotificationWindow {
 
   void EnsureClassRegistered();
   bool CreateWindowIfNeeded();
-  void ApplyAcrylicBlur(HWND hwnd);
   void ApplyRoundedCorners(HWND hwnd);
   POINT BottomRightOrigin() const;
-  void CaptureBackdrop(int origin_x, int origin_y);
   void ComputeLayout();
   void DestroyNativeWindow();
   void StartTimer();
@@ -54,11 +53,11 @@ class DesktopNotificationWindow {
   void Repaint();
 
   // ── 绘制 ──
+  // hdc 仅用于字体度量；像素全部画进 call_vis::GlassSurface（PARGB），
+  // 随后 UpdateLayeredWindow 整窗上屏（半透明区域 DWM 实时合成）。
   void Paint(HWND hwnd, HDC hdc);
-  // 双缓冲绘制：Paint 先画进内存位图再一次性 BitBlt 到目标 DC，
-  // 避免 GDI+ 分层直画被 DWM 采样到中间态（进度条 tick 时底部闪烁）
-  void PaintBuffered(HWND hwnd, HDC hdc);
-  void DrawBellGlyph(HDC hdc, const RECT& rc, COLORREF color);
+  void PaintLayered(HWND hwnd);
+  void DrawBellGlyph(Gdiplus::Graphics& g, const RECT& rc, COLORREF color);
   int  MeasureButtonWidth(HDC hdc, const std::wstring& label) const;
   int  MeasureMessageHeight(HDC hdc) const;
 
@@ -66,10 +65,6 @@ class DesktopNotificationWindow {
   int  HitTest(const POINT& pt) const;
 
   HWND window_handle_ = nullptr;
-  // 弹出前抓拍并模糊的桌面背景（自绘毛玻璃底）
-  std::unique_ptr<Gdiplus::Bitmap> backdrop_;
-  // 毛玻璃底的自适应压暗系数（1=不压；背后桌面太亮时 <1，保证白字可读）
-  float backdrop_dim_ = 1.0f;
 
   std::wstring title_;         // 正文粗标题（原 title 字段）
   std::wstring message_;       // 正文描述

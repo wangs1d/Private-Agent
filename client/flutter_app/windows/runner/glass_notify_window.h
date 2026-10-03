@@ -12,7 +12,8 @@
 // ── 桌面右上角玻璃通知栈（主动性消息专属通道） ──
 //    与 DesktopNotificationWindow（日程提醒，右下角单条）职责分离：
 //    本窗口浮在屏幕工作区右上角，与应用主窗口可见性无关（应用最小化也可见）。
-//    视觉 = Meoo 玻璃态设计：抓拍桌面像素自绘毛玻璃底 + 深色玻璃卡片 +
+//    视觉 = Meoo 玻璃态设计：恒定半透明深卡（逐像素 alpha，DWM 实时合成，
+//    背后内容永远透出当下画面；旧版抓拍桌面自绘毛玻璃已废） +
 //    图标徽章 + 白色确认胶囊 + 底部倒计时进度线；多条通知同窗层叠，
 //    后卡逐级缩小/上移/降透明（景深），同屏上限 4 条。
 //    渲染走 UpdateLayeredWindow 逐像素 alpha：卡片间空隙真实透明，
@@ -78,7 +79,6 @@ class GlassNotifyWindow {
   int MeasurePillWidth(const Card& card) const;
   void ComputeLayout();
   POINT TopRightOrigin() const;
-  void CaptureBackdrop(int origin_x, int origin_y, int w, int h);
   void EnsureNoiseTile();
 
   // 将整栈绘制进 ARGB DIB 并 UpdateLayeredWindow 上屏；
@@ -100,9 +100,6 @@ class GlassNotifyWindow {
   std::vector<Card> cards_;  // 下标 0 = 最前（最新）
   static constexpr int kMaxCards = 4;
 
-  // 抓拍并模糊的桌面背景（窗口坐标系）
-  std::unique_ptr<Gdiplus::Bitmap> backdrop_;
-  float backdrop_dim_ = 1.0f;
   // 玻璃噪点纹理（首帧懒生成）
   std::unique_ptr<Gdiplus::Bitmap> noise_tile_;
   int dump_shots_ = 0;  // 调试出图计数（每次 Show 重置）

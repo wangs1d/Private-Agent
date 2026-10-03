@@ -5,6 +5,7 @@ import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/services/agent_sphere_voice_controller.dart";
 import "../../core/services/app_auto_start.dart";
 import "../../core/services/local_runtime_config.dart";
 import "../../core/services/local_runtime_manager.dart";
@@ -12,6 +13,9 @@ import "../../core/services/model_api_tester.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
 import "../../core/theme/app_theme.dart";
+import "../chat/voiceprint_registration_page.dart";
+import "../model_config/model_provider_card.dart";
+import "../model_config/model_provider_catalog.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
@@ -47,13 +51,11 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _captureLoading = true;
 
   // —— 模型与声纹分区 ——
-  final TextEditingController _modelKeyCtrl = TextEditingController();
-  final TextEditingController _modelBaseCtrl = TextEditingController();
-  ModelApiTestResult? _modelTestResult;
-  bool _modelTesting = false;
-  bool _modelSaving = false;
-  String? _modelSaveMsg;
-  bool _obscureModelKey = true;
+  // 模型接入 UI/收集/测试全部在 ModelProviderCard（与首启向导共用），这里只存
+  // 预填值与落盘回调。
+  String _modelInitialKey = "";
+  String? _modelInitialBase;
+  String? _modelInitialModel;
   Map<String, dynamic>? _vpStatus;
   bool _vpClearing = false;
 
@@ -298,8 +300,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _loadModelConfig() async {
     final Map<String, String> cfg = LocalRuntimeConfig.readSync();
-    _modelKeyCtrl.text = cfg["OPENAI_API_KEY"] ?? "";
-    _modelBaseCtrl.text = cfg["OPENAI_BASE_URL"] ?? "";
+    _modelInitialKey = cfg["OPENAI_API_KEY"] ?? "";
+    _modelInitialBase = cfg["OPENAI_BASE_URL"];
+    _modelInitialModel = cfg["OPENAI_MODEL"];
   }
 
   Future<void> _refreshVoiceprintStatus() async {
@@ -356,52 +359,32 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<void> _saveModelConfig() async {
-    if (_modelSaving) return;
-    final String key = _modelKeyCtrl.text.trim();
-    if (key.isEmpty) {
-      setState(() => _modelSaveMsg = "API Key 不能为空");
-      return;
-    }
-    setState(() {
-      _modelSaving = true;
-      _modelSaveMsg = null;
-    });
-    try {
-      final Map<String, String> cfg = Map.of(LocalRuntimeConfig.readSync()); // readSync 返回不可变 map，须拷贝后改
-      cfg["OPENAI_API_KEY"] = key;
-      final String base = _modelBaseCtrl.text.trim();
-      if (base.isNotEmpty) {
-        cfg["OPENAI_BASE_URL"] = base;
-      } else {
-        cfg.remove("OPENAI_BASE_URL");
-      }
-      LocalRuntimeConfig.write(cfg);
-      if (!kIsWeb && LocalRuntimeManager.isBundled) {
-        await LocalRuntimeManager.restart().timeout(const Duration(seconds: 30));
-      }
-      if (!mounted) return;
-      setState(() => _modelSaveMsg = "已保存并生效");
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _modelSaveMsg = "保存失败：$e");
-    } finally {
-      if (mounted) setState(() => _modelSaving = false);
+  /// 落盘由 ModelProviderCard 校验后回调；这里写 config.env 并重启本地引擎生效。
+  Future<void> _saveModelConfig(ModelConfigDraft draft) async {
+    await LocalRuntimeConfig.writeModelConfig(
+      apiKey: draft.apiKey,
+      baseUrl: draft.baseUrl,
+      model: draft.model,
+    );
+    if (!kIsWeb && LocalRuntimeManager.isBundled) {
+      await LocalRuntimeManager.restart().timeout(const Duration(seconds: 30));
     }
   }
 
-  Future<void> _runModelTest() async {
-    if (_modelTesting) return;
-    setState(() {
-      _modelTesting = true;
-      _modelTestResult = null;
-    });
-    final ModelApiTestResult result = await ModelApiTester.test(_modelBaseCtrl.text, _modelKeyCtrl.text);
-    if (!mounted) return;
-    setState(() {
-      _modelTesting = false;
-      _modelTestResult = result;
-    });
+  /// 直达声纹注册页（无需经语音模式触发）。注册完成同步语音球状态并刷新本卡。
+  Future<void> _openVoiceprintRegistration() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext ctx) => VoiceprintRegistrationPage(
+          userId: ApiConfig.effectiveActorId,
+          onRegistrationComplete: () {
+            Navigator.of(ctx).pop();
+            AgentSphereVoiceController.instance.markVoiceprintRegistered();
+          },
+        ),
+      ),
+    );
+    if (mounted) await _refreshVoiceprintStatus();
   }
 
   Future<void> _clearVoiceprint() async {
@@ -622,72 +605,19 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             const SizedBox(height: 6),
             Text(
-              "对话模型 API Key（OpenAI 兼容，如 DeepSeek）。仅保存在本机，保存后自动重启本地引擎生效。",
+              "选模型服务商，按引导获取 API Key 后填入。仅保存在本机，保存后自动重启本地引擎生效。",
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 14),
-            TextField(
-              controller: _modelKeyCtrl,
-              obscureText: _obscureModelKey,
-              style: const TextStyle(fontSize: 13),
-              decoration: InputDecoration(
-                labelText: "API Key",
-                hintText: "sk-…",
-                isDense: true,
-                suffixIcon: IconButton(
-                  icon: Icon(_obscureModelKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18),
-                  onPressed: () => setState(() => _obscureModelKey = !_obscureModelKey),
-                ),
-              ),
+            ModelProviderCard(
+              initialApiKey: _modelInitialKey,
+              initialBaseUrl: _modelInitialBase,
+              initialModel: _modelInitialModel,
+              onSave: _saveModelConfig,
+              onSaved: () {
+                if (mounted) setState(() {}); // 刷新头部「已配置」状态
+              },
             ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _modelBaseCtrl,
-              style: const TextStyle(fontSize: 13),
-              decoration: const InputDecoration(
-                labelText: "API Base URL",
-                hintText: "https://api.deepseek.com/v1",
-                isDense: true,
-              ),
-            ),
-            const SizedBox(height: 14),
-            Row(
-              children: <Widget>[
-                OutlinedButton(
-                  onPressed: _modelTesting ? null : _runModelTest,
-                  child: _modelTesting
-                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text("测试连接", style: TextStyle(fontSize: 13)),
-                ),
-                const SizedBox(width: 12),
-                FilledButton(
-                  onPressed: _modelSaving ? null : _saveModelConfig,
-                  child: _modelSaving
-                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text("保存并生效", style: TextStyle(fontSize: 13)),
-                ),
-                if (_modelSaveMsg != null) ...<Widget>[
-                  const SizedBox(width: 12),
-                  Expanded(child: Text(_modelSaveMsg!, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis)),
-                ],
-              ],
-            ),
-            if (_modelTestResult != null) ...<Widget>[
-              const SizedBox(height: 10),
-              Row(
-                children: <Widget>[
-                  Icon(
-                    _modelTestResult!.ok ? Icons.check_circle_outline : Icons.error_outline_outlined,
-                    size: 16,
-                    color: _modelTestResult!.ok ? cs.primary : Theme.of(context).colorScheme.error,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(_modelTestResult!.summary, style: const TextStyle(fontSize: 12.5), overflow: TextOverflow.ellipsis),
-                  ),
-                ],
-              ),
-            ],
           ],
         ),
       ),
@@ -720,12 +650,17 @@ class _SettingsPageState extends State<SettingsPage> {
             Text(
               registered
                   ? "语音对话与语音控制只响应你录入的声音。清除后需重新录入。"
-                  : "录入声纹后，语音对话与控制只响应你的声音。可在语音模式里触发注册引导。",
+                  : "录入声纹后，语音对话与控制只响应你的声音。",
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
             Row(
               children: <Widget>[
+                FilledButton(
+                  onPressed: _openVoiceprintRegistration,
+                  child: Text(registered ? "重新录入" : "录入声纹", style: const TextStyle(fontSize: 13)),
+                ),
+                const SizedBox(width: 8),
                 OutlinedButton(
                   onPressed: _vpClearing ? null : (registered ? _clearVoiceprint : _refreshVoiceprintStatus),
                   child: _vpClearing

@@ -56,4 +56,29 @@ class LocalRuntimeConfig {
     final String? key = readSync()["OPENAI_API_KEY"];
     return key != null && key.trim().isNotEmpty;
   }
+
+  /// 模型接入三键合并写入（目录式选择的唯一落盘通道；write 是整文件覆写，
+  /// 必须先读旧键再改）。[baseUrl]/[model] 传空则移除对应键，回落 runtime 默认。
+  /// 消费方：resolve-provider.ts 的 openai 绑定（OPENAI_API_KEY/BASE_URL/MODEL）。
+  static Future<void> writeModelConfig({
+    required String apiKey,
+    String? baseUrl,
+    String? model,
+  }) async {
+    final Map<String, String> cfg = Map.of(readSync()); // readSync 返回不可变 map，须拷贝后改
+    cfg["OPENAI_API_KEY"] = apiKey;
+    final String base = (baseUrl ?? "").trim();
+    if (base.isNotEmpty) {
+      cfg["OPENAI_BASE_URL"] = base;
+    } else {
+      cfg.remove("OPENAI_BASE_URL");
+    }
+    final String m = (model ?? "").trim();
+    if (m.isNotEmpty) {
+      cfg["OPENAI_MODEL"] = m;
+    } else {
+      cfg.remove("OPENAI_MODEL");
+    }
+    await write(cfg);
+  }
 }

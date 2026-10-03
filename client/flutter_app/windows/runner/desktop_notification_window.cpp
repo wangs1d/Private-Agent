@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <memory>
 
+#include "call_visuals.h"
+
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdiplus.lib")
 
@@ -43,44 +45,14 @@ constexpr COLORREF kAccentNormal = RGB(0x7A, 0xA2, 0xFF);  // normal → 柔蓝
 constexpr COLORREF kAccentHigh   = RGB(0xFF, 0xB0, 0x20);  // high → 琥珀
 constexpr COLORREF kAccentUrgent = RGB(0xFF, 0x5C, 0x5C);  // urgent → 红
 
-// ── DWM Acrylic（未公开 user32 接口，Win10 1803+ / Win11 稳定可用） ──
-struct AccentPolicy {
-  int   accent_state;
-  int   flags;
-  DWORD gradient_color;  // 0xAABBGGRR
-  int   animation_id;
-};
-struct WindowCompositionAttributeData {
-  int     attribute;
-  PVOID   data;
-  size_t  size;
-};
-using SetWindowCompositionAttributeFn =
-    BOOL (WINAPI*)(HWND, WindowCompositionAttributeData*);
-
-constexpr int kWcaAccentPolicy              = 19;
-constexpr int kAccentEnableAcrylicBlurBehind = 4;
-// rgba(18,18,24,0.13) → A=0x22, B=0x18, G=0x12, R=0x12
-// 注意：未公开的 AccentPolicy Acrylic 在部分 Win11 版本上已失效（本机实测
-// 无模糊），真正的玻璃底由 CaptureBackdrop 自绘；系统 Acrylic 仅作老系统
-// 兼容叠加（被不透明的自绘底覆盖后无感，保留无害）。
-constexpr DWORD kAcrylicTint = 0x22181212u;
+// ── 玻璃卡底：恒定半透明深渐变（与通话弹窗家族同源，见 call_visuals.h） ──
+// WS_EX_LAYERED + UpdateLayeredWindow 逐像素 alpha，DWM 实时合成，
+// 背后桌面/窗口变化永远透出当下画面；不再抓拍桌面（旧版背景冻结）。
+// 此前叠在抓拍图上的系统 Acrylic（未公开 AccentPolicy）已一并删除：
+// 本机实测无效，逐像素 alpha 是全版本确定路径。
 
 constexpr int kDwmwaWindowCornerPreference = 33;
 constexpr int kDwmwcpRound                 = 2;
-
-// ── 自绘玻璃压暗层（GDI+ 半透明渐变，直接控制通透度与文字对比度） ──
-// 全透明玻璃：只留一层极薄的顶部→底部渐变托住文字对比度，
-// 桌面/壁纸经 CaptureBackdrop 模糊后直接成为弹窗背景
-constexpr COLORREF kScrimTop    = RGB(0x1A, 0x1C, 0x24);  // 顶部稍深
-constexpr BYTE     kScrimTopA   = 32;
-constexpr COLORREF kScrimBottom = RGB(0x0C, 0x0D, 0x12);  // 底部稍浅
-constexpr BYTE     kScrimBottomA = 12;
-constexpr COLORREF kRimColor    = RGB(0xFF, 0xFF, 0xFF);
-constexpr BYTE     kRimAlpha    = 66;                     // 玻璃高光描边
-
-// 自适应压暗目标：模糊底平均亮度高于此值时按比例压暗（白字可读底线）
-constexpr float kGlassTargetLuma = 90.0f;
 
 // ── 布局常量 ──
 constexpr int kSidePad    = 18;   // 左右留白
@@ -232,29 +204,12 @@ bool PtIn(const POINT& pt, const RECT& rc) {
          pt.y >= rc.top && pt.y < rc.bottom;
 }
 
-// 抓拍背景的平均亮度（0-255），用于自适应压暗白字背景
-float MeanLuma(Gdiplus::Bitmap* img) {
-  using namespace Gdiplus;
-  BitmapData data;
-  Rect full(0, 0, static_cast<INT>(img->GetWidth()),
-            static_cast<INT>(img->GetHeight()));
-  if (img->LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB,
-                    &data) != Ok) {
-    return 80.0f;
-  }
-  float sum = 0.0f;
-  int n = 0;
-  for (UINT y = 0; y < data.Height; ++y) {
-    const BYTE* row =
-        static_cast<const BYTE*>(data.Scan0) + y * data.Stride;
-    for (UINT x = 0; x < data.Width; ++x) {
-      const BYTE* px = row + x * 4;  // BGRA
-      sum += 0.299f * px[2] + 0.587f * px[1] + 0.114f * px[0];
-      ++n;
-    }
-  }
-  img->UnlockBits(&data);
-  return n > 0 ? sum / n : 80.0f;
+// 合成表面（PARGB）：本窗专属一份，尺寸随内容高度变化由 Ensure 处理；
+// 与通话窗的共享表面互不干扰。表面跨帧复用，每帧绘制前必须 Clear
+// （半透明底逐帧叠加会把 alpha 饱和成不透明，见 call_visuals.h）。
+call_vis::GlassSurface& PaintSurface() {
+  static call_vis::GlassSurface surface;
+  return surface;
 }
 
 }  // namespace
@@ -295,29 +250,8 @@ void DesktopNotificationWindow::EnsureClassRegistered() {
   registered = true;
 }
 
-void DesktopNotificationWindow::ApplyAcrylicBlur(HWND hwnd) {
-  HMODULE user32 = GetModuleHandleW(L"user32.dll");
-  if (!user32) return;
-  auto set_attr = reinterpret_cast<SetWindowCompositionAttributeFn>(
-      reinterpret_cast<void*>(GetProcAddress(
-          user32, "SetWindowCompositionAttribute")));
-  if (!set_attr) return;
-
-  AccentPolicy accent = {};
-  accent.accent_state   = kAccentEnableAcrylicBlurBehind;
-  accent.flags          = 2;
-  accent.gradient_color = kAcrylicTint;
-  accent.animation_id   = 0;
-
-  WindowCompositionAttributeData data = {};
-  data.attribute = kWcaAccentPolicy;
-  data.data      = &accent;
-  data.size      = sizeof(accent);
-  set_attr(hwnd, &data);
-}
-
 void DesktopNotificationWindow::ApplyRoundedCorners(HWND hwnd) {
-  // Win11：系统级圆角（带抗锯齿，Acrylic 自动跟随裁剪，无黑角）
+  // Win11：系统级圆角（带抗锯齿，半透明卡自动跟随裁剪，无黑角）
   DWORD pref = kDwmwcpRound;
   DwmSetWindowAttribute(hwnd, kDwmwaWindowCornerPreference,
                         &pref, sizeof(pref));
@@ -327,8 +261,10 @@ bool DesktopNotificationWindow::CreateWindowIfNeeded() {
   if (window_handle_) return true;
   EnsureClassRegistered();
 
-  // 注意：不要使用 WS_EX_LAYERED——它与 Acrylic 冲突且只会让整窗变淡。
-  DWORD ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+  // WS_EX_LAYERED = 逐像素 alpha 真透明（见文件头注释）；首次
+  // UpdateLayeredWindow 上屏前窗口不可见。
+  DWORD ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+                   WS_EX_LAYERED;
   DWORD style    = WS_POPUP;
 
   HWND hwnd = CreateWindowExW(
@@ -338,9 +274,6 @@ bool DesktopNotificationWindow::CreateWindowIfNeeded() {
   window_handle_ = hwnd;
 
   ApplyRoundedCorners(hwnd);
-  // 玻璃背景：真正的毛玻璃由 Show() 里的 CaptureBackdrop 自绘提供；
-  // 系统 Acrylic 仅作老系统兼容叠加
-  ApplyAcrylicBlur(hwnd);
   return true;
 }
 
@@ -402,78 +335,6 @@ POINT DesktopNotificationWindow::BottomRightOrigin() const {
   return pt;
 }
 
-// ── 自绘毛玻璃底 ──
-// 抓取弹窗将覆盖的桌面像素（此时窗口还隐藏，画面干净），1/8 降采样丢弃
-// 细节后再双三次放大回原尺寸 = 大半径柔焦。不依赖系统 Acrylic 接口
-// （AccentPolicy 在部分 Win11 版本上已失效，本机实测无模糊效果）。
-void DesktopNotificationWindow::CaptureBackdrop(int origin_x, int origin_y) {
-  backdrop_.reset();
-  const int w = kWindowWidth;
-  const int h = window_height_;
-
-  HDC screen = GetDC(nullptr);
-  BITMAPINFO bmi = {};
-  bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-  bmi.bmiHeader.biWidth       = w;
-  bmi.bmiHeader.biHeight      = -h;  // top-down，与 GDI+ 扫描行方向一致
-  bmi.bmiHeader.biPlanes      = 1;
-  bmi.bmiHeader.biBitCount    = 32;
-  bmi.bmiHeader.biCompression = BI_RGB;
-  void* bits = nullptr;
-  HBITMAP dib =
-      CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (!dib) {
-    ReleaseDC(nullptr, screen);
-    return;
-  }
-  HDC mem = CreateCompatibleDC(screen);
-  HBITMAP old = static_cast<HBITMAP>(SelectObject(mem, dib));
-  BitBlt(mem, 0, 0, w, h, screen, origin_x, origin_y, SRCCOPY);
-  SelectObject(mem, old);
-  DeleteDC(mem);
-  ReleaseDC(nullptr, screen);
-
-  // raw 只是包裹 DIB 缓冲的视图；降采样完成前不能释放 dib
-  Bitmap raw(w, h, w * 4, PixelFormat32bppARGB, static_cast<BYTE*>(bits));
-
-  const int sw = std::max(1, w / 8);
-  const int sh = std::max(1, h / 8);
-  Bitmap downscaled(sw, sh, PixelFormat32bppARGB);
-  {
-    Graphics gs(&downscaled);
-    gs.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    gs.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    ImageAttributes ia;
-    ia.SetWrapMode(WrapModeTileFlipXY);  // 边缘镜像采样，避免暗边
-    gs.DrawImage(&raw, RectF(0.0f, 0.0f, static_cast<REAL>(sw),
-                             static_cast<REAL>(sh)),
-                 0.0f, 0.0f, static_cast<REAL>(w), static_cast<REAL>(h),
-                 UnitPixel, &ia);
-  }
-  DeleteObject(dib);  // 像素已复制进 downscaled，DIB 可释放
-
-  // 自适应压暗：白字的可读底线约在亮度 90；暗桌面不压（全通透），
-  // 亮桌面把玻璃整体压到深色贴膜效果（模糊纹理仍清晰可见）
-  backdrop_dim_ = std::clamp(kGlassTargetLuma / std::max(MeanLuma(&downscaled),
-                                                         1.0f),
-                             0.34f, 1.0f);
-
-  auto* blurred = new Bitmap(w, h, PixelFormat32bppARGB);
-  {
-    Graphics gb(blurred);
-    gb.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    gb.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    ImageAttributes ia;
-    ia.SetWrapMode(WrapModeTileFlipXY);
-    gb.DrawImage(&downscaled, RectF(0.0f, 0.0f, static_cast<REAL>(w),
-                                    static_cast<REAL>(h)),
-                 0.0f, 0.0f, static_cast<REAL>(sw), static_cast<REAL>(sh),
-                 UnitPixel, &ia);
-  }
-  backdrop_.reset(blurred);
-}
-
-
 void DesktopNotificationWindow::Show(const std::string& title,
                                      const std::string& message,
                                      const std::string& priority,
@@ -507,25 +368,17 @@ void DesktopNotificationWindow::Show(const std::string& title,
   window_height_ = std::clamp(btn_y + kBtnHeight + kBtnBottomPad,
                               kMinHeight, kMaxHeight);
 
-  // 每次都重建窗口：玻璃窗口从不擦除背景，复用旧窗口会残留上一次的
-  // 像素（文字/高度变化时出现鬼影）；新建表面全零，视觉始终纯净。
+  // 每次都重建窗口：复用旧窗口会残留上一次的像素（文字/高度变化时出现
+  // 鬼影）；新建窗口 + 重绘合成表面，视觉始终纯净。
   DestroyNativeWindow();
   if (!CreateWindowIfNeeded()) return;
   ComputeLayout();
   hover_id_ = 0;
   show_tick_ = GetTickCount64();  // 预绘制进度条需要正确的起点
 
-  // 窗口尚不可见时，先抓拍右下角目标位置背后的桌面做毛玻璃底，
-  // 弹出即是"透明玻璃盖在桌面上"
+  // 显示前先把完整第一帧画进合成表面并上屏，避免弹出瞬间出现空帧
   const POINT origin = BottomRightOrigin();
-  CaptureBackdrop(origin.x, origin.y);
-
-  // 显示前先绘制完整第一帧（含玻璃底），避免弹出瞬间出现空帧
-  {
-    HDC wdc = GetWindowDC(window_handle_);
-    PaintBuffered(window_handle_, wdc);
-    ReleaseDC(window_handle_, wdc);
-  }
+  PaintLayered(window_handle_);
   // 原子定位+显示——NOACTIVATE 不抢焦点，避免仅靠 SWP_SHOWWINDOW
   // 在个别环境下初始不可见的竞态
   SetWindowPos(window_handle_, HWND_TOPMOST, origin.x, origin.y, kWindowWidth,
@@ -563,7 +416,7 @@ void DesktopNotificationWindow::DestroyNativeWindow() {
 
 void DesktopNotificationWindow::Repaint() {
   if (!window_handle_) return;
-  InvalidateRect(window_handle_, nullptr, FALSE);  // 不擦除，保护 Acrylic 底
+  InvalidateRect(window_handle_, nullptr, FALSE);  // 不擦除，保护合成表面
 }
 
 int DesktopNotificationWindow::HitTest(const POINT& pt) const {
@@ -575,15 +428,14 @@ int DesktopNotificationWindow::HitTest(const POINT& pt) const {
 // ═══════════════════════════════ 绘制 ════════════════════════════════
 
 // 铃铛：优先用 Segoe Fluent/MDL2 字形（矢量，GDI+ 渲染）；缺失时退回几何拼形
-void DesktopNotificationWindow::DrawBellGlyph(HDC hdc, const RECT& rc,
+void DesktopNotificationWindow::DrawBellGlyph(Gdiplus::Graphics& g,
+                                              const RECT& rc,
                                               COLORREF color) {
-  Graphics g(hdc);
-  g.SetSmoothingMode(SmoothingModeAntiAlias);
-  g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
   const RectF rc_g(static_cast<float>(rc.left), static_cast<float>(rc.top),
                    static_cast<float>(rc.right - rc.left),
                    static_cast<float>(rc.bottom - rc.top));
   if (HasIconFont()) {
+    HDC hdc = GetDC(nullptr);
     const wchar_t* faces[] = {L"Segoe Fluent Icons", L"Segoe MDL2 Assets"};
     for (const wchar_t* face : faces) {
       HFONT hf = CreateFontW(-(kBadgeSize * 2 / 5), 0, 0, 0, FW_NORMAL,
@@ -613,8 +465,10 @@ void DesktopNotificationWindow::DrawBellGlyph(HDC hdc, const RECT& rc,
       sf.SetAlignment(StringAlignmentCenter);
       sf.SetLineAlignment(StringAlignmentCenter);
       g.DrawString(L"\uEA8F", 1, font.get(), rc_g, &sf, &brush);
+      ReleaseDC(nullptr, hdc);
       return;
     }
+    ReleaseDC(nullptr, hdc);
   }
   // 回退：几何铃铛（钟顶圆钮 + 半圆钟身 + 外撇裙 + 钟舌），GDI+ 抗锯齿
   const float cx = rc_g.X + rc_g.Width / 2.0f;
@@ -630,52 +484,38 @@ void DesktopNotificationWindow::DrawBellGlyph(HDC hdc, const RECT& rc,
 }
 
 void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
-  Graphics g(hdc);
+  // hdc 仅用于字体度量；像素全部画进 PARGB 合成表面
+  call_vis::GlassSurface& surface = PaintSurface();
+  if (!surface.Ensure(kWindowWidth, window_height_)) return;
+  Graphics& g = *surface.gfx;
   g.SetSmoothingMode(SmoothingModeAntiAlias);
   g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
   g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+  // 表面跨帧复用，必须先清成全透明（半透明底逐帧叠加会把 alpha
+  // 饱和成不透明，见 call_visuals.h）
+  g.Clear(Color(0, 0, 0, 0));
 
-  // ── 毛玻璃底：弹出前抓拍并模糊的桌面（全透明玻璃的本体）；
-  //    背后太亮时整体压暗（深色贴膜），保证白字可读 ──
-  if (backdrop_) {
-    if (backdrop_dim_ < 0.999f) {
-      ColorMatrix dim = {{
-        {backdrop_dim_, 0.0f,          0.0f,          0.0f, 0.0f},
-        {0.0f,          backdrop_dim_, 0.0f,          0.0f, 0.0f},
-        {0.0f,          0.0f,          backdrop_dim_, 0.0f, 0.0f},
-        {0.0f,          0.0f,          0.0f,          1.0f, 0.0f},
-        {0.0f,          0.0f,          0.0f,          0.0f, 1.0f},
-      }};
-      ImageAttributes ia;
-      ia.SetColorMatrix(&dim);
-      g.DrawImage(backdrop_.get(),
-                  RectF(0.0f, 0.0f, static_cast<float>(kWindowWidth),
-                        static_cast<float>(window_height_)),
-                  0.0f, 0.0f, static_cast<float>(kWindowWidth),
-                  static_cast<float>(window_height_), UnitPixel, &ia);
-    } else {
-      g.DrawImage(backdrop_.get(), 0.0f, 0.0f,
-                  static_cast<float>(kWindowWidth),
-                  static_cast<float>(window_height_));
-    }
-  }
-
-  // ── 玻璃压暗层：毛玻璃底上极薄的顶部→底部渐变，只负责托住文字对比度 ──
+  // ── 玻璃卡底：恒定半透明深渐变圆角 + 高光描边（与通话弹窗家族同源；
+  //    背后内容由 DWM 实时合成，弹窗存活期内永远透出当下画面） ──
   {
     const RectF full(0, 0, static_cast<float>(kWindowWidth),
                      static_cast<float>(window_height_));
-    LinearGradientBrush scrim(full, ToGdiColorA(kScrimTop, kScrimTopA),
-                              ToGdiColorA(kScrimBottom, kScrimBottomA),
-                              90.0f);
-    g.FillRectangle(&scrim, full);
+    GraphicsPath card;
+    AppendRoundRect(&card, full, 7.0f);
+    LinearGradientBrush base(full,
+                             ToGdiColorA(call_vis::kCardTop,
+                                         call_vis::kCardTopA),
+                             ToGdiColorA(call_vis::kCardBottom,
+                                         call_vis::kCardBottomA),
+                             90.0f);
+    g.FillPath(&base, &card);
 
-    // 玻璃高光描边（内缩 1px，跟随系统圆角），增强“玻璃片”轮廓
     GraphicsPath rim;
     AppendRoundRect(&rim,
                     RectF(1.0f, 1.0f, static_cast<float>(kWindowWidth) - 2.0f,
                           static_cast<float>(window_height_) - 2.0f),
-                    7.0f);
-    Pen rim_pen(ToGdiColorA(kRimColor, kRimAlpha));
+                    6.0f);
+    Pen rim_pen(ToGdiColorA(kTextWhite, call_vis::kRimAlpha));
     g.DrawPath(&rim_pen, &rim);
   }
 
@@ -751,7 +591,7 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
   // ── 顶部：铃铛徽章字形 ──
   const RECT badge_rc = {kSidePad, kHeaderTop, kSidePad + kBadgeSize,
                          kHeaderTop + kBadgeSize};
-  DrawBellGlyph(hdc, badge_rc, kBadgeGlyph);
+  DrawBellGlyph(g, badge_rc, kBadgeGlyph);
 
   // ── 顶部：「系统通知」+ 右侧「刚刚」（与徽章垂直居中对齐） ──
   auto f_header = MakeGpFont(hdc, 14, FW_SEMIBOLD);
@@ -804,23 +644,14 @@ void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
   g.Flush(FlushIntentionSync);
 }
 
-void DesktopNotificationWindow::PaintBuffered(HWND hwnd, HDC hdc) {
-  const int w = kWindowWidth;
-  const int h = window_height_;
-  HDC mem       = CreateCompatibleDC(hdc);
-  HBITMAP bmp   = CreateCompatibleBitmap(hdc, w, h);
-  if (!mem || !bmp) {
-    if (mem) DeleteDC(mem);
-    if (bmp) DeleteObject(bmp);
-    Paint(hwnd, hdc);  // 缓冲分配失败退回直画（有闪但不黑屏）
-    return;
-  }
-  HGDIOBJ old_bmp = SelectObject(mem, bmp);
-  Paint(hwnd, mem);
-  BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
-  SelectObject(mem, old_bmp);
-  DeleteObject(bmp);
-  DeleteDC(mem);
+void DesktopNotificationWindow::PaintLayered(HWND hwnd) {
+  HDC hdc = GetDC(nullptr);  // 字体度量用屏幕 DC
+  Paint(hwnd, hdc);
+  ReleaseDC(nullptr, hdc);
+  if (!window_handle_) return;
+  HDC wdc = GetDC(hwnd);
+  call_vis::PresentLayered(hwnd, PaintSurface(), wdc);
+  ReleaseDC(hwnd, wdc);
 }
 
 // ═══════════════════════════════ 消息处理 ══════════════════════════════
@@ -846,13 +677,13 @@ LRESULT DesktopNotificationWindow::HandleMessage(HWND hwnd, UINT message,
   switch (message) {
     case WM_PAINT: {
       PAINTSTRUCT ps;
-      HDC hdc = BeginPaint(hwnd, &ps);
-      PaintBuffered(hwnd, hdc);
+      BeginPaint(hwnd, &ps);  // 仅用于校验更新区；像素走合成表面 ULW
+      PaintLayered(hwnd);
       EndPaint(hwnd, &ps);
       return 0;
     }
     case WM_ERASEBKGND:
-      // Acrylic 层是背景，绝不用画刷擦除（否则黑底/闪烁）
+      // 背景由 DWM 合成的半透明卡提供，绝不用画刷擦除（否则黑底/闪烁）
       return 1;
 
     case WM_TIMER:

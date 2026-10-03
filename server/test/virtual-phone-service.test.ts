@@ -69,19 +69,66 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 test("ensureNumber 分配 6 位号码且幂等", async () => {
   const { service } = makeService();
-  const first = service.ensureNumber("actor-a");
+  const first = await service.ensureNumber("actor-a");
   assert.match(first, /^\d{6}$/);
-  assert.equal(service.ensureNumber("actor-a"), first);
+  assert.equal(await service.ensureNumber("actor-a"), first);
 });
 
 test("ensureNumber 持久化到 VIRTUAL_PHONES_FILE", async () => {
   const { service } = makeService();
-  const num = service.ensureNumber("actor-persist");
+  const num = await service.ensureNumber("actor-persist");
   await sleep(50);
   const raw = JSON.parse(await readFile(process.env.VIRTUAL_PHONES_FILE!, "utf8")) as {
     byActor: Record<string, string>;
   };
   assert.equal(raw.byActor["actor-persist"], num);
+});
+
+test("ensureNumber 写穿：落盘成功才返回，无缓冲窗口", async () => {
+  const { service } = makeService();
+  const num = await service.ensureNumber("actor-writethrough");
+  // 不 sleep：await 返回即磁盘可见（写穿语义），进程此刻崩溃号码也不丢
+  const raw = JSON.parse(await readFile(process.env.VIRTUAL_PHONES_FILE!, "utf8")) as {
+    byActor: Record<string, string>;
+  };
+  assert.equal(raw.byActor["actor-writethrough"], num);
+});
+
+test("ensureNumber 全局唯一：批量申领无重号且 actor↔number 双向一致", async () => {
+  const { service } = makeService();
+  const actors = Array.from({ length: 200 }, (_, i) => `actor-uniq-${i}`);
+  const numbers = await Promise.all(actors.map((a) => service.ensureNumber(a)));
+  assert.equal(new Set(numbers).size, numbers.length, "号码出现重复");
+  for (let i = 0; i < actors.length; i++) {
+    assert.equal(service.getPhoneForActor(actors[i]), numbers[i]);
+  }
+});
+
+test("号码跨重启存活：新实例 load 后幂等返回同号，新用户不会撞号", async () => {
+  const { service: first } = makeService();
+  const claimed = await first.ensureNumber("user-x");
+  // 模拟重启：全新实例从同一文件加载
+  const { service: rebooted } = makeService();
+  await rebooted.load();
+  assert.equal(rebooted.getPhoneForActor("user-x"), claimed, "已申领号码重启后漂移");
+  const other = await rebooted.ensureNumber("user-y");
+  assert.notEqual(other, claimed, "其他用户分到了已申领的号码");
+});
+
+test("多实例共盘：分配前合流磁盘，不把别家已发号码再发出去", async () => {
+  const { service } = makeService();
+  await service.ensureNumber("actor-self");
+  // 模拟另一个实例（并行会话的服务进程）直接写盘申领
+  const raw = JSON.parse(await readFile(process.env.VIRTUAL_PHONES_FILE!, "utf8")) as {
+    byActor: Record<string, string>;
+  };
+  raw.byActor["actor-foreign"] = "123456";
+  await writeFile(process.env.VIRTUAL_PHONES_FILE!, JSON.stringify(raw), "utf8");
+  // 本实例内存尚不知 actor-foreign；申领新用户时先合流磁盘
+  await service.ensureNumber("actor-late");
+  assert.equal(service.getPhoneForActor("actor-foreign"), "123456", "外部申领未被合流");
+  const mine = await service.ensureNumber("actor-late2");
+  assert.notEqual(mine, "123456", "把外部实例已发的号码又分给了别人");
 });
 
 // ============================================================
@@ -90,7 +137,7 @@ test("ensureNumber 持久化到 VIRTUAL_PHONES_FILE", async () => {
 
 test("callUser 推送 incoming 且 replyEnabled，回复路由进 userReplyHandler", async () => {
   const { service, connect } = makeService();
-  service.ensureNumber("actor-agent");
+  await service.ensureNumber("actor-agent");
   const sock = connect("user-1");
 
   const replies: Array<{ callId: string; fromActorId: string; toUserId: string; text: string }> = [];
@@ -129,7 +176,7 @@ test("callUser 推送 incoming 且 replyEnabled，回复路由进 userReplyHandl
 
 test("callUserWithRinging 两阶段推送（ringing_start → call_connecting）", async () => {
   const { service, connect } = makeService();
-  service.ensureNumber("actor-agent");
+  await service.ensureNumber("actor-agent");
   const sock = connect("user-1");
 
   const result = await service.callUserWithRinging({
@@ -169,8 +216,8 @@ test("callUserWithRinging 两阶段推送（ringing_start → call_connecting）
 
 test("用户呼叫 Agent：connecting → connected（Agent 回应 + TTS）", async () => {
   const { service, connect } = makeService();
-  service.ensureNumber("actor-agent");
-  service.ensureNumber("user-1"); // 门禁：主叫用户须已申领站内号码
+  await service.ensureNumber("actor-agent");
+  await service.ensureNumber("user-1"); // 门禁：主叫用户须已申领站内号码
   const sock = connect("user-1");
 
   service.setUserCallAgentHandler(async ({ userMessage }) => {
@@ -203,7 +250,7 @@ test("用户呼叫 Agent：connecting → connected（Agent 回应 + TTS）", as
 
 test("用户呼叫 Agent：Agent 处理器抛错时按兜底话术接通", async () => {
   const { service, connect } = makeService();
-  service.ensureNumber("user-1");
+  await service.ensureNumber("user-1");
   const sock = connect("user-1");
   service.setUserCallAgentHandler(async () => {
     throw new Error("llm down");
@@ -229,7 +276,7 @@ test("用户呼叫 Agent：Agent 处理器抛错时按兜底话术接通", async
 
 test("用户呼叫 Agent：Agent 回应超时按兜底话术接通", async () => {
   const { service, connect } = makeService();
-  service.ensureNumber("user-1");
+  await service.ensureNumber("user-1");
   const sock = connect("user-1");
   service.setUserCallAgentHandler(() => new Promise(() => {})); // 永不返回
 
@@ -251,28 +298,35 @@ test("用户呼叫 Agent：Agent 回应超时按兜底话术接通", async () =>
   assert.match(String(connected.transcript), /接通/);
 });
 
-test("门禁：未申领号码的用户发起呼叫被拒绝", async () => {
-  const { service } = makeService();
-  service.ensureNumber("actor-agent");
+test("号码代持：未申领号码的用户首次呼出自动申领并接通", async () => {
+  const { service, connect } = makeService();
+  await service.ensureNumber("actor-agent");
+  const sock = connect("user-no-number");
   const result = await service.handleUserCallAgent({
     fromUserId: "user-no-number",
     toActorId: "actor-agent",
     ringPhase: { enableRingingPhase: false },
   });
-  assert.equal(result.ok, false);
-  assert.match(result.error!, /申领/);
+  // 呼出不再被拒：按「号码由 Agent 代为持有」语义静默申领后正常接通
+  assert.equal(result.ok, true);
+  assert.match(service.getPhoneForActor("user-no-number") ?? "", /^\d{6}$/);
+  await until(
+    () => eventsOf(sock, "agent.phone.call_status").some((e) => (e.payload as Record<string, unknown>).status === "connected"),
+    3000,
+    "connected status (auto-claimed)",
+  );
 });
 
-test("releaseNumber：释放后可重新申领、重复释放报错", () => {
+test("releaseNumber：释放后可重新申领、重复释放报错", async () => {
   const { service } = makeService();
-  service.ensureNumber("user-1");
+  await service.ensureNumber("user-1");
   assert.equal(service.releaseNumber("user-1").ok, true);
   assert.equal(service.getPhoneForActor("user-1"), undefined);
   const again = service.releaseNumber("user-1");
   assert.equal(again.ok, false);
   assert.match(again.error!, /尚未申领/);
   // 释放后可再次申领到新号
-  assert.match(service.ensureNumber("user-1"), /^\d{6}$/);
+  assert.match(await service.ensureNumber("user-1"), /^\d{6}$/);
 });
 
 test("忙线护栏：同用户第二通 Agent 来电被拒且不覆盖第一通", async () => {
@@ -304,7 +358,7 @@ test("忙线护栏：同用户第二通 Agent 来电被拒且不覆盖第一通"
 
 test("忙线护栏：用户通话中再次发起呼叫被拒", async () => {
   const { service } = makeService();
-  service.ensureNumber("user-1");
+  await service.ensureNumber("user-1");
   const first = await service.handleUserCallAgent({
     fromUserId: "user-1",
     toActorId: "actor-a",
@@ -435,7 +489,7 @@ test("cancelCallReplyWaiters 使等待方以 null 收尾", async () => {
 
 test("endCall 推送 ended 并清理：后续回复与二次挂断报错", async () => {
   const { service, connect } = makeService();
-  service.ensureNumber("user-1");
+  await service.ensureNumber("user-1");
   const sock = connect("user-1");
   const result = await service.handleUserCallAgent({
     fromUserId: "user-1",

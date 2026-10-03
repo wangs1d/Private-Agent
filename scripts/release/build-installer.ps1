@@ -3,15 +3,15 @@
 .SYNOPSIS
   一键产出 Windows 安装包：客户端构建 → server dist → staging 组装 → Inno 编译。
 .EXAMPLE
-  .\build-installer.ps1 -Version 0.1.0 -UpdateManifestUrl http://47.98.122.29:3000
+  .\build-installer.ps1 -Version 0.1.0 -UpdateManifestUrl http://login.nextbot.top
 #>
 param(
   [string]$Version = "0.1.0",
   # 版本控制面（ECS manifest），byok 形态 chat 仍走本地 runtime
-  [string]$UpdateManifestUrl = "http://47.98.122.29:3000",
+  [string]$UpdateManifestUrl = "http://login.nextbot.top",
   # 控制面（管理后台所在服务器）：反馈/站内信等运营数据走这里。
   # 不烤入的话捆绑用户的反馈只会落在本机数据库，管理后台收不到。
-  [string]$ControlPlaneUrl = "http://47.98.122.29:3000",
+  [string]$ControlPlaneUrl = "http://login.nextbot.top",
   # staging 根目录：刻意用短路径，避开 node_modules 深路径 260 字符上限
   [string]$StageRootPath = "E:\PAStage",
   # 发行版本：internal=内测版（默认，能力全量，AppId/文件名同历史）；oss=开源版
@@ -131,9 +131,10 @@ foreach ($ortBin in (Join-Path $StageRuntime 'node_modules\onnxruntime-node\bin'
 # 上三级即 runtime 根），与 load-server-env 的 serverRoot 口径一致。
 Copy-Item (Join-Path $Repo 'server\models\bge-small-zh-v1.5') (Join-Path $StageRuntime 'models\bge-small-zh-v1.5') -Recurse -Force
 
-# 3.7.1 说话人向量模型（声纹底座）：wespeaker cnceleb_resnet34 ONNX（~26MB，256 维）。
-# 与 bge 同目录约定（runtime\models\speaker-cnceleb-resnet34）。
-Copy-Item (Join-Path $Repo 'server\models\speaker-cnceleb-resnet34') (Join-Path $StageRuntime 'models\speaker-cnceleb-resnet34') -Recurse -Force
+# 3.7.1 说话人向量模型（声纹底座）：3D-Speaker CAM++ 中文版 ONNX（~28MB，192 维，
+# CN-Celeb+CN-Common ~20 万说话人）。与 bge 同目录约定（runtime\models\speaker-campplus-zh）。
+# 2026-10-03 由 wespeaker cnceleb_resnet34 升级；换模型=换向量空间，旧声纹全部作废。
+Copy-Item (Join-Path $Repo 'server\models\speaker-campplus-zh') (Join-Path $StageRuntime 'models\speaker-campplus-zh') -Recurse -Force
 
 # 3.8 旅行知识种子数据（68KB）：travel 技能的离线底座（poi/坐标/目的地/国内关键词）。
 # 知识库读 cwd\data\travel-knowledge，捆绑 runtime 的 cwd 就是 runtime 目录，路径正好对上；
@@ -166,7 +167,7 @@ foreach ($f in (Join-Path $StageApp 'private_ai_agent.exe'),
                (Join-Path $StageRuntime 'node_modules\onnxruntime-node\bin\napi-v6\win32\x64'),
                (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\model_quantized.onnx'),
                (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\vocab.txt'),
-               (Join-Path $StageRuntime 'models\speaker-cnceleb-resnet34\cnceleb_resnet34.onnx'),
+               (Join-Path $StageRuntime 'models\speaker-campplus-zh\campplus_zh_cn_common_200k.onnx'),
                (Join-Path $StageRuntime 'package.json')) {
   if (-not (Test-Path $f)) { throw "staging 缺少关键文件: $f" }
 }

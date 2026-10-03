@@ -525,6 +525,9 @@ export class VirtualPhoneService {
     try {
       const raw = await readFile(this.persistPath, "utf8");
       const data = JSON.parse(raw) as PersistedVirtualPhones;
+      // 引导快照：每次成功加载把当时注册表留一份 .bak——此后若被误写污染
+      // （如测试未隔离直写真实文件），已申领号码可从快照恢复
+      void writeFile(`${this.persistPath}.bak`, raw, "utf8").catch(() => {});
       this.byActor.clear();
       this.byPhone.clear();
       for (const [actor, phone] of Object.entries(data.byActor ?? {})) {
@@ -548,16 +551,24 @@ export class VirtualPhoneService {
   }
 
   private schedulePersist(): void {
-    const path = this.persistPath;
     // 按路径的全局写队列：同进程多实例（测试/多会话）写同一文件时串行化，
     // 避免并发 rename 在 Windows 上 EPERM；失败吞掉（warn），链不断
+    void this.enqueuePersist().catch((err: unknown) => {
+      console.warn("[VirtualPhoneService] persist failed:", err);
+    });
+  }
+
+  /** 入队一次持久化并返回可等待的句柄（写穿式申领用：落盘成功才算数）。 */
+  private enqueuePersist(): Promise<void> {
+    const path = this.persistPath;
     const prev = persistQueues.get(path) ?? Promise.resolve();
-    const next = prev
-      .then(() => this.persistNow())
-      .catch((err: unknown) => {
-        console.warn("[VirtualPhoneService] persist failed:", err);
-      });
-    persistQueues.set(path, next);
+    const next = prev.then(() => this.persistNow());
+    // 队列里存吞错后的链：单次写盘失败不让后续持久化连锁 reject（队列自愈）
+    persistQueues.set(path, next.then(
+      () => {},
+      () => {},
+    ));
+    return next;
   }
 
   private async persistNow(): Promise<void> {
@@ -579,13 +590,22 @@ export class VirtualPhoneService {
   /**
    * 申领或返回该 Actor（Agent 实例）的 6 位虚拟号码。
    * 号码登记在 Agent 名下，即用户的站内电话号，申领后方可呼出虚拟电话；App 内通话不必另输 6 位号。
-   * 仅应在用户明确要求办理时调用（如 `phone.ensure_my_number`），不得在其它路径隐式调用。
+   * 除用户明确要求办理（如 `phone.ensure_my_number`）外，用户呼出通话路径
+   * （handleUserCallAgent）按「号码由 Agent 代为持有」语义代申领，其余路径不得隐式调用。
+   *
+   * 硬保证（2026-10-03 号码漂移加固）：
+   *   - 写穿：分配结果落盘成功后才返回；写盘失败回滚内存并抛错，绝不出现
+   *     「调用方已拿到号但磁盘没有」的窗口（进程重启即漂移）。
+   *   - 全局唯一：分配前先从磁盘合流其它实例的申领（并行会话起的多实例
+   *     共享同一文件），再查内存 byPhone 表——同一号码不可能分给两个 Actor。
    */
-  ensureNumber(actorId: string): string {
+  async ensureNumber(actorId: string): Promise<string> {
     const id = actorId.trim();
     if (!id) throw new Error("actorId 不能为空");
     const existing = this.byActor.get(id);
     if (existing) return existing;
+
+    await this.hydrateFromDisk();
 
     const maxAttempts = 16_384;
     const poolSize = 1_000_000;
@@ -598,10 +618,45 @@ export class VirtualPhoneService {
       if (this.byPhone.has(candidate)) continue;
       this.byActor.set(id, candidate);
       this.byPhone.set(candidate, id);
-      this.schedulePersist();
+      try {
+        await this.enqueuePersist();
+      } catch (err) {
+        // 落盘失败：回滚内存，申领不生效（调用方拿到错误，号码不漂移）
+        this.byActor.delete(id);
+        this.byPhone.delete(candidate);
+        throw err;
+      }
       return candidate;
     }
     throw new Error("虚拟号池忙碌，请稍后重试");
+  }
+
+  /**
+   * 从磁盘合流本进程不知的申领（多实例共盘防护）：并行会话起的另一实例
+   * 可能已把新号码写进同一文件，分配前不读盘就会把同一号分给别人。
+   * 只采纳内存缺失的条目；冲突（同号不同主）以内存为准并忽略磁盘侧。
+   */
+  private async hydrateFromDisk(): Promise<void> {
+    let raw: string;
+    try {
+      raw = await readFile(this.persistPath, "utf8");
+    } catch {
+      return; // 文件不存在/不可读：无事可合流
+    }
+    let data: PersistedVirtualPhones;
+    try {
+      data = JSON.parse(raw) as PersistedVirtualPhones;
+    } catch {
+      return; // 损坏文件不采纳，等下一次成功写覆盖
+    }
+    for (const [actor, phone] of Object.entries(data.byActor ?? {})) {
+      const a = actor?.trim() ?? "";
+      const p = normalizeVirtualPhone(phone);
+      if (!a || !p) continue;
+      if (this.byActor.has(a) || this.byPhone.has(p)) continue;
+      this.byActor.set(a, p);
+      this.byPhone.set(p, a);
+    }
   }
 
   /**
@@ -837,13 +892,18 @@ export class VirtualPhoneService {
     if (!toActorId) {
       return { ok: false, error: "目标 Agent ID 无效" };
     }
-    // 号码注册制门禁：只有申领了站内号码的用户才能发起虚拟通话
+    // 号码注册制：站内号由 Agent 代为持有（见联系 Agent 页文案），App 内呼出
+    // 无需用户先办号——首次呼出时按代持语义静默申领（登记在用户 Actor 名下、
+    // 与 Agent 共用），保证注册表完整；号池耗尽等异常仍如实拒绝。
     if (!this.byActor.get(fromUserId)) {
-      return {
-        ok: false,
-        error:
-          "尚未申领站内号码，无法发起通话。请先申领：对我说「帮我申请虚拟号码」即可领取 6 位号码。",
-      };
+      try {
+        await this.ensureNumber(fromUserId);
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : "站内号码申领失败，请稍后重试",
+        };
+      }
     }
     // 忙线护栏：用户已在通话中时拒绝再次发起，避免新会话顶掉进行中的通话
     if (this.findActiveSessionByUser(fromUserId)) {

@@ -9,6 +9,16 @@ import { ProactiveCaller } from "../src/proactivity/proactive-caller.js";
 import type { TtsService } from "../src/services/tts-service.js";
 import { VirtualPhoneService } from "../src/services/virtual-phone-service.js";
 
+// 持久化文件隔离（必须先于任何服务实例化）：不设 env 时 VirtualPhoneService
+// 默认写 process.cwd()/data/ —— 本测试 cwd=server，会直接抹掉真实号码注册表
+// （2026-10-03 实锤：跑本测试把用户已申领的 831672 连带清掉）。
+{
+  const isoDir = mkdtempSync(join(tmpdir(), "vp-realtime-test-"));
+  process.env.VIRTUAL_PHONES_FILE = join(isoDir, "virtual-phones.json");
+  process.env.VIRTUAL_PHONE_CALLS_FILE = join(isoDir, "virtual-phone-calls.json");
+  process.env.VIRTUAL_PHONE_HISTORY_DIR = join(isoDir, "virtual-phone-history");
+}
+
 /** 收集推送给用户的 WS 帧（供断言），trySend 永远成功。 */
 function makeRegistry(): { port: ClientPushPort; frames: Array<{ to: string; body: Record<string, unknown> }> } {
   const frames: Array<{ to: string; body: Record<string, unknown> }> = [];
@@ -57,7 +67,7 @@ test("电话实时语音：开关与上下文人设（来电汇报 / 用户来�
 
   // user_to_agent：带留言
   phone.endCall(callId, "test_end");
-  phone.ensureNumber("user-2");
+  await phone.ensureNumber("user-2");
   const dial = await phone.handleUserCallAgent({
     fromUserId: "user-2",
     toActorId: "actor-2",
@@ -119,7 +129,7 @@ test("电话实时语音：user_to_agent 接通走 realtime 分支（不调 LLM�
     handlerCalled += 1;
     return { replyText: "不该被调用的开场白" };
   });
-  phone.ensureNumber("user-rt");
+  await phone.ensureNumber("user-rt");
   const dial = await phone.handleUserCallAgent({
     fromUserId: "user-rt",
     toActorId: "actor-rt",

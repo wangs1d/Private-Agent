@@ -10,6 +10,7 @@ import { registerBrainRoutes } from "./brain.js";
 import { registerCatalogRoutes } from "./catalog.js";
 import { registerChatRoutes } from "./chat.js";
 import { registerClientManifestRoutes } from "./client-manifest.js";
+import { registerModelProviderRoutes } from "./model-providers.js";
 import { registerFriendRoutes } from "./friends.js";
 import { registerInfoRoutes } from "./info.js";
 import { registerUnifiedProtocolRoutes } from "./protocol-unified.js";
@@ -99,6 +100,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerSystemRoutes(app, deps);
   // 客户端版本清单（自包含，无 deps）：桌面客户端启动检查 + 后期 runtime 收回总开关
   registerClientManifestRoutes(app);
+  // 模型接入目录（自包含，无 deps）：向导/设置页目录式选模型，base URL 服务端统一下发
+  registerModelProviderRoutes(app);
   registerUnifiedProtocolRoutes(app, deps);
   registerInfoRoutes(app, deps);
   registerScheduleRoutes(app, deps);

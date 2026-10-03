@@ -7,13 +7,9 @@
 #include <memory>
 #include <string>
 
-namespace Gdiplus {
-class Bitmap;
-}
-
 // 独立的来电悬浮窗 —— 脱离主 Flutter 窗口存在。
 //
-// 真玻璃深卡（视觉原语见 call_visuals.h）：弹出前抓取落点桌面模糊成毛玻璃底，
+// 真透明深卡（视觉原语见 call_visuals.h）：卡片恒定半透明逐像素 alpha，
 // 全自绘无子控件（按钮手动命中），DWM 系统圆角。位于工作区右下角，
 // 带铃声循环 + 接听/挂断按钮。
 // 主窗口最小化、被遮挡都不会影响该窗口可见。
@@ -87,9 +83,7 @@ class IncomingCallWindow {
   std::wstring caller_initial_;
   int ring_timeout_ms_ = 30000;
 
-  // 玻璃底（Show 时抓拍，见 call_visuals.h）
-  Gdiplus::Bitmap* backdrop_ = nullptr;
-  float backdrop_dim_ = 1.0f;
+  // 玻璃底已改为逐像素 alpha 半透明（见 call_visuals.h），不再抓拍桌面
 
   // 状态
   bool ringing_ = false;

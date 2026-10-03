@@ -112,9 +112,11 @@ bool IncomingCallWindow::CreateWindowIfNeeded() {
   EnsureClassRegistered();
   call_vis::EnsureGdiplus();
 
-  // 无子控件：整窗一层玻璃自绘表面，按钮全靠命中测试（勿加 WS_CLIPCHILDREN/
-  // WS_EX_LAYERED，前者多余后者与玻璃冲突）
-  DWORD ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+  // 无子控件：整窗一层玻璃自绘表面，按钮全靠命中测试。
+  // WS_EX_LAYERED = 逐像素 alpha 半透明（见 call_visuals.h），首次
+  // UpdateLayeredWindow 上屏前窗口不可见。
+  DWORD ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+                   WS_EX_LAYERED;
   DWORD style = WS_POPUP;
 
   HWND hwnd = CreateWindowExW(
@@ -139,13 +141,6 @@ void IncomingCallWindow::PositionAtBottomRight() {
   const int work_h = mi.rcWork.bottom - mi.rcWork.top;
   const int x = mi.rcWork.left + (work_w - kWindowWidth - kMargin);
   const int y = mi.rcWork.top + (work_h - kWindowHeight - kMargin);
-
-  // 玻璃底在窗口可见前抓拍（画面干净）；已可见（更新内容）则沿用旧底
-  if (!IsWindowVisible(window_handle_)) {
-    delete backdrop_;
-    call_vis::CaptureGlassBackdrop(x, y, kWindowWidth, kWindowHeight,
-                                   &backdrop_, &backdrop_dim_);
-  }
 
   SetWindowPos(window_handle_, HWND_TOPMOST, x, y, kWindowWidth, kWindowHeight,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -191,8 +186,6 @@ void IncomingCallWindow::DestroyNativeWindow() {
   StopAcceptButtonGlow();
   ringing_ = false;
 
-  delete backdrop_;
-  backdrop_ = nullptr;
   if (window_handle_) {
     if (IsWindow(window_handle_)) DestroyWindow(window_handle_);
     window_handle_ = nullptr;
@@ -250,70 +243,64 @@ const wchar_t* IncomingCallWindow::AvatarInitial() const {
 }
 
 void IncomingCallWindow::Paint(HWND hwnd, HDC hdc) {
-  RECT rc;
-  GetClientRect(hwnd, &rc);
+  call_vis::GlassSurface& s =
+      call_vis::SharedGlassSurface(kWindowWidth, kWindowHeight);
 
-  HDC mem = CreateCompatibleDC(hdc);
-  HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-  HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem, bmp));
-
-  // ── 玻璃底：模糊桌面 + 压暗 scrim + 高光描边（DWM 系统圆角） ──
-  call_vis::DrawGlassBase(mem, backdrop_, backdrop_dim_, kWindowWidth,
-                          kWindowHeight);
+  // ── 半透明玻璃底：逐像素 alpha 深卡 + 高光描边（DWM 系统圆角） ──
+  call_vis::DrawGlassBase(s);
 
   // ── 标题栏：信号条 + Nextbot 通话 + 最小化/关闭 ──
-  call_vis::PaintTitleBar(mem, kWindowWidth, title_min_hover_,
+  call_vis::PaintTitleBar(s, kWindowWidth, title_min_hover_,
                           title_close_hover_);
 
   // ── 金属盘头像 + 振铃呼吸扩散外环 ──
   if (ringing_) {
     const double t = (pulse_phase_ % 30) / 30.0;
     const int r = kAvatarR + 5 + static_cast<int>(10 * t);
-    call_vis::FillDiscAlpha(mem, kAvatarCx, kAvatarCy, r, RGB(0xBE, 0xBE, 0xC4),
+    call_vis::FillDiscAlpha(*s.gfx, kAvatarCx, kAvatarCy, r, RGB(0xBE, 0xBE, 0xC4),
                             static_cast<BYTE>(call_vis::kHaloBaseA * (1 - t)));
   }
   const wchar_t* initial = AvatarInitial();
-  call_vis::PaintAvatarDisc(mem, kAvatarCx, kAvatarCy, kAvatarR,
+  call_vis::PaintAvatarDisc(s, kAvatarCx, kAvatarCy, kAvatarR,
                             initial ? std::wstring(initial) : std::wstring());
 
   // ── 名称（18px 白 Semibold） ──
-  RECT name_rc = {20, kNameTop, rc.right - 20, kNameTop + 26};
-  call_vis::DrawCenteredText(mem, name_rc, caller_name_, call_vis::kNameColor,
+  RECT name_rc = {20, kNameTop, kWindowWidth - 20, kNameTop + 26};
+  call_vis::DrawCenteredText(s, name_rc, caller_name_, call_vis::kNameColor,
                              18, FW_SEMIBOLD, L"Microsoft YaHei UI");
 
   // ── 副标题（12px 中灰） ──
-  RECT sub_rc = {20, kSubTop, rc.right - 20, kSubTop + 18};
-  call_vis::DrawCenteredText(mem, sub_rc, subtitle_, call_vis::kSubColor, 12,
+  RECT sub_rc = {20, kSubTop, kWindowWidth - 20, kSubTop + 18};
+  call_vis::DrawCenteredText(s, sub_rc, subtitle_, call_vis::kSubColor, 12,
                              FW_NORMAL, L"Microsoft YaHei UI");
 
   // ── 状态行（12px 暗灰）：来电 ──
-  RECT status_rc = {20, kStatusTop, rc.right - 20, kStatusTop + 18};
-  call_vis::DrawCenteredText(mem, status_rc, L"来电", call_vis::kStatusColor,
+  RECT status_rc = {20, kStatusTop, kWindowWidth - 20, kStatusTop + 18};
+  call_vis::DrawCenteredText(s, status_rc, L"来电", call_vis::kStatusColor,
                              12, FW_NORMAL, L"Microsoft YaHei UI");
 
   // ── 分隔线 ──
-  call_vis::DrawDivider(mem, kWindowWidth, kDividerY);
+  call_vis::DrawDivider(*s.gfx, kWindowWidth, kDividerY);
 
   // ── 接听钮呼吸光环（画在玻璃上，无子控件裁剪） ──
   if (ringing_ && accept_glow_) {
     const double t = (pulse_phase_ % 30) / 30.0;
     const Gdiplus::REAL r =
         static_cast<Gdiplus::REAL>(kBtnSize / 2 + 2 + 3 * t);
-    call_vis::Gfx gfx{mem};
     Gdiplus::Pen pen(call_vis::GpColor(RGB(0xFF, 0xFF, 0xFF),
                                        static_cast<BYTE>(110 * (1 - t))),
                      1.5f);
-    gfx.g.DrawEllipse(&pen, static_cast<Gdiplus::REAL>(kAcceptCx) - r,
-                      static_cast<Gdiplus::REAL>(kBtnCy) - r, r * 2.0f,
-                      r * 2.0f);
+    s.gfx->DrawEllipse(&pen, static_cast<Gdiplus::REAL>(kAcceptCx) - r,
+                       static_cast<Gdiplus::REAL>(kBtnCy) - r, r * 2.0f,
+                       r * 2.0f);
   }
 
   // ── 按钮：瓷白接听 / 曜石拒接（自绘，无子控件） ──
   const RECT decline_rc = DeclineRect();
   const RECT accept_rc = AcceptRect();
-  call_vis::DrawSphereButton(mem, decline_rc, call_vis::kGlyphPhone, false,
+  call_vis::DrawSphereButton(s, decline_rc, call_vis::kGlyphPhone, false,
                              true, decline_hovered_);
-  call_vis::DrawSphereButton(mem, accept_rc, call_vis::kGlyphPhone, true,
+  call_vis::DrawSphereButton(s, accept_rc, call_vis::kGlyphPhone, true,
                              false, accept_hovered_);
 
   // ── 按钮标签（11px 中灰） ──
@@ -322,15 +309,12 @@ void IncomingCallWindow::Paint(HWND hwnd, HDC hdc) {
       {kAcceptCx - 40, kLabelTop, kAcceptCx + 40, kLabelTop + 16}};
   const wchar_t* label_texts[2] = {L"拒接", L"接听"};
   for (int i = 0; i < 2; ++i) {
-    call_vis::DrawCenteredText(mem, labels[i], label_texts[i],
+    call_vis::DrawCenteredText(s, labels[i], label_texts[i],
                                call_vis::kSubColor, 11, FW_NORMAL,
                                L"Microsoft YaHei UI");
   }
 
-  BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-  SelectObject(mem, old_bmp);
-  DeleteObject(bmp);
-  DeleteDC(mem);
+  call_vis::PresentLayered(hwnd, s, hdc);
 }
 
 // ═════════════════════════════════ 消息处理 ═════════════════════════════════

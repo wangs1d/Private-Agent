@@ -14,7 +14,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { parseAudioToPcm16, cosineSimilarity } from "../src/services/voice/voiceprint-service.js";
-import { initSpeakerEmbeddingEngine, resolveSpeakerModelDir } from "../src/services/voice/speaker-embedding-engine.js";
+import {
+  initSpeakerEmbeddingEngine,
+  resolveSpeakerModelDir,
+  SPEAKER_EMBEDDING_DIMS,
+} from "../src/services/voice/speaker-embedding-engine.js";
 import { VoiceprintStore } from "../src/services/voice/voiceprint-store.js";
 import { VoiceprintService } from "../src/services/voice/voiceprint-service.js";
 
@@ -43,14 +47,14 @@ test("parseAudioToPcm16：WAV 头解析 + 裸 PCM16 兜底", () => {
   assert.equal(rawParsed.pcm[0], 16384);
 });
 
-test("引擎：确定性 + 256 维 + L2 归一", { skip: !hasModel && "模型资产缺失" }, async () => {
+test("引擎：确定性 + 维度跟随模型（CAM++ 192）+ L2 归一", { skip: !hasModel && "模型资产缺失" }, async () => {
   const engine = await initSpeakerEmbeddingEngine();
   assert.ok(engine);
   const buf = loadWavBuffer(join(CASE_DIR, "case_0.wav"));
   const { pcm, sampleRate } = parseAudioToPcm16(buf);
   const a = await engine!.embedPcm16(pcm, sampleRate);
   const b = await engine!.embedPcm16(pcm, sampleRate);
-  assert.equal(a.length, 256);
+  assert.equal(a.length, SPEAKER_EMBEDDING_DIMS);
   const norm = Math.sqrt(Array.from(a).reduce((s, v) => s + v * v, 0));
   assert.ok(Math.abs(norm - 1) < 1e-3, `模长应≈1，实际 ${norm}`);
   assert.ok(Math.abs(cosineSimilarity(a, b) - 1) < 1e-4, "同输入应得相同向量");

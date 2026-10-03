@@ -7,7 +7,6 @@ import "dart:ui" show lerpDouble;
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
-import "package:url_launcher/url_launcher.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/presentation/boot_animation.dart";
@@ -16,6 +15,8 @@ import "../../core/services/local_runtime_manager.dart";
 import "../../core/services/mic_clip_recorder.dart";
 import "../../core/services/model_api_tester.dart";
 import "../../core/theme/app_theme.dart";
+import "../model_config/model_provider_card.dart";
+import "../model_config/model_provider_catalog.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 首启序列：进度条开机动画 + 四步配置向导（称呼 → agent 名字 → 声纹注册 →
@@ -89,50 +90,17 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   static const Duration _clipDuration = Duration(seconds: 4);
   bool _voiceprintSkipped = false;
 
-  // ── 步骤 4：模型 ──
-  final TextEditingController _apiKeyCtrl = TextEditingController();
-  final TextEditingController _baseUrlCtrl = TextEditingController();
-  int _presetIndex = 0; // 默认 DeepSeek
-  bool _obscureKey = true;
-  bool _guidanceExpanded = false;
-  ModelApiTestResult? _testResult;
-  bool _testing = false;
-  bool _saving = false;
-  String? _saveError;
-
-  static const List<({String label, String base, String consoleUrl, String guide})> _presets =
-      <({String label, String base, String consoleUrl, String guide})>[
-    (
-      label: "DeepSeek 官方",
-      base: "https://api.deepseek.com/v1",
-      consoleUrl: "https://platform.deepseek.com/api_keys",
-      guide: "打开 DeepSeek 开放平台 → 左侧「API Keys」→ 创建新 key → 复制粘贴到下方。新用户通常有免费额度。",
-    ),
-    (
-      label: "Kimi（月之暗面）",
-      base: "https://api.moonshot.cn/v1",
-      consoleUrl: "https://platform.moonshot.cn/console/api-keys",
-      guide: "打开 Moonshot 开放平台 → 「API Key 管理」→ 新建 key → 复制粘贴到下方。",
-    ),
-    (
-      label: "MiniMax",
-      base: "https://api.minimaxi.com/v1",
-      consoleUrl: "https://platform.minimaxi.com/user-center/basic-information/interface-key",
-      guide: "打开 MiniMax 开放平台 → 「接口密钥」→ 创建新密钥 → 复制粘贴到下方。",
-    ),
-    (
-      label: "OpenAI",
-      base: "https://api.openai.com/v1",
-      consoleUrl: "https://platform.openai.com/api-keys",
-      guide: "打开 OpenAI 平台 → 「API keys」→ Create new secret key → 复制粘贴到下方。",
-    ),
-    (
-      label: "自定义（OpenAI 兼容）",
-      base: "",
-      consoleUrl: "",
-      guide: "任何 OpenAI 兼容网关均可：填写其 Base URL（通常以 /v1 结尾）与对应 API Key。",
-    ),
-  ];
+  // ── 步骤 4：模型（目录式选择，UI 与数据全部在 ModelProviderCard）──
+  final GlobalKey<ModelProviderCardState> _modelCardKey = GlobalKey<ModelProviderCardState>();
+  ModelApiTestResult? _lastTestResult;
+  // 预填：已配置过 key 的重进用户（例如向导中断后重跑）
+  String _initialApiKey = "";
+  String? _initialBase;
+  String? _initialModel;
+  // debug 通道缓存（卡片未挂载前先存，挂载后转交）
+  String? _debugApiKey;
+  String? _debugBaseUrl;
+  String? _debugModel;
 
   // ── 完成页 ──
   String? _savedAppellation;
@@ -152,8 +120,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     _recorder.dispose();
     _appellationCtrl.dispose();
     _agentNameCtrl.dispose();
-    _apiKeyCtrl.dispose();
-    _baseUrlCtrl.dispose();
     _bootProgress.dispose();
     super.dispose();
   }
@@ -235,14 +201,11 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     await Future<void>.delayed(const Duration(milliseconds: 420));
     if (!mounted) return;
     setState(() => _prepDone = true);
-    // 预填：已配置过 key 的重进用户（例如向导中断后重跑）
-    if (LocalRuntimeConfig.hasApiKey) {
-      final Map<String, String> cfg = LocalRuntimeConfig.readSync();
-      _apiKeyCtrl.text = cfg["OPENAI_API_KEY"] ?? "";
-      _baseUrlCtrl.text = cfg["OPENAI_BASE_URL"] ?? _presets[0].base;
-    } else {
-      _baseUrlCtrl.text = _presets[0].base;
-    }
+    // 预填：已配置过 key 的重进用户（例如向导中断后重跑）；卡片会按 base 解析回目录商
+    final Map<String, String> cfg = LocalRuntimeConfig.readSync();
+    _initialApiKey = cfg["OPENAI_API_KEY"] ?? "";
+    _initialBase = cfg["OPENAI_BASE_URL"];
+    _initialModel = cfg["OPENAI_MODEL"];
     _go(_Phase.appellation);
   }
 
@@ -381,68 +344,20 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   }
 
   // ============================================================
-  // 步骤 4：模型接入
+  // 步骤 4：模型接入（UI/收集/测试在 ModelProviderCard，这里只落盘）
   // ============================================================
 
-  void _selectPreset(int index) {
-    setState(() {
-      _presetIndex = index;
-      _baseUrlCtrl.text = _presets[index].base;
-      _testResult = null;
-    });
-  }
-
-  Future<void> _runModelTest() async {
-    if (_testing) return;
-    setState(() {
-      _testing = true;
-      _testResult = null;
-    });
-    final ModelApiTestResult result =
-        await ModelApiTester.test(_baseUrlCtrl.text, _apiKeyCtrl.text);
-    if (!mounted) return;
-    setState(() {
-      _testing = false;
-      _testResult = result;
-    });
-  }
-
-  Future<void> _saveModelConfig() async {
-    if (_saving) return;
-    final String key = _apiKeyCtrl.text.trim();
-    if (key.isEmpty) {
-      setState(() => _saveError = "请先填写 API Key");
-      return;
+  Future<void> _saveModelConfig(ModelConfigDraft draft) async {
+    await LocalRuntimeConfig.writeModelConfig(
+      apiKey: draft.apiKey,
+      baseUrl: draft.baseUrl,
+      model: draft.model,
+    );
+    // 捆绑形态重启 runtime 使配置即刻生效（kill+端口释放+拉起，最久 ~25s）
+    if (!kIsWeb && LocalRuntimeManager.isBundled) {
+      await LocalRuntimeManager.restart().timeout(const Duration(seconds: 30));
     }
-    setState(() {
-      _saving = true;
-      _saveError = null;
-    });
-    try {
-      // merge 写入（LocalRuntimeConfig.write 是整文件覆写，必须先读旧键）
-      final Map<String, String> cfg = Map.of(LocalRuntimeConfig.readSync()); // readSync 返回不可变 map，须拷贝后改
-      cfg["OPENAI_API_KEY"] = key;
-      final String base = _baseUrlCtrl.text.trim();
-      if (base.isNotEmpty) {
-        cfg["OPENAI_BASE_URL"] = base;
-      } else {
-        cfg.remove("OPENAI_BASE_URL");
-      }
-      LocalRuntimeConfig.write(cfg);
-      // 捆绑形态重启 runtime 使 key 即刻生效（kill+端口释放+拉起，最久 ~25s）
-      if (!kIsWeb && LocalRuntimeManager.isBundled) {
-        await LocalRuntimeManager.restart().timeout(const Duration(seconds: 30));
-      }
-      if (!mounted) return;
-      _finalModelResult = _testResult ?? await ModelApiTester.test(base, key);
-      _go(_Phase.done);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _saving = false;
-        _saveError = "保存失败：$e";
-      });
-    }
+    _finalModelResult = _lastTestResult;
   }
 
   // ============================================================
@@ -479,25 +394,43 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       final String? agentName = params["agentName"];
       final String? apiKey = params["apiKey"];
       final String? baseUrl = params["baseUrl"];
+      final String? model = params["model"];
+      final String? providerId = params["providerId"];
       final bool skipVoiceprint = params["skipVoiceprint"] != "0";
       final bool submit = params["submit"] == "1";
       if (appellation != null) _appellationCtrl.text = appellation;
       if (agentName != null) _agentNameCtrl.text = agentName;
-      if (apiKey != null) _apiKeyCtrl.text = apiKey;
-      if (baseUrl != null) _baseUrlCtrl.text = baseUrl;
+      // 模型字段：卡片已挂载则直接填充；未挂载先缓存（_buildModelStep 时转交）
+      if (_modelCardKey.currentState != null) {
+        _modelCardKey.currentState!.debugFill(
+          apiKey: apiKey, baseUrl: baseUrl, model: model, providerId: providerId,
+        );
+      } else {
+        _debugApiKey = apiKey;
+        _debugBaseUrl = baseUrl;
+        _debugModel = model;
+      }
       if (submit) {
         _savedAppellation = _appellationCtrl.text.trim().isNotEmpty ? _appellationCtrl.text.trim() : "(未填)";
         _savedAgentName = _agentNameCtrl.text.trim().isNotEmpty ? _agentNameCtrl.text.trim() : "(未填)";
         unawaited(_saveAppellation(_appellationCtrl.text.trim()));
         unawaited(_saveAgentName(_agentNameCtrl.text.trim()));
         if (skipVoiceprint) _voiceprintSkipped = true;
-        if (_apiKeyCtrl.text.trim().isNotEmpty) {
-          final Map<String, String> cfg = LocalRuntimeConfig.readSync();
-          cfg["OPENAI_API_KEY"] = _apiKeyCtrl.text.trim();
-          if (_baseUrlCtrl.text.trim().isNotEmpty) cfg["OPENAI_BASE_URL"] = _baseUrlCtrl.text.trim();
-          LocalRuntimeConfig.write(cfg);
+        final ModelConfigDraft? draft = _modelCardKey.currentState?.buildDraft()
+            ?? ((apiKey != null && apiKey.trim().isNotEmpty)
+                ? ModelConfigDraft(
+                    providerId: providerId ?? ModelProviderCatalog.customId,
+                    baseUrl: baseUrl?.trim() ?? "",
+                    model: model?.trim() ?? "",
+                    apiKey: apiKey.trim(),
+                  )
+                : null);
+        if (draft != null) {
+          unawaited(LocalRuntimeConfig.writeModelConfig(
+            apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model,
+          ));
         }
-        _finalModelResult = _testResult;
+        _finalModelResult = _lastTestResult;
         if (mounted) _go(_Phase.done);
       }
       return developer.ServiceExtensionResponse.result('{"ok":true}');
@@ -782,138 +715,30 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   // ── 步骤 4：模型接入 ──
 
   Widget _buildModelStep() {
-    final ({String label, String base, String consoleUrl, String guide}) preset = _presets[_presetIndex];
-    final bool canSave = _apiKeyCtrl.text.trim().isNotEmpty && !_saving;
     return _stepFrame(
       step: 4,
       title: "接入你的模型",
-      subtitle: "填入你的 API Key，我才有大脑。数据只存在这台电脑上。",
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              for (int i = 0; i < _presets.length; i++)
-                _presetChip(i, _presets[i].label, i == _presetIndex),
-            ],
-          ),
-          const SizedBox(height: 18),
-          _darkField(
-            controller: _apiKeyCtrl,
-            hint: "API Key（sk-…）",
-            obscure: _obscureKey,
-            onChanged: (_) => setState(() => _testResult = null),
-            suffix: IconButton(
-              icon: Icon(_obscureKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: textMuted, size: 18),
-              onPressed: () => setState(() => _obscureKey = !_obscureKey),
-            ),
-          ),
-          const SizedBox(height: 12),
-          _darkField(
-            controller: _baseUrlCtrl,
-            hint: "API Base URL（选预设自动填）",
-            onChanged: (_) => setState(() => _testResult = null),
-          ),
-          const SizedBox(height: 14),
-          // 获取 Key 引导（小白友好）
-          _guideCard(preset),
-          const SizedBox(height: 18),
-          Row(
-            children: <Widget>[
-              Expanded(child: _primaryButton("测试连接", _runModelTest, enabled: _apiKeyCtrl.text.trim().isNotEmpty, loading: _testing)),
-              const SizedBox(width: 12),
-              Expanded(child: _primaryButton("保存并完成", _saveModelConfig, enabled: canSave, loading: _saving)),
-            ],
-          ),
-          if (_testResult != null) ...<Widget>[
-            const SizedBox(height: 14),
-            _testResultCard(_testResult!),
-          ],
-          if (_saveError != null) ...<Widget>[
-            const SizedBox(height: 10),
-            Text(_saveError!, style: const TextStyle(color: errorRed, fontSize: 12.5)),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _guideCard(({String label, String base, String consoleUrl, String guide}) preset) {
-    return Container(
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cardBorder),
-      ),
-      child: Column(
-        children: <Widget>[
-          InkWell(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-            onTap: () => setState(() => _guidanceExpanded = !_guidanceExpanded),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Row(
-                children: <Widget>[
-                  const Icon(Icons.help_outline_rounded, color: textSecondary, size: 16),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text("没有 API Key？点这里，一步步教你获取", style: TextStyle(color: textSecondary, fontSize: 12.5)),
-                  ),
-                  Icon(_guidanceExpanded ? Icons.expand_less : Icons.expand_more, color: textMuted, size: 18),
-                ],
-              ),
-            ),
-          ),
-          AnimatedCrossFade(
-            duration: const Duration(milliseconds: 220),
-            crossFadeState: _guidanceExpanded ? CrossFadeState.showFirst : CrossFadeState.showSecond,
-            firstChild: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(preset.guide, style: const TextStyle(color: textSecondary, fontSize: 12.5, height: 1.7)),
-                  if (preset.consoleUrl.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 10),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: _textLink("打开获取页面 ↗", () {
-                        unawaited(launchUrl(Uri.parse(preset.consoleUrl), mode: LaunchMode.externalApplication));
-                      }),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            secondChild: const SizedBox(width: double.infinity),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _testResultCard(ModelApiTestResult result) {
-    final Color color = result.ok ? Colors.white : errorRed;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: result.ok ? cardBorder : color.withValues(alpha: 0.4)),
-      ),
-      child: Row(
-        children: <Widget>[
-          Icon(result.ok ? Icons.check_circle_outline : Icons.error_outline_outlined, color: color, size: 18),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              result.summary,
-              style: TextStyle(color: result.ok ? textPrimary : color, fontSize: 13),
-            ),
-          ),
-        ],
+      subtitle: "选一个模型服务商，按引导拿到 API Key 填进来，我才有大脑。数据只存在这台电脑上。",
+      child: ModelProviderCard(
+        key: _modelCardKey,
+        saveLabel: "保存并完成",
+        initialApiKey: _debugApiKey ?? _initialApiKey,
+        initialBaseUrl: _debugBaseUrl ?? _initialBase,
+        initialModel: _debugModel ?? _initialModel,
+        colors: const ModelProviderCardColors(
+          fieldBg: cardBg,
+          fieldBorder: cardBorder,
+          focusedBorder: Color(0x80FFFFFF),
+          textPrimary: textPrimary,
+          textSecondary: textSecondary,
+          textMuted: textMuted,
+          error: errorRed,
+        ),
+        onTestResult: (ModelApiTestResult r) => _lastTestResult = r,
+        onSave: _saveModelConfig,
+        onSaved: () {
+          if (mounted) _go(_Phase.done);
+        },
       ),
     );
   }
@@ -993,15 +818,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.5))),
       ),
       onChanged: onChanged,
-    );
-  }
-
-  Widget _presetChip(int index, String label, bool selected) {
-    return ActionChip(
-      backgroundColor: selected ? Colors.white : cardBg,
-      side: BorderSide(color: selected ? Colors.white : cardBorder),
-      label: Text(label, style: TextStyle(color: selected ? Colors.black : textSecondary, fontSize: 12.5)),
-      onPressed: () => _selectPreset(index),
     );
   }
 

@@ -9,6 +9,7 @@
 #include <memory>
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "ole32.lib")  // CLSIDFromString（调试出图用）
 
 namespace {
 
@@ -19,7 +20,9 @@ constexpr COLORREF kInk          = RGB(0xFC, 0xFC, 0xFC);  // 主文字
 constexpr COLORREF kInkSoft      = RGB(0xFF, 0xFF, 0xFF);  // 次文字（乘 66% alpha）
 constexpr BYTE     kInkSoftA     = 168;
 constexpr COLORREF kCardFill     = RGB(0x18, 0x18, 0x18);  // 玻璃卡深色膜
-constexpr BYTE     kCardFillA    = 150;
+// 200 ≈ 78% 不透明度：半透明膜单独成底（不再有抓拍图垫底），
+// 白字在亮背景上仍可读；后卡按景深 fade 继续降透明
+constexpr BYTE     kCardFillA    = 200;
 constexpr BYTE     kCardLineA    = 46;                     // 边框 ≈ 白 18%
 constexpr BYTE     kSheenA       = 92;                     // 顶部高光线 ≈ 白 36%
 constexpr COLORREF kChipFill     = RGB(0x30, 0x30, 0x30);  // 图标徽章底
@@ -127,28 +130,6 @@ void DrawTextGp(Graphics& g, Font* font, const std::wstring& s,
 bool PtIn(const POINT& pt, const RECT& rc) {
   return pt.x >= rc.left && pt.x < rc.right &&
          pt.y >= rc.top && pt.y < rc.bottom;
-}
-
-float MeanLuma(Bitmap* img) {
-  BitmapData data;
-  Rect full(0, 0, static_cast<INT>(img->GetWidth()),
-            static_cast<INT>(img->GetHeight()));
-  if (img->LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &data) !=
-      Ok) {
-    return 80.0f;
-  }
-  float sum = 0.0f;
-  int n = 0;
-  for (UINT y = 0; y < data.Height; ++y) {
-    const BYTE* row = static_cast<const BYTE*>(data.Scan0) + y * data.Stride;
-    for (UINT x = 0; x < data.Width; ++x) {
-      const BYTE* px = row + x * 4;  // BGRA
-      sum += 0.299f * px[2] + 0.587f * px[1] + 0.114f * px[0];
-      ++n;
-    }
-  }
-  img->UnlockBits(&data);
-  return n > 0 ? sum / n : 80.0f;
 }
 
 // Segoe Fluent(Win11)/MDL2(Win10) 图标字体是否可用
@@ -265,7 +246,6 @@ void GlassNotifyWindow::DestroyNativeWindow() {
   }
   window_handle_ = nullptr;
   cards_.clear();
-  backdrop_.reset();
   hover_card_ = -1;
 }
 
@@ -372,68 +352,6 @@ POINT GlassNotifyWindow::TopRightOrigin() const {
   return pt;
 }
 
-// 抓拍将覆盖的桌面像素，1/8 降采样再双三次放大 = 大半径柔焦（自绘毛玻璃底）
-void GlassNotifyWindow::CaptureBackdrop(int origin_x, int origin_y, int w,
-                                        int h) {
-  backdrop_.reset();
-  HDC screen = GetDC(nullptr);
-  BITMAPINFO bmi = {};
-  bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-  bmi.bmiHeader.biWidth       = w;
-  bmi.bmiHeader.biHeight      = -h;
-  bmi.bmiHeader.biPlanes      = 1;
-  bmi.bmiHeader.biBitCount    = 32;
-  bmi.bmiHeader.biCompression = BI_RGB;
-  void* bits = nullptr;
-  HBITMAP dib =
-      CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (!dib) {
-    ReleaseDC(nullptr, screen);
-    return;
-  }
-  HDC mem = CreateCompatibleDC(screen);
-  HBITMAP old = static_cast<HBITMAP>(SelectObject(mem, dib));
-  BitBlt(mem, 0, 0, w, h, screen, origin_x, origin_y, SRCCOPY);
-  SelectObject(mem, old);
-  DeleteDC(mem);
-  ReleaseDC(nullptr, screen);
-
-  Bitmap raw(w, h, w * 4, PixelFormat32bppARGB, static_cast<BYTE*>(bits));
-  const int sw = std::max(1, w / 8);
-  const int sh = std::max(1, h / 8);
-  Bitmap downscaled(sw, sh, PixelFormat32bppARGB);
-  {
-    Graphics gs(&downscaled);
-    gs.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    gs.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    ImageAttributes ia;
-    ia.SetWrapMode(WrapModeTileFlipXY);
-    gs.DrawImage(&raw, RectF(0.0f, 0.0f, static_cast<REAL>(sw),
-                             static_cast<REAL>(sh)),
-                 0.0f, 0.0f, static_cast<REAL>(w), static_cast<REAL>(h),
-                 UnitPixel, &ia);
-  }
-  DeleteObject(dib);
-
-  // 自适应压暗：亮桌面把玻璃压成深色贴膜保证白字可读，暗桌面全通透
-  backdrop_dim_ = std::clamp(90.0f / std::max(MeanLuma(&downscaled), 1.0f),
-                             0.34f, 1.0f);
-
-  auto* blurred = new Bitmap(w, h, PixelFormat32bppARGB);
-  {
-    Graphics gb(blurred);
-    gb.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    gb.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    ImageAttributes ia;
-    ia.SetWrapMode(WrapModeTileFlipXY);
-    gb.DrawImage(&downscaled, RectF(0.0f, 0.0f, static_cast<REAL>(w),
-                                    static_cast<REAL>(h)),
-                 0.0f, 0.0f, static_cast<REAL>(sw), static_cast<REAL>(sh),
-                 UnitPixel, &ia);
-  }
-  backdrop_.reset(blurred);
-}
-
 void GlassNotifyWindow::EnsureNoiseTile() {
   if (noise_tile_) return;
   const int size = 48;
@@ -491,18 +409,9 @@ void GlassNotifyWindow::Show(const std::string& id,
     if (event_callback_) event_callback_(evicted, "timeout");
   }
 
-  const bool first_card = cards_.size() == 1;
   if (!CreateWindowIfNeeded()) return;
   dump_shots_ = 0;  // 新卡入栈重新允许调试出图
   ComputeLayout();
-
-  if (first_card) {
-    // 窗口未显示：先抓拍右上角目标位置的桌面做毛玻璃底
-    const int total_h = cards_.back().rc_card.bottom + 2;
-    const POINT origin = TopRightOrigin();
-    CaptureBackdrop(origin.x, origin.y, kCardWidth, total_h);
-  }
-  // 窗口已在显示中：沿用旧抓拍底（模糊底下错位不可感），仅重排重绘
 
   SetTimer(window_handle_, kTickTimerId, 50, nullptr);
   Repaint();
@@ -625,24 +534,11 @@ void GlassNotifyWindow::PaintCard(Graphics& g, const Card& card, int index) {
   g.ScaleTransform(scale, scale, MatrixOrderAppend);
   g.TranslateTransform(-cx, -cy, MatrixOrderAppend);
 
-  // ── 玻璃卡底：抓拍桌面区域 + 深色玻璃膜（裁到圆角路径） ──
+  // ── 玻璃卡底：恒定半透明深膜（背后内容由 DWM 实时透出，不再抓拍桌面） ──
   const RectF rc(0.0f, 0.0f, static_cast<REAL>(kCardWidth),
                  static_cast<REAL>(h));
   GraphicsPath card_path;
   AppendRoundRect(&card_path, rc, kCardRadius);
-  if (backdrop_) {
-    g.SetClip(&card_path);
-    SolidBrush base(ToGdiColorA(kCardFill,
-                                static_cast<BYTE>(kCardFillA *
-                                    (0.75f + 0.25f * index))));
-    g.FillRectangle(&base, rc);
-    // 取窗口坐标里卡片对应的背景区域（缩放错位在模糊底上不可感）
-    g.DrawImage(backdrop_.get(), rc,
-                static_cast<REAL>(card.rc_card.left),
-                static_cast<REAL>(card.rc_card.top), rc.Width, rc.Height,
-                UnitPixel, nullptr);
-    g.ResetClip();
-  }
   SolidBrush scrim(ToGdiColorA(kCardFill,
                                static_cast<BYTE>(kCardFillA * fade)));
   g.FillPath(&scrim, &card_path);

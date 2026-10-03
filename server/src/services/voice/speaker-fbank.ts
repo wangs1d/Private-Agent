@@ -132,10 +132,20 @@ export const MIN_FRAMES = 25; // ≈0.25s
 export const MAX_FRAMES = 600; // 6s 截断（与训练 num_frms=200 同量级，余量覆盖 3-5s 注册句）
 
 /**
- * 16k float 波形 → log-mel fbank + 逐句 CMVN。
+ * 16k float 波形 → log-mel fbank + 时间维归一化。
  * 输入约定：已重采样到 16k 的单声道 [-1,1]。
+ *
+ * normalize 变体（前端口径按官方样本实证标定，见 scripts/probe-campplus-frontend.ts）：
+ *   - "cmvn"：逐句均值方差归一（wespeaker ResNet34 训练口径）
+ *   - "mean"：仅逐句减均值（3D-Speaker/sherpa-onnx 对 CAM++ 的推理口径）
+ *   - "none"：原始 log-mel
  */
-export function computeFbankWithCmvn(samples16k: Float32Array): FbankResult {
+export type FbankNormalize = "cmvn" | "mean" | "none";
+
+export function computeFbank(
+  samples16k: Float32Array,
+  normalize: FbankNormalize = "cmvn",
+): FbankResult {
   const numFrames = samples16k.length >= FRAME_LEN
     ? 1 + Math.floor((samples16k.length - FRAME_LEN) / FRAME_SHIFT)
     : 0;
@@ -176,23 +186,37 @@ export function computeFbankWithCmvn(samples16k: Float32Array): FbankResult {
     }
   }
 
-  // 逐句 CMVN：时间维均值方差归一（pyannote/wespeaker 同款，替代 cmvn.json）
-  for (let d = 0; d < NUM_MEL_BINS; d++) {
-    let mean = 0;
-    for (let f = 0; f < useFrames; f++) mean += feats[f * NUM_MEL_BINS + d]!;
-    mean /= useFrames;
-    let variance = 0;
-    for (let f = 0; f < useFrames; f++) {
-      const diff = feats[f * NUM_MEL_BINS + d]! - mean;
-      variance += diff * diff;
-    }
-    const std = Math.sqrt(variance / useFrames) + 1e-8;
-    for (let f = 0; f < useFrames; f++) {
-      feats[f * NUM_MEL_BINS + d] = (feats[f * NUM_MEL_BINS + d]! - mean) / std;
+  // 时间维归一化（口径见上）
+  if (normalize !== "none") {
+    for (let d = 0; d < NUM_MEL_BINS; d++) {
+      let mean = 0;
+      for (let f = 0; f < useFrames; f++) mean += feats[f * NUM_MEL_BINS + d]!;
+      mean /= useFrames;
+      if (normalize === "none") continue;
+      if (normalize === "mean") {
+        for (let f = 0; f < useFrames; f++) {
+          feats[f * NUM_MEL_BINS + d] = feats[f * NUM_MEL_BINS + d]! - mean;
+        }
+        continue;
+      }
+      let variance = 0;
+      for (let f = 0; f < useFrames; f++) {
+        const diff = feats[f * NUM_MEL_BINS + d]! - mean;
+        variance += diff * diff;
+      }
+      const std = Math.sqrt(variance / useFrames) + 1e-8;
+      for (let f = 0; f < useFrames; f++) {
+        feats[f * NUM_MEL_BINS + d] = (feats[f * NUM_MEL_BINS + d]! - mean) / std;
+      }
     }
   }
 
   return { data: feats, frames: useFrames, dims: NUM_MEL_BINS, sampleRate: 16000 };
+}
+
+/** 兼容旧名：逐句 CMVN（wespeaker 口径）。 */
+export function computeFbankWithCmvn(samples16k: Float32Array): FbankResult {
+  return computeFbank(samples16k, "cmvn");
 }
 
 /** 波形 RMS（[-1,1] 口径），用于静音检测 */

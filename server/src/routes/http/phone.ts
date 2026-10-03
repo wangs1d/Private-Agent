@@ -41,7 +41,7 @@ export function registerPhoneRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
     const { sessionId, userId } = parsed.data;
     const actorId = resolveActorId({ sessionId, userId });
     try {
-      const virtualPhone = virtualPhoneService.ensureNumber(actorId);
+      const virtualPhone = await virtualPhoneService.ensureNumber(actorId);
       return { ok: true, actorId, virtualPhone, ttsConfigured: deps.ttsService.isEnabled() };
     } catch (e) {
       return reply.code(503).send({

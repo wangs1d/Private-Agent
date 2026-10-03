@@ -23,7 +23,7 @@ function cleanCallUserDedupCache(): void {
 export function registerAgentPhoneTools(registry: ToolRegistry, phone: VirtualPhoneService): void {
   registry.register("phone.ensure_my_number", async (_input, context) => {
     const actorId = resolveActorId(context);
-    const number = phone.ensureNumber(actorId);
+    const number = await phone.ensureNumber(actorId);
     return {
       ok: true,
       actorId,

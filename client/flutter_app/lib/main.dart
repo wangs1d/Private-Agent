@@ -2406,6 +2406,27 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             unawaited(ConnectedCallLauncher.hide());
           }
         }
+        // 呼叫失败必须可见：服务端对呼出拒绝统一回 error.event（号码申领失败/
+        // 忙线等），并同时以对话方式落一条 agent 气泡进聊天流（服务端推
+        // chat.assistant_done task_plane 帧）。客户端职责=关掉外呼窗清状态，
+        // 不再弹一次性 SnackBar——气泡是对话式提醒的唯一出口。
+        // 注意须同时看外呼窗可见性：点呼叫后 _phoneCallStatus 要等服务端
+        // ringing 事件才置位，即时拒绝发生时它还是 null。
+        if (type == "error.event" &&
+            (_phoneCallStatus != null || OutgoingCallLauncher.isVisible.value)) {
+          final String callErrCode = payload["code"]?.toString() ?? "";
+          if (callErrCode == "PHONE_CALL_FAILED") {
+            if (!mounted) return;
+            setState(() {
+              _phoneCallStatus = null;
+              _phoneCallToActorId = null;
+              _activeCallId = null;
+            });
+            PhoneCallSession.instance.end();
+            unawaited(OutgoingCallLauncher.hide());
+            unawaited(IncomingCallLauncher.hide());
+          }
+        }
         if (type == "desktop.bridge.sync") {
           final bool? on = payload["bridgeOnline"] as bool?;
           final Map<String, dynamic>? lt =

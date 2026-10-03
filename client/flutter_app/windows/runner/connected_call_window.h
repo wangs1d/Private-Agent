@@ -106,9 +106,7 @@ class ConnectedCallWindow {
   bool speaker_hover_ = false;      // 免提钮悬停
   bool pill_hover_ = false;         // 挂断胶囊悬停
 
-  // 玻璃底（Show 时抓拍，见 call_visuals.h）
-  Gdiplus::Bitmap* backdrop_ = nullptr;
-  float backdrop_dim_ = 1.0f;
+  // 玻璃底已改为逐像素 alpha 半透明（见 call_visuals.h），不再抓拍桌面
 
   HangUpCallback on_hangup_;
   MuteCallback on_mute_toggle_;

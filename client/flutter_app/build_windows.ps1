@@ -23,13 +23,15 @@ param(
   #   .\build_windows_release.ps1 -HttpBase https://your-server-domain
   [string] $HttpBase = '',
   # 版本清单（更新检查）地址：byok 捆绑形态下 chat 走本地 runtime，而版本控制面
-  # 在云端，必须单独烤入。默认烤入 ECS——控制面常量是编译期烤死的，漏传时客户端
+  # 在云端，必须单独烤入。默认烤入云端域名（nginx login 子域反代 Node，勿烤裸 IP：
+  # 登录页等页面会直接进用户浏览器地址栏）——控制面常量是编译期烤死的，漏传时客户端
   # 静默回落 127.0.0.1:3000，更新检查/反馈失联（0.2.1 与本地 Debug 均翻过车）。
   # 确要回落本地联调请显式传空：-UpdateManifestUrl ''
-  [string] $UpdateManifestUrl = 'http://47.98.122.29:3000',
-  # 控制面（管理后台所在服务器）：反馈/站内信等运营数据走这里。默认烤入 ECS，
-  # 本地构建也能在后台看到反馈；确要回落本地请显式传空：-ControlPlaneUrl ''
-  [string] $ControlPlaneUrl = 'http://47.98.122.29:3000',
+  [string] $UpdateManifestUrl = 'http://login.nextbot.top',
+  # 控制面（管理后台所在服务器）：反馈/站内信/网页登录页（/accounts/web）走这里。
+  # 网页登录 URL 用户可见，必须烤域名（login.nextbot.top）而非裸 IP。
+  # 默认烤入云端域名，本地构建也能在后台看到反馈；确要回落本地请显式传空：-ControlPlaneUrl ''
+  [string] $ControlPlaneUrl = 'http://login.nextbot.top',
   # 发行版本：internal=内测版（默认，能力全量）；oss=开源版（GitHub 发行，
   # 内测独占能力整族隐藏）。与服务端 NEXTBOT_EDITION 同名值，开源安装包传 -Edition oss。
   [ValidateSet('internal', 'oss')]
@@ -152,7 +154,7 @@ function Invoke-BuildAndDeploy {
       # 静默回落是隐形坑：0.2.1 安装包因此把用户反馈全落在了本机库
       Write-Host 'WARNING: 本次 Release 构建未烤入 UpdateManifestUrl / ControlPlaneUrl，' -ForegroundColor Yellow
       Write-Host '  更新检查与用户反馈将回落 httpBase（本地 127.0.0.1:3000），云端后台收不到。' -ForegroundColor Yellow
-      Write-Host '  需联调后台或发用户请加：-UpdateManifestUrl http://47.98.122.29:3000 -ControlPlaneUrl http://47.98.122.29:3000' -ForegroundColor Yellow
+      Write-Host '  需联调后台或发用户请加：-UpdateManifestUrl http://login.nextbot.top -ControlPlaneUrl http://login.nextbot.top' -ForegroundColor Yellow
     }
     Write-Host "flutter build windows --release $($dartDefines -join ' ')"
     & $flutterExe build windows --release @dartDefines

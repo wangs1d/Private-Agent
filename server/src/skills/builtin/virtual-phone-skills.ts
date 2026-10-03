@@ -38,7 +38,7 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
     handler: async (_input, context) => {
       const actorId = resolveActorId(context);
       try {
-        const number = virtualPhoneService.ensureNumber(actorId);
+        const number = await virtualPhoneService.ensureNumber(actorId);
         return {
           ok: true,
           actorId,

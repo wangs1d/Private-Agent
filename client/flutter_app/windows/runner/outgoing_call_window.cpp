@@ -74,11 +74,13 @@ bool OutgoingCallWindow::CreateWindowIfNeeded() {
   EnsureClassRegistered();
   call_vis::EnsureGdiplus();
 
-  // 无子控件：整窗一层玻璃自绘表面，胶囊按钮靠命中测试
+  // 无子控件：整窗一层玻璃自绘表面，胶囊按钮靠命中测试。
+  // WS_EX_LAYERED = 逐像素 alpha 半透明（见 call_visuals.h），首次
+  // UpdateLayeredWindow 上屏前窗口不可见。
   HWND hwnd = CreateWindowExW(
-      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"",
-      WS_POPUP, 0, 0, kWindowWidth, kWindowHeight, nullptr, nullptr,
-      GetModuleHandle(nullptr), this);
+      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+      kClassName, L"", WS_POPUP, 0, 0, kWindowWidth, kWindowHeight, nullptr,
+      nullptr, GetModuleHandle(nullptr), this);
   if (!hwnd) return false;
   window_handle_ = hwnd;
 
@@ -93,13 +95,6 @@ void OutgoingCallWindow::PositionAtBottomRight() {
                   &mi);
   const int x = mi.rcWork.right - kWindowWidth - kMargin;
   const int y = mi.rcWork.bottom - kWindowHeight - kMargin;
-
-  // 玻璃底在窗口可见前抓拍；已可见（更新内容）则沿用旧底
-  if (!IsWindowVisible(window_handle_)) {
-    delete backdrop_;
-    call_vis::CaptureGlassBackdrop(x, y, kWindowWidth, kWindowHeight,
-                                   &backdrop_, &backdrop_dim_);
-  }
 
   SetWindowPos(window_handle_, HWND_TOPMOST, x, y, kWindowWidth, kWindowHeight,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -137,25 +132,19 @@ void OutgoingCallWindow::StopPulse() {
 
 void OutgoingCallWindow::DestroyNativeWindow() {
   StopPulse();
-  delete backdrop_;
-  backdrop_ = nullptr;
   if (window_handle_ && IsWindow(window_handle_)) DestroyWindow(window_handle_);
   window_handle_ = nullptr;
 }
 
 void OutgoingCallWindow::Paint(HWND hwnd, HDC hdc) {
-  RECT rc;
-  GetClientRect(hwnd, &rc);
-  HDC mem = CreateCompatibleDC(hdc);
-  HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-  HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem, bmp));
+  call_vis::GlassSurface& s =
+      call_vis::SharedGlassSurface(kWindowWidth, kWindowHeight);
 
-  // ── 玻璃底 ──
-  call_vis::DrawGlassBase(mem, backdrop_, backdrop_dim_, kWindowWidth,
-                          kWindowHeight);
+  // ── 半透明玻璃底（逐像素 alpha，拖到任何背景都是活的） ──
+  call_vis::DrawGlassBase(s);
 
   // ── 标题栏 ──
-  call_vis::PaintTitleBar(mem, kWindowWidth, title_min_hover_,
+  call_vis::PaintTitleBar(s, kWindowWidth, title_min_hover_,
                           title_close_hover_);
 
   // ── 金属盘头像（静态） ──
@@ -163,12 +152,12 @@ void OutgoingCallWindow::Paint(HWND hwnd, HDC hdc) {
       !caller_initial_.empty()
           ? caller_initial_.c_str()
           : (!caller_name_.empty() ? caller_name_.c_str() : nullptr);
-  call_vis::PaintAvatarDisc(mem, kAvatarCx, kAvatarCy, kAvatarR,
+  call_vis::PaintAvatarDisc(s, kAvatarCx, kAvatarCy, kAvatarR,
                             initial ? std::wstring(initial) : std::wstring());
 
   // ── 名称（18px 白 Semibold） ──
   RECT name_rc = {20, kNameTop, kWindowWidth - 20, kNameTop + 26};
-  call_vis::DrawCenteredText(mem, name_rc, caller_name_, call_vis::kNameColor,
+  call_vis::DrawCenteredText(s, name_rc, caller_name_, call_vis::kNameColor,
                              18, FW_SEMIBOLD, L"Microsoft YaHei UI");
 
   // ── 副标题（12px 中灰；呼叫中文案追加动画点） ──
@@ -179,19 +168,16 @@ void OutgoingCallWindow::Paint(HWND hwnd, HDC hdc) {
     sub.append(dots, L'\u00B7');
   }
   RECT sub_rc = {20, kSubTop, kWindowWidth - 20, kSubTop + 18};
-  call_vis::DrawCenteredText(mem, sub_rc, sub, call_vis::kSubColor, 12,
+  call_vis::DrawCenteredText(s, sub_rc, sub, call_vis::kSubColor, 12,
                              FW_NORMAL, L"Microsoft YaHei UI");
 
   // ── 分隔线 ──
-  call_vis::DrawDivider(mem, kWindowWidth, kDividerY);
+  call_vis::DrawDivider(*s.gfx, kWindowWidth, kDividerY);
 
   // ── 挂断胶囊（自绘，无子控件） ──
-  call_vis::DrawPillButton(mem, PillRect(), pill_hover_);
+  call_vis::DrawPillButton(s, PillRect(), pill_hover_);
 
-  BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-  SelectObject(mem, old_bmp);
-  DeleteObject(bmp);
-  DeleteDC(mem);
+  call_vis::PresentLayered(hwnd, s, hdc);
 }
 
 namespace {
