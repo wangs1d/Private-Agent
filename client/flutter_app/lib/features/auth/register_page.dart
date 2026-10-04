@@ -21,8 +21,7 @@ import "../../widgets/app_window_titlebar.dart";
 /// 左列按扣子桌面端版式：大标题在顶、底部问候 + 「立即登录」按钮，
 /// 不再放表单——点击按钮后跳系统浏览器到控制面登录页（/accounts/web），
 /// 网页完成注册/登录后经本机回环地址把邮箱回连给本页（见 [_startWebAuth]）。
-/// 右侧为展示面板（C 案定稿：织物侧光背景图 + 真实对话样例玻璃卡，
-/// 设计稿见 design-preview/register-redesign/preview.html）。
+/// 右侧为展示面板（C 案定稿：织物侧光背景图 + 真实对话样例玻璃卡）。
 ///
 /// 集成约定：页面自身不依赖任何全局服务，登录结果通过
 /// [RegisterPage.onAuthenticated] 回调外抛（null 时走 1.2s 模拟延迟，
