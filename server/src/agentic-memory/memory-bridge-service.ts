@@ -33,6 +33,7 @@ import {
   isMemoryBridgeEnabled,
 } from "./env.js";
 import { openAgenticSqlite, fromJsonColumn, toJsonColumn } from "./sqlite-store.js";
+import { actorIdVariants } from "./actor-key.js";
 import { semanticFingerprint } from "../services/memory-record-utils.js";
 
 // ============================================================
@@ -42,7 +43,7 @@ import { semanticFingerprint } from "../services/memory-record-utils.js";
 /** Mem0 侧外观：遗忘同步需要 delete；回填/调和需要可选 getAll */
 export interface BridgeMem0Like {
   delete(memoryId: string): Promise<unknown>;
-  getAll?(config?: { topK?: number }): Promise<{
+  getAll?(config?: { topK?: number; filters?: { user_id?: string } }): Promise<{
     results?: Array<{ id: string; memory?: string; metadata?: Record<string, unknown> }>;
   }>;
 }
@@ -654,14 +655,22 @@ export class MemoryBridgeService {
   async backfillLinks(actorId?: string, opts?: { similarityThreshold?: number }): Promise<{ nodesMatched: number; linksCreated: number }> {
     if (!this.memory.getAll) return { nodesMatched: 0, linksCreated: 0 };
     const threshold = opts?.similarityThreshold ?? 0.55;
-    let allResult: { results?: Array<{ id: string; memory?: string; metadata?: Record<string, unknown> }> };
+    // mem0ai v3 getAll 强制 filters.user_id（裸 topK 必抛，回填自升级起静默失效）；
+    // 按 actor 逐形式扫（存量数据两种 actor 形式并存），再统一配对。
+    const candidateActors = actorId
+      ? actorIdVariants(actorId)
+      : [...new Set(this.listDistinctActorIds().flatMap((a) => actorIdVariants(a)))];
+    const mem0Records: Array<{ id: string; memory?: string; metadata?: Record<string, unknown> }> = [];
     try {
-      allResult = await this.memory.getAll({ topK: 10000 });
+      for (const variant of candidateActors) {
+        const allResult = await this.memory.getAll({ topK: 10000, filters: { user_id: variant } });
+        mem0Records.push(...((allResult.results ?? []) as typeof mem0Records));
+      }
     } catch {
       return { nodesMatched: 0, linksCreated: 0 };
     }
-    const mem0Records = (allResult.results ?? []).filter((r) => r.id && r.memory);
-    if (mem0Records.length === 0) return { nodesMatched: 0, linksCreated: 0 };
+    const usableRecords = mem0Records.filter((r) => r.id && r.memory);
+    if (usableRecords.length === 0) return { nodesMatched: 0, linksCreated: 0 };
 
     const nodeLists = actorId
       ? [this.graph.getAllNodes(actorId)]
@@ -681,7 +690,7 @@ export class MemoryBridgeService {
         const existing = Array.isArray(node.metadata?.mem0Ids) ? node.metadata.mem0Ids : [];
         if (existing.length > 0) continue; // 已有 linkage，幂等跳过
         const matched: string[] = [];
-        for (const rec of mem0Records) {
+        for (const rec of usableRecords) {
           const metaActor = typeof rec.metadata?.actorId === "string" ? rec.metadata.actorId : "";
           if (metaActor && metaActor !== node.actorId) continue;
           if (bigramJaccard(node.summary, rec.memory ?? "") >= threshold) matched.push(rec.id);

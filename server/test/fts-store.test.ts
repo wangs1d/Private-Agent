@@ -178,21 +178,29 @@ test("FTS：remove 与 purgeActor", () => {
   });
 });
 
-test("FTS：backfillFromMem0 存量回填（metadata.actorId 归属）", async () => {
+test("FTS：backfillFromMem0 存量回填（按 filters.user_id 逐 actor 过滤）", async () => {
   await withStoreAsync(async (ctx) => {
     const { store } = ctx;
+    const seenFilters: Array<{ user_id?: string } | undefined> = [];
     const fakeMem0 = {
-      async getAll() {
+      async getAll(config?: { topK?: number; filters?: { user_id?: string } }) {
+        seenFilters.push(config?.filters);
+        const uid = config?.filters?.user_id;
         return {
           results: [
-            { id: "b1", memory: "用户的女儿五岁了", metadata: { actorId: "user-1" } },
-            { id: "b2", memory: "用户会说日语", metadata: { actorId: "user-2" } },
+            ...(uid === "user-1"
+              ? [{ id: "b1", memory: "用户的女儿五岁了", metadata: { actorId: "user-1" } }]
+              : []),
+            ...(uid === "user-2"
+              ? [{ id: "b2", memory: "用户会说日语", metadata: { actorId: "user-2" } }]
+              : []),
             { id: "b3", memory: "无主记忆不回填", metadata: {} },
           ],
         };
       },
     };
-    const { indexed } = await store.backfillFromMem0(fakeMem0);
+    const { indexed } = await store.backfillFromMem0(fakeMem0, ["user-1", "user-2"]);
+    assert.deepEqual(seenFilters, [{ user_id: "user-1" }, { user_id: "user-2" }], "必须带 filters.user_id 逐 actor 扫（mem0ai v3 裸 topK 必抛）");
     assert.equal(indexed, 2);
     assert.equal(store.search("user-1", "女儿 几岁")[0]?.memoryId, "b1");
     assert.equal(store.search("user-1", "日语").length, 0, "user-2 的记忆不串到 user-1");

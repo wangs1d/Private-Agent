@@ -10,20 +10,6 @@ import 'package:flutter/services.dart';
 /// 对话流卡片），见 _handleMorningBriefingEvent。
 enum IslandKind { task, update, schedule, inbox, voice }
 
-/// 展开卡「任务动态」里的一行 agent 步骤（工具调用状态流，对齐 eisland
-/// 的 agent/thinking/todo 上岛思路：岛直接呈现 agent 正在干什么）。
-class IslandAgentStep {
-  const IslandAgentStep({required this.label, this.state = 0, this.key});
-
-  final String label;
-
-  /// 0=进行中 1=成功 2=失败（与原生 AgentStep.state 对应）。
-  final int state;
-
-  /// 幂等键（通常为工具名）；同键新步骤开始时旧步骤视为已收尾。
-  final String? key;
-}
-
 /// 一条要在岛上展示的信息。
 class IslandEntry {
   const IslandEntry({
@@ -76,8 +62,7 @@ class DynamicIslandController extends ChangeNotifier {
   bool _voiceExclusive = false;
   final List<IslandEntry> _voiceParking = <IslandEntry>[];
 
-  // 环境数据（不走条目优先级仲裁，直接进原生 hover 态/展开卡）。
-  List<IslandAgentStep> _agentSteps = const <IslandAgentStep>[];
+  // 环境数据（不走条目优先级仲裁，直接进原生 hover 态）。
   int _taskPlaneCount = 0;
   bool _foregroundAgentActive = false;
   int _ambientUnread = 0;
@@ -89,7 +74,6 @@ class DynamicIslandController extends ChangeNotifier {
 
   IslandEntry? get entry => _entry;
   bool get expanded => _expanded;
-  List<IslandAgentStep> get agentSteps => _agentSteps;
   /// hover 环境行未读总数（站内信 + 消息聚合）。
   int get ambientUnread => _ambientUnread + _messageHubUnread;
   String get agentStatusLine => _agentStatusLine;
@@ -116,14 +100,6 @@ class DynamicIslandController extends ChangeNotifier {
     final String trimmed = line.trim();
     if (_agentStatusLine == trimmed) return;
     _agentStatusLine = trimmed;
-    notifyListeners();
-  }
-
-  /// 更新展开卡「任务动态」步骤流（同引用跳过，最多保留 5 条）。
-  void setAgentSteps(List<IslandAgentStep> steps) {
-    if (listEquals(steps, _agentSteps)) return;
-    _agentSteps = List<IslandAgentStep>.unmodifiable(
-        steps.length > 5 ? steps.sublist(steps.length - 5) : steps);
     notifyListeners();
   }
 
@@ -431,20 +407,12 @@ class DynamicIslandLauncher {
       }
       await _channel.invokeMethod<bool>('setExpanded',
           <String, Object?>{'expanded': _controller!.expanded});
-      // hover 态环境行 + 展开卡任务动态 + 岛旁消息挂件：轻量数据随状态同步直推。
+      // hover 态环境行 + 岛旁消息挂件：轻量数据随状态同步直推。
       await _channel.invokeMethod<bool>('setAmbient', <String, Object?>{
         'unread': _controller!.ambientUnread,
         'agentActive': _controller!.agentActive,
         'agentStatus': _controller!.agentStatusLine,
         'messageHub': _controller!.messageHubUnread,
-      });
-      await _channel.invokeMethod<bool>('setAgentSteps', <String, Object?>{
-        'labels': <String>[
-          for (final IslandAgentStep s in _controller!.agentSteps) s.label
-        ],
-        'states': <int>[
-          for (final IslandAgentStep s in _controller!.agentSteps) s.state
-        ],
       });
       if (_lastMessageRows.isNotEmpty) {
         await _channel.invokeMethod<bool>('setMessagesPreview',
@@ -625,40 +593,12 @@ class IslandRealFeeds {
   static final DynamicIslandController _c = DynamicIslandController.instance;
   static final DynamicIslandLauncher _l = DynamicIslandLauncher.instance;
 
-  /// 后台任务进行中（chat.task_update 生命周期驱动）。
-  /// [statusLine] 可选：最后一次工具状态行，进 hover「任务」页。
+  /// 后台任务计数/状态行（chat.task_update 生命周期驱动）：只喂 hover「任务」页
+  /// （agentActive + 状态行），胶囊不再出「后台任务进行中」条目（2026-10-04 拍板）。
   static void setTaskActivity({required int activeCount, String? statusLine}) {
     _c.updateTaskPlaneCount(activeCount);
     if (statusLine != null && statusLine.trim().isNotEmpty) {
       _c.updateAgentStatusLine(statusLine);
-    }
-    if (activeCount > 0) {
-      _c.present(IslandEntry(
-        id: 'task',
-        title: activeCount == 1 ? '后台任务进行中' : '$activeCount 个任务进行中',
-        kind: IslandKind.task,
-        spinning: true,
-        priority: 0,
-      ));
-    } else {
-      _c.dismiss('task');
-    }
-  }
-
-  /// 应用更新下载进度（ClientUpdateFlowController 通知驱动）。
-  /// progress 非 null = 下载中（0~1）；null = 回 idle/终态，撤条目。
-  static void setUpdateProgress(double? progress, {String version = ''}) {
-    if (progress != null) {
-      _c.present(IslandEntry(
-        id: 'update',
-        title: '更新下载中',
-        kind: IslandKind.update,
-        trailing: '${(progress * 100).round()}%',
-        progress: progress.clamp(0.0, 1.0),
-        priority: 1,
-      ));
-    } else {
-      _c.dismiss('update');
     }
   }
 

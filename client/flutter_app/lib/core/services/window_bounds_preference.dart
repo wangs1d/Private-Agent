@@ -69,8 +69,9 @@ class WindowBounds {
 /// （与 [RightPanelToolPreference] 同目录、同读写模式，进程内带缓存）。
 ///
 /// 首次启动（无文件）返回 null，主入口走默认 1280x800 居中；之后每次
-/// 调整窗口都会落盘，下次启动按上次的大小/位置还原，实现「固定打开时
-/// 的大小」。
+/// 调整窗口都会落盘。下次启动沿用落盘的大小与最大化状态，位置则一律
+/// 重新居中（每次打开都在桌面正中间），实现「固定打开时的大小」+「
+/// 每次打开都在正中间」。
 class WindowBoundsPreference {
   WindowBoundsPreference._();
 
@@ -134,11 +135,33 @@ Future<Size> firstLaunchWindowSize() async {
   return Size(width, height);
 }
 
-/// 读取「可用于还原」的窗口矩形：加载落盘值后，按当前显示器布局做
-/// 可见性校验与钳制。显示器拔掉/分辨率变小后，保证窗口不会整个跑到
-/// 屏幕外，也不会比当前屏幕大得离谱。
+/// 「每次打开都居中」的目标位置：主显示器工作区（扣除任务栏）中心
+/// 减去窗口尺寸的一半，窗口比工作区大时贴住工作区左上角。
+/// 返回 null 表示显示器信息拿不到，调用方回退 windowManager.center()。
+/// 坐标为逻辑像素，与 windowManager.setPosition 的坐标系一致。
+Future<Offset?> desktopCenteredPosition(Size windowSize) async {
+  try {
+    final Display primary = await screenRetriever.getPrimaryDisplay();
+    final Offset? visiblePos = primary.visiblePosition;
+    final Size? visibleSize = primary.visibleSize;
+    if (visiblePos == null || visibleSize == null) return null;
+    final double x =
+        visiblePos.dx + math.max(0, (visibleSize.width - windowSize.width) / 2);
+    final double y = visiblePos.dy +
+        math.max(0, (visibleSize.height - windowSize.height) / 2);
+    return Offset(x, y);
+  } catch (e) {
+    debugPrint("[WindowBounds] centered position query failed: $e");
+    return null;
+  }
+}
+
+/// 读取「可用于还原」的窗口大小与最大化状态：加载落盘值后，按当前
+/// 显示器布局做可见性校验与钳制。显示器拔掉/分辨率变小后，保证窗口
+/// 尺寸不会比当前屏幕大得离谱。位置不再从这里还原（每次启动一律
+/// 居中，见 [desktopCenteredPosition]）。
 ///
-/// 无历史、数据损坏或完全落在所有屏幕之外时返回 null（走默认居中）。
+/// 无历史、数据损坏或完全落在所有屏幕之外时返回 null（走默认尺寸）。
 Future<WindowBounds?> loadRestorableWindowBounds() async {
   final WindowBounds? saved = await WindowBoundsPreference.load();
   if (saved == null) return null;

@@ -5,6 +5,13 @@ import {
   type ScheduleTaskRecord,
 } from "../../services/schedule-task-service.js";
 import {
+  getScheduleHabitStore,
+  isPlausibleSleepStartHour,
+  isPlausibleWakeHour,
+  parseSleepRoutine,
+} from "../../services/schedule-habit-store.js";
+import { getPresenceFootprintStore } from "../../rhythm/presence-footprint-store.js";
+import {
   scheduleTaskCreateBodySchema,
   scheduleTaskListQuerySchema,
   scheduleTaskRunsQuerySchema,
@@ -282,5 +289,71 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
     }
     const streak = computeStreak(habit.checkins);
     return { ok: true, streak, totalCheckins: habit.checkins.length };
+  });
+
+  // ── 作息偏好（分级提醒的冷启动习惯源）────────────────────────────────
+  // 用户在设置里填一次「平时几点睡、几点起」，策略层即按此个性化睡前备忘与
+  // 起床闹钟（无需等连续多晚的被动睡眠样本）。也接受原文 text 走确定性解析。
+  app.get("/api/schedule/sleep-routine", async (request, reply) => {
+    const store = getScheduleHabitStore();
+    if (!store) return reply.code(503).send({ ok: false, error: "habit store unavailable" });
+    const sessionId = String((request.query as { sessionId?: string }).sessionId ?? "").trim();
+    if (!sessionId) return reply.code(400).send({ ok: false, error: "sessionId required" });
+
+    // 被动观察：agent 记录「你什么时候在线」推出来的作息（零文本抽取）。
+    // 设置页据此如实告知用户：作息是观察来的、观察了几晚、还差什么。
+    const footprint = getPresenceFootprintStore();
+    const derived = footprint?.deriveSleepWindow(sessionId, { lookbackDays: 14 }) ?? null;
+    const observed = footprint
+      ? {
+          sleepStartHour: derived?.sleepStartHour ?? null,
+          wakeHour: derived?.wakeHour ?? null,
+          nightCount: derived?.nightCount ?? 0,
+          dayCount: footprint.listDays(sessionId).length,
+          // 入睡点推得出来才算「观察到了」；差几晚也如实告诉前端，好提示用户
+          enoughNights: (derived?.nightCount ?? 0) >= 3,
+        }
+      : null;
+
+    return { ok: true, routine: store.get(sessionId), observed };
+  });
+
+  app.put("/api/schedule/sleep-routine", async (request, reply) => {
+    const store = getScheduleHabitStore();
+    if (!store) return reply.code(503).send({ ok: false, error: "habit store unavailable" });
+    const body = (request.body ?? {}) as {
+      sessionId?: unknown;
+      sleepStartHour?: unknown;
+      wakeHour?: unknown;
+      text?: unknown;
+    };
+    const sessionId = String(body.sessionId ?? "").trim();
+    if (!sessionId) return reply.code(400).send({ ok: false, error: "sessionId required" });
+
+    let parsed: { sleepStartHour: number; wakeHour: number } | null = null;
+    if (typeof body.text === "string" && body.text.trim()) {
+      parsed = parseSleepRoutine(body.text);
+      if (!parsed) return reply.code(400).send({ ok: false, error: "text_unparsed" });
+    } else {
+      const sleepStartHour = Number(body.sleepStartHour);
+      const wakeHour = Number(body.wakeHour);
+      if (!isPlausibleSleepStartHour(sleepStartHour)) {
+        return reply.code(400).send({ ok: false, error: "invalid_sleep_start_hour" });
+      }
+      if (!isPlausibleWakeHour(wakeHour)) {
+        return reply.code(400).send({ ok: false, error: "invalid_wake_hour" });
+      }
+      parsed = { sleepStartHour, wakeHour };
+    }
+    const routine = store.set(sessionId, parsed, "explicit");
+    return { ok: true, routine };
+  });
+
+  app.delete("/api/schedule/sleep-routine", async (request, reply) => {
+    const store = getScheduleHabitStore();
+    if (!store) return reply.code(503).send({ ok: false, error: "habit store unavailable" });
+    const sessionId = String((request.query as { sessionId?: string }).sessionId ?? "").trim();
+    if (!sessionId) return reply.code(400).send({ ok: false, error: "sessionId required" });
+    return { ok: true, cleared: store.clear(sessionId) };
   });
 }

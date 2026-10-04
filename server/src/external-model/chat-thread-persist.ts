@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 import { MASTER_CHAT_SESSION_PREFIX, NOTES_CHAT_SESSION_PREFIX } from "../agent/master-chat-session.js";
+import { attachPersistedClientIds } from "./chat-thread-client-id.js";
 import { mergeActorThreadIntoMasterThread } from "./chat-thread-merge.js";
 import { compactValidChatMessages, repairKimiAssistantToolCallReasoning, sanitizeToolCallMessageChain } from "./chat-thread-sanitize.js";
 
@@ -265,6 +266,22 @@ export class ChatThreadPersistence {
     }
   }
 
+  /**
+   * 持久层是否有该会话可恢复的消息（只判存在，不做 sanitize/裁剪）。
+   *
+   * 用途：删除/编辑这类「按 clientMessageId 定位」的操作在内存里找不到线程时，需要先
+   * 判断「该恢复」还是「确实没有该会话」——前者恢复后继续操作，后者直接返回 not_found，
+   * 不能给未知会话凭空建上下文。
+   */
+  hasPersistedMessages(sessionId: string): boolean {
+    if (!shouldPersistChatThread(sessionId)) return false;
+    const row = this.pickStore(sessionId).sessions[sessionId];
+    if (!row?.messages?.length) return false;
+    return row.messages.some(
+      (m) => m?.role === "user" || m?.role === "assistant" || m?.role === "tool",
+    );
+  }
+
   loadRestoredMessages(sessionId: string): ChatCompletionMessageParam[] | null {
     if (!shouldPersistChatThread(sessionId)) return null;
     const store = this.pickStore(sessionId);
@@ -301,7 +318,12 @@ export class ChatThreadPersistence {
         // load 完成后该写入丢失，且 load 一完成就全量覆写掉已持久化的会话。
         await this.whenLoaded();
         const sanitized = sanitizeToolCallMessageChain(nonSystem, "[chat-thread-persist-save]");
-        const snapshot = tailMessages(sanitized, getChatThreadPersistMaxMessages());
+        // clientMessageId 随消息落盘：进程重启后「删除这一轮 / 编辑重发」还要靠它按 id
+        // 定位线程消息（原先只活在进程内 WeakMap 里，重启即失效）。这里是克隆式附加，
+        // 不改线程里正在用的对象；恢复时由 store 侧 absorb 回灌并剥掉。
+        const snapshot = attachPersistedClientIds(
+          tailMessages(sanitized, getChatThreadPersistMaxMessages()),
+        );
         // P3 修复：写盘失败必须打日志并保持链条存活。此前 rejection 存进
         // persistChain 无人消费——一次磁盘错误既静默丢弃本次保存，又让链上
         // 后续所有保存被 .then 跳过（持久化永久瘫痪且无任何日志）。

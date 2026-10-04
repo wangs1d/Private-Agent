@@ -3,6 +3,7 @@ import "dart:convert";
 import "dart:developer" as developer;
 import "dart:io";
 
+import "package:file_picker/file_picker.dart";
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
@@ -49,6 +50,7 @@ import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
 import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
+import "core/services/user_avatar_api.dart";
 import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
 import "core/services/video_preview_launcher.dart";
@@ -159,17 +161,19 @@ void main() async {
     ));
     if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
       await windowManager.ensureInitialized();
-      // 「固定打开时的大小」：首次启动（无历史）在默认 1280x800 基础上
-      // 向外扩展 0.1 倍（→1408x880，屏幕放不下则钳到工作区内）并居中；
-      // 之后按上次关闭前的窗口矩形还原（含最大化状态），大小不再被重置。
-      // WindowOptions 没有 position 字段，位置在 readyToShow 回调里还原。
+      // 「固定打开时的大小 + 每次打开都在桌面正中间」：首次启动（无历史）
+      // 在默认 1280x800 基础上向外扩展 0.1 倍（→1408x880，屏幕放不下则
+      // 钳到工作区内）；之后沿用上次关闭前的窗口大小与最大化状态，但
+      // 位置一律重新放到主显示器工作区正中间，上次的位置不再还原。
+      // WindowOptions 没有 position 字段，位置在 readyToShow 回调里设置。
       final WindowBounds? savedBounds = await loadRestorableWindowBounds();
       final Size initialSize = savedBounds == null
           ? await firstLaunchWindowSize()
           : Size(savedBounds.width, savedBounds.height);
+      final Offset? centeredPosition =
+          await desktopCenteredPosition(initialSize);
       final WindowOptions options = WindowOptions(
         size: initialSize,
-        center: savedBounds == null,
         backgroundColor: Colors.transparent,
         skipTaskbar: false,
         // 隐藏原生标题栏，由自绘的 AppWindowTitleBar 接管
@@ -177,11 +181,15 @@ void main() async {
         titleBarStyle: TitleBarStyle.hidden,
       );
       await windowManager.waitUntilReadyToShow(options, () async {
-        if (savedBounds != null) {
-          await windowManager.setPosition(Offset(savedBounds.x, savedBounds.y));
+        if (centeredPosition != null) {
+          await windowManager.setPosition(centeredPosition);
+        } else {
+          // 主显示器信息拿不到时的兜底居中。
+          await windowManager.center();
         }
         if (savedBounds?.maximized ?? false) {
           // SW_MAXIMIZE 会顺带显示窗口，随后的 show() 是无害的幂等调用。
+          // 先摆好居中的还原态矩形再最大化，取消最大化后回到正中间。
           await windowManager.maximize();
         }
         await windowManager.show();
@@ -454,6 +462,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   String? _accountEmail;
   bool _sessionLoaded = false;
 
+  /// 用户头像相对路径（服务端 /agent/avatars/...；null = 未设置/拉取失败）。
+  /// 启动登录态就绪后拉一次，设置/更换成功后本地即时更新。
+  String? _userAvatarPath;
+
   /// N 开场动画武装位：只在大门放行后播放——已登录冷启动（读盘有会话）
   /// 或注册/登录完成首次切入主界面时置位。未登录停在注册页期间绝不播放。
   bool _playBootAnimation = false;
@@ -480,10 +492,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 当前正在调用的工具名（`tool.call` 置位、`tool.result`/收尾清空）。
   /// 输入框左上角据此展示「球形图标 + 正在调用:xxx」。
   String? _currentToolName;
-
-  /// 岛上「任务动态」步骤流：tool.call/tool.result 驱动
-  /// （agent 过程直接上岛，对齐「岛 = agent 在干什么」的定位）。
-  final List<IslandAgentStep> _islandAgentSteps = <IslandAgentStep>[];
 
   /// `chat.agent_status` 携带的可选进度百分比（0-90，长工具心跳推进）。
   /// null = 无进度条（仅文本状态）；非 null = 渲染进度条。
@@ -1278,11 +1286,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             if (line.isNotEmpty) {
               _updateAgentStatusLine(line);
             }
-            // Agent 过程直接上岛：步骤流进展开卡「任务动态」+ hover「任务」页。
+            // hover「任务」页：agent 状态行上岛（步骤流不上岛）。
             final String islandLabel = line.isNotEmpty
                 ? line
                 : (toolName.isNotEmpty ? toolName : "正在处理");
-            _islandStepStart(toolName, islandLabel);
             DynamicIslandController.instance
               ..setForegroundAgent(active: true)
               ..updateAgentStatusLine(islandLabel);
@@ -1305,9 +1312,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           }
           final String toolName = payload["toolName"]?.toString() ?? "";
           final bool toolOk = payload["ok"] == true;
-          if (toolName.isNotEmpty) {
-            _islandStepFinish(toolName, toolOk);
-          }
           if (isMasterInvokeSubAgentTool(toolName) && result != null) {
             final bool delegateOk = result["ok"] != false;
             if (!toolOk || !delegateOk) {
@@ -2998,40 +3002,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     DynamicIslandController.instance.setForegroundAgent(active: false);
   }
 
-  // ── 岛上「任务动态」步骤流（agent 过程直接上岛）──
-
-  /// 工具调用开始：追加一步「进行中」；同名工具重入时先收尾旧步。
-  void _islandStepStart(String toolName, String label) {
-    for (int i = _islandAgentSteps.length - 1; i >= 0; i--) {
-      if (_islandAgentSteps[i].key == toolName &&
-          _islandAgentSteps[i].state == 0) {
-        _islandAgentSteps[i] = IslandAgentStep(
-            label: _islandAgentSteps[i].label, state: 1, key: toolName);
-        break;
-      }
-    }
-    _islandAgentSteps
-        .add(IslandAgentStep(label: label, state: 0, key: toolName));
-    DynamicIslandController.instance
-        .setAgentSteps(List<IslandAgentStep>.of(_islandAgentSteps));
-  }
-
-  /// 工具调用结束：该工具最近的「进行中」步落终态（成功/失败）。
-  void _islandStepFinish(String toolName, bool ok) {
-    for (int i = _islandAgentSteps.length - 1; i >= 0; i--) {
-      if (_islandAgentSteps[i].key == toolName &&
-          _islandAgentSteps[i].state == 0) {
-        _islandAgentSteps[i] = IslandAgentStep(
-            label: _islandAgentSteps[i].label,
-            state: ok ? 1 : 2,
-            key: toolName);
-        DynamicIslandController.instance
-            .setAgentSteps(List<IslandAgentStep>.of(_islandAgentSteps));
-        return;
-      }
-    }
-  }
-
   /// v2：用户点 TurnPanel 顶栏「停止」按钮时的软取消。
   /// 不发 WS 事件——只本地清状态，让后续 chunk/agent_status 因 traceId 不匹配被过滤。
   /// 服务端 LLM 调用仍在后台跑（无法硬中断），但客户端不再接收/渲染。
@@ -3207,15 +3177,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   void _armAgentReplyWatchdog(String userMessageId) {
-    // 新一轮前台任务开始：清掉上一轮已收尾的「任务动态」步骤
-    // （后台任务仍有进行中步骤时保留，不打断任务面动态）。
-    final bool anyRunning =
-        _islandAgentSteps.any((IslandAgentStep s) => s.state == 0);
-    if (_islandAgentSteps.isNotEmpty && !anyRunning) {
-      _islandAgentSteps.clear();
-      DynamicIslandController.instance
-          .setAgentSteps(const <IslandAgentStep>[]);
-    }
     ChatTurnController.instance.armTrace(userMessageId);
   }
 
@@ -4075,22 +4036,113 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 删除单条消息（本地 + 通知服务端清除上下文）
-  Future<void> _deleteSingleMessage(String messageId) async {
-    await _store.deleteMessage(messageId);
-    // 通知服务端同步清除 ChatThreadStore
-    _ws.sendEvent("chat.clear_history", <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-    });
-    setState(() {
-      final int idx =
-          _messages.indexWhere((ChatMessage m) => m.messageId == messageId);
-      if (idx >= 0) {
-        _messages.removeAt(idx);
-        // 重建索引：被删除位置之后的索引全部前移
-        _rebuildAssistantIndex();
+  /// 删除「一整轮对话」：用户提问 + 该轮 Agent 的全部回复气泡（正文、工具/思考
+  /// 过程、分泡、卡片回执、后台任务回执……）。
+  ///
+  /// 替换原 `_deleteSingleMessage`，两处关键修正：
+  /// 1. 粒度：旧实现只删被点的那一条气泡，留下孤零零的另一半；现在按轮次摘除
+  ///    （user 消息 + 其后所有非 user 气泡，直到下一条 user 消息）。
+  /// 2. 服务端：旧实现发 `chat.clear_history`，服务端落到 `clearAllMemoryForActor`
+  ///    ——删一条消息等于把整个会话线程 + 全部 Agent 记忆清空。现在改调
+  ///    `/api/chat-data/delete-turn` 精准摘除这一轮，其余历史与记忆原样保留。
+  Future<void> _deleteTurn(String messageId) async {
+    final int anchor =
+        _messages.indexWhere((ChatMessage m) => m.messageId == messageId);
+    if (anchor < 0) return;
+
+    // 点在 Agent 气泡上 → 回溯到本轮的 user 消息（轮次锚点）
+    int start = anchor;
+    if (_messages[anchor].role != "user") {
+      start = -1;
+      for (int i = anchor - 1; i >= 0; i--) {
+        if (_messages[i].role == "user") {
+          start = i;
+          break;
+        }
       }
+      // 没有归属的 user 消息（异常历史数据）→ 不动，避免误删
+      if (start < 0) return;
+    }
+
+    // 轮次右边界：下一条 user 消息（不含）
+    int end = start + 1;
+    while (end < _messages.length && _messages[end].role != "user") {
+      end++;
+    }
+
+    final List<String> turnIds = _messages
+        .sublist(start, end)
+        .map((ChatMessage m) => m.messageId)
+        .toList();
+    final String userMessageId = _messages[start].messageId;
+
+    // 删的是正在进行的这一轮 → 先掐断，否则迟到的 chunk / done 会把刚删掉的
+    // 气泡重新插回列表（按 messageId 找不到就当新消息重建）。
+    final String? activeTraceId = ChatTurnController.instance.activeTraceId;
+    if (activeTraceId != null && turnIds.contains(activeTraceId)) {
+      _cancelCurrentTurn();
+    }
+
+    for (final String id in turnIds) {
+      await _store.deleteMessage(id);
+    }
+
+    // 服务端精准删除这一轮（不清空整个会话上下文 / Agent 记忆）
+    unawaited(_notifyServerDeleteTurn(userMessageId, _messages[start].text));
+
+    if (!mounted) return;
+    setState(() {
+      _messages.removeRange(start, end);
+      // 本轮可能挂着后台任务回执 / 排队中的追问，一并清索引，避免删完后
+      // 回执按 messageId 找不到宿主消息、排队集合里残留已消失的 id。
+      _taskReceiptMessageIdByTaskId
+          .removeWhere((String _, String mid) => turnIds.contains(mid));
+      _queuedUserMessageIds.removeAll(turnIds);
+      _failedUserMessageIds.removeAll(turnIds);
+      // 重建索引：被删除位置之后的索引全部前移
+      _rebuildAssistantIndex();
     });
+  }
+
+  /// 通知服务端摘除这一轮对话（失败不打断本地删除：本地已删，服务侧未命中不影响 UI）。
+  ///
+  /// 带上 [userText] 是为了服务端能兜底定位「本功能上线前落盘的旧轮次」——那些消息当年
+  /// 没有把 messageId 落盘，服务端重启后按 id 找不到，只能按原文唯一命中来定位。
+  ///
+  /// 服务端未命中会打日志：`message_not_found` 意味着服务端线程里已经没有这一轮
+  /// （已被上下文窗口裁掉，或该轮早于落盘窗口）——语义上仍是「已删掉」；
+  /// 而 `session_not_found` 才是异常，说明这次删除没落到服务端，需要查路由/会话 id。
+  Future<void> _notifyServerDeleteTurn(
+    String userMessageId,
+    String? userText,
+  ) async {
+    try {
+      final http.Response res = await http
+          .post(
+            Uri.parse("${ApiConfig.httpBase}/api/chat-data/delete-turn"),
+            headers: const <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{
+              "sessionId": ApiConfig.effectiveActorId,
+              "messageId": userMessageId,
+              if (userText != null && userText.trim().isNotEmpty)
+                "text": userText.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) {
+        debugPrint(
+            "[chat] delete-turn HTTP ${res.statusCode}: ${res.body}");
+        return;
+      }
+      final Object? decoded = jsonDecode(res.body);
+      if (decoded is Map && decoded["ok"] != true) {
+        debugPrint(
+            "[chat] delete-turn 服务端未命中: reason=${decoded["reason"]}");
+      }
+    } catch (e) {
+      // 服务端不可达：本地删除已生效，忽略（下次对话由线程自然重建）
+      debugPrint("[chat] delete-turn 请求失败: $e");
+    }
   }
 
   /// 删除从某条消息起之后的所有消息（含该条）—— 本地 + 服务端同步
@@ -4415,6 +4467,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (peerCallId != null && peerCallId.isNotEmpty) {
       _sendPeerIncomingResponse(peerCallId, "decline");
     } else {
+      // 拒接 agent 来电：同超时路径，须通知服务端收尾会话（防忙线残留）
+      if (_activeCallId?.isNotEmpty ?? false) {
+        _ws.sendEvent("phone.call_hangup", <String, dynamic>{
+          "callId": _activeCallId,
+        });
+      }
       AmbientFeedsController.instance.sendContactFeedback(
         channel: "phone_call",
         responded: false,
@@ -4430,6 +4488,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       setState(() {
         _phoneCallStatus = null;
         _phoneCallToActorId = null;
+        _activeCallId = null;
         _peerIncomingDialogCallId = null;
       });
     }
@@ -4443,6 +4502,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (peerCallId != null && peerCallId.isNotEmpty) {
       _sendPeerIncomingResponse(peerCallId, "decline");
     } else {
+      // 振铃超时无人接：与服务端会话对齐（agent_to_user 会话靠本事件收尾，
+      // 漏发会让残留会话把用户后续呼叫挡成忙线），peer 通话走上面的回执
+      if (_activeCallId?.isNotEmpty ?? false) {
+        _ws.sendEvent("phone.call_hangup", <String, dynamic>{
+          "callId": _activeCallId,
+        });
+      }
       AmbientFeedsController.instance.sendContactFeedback(
         channel: "phone_call",
         responded: false,
@@ -4458,6 +4524,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       setState(() {
         _phoneCallStatus = null;
         _phoneCallToActorId = null;
+        _activeCallId = null;
         _peerIncomingDialogCallId = null;
       });
     }
@@ -4483,6 +4550,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// "通话中"窗口里点了挂断：关窗 + 停 TTS + 清状态
   void _handleConnectedHangup() {
+    // 服务端会话清理依赖此事件：漏发会把 user_to_agent 会话残留成忙线，
+    // 挡死用户后续一切呼叫（2026-10-04 实证）。_activeCallId 在下方清空前发送。
+    if (_activeCallId?.isNotEmpty ?? false) {
+      _ws.sendEvent("phone.call_hangup", <String, dynamic>{
+        "callId": _activeCallId,
+      });
+    }
     unawaited(TtsPlayer.instance.stop());
     unawaited(IncomingCallLauncher.hide());
     unawaited(OutgoingCallLauncher.hide());
@@ -4491,11 +4565,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       setState(() {
         _phoneCallStatus = null;
         _phoneCallToActorId = null;
+        _activeCallId = null;
         _peerIncomingDialogCallId = null;
         _phoneMuted = false;
         _phoneSpeakerOn = true;
       });
     }
+    PhoneCallSession.instance.end();
   }
 
   /// 手机端全屏通话页点挂断：WS 事件已由 PhoneCallSession.hangup() 先行发出
@@ -5132,6 +5208,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                           onOpenUserMenuFeedback: _openUserMenuFeedback,
                           onOpenDevices: _openDevicesPage,
                           userName: _accountEmail?.split("@").first ?? "king",
+                          userAvatarUrl: UserAvatarApi.resolveUrl(_userAvatarPath),
+                          onSetAvatar: _setUserAvatar,
                           onLogout: _logout,
                         ),
                         VerticalDivider(
@@ -5303,6 +5381,49 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _needsOnboarding = _accountEmail != null && pending;
       _playBootAnimation = _accountEmail != null && !pending;
     });
+    if (_accountEmail != null) {
+      unawaited(_loadUserAvatar());
+    }
+  }
+
+  /// 拉取当前账号头像（非关键链路：失败静默，各展示位回退缺省球）。
+  Future<void> _loadUserAvatar() async {
+    final String? path = await UserAvatarApi().fetchAvatarPath();
+    if (!mounted || path == _userAvatarPath) return;
+    setState(() => _userAvatarPath = path);
+  }
+
+  /// 用户菜单「设置头像」：选图 → 上传 → 三处展示位即时刷新。
+  Future<void> _setUserAvatar() async {
+    final FilePickerResult? picked = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      withData: true,
+    );
+    final PlatformFile? file = picked?.files.single;
+    if (file == null) return;
+    if (file.bytes == null || file.bytes!.isEmpty) {
+      _showUserMenuToast("读取图片失败，请换一张试试");
+      return;
+    }
+    final String? path =
+        await UserAvatarApi().uploadAvatar(file.bytes!, file.name);
+    if (!mounted) return;
+    if (path == null) {
+      _showUserMenuToast("头像上传失败，请稍后再试");
+      return;
+    }
+    setState(() => _userAvatarPath = path);
+    _showUserMenuToast("头像已更新");
+  }
+
+  /// 用户菜单动作的全局提示（State 的 context 在 Navigator 之上，
+  /// 与 [_openUserMenuFeedback] 同理走 [_rootNavigatorKey]）。
+  void _showUserMenuToast(String message) {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    ScaffoldMessenger.maybeOf(navCtx)?.showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   /// 向导完成标记（按账号分键；读盘前 store 可能未 init，等待其就绪）
@@ -5337,6 +5458,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _playBootAnimation = !pending;
       _bootAnimDone = false;
     });
+    unawaited(_loadUserAvatar());
   }
 
   /// 向导完成：按账号落完成标记，切入主界面（N 光扫不再补播，
@@ -5410,7 +5532,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     await AccountSessionStore.instance.clear();
     ApiConfig.runtimeUserId = null;
     if (!mounted) return;
-    setState(() => _accountEmail = null);
+    setState(() {
+      _accountEmail = null;
+      _userAvatarPath = null;
+    });
   }
 
   Future<void> _handleMorningBriefingEvent(
@@ -6046,6 +6171,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       onSend: _sendMessage,
       agentName: _agentName,
       agentAvatarUrl: _agentProfile.avatarUrl,
+      userAvatarUrl: UserAvatarApi.resolveUrl(_userAvatarPath),
       agentMoodStyle: _agentProfile.moodStyle,
       agentAvatarPreset: _agentProfile.avatarPreset,
       agentProfile: _agentProfile,
@@ -6069,7 +6195,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       onOpenPhoneDialer: () {
         _callMyAgentViaPhone(null);
       },
-      onDeleteMessage: _deleteSingleMessage,
+      onDeleteMessage: _deleteTurn,
       onDeleteFromMessage: _deleteMessagesFrom,
       onStopAgent: _cancelCurrentTurn,
       onUserAction: _handleCardAction,

@@ -27,6 +27,8 @@ class AppSidebar extends StatefulWidget {
     required this.onOpenDevices,
     required this.onLogout,
     this.userName = "king",
+    this.userAvatarUrl,
+    this.onSetAvatar,
   });
 
   /// 「检查更新」结果浮卡的锚点：浮卡贴在按钮正上方
@@ -71,6 +73,12 @@ class AppSidebar extends StatefulWidget {
 
   /// 用户菜单头部展示名：登录邮箱的本地部分（未登录兜底 "king"）
   final String userName;
+
+  /// 用户头像绝对 URL（null=未设置，渲染首字母球）
+  final String? userAvatarUrl;
+
+  /// 用户菜单「设置头像」行（null 时不渲染该行）
+  final VoidCallback? onSetAvatar;
 
   @override
   State<AppSidebar> createState() => _AppSidebarState();
@@ -170,6 +178,8 @@ class _AppSidebarState extends State<AppSidebar> {
                   message: "用户菜单",
                   child: SidebarUserMenu(
                     userName: widget.userName,
+                    userAvatarUrl: widget.userAvatarUrl,
+                    onSetAvatar: widget.onSetAvatar,
                     inboxUnread: widget.inboxUnread,
                     currentTheme: widget.currentTheme,
                     onSetLightTheme: widget.onSetLightTheme,

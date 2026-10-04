@@ -556,7 +556,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.create_task",
       description:
-        "【内置 Calendar】按结构化字段创建定时任务：reminder（提醒）/action（HTTP 动作）/weather_brief（天气简报，需用户已在天气页保存定位）/agent_task（到点让 Agent 执行 prompt）。runAt 须为 ISO-8601 未来时间；时间/类型已明确时优先用本工具，含糊时用 calendar.create_from_text。返回 taskId、nextRunAt（UTC）、nextRunAtLocal（展示用）。",
+        "【内置 Calendar】按结构化字段创建定时任务：reminder（提醒）/action（HTTP 动作）/weather_brief（天气简报，需用户已在天气页保存定位）/agent_task（到点让 Agent 执行 prompt）。runAt 须为 ISO-8601 未来时间；时间/类型已明确时优先用本工具，含糊时用 calendar.create_from_text。返回 taskId、nextRunAt（UTC）、nextRunAtLocal（展示用）。单次正事提醒未指定提前量时，系统会按事项时间/重要程度/地点自动生成分级提醒（前晚备忘/起床闹钟/出发预留），结果在 remindPlan 字段——转述时把各段计划一并告知用户。",
       parameters: {
         type: "object",
         properties: {
@@ -581,10 +581,11 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           },
           timezone: { type: "string" },
           durationMinutes: { type: "number", description: "事件时长（分钟）。会议/就诊/课程等有时长的安排必填（用于冲突检测与区间展示）；纯时间点提醒不填。" },
+          location: { type: "string", description: "事件地点（可选），如「协和医院」「首都机场T3」。用户说了具体地点就填：系统据此估算路程并动态安排分级提醒（前晚备忘/起床闹钟/出发预留）。" },
           remindBeforeMinutes: {
             type: "array",
             items: { type: "number" },
-            description: "提前量提醒（分钟数组，如 [15,5] 表示提前 15 和 5 分钟各提醒一次）。重要安排可填。",
+            description: "提前量提醒（分钟数组，如 [15,5]）。仅当用户明确说出提前量（如「提前15分钟提醒我」）时填写；用户没说就省略——系统会按事项时间/重要程度/地点自动安排分级提醒，不要替用户默认填 [15]。",
           },
           forceCreate: {
             type: "boolean",
@@ -639,7 +640,8 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
                 category: { type: "string", enum: ["itinerary", "trivia"], description: "缺省 itinerary（正事）" },
                 recurrence: { type: "string", enum: ["none", "daily", "weekly", "yearly"], description: "缺省 none" },
                 durationMinutes: { type: "number", description: "时长（分钟），可选" },
-                remindBeforeMinutes: { type: "array", items: { type: "number" }, description: "提前量提醒（分钟），可选" },
+                location: { type: "string", description: "地点（可选），说了具体地点就填" },
+                remindBeforeMinutes: { type: "array", items: { type: "number" }, description: "提前量提醒（分钟）；仅用户明确说了提前量才填，缺省由系统按事项类型自动分级" },
                 reminderMessage: { type: "string", description: "到点提醒文案，可选（缺省用 description）" },
               },
               required: ["description", "runAt"],
@@ -702,10 +704,11 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           recurrence: { type: "string", enum: ["none", "daily", "weekly", "yearly"] },
           timezone: { type: "string" },
           durationMinutes: { type: "number", description: "新时长（分钟）" },
+          location: { type: "string", description: "新地点（可选）" },
           remindBeforeMinutes: {
             type: "array",
             items: { type: "number" },
-            description: "新提前量提醒数组（分钟）",
+            description: "新提前量提醒数组（分钟）。填写即代表接管提前量（覆盖系统自动分级）；仅在用户明确要求时填。",
           },
           status: {
             type: "string",

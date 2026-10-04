@@ -72,16 +72,8 @@ Future<void> runIslandStageE2EBootstrap() async {
   // 喂点 2：站内信未读（hover 环境行「N 未读」）。
   IslandRealFeeds.setInboxUnread(3);
 
-  // 喂点 3：后台任务进行中（compact 声明档条目 + hover「任务」页激活）。
+  // 喂点 3：后台任务计数/状态行（hover「任务」页激活；胶囊无任务条目）。
   IslandRealFeeds.setTaskActivity(activeCount: 1, statusLine: "正在搜索资料");
-
-  // agent 工具步骤流（tool.call / tool.result 的产物形态）：
-  // 进行中转圈、成功勾、失败叉——展开卡「任务动态」三态齐活。
-  DynamicIslandController.instance.setAgentSteps(<IslandAgentStep>[
-    const IslandAgentStep(label: "读取今日日程", state: 1, key: "calendar.list"),
-    const IslandAgentStep(label: "生成晨报摘要", state: 2, key: "briefing.make"),
-    const IslandAgentStep(label: "正在搜索资料", state: 0, key: "web.search"),
-  ]);
 
   readyFlag.writeAsStringSync(DateTime.now().toIso8601String());
 
@@ -98,7 +90,7 @@ Future<void> runIslandStageE2EBootstrap() async {
   File("${_stageDir.path}${Platform.pathSeparator}voice_ready.flag")
       .writeAsStringSync(DateTime.now().toIso8601String());
   DynamicIslandController.instance.collapse();
-  // 撤下任务条目：与语音条目同为 priority 0，不撤则语音条目只能排队。
+  // 任务计数清零（hover「任务」页回空闲文案；胶囊本就无任务条目）。
   IslandRealFeeds.setTaskActivity(activeCount: 0);
   Future<void> hold(int ms) async =>
       await Future<void>.delayed(Duration(milliseconds: ms));
@@ -112,7 +104,7 @@ Future<void> runIslandStageE2EBootstrap() async {
   IslandRealFeeds.dismissVoice(); // 会话收束 → 回原态
   await hold(2600);
 
-  // 撤下注入的条目（回 FIFO 队列轮播真实条目）。
+  // 撤下注入的环境数据（hover 行回真实数据源）。
   IslandRealFeeds.setTaskActivity(activeCount: 0);
   await Future<void>.delayed(const Duration(seconds: 1));
   exit(0);

@@ -97,3 +97,9 @@ tmp/
 
 # 开机自启生成的启动器（含本机绝对路径，由 install-autostart.mjs 生成）
 scripts/autostart/autostart-launcher.vbs
+
+# 操作截图/取证截图不入库（2026-10-03 定调）：只拦 AI 操作截图，应用资源/图标/头像等正常 PNG 不受任何限制。
+# 约定：操作截图统一存仓库根 shots/（整目录忽略）；根目录与 scripts/ 两个历史落点按位置兜底。
+/shots/
+/*.png
+/scripts/*.png

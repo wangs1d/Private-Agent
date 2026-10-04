@@ -6,6 +6,7 @@ import type { GoalBoard } from "../../../proactivity/goal-board.js";
 import type { CommitmentBoard } from "../../../agentic-memory/commitment-board.js";
 import type { ShoppingCompareService } from "../../../services/shopping-compare-service.js";
 import { getAgenticMemoryRuntime } from "../../../agentic-memory/index.js";
+import { actorIdVariants } from "../../../agentic-memory/actor-key.js";
 
 /**
  * memory.forget / activity.timeline handler + 注册入口。
@@ -102,10 +103,16 @@ export function createForgetHandler(deps: MemoryGovernanceModuleDeps): ToolHandl
         skipped.push("memory(长期记忆系统未启用)");
       } else {
         try {
-          const all = (await runtime.memory.getAll({ topK: 10000 })) as {
-            results?: Array<{ id: string; memory?: string; metadata?: { actorId?: string } }>;
-          };
-          const ids = (all.results ?? [])
+          // mem0ai v3 getAll 强制 filters.user_id；actor 存量数据两种形式并存，逐形式扫
+          const records: Array<{ id: string; memory?: string; metadata?: { actorId?: string } }> = [];
+          for (const variant of actorIdVariants(actorId)) {
+            const all = (await runtime.memory.getAll({
+              topK: 10000,
+              filters: { user_id: variant },
+            })) as { results?: Array<{ id: string; memory?: string; metadata?: { actorId?: string } }> };
+            records.push(...(all.results ?? []));
+          }
+          const ids = records
             .filter((m) => (m.metadata?.actorId ?? actorId) === actorId)
             .filter((m) => String(m.memory ?? "").toLowerCase().includes(kw))
             .map((m) => m.id);

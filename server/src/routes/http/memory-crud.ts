@@ -10,6 +10,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { getAgenticMemoryRuntime } from "../../agentic-memory/index.js";
+import { actorIdVariants } from "../../agentic-memory/actor-key.js";
 import { getGlobalMemoryInventory } from "../../brain/memory-inventory.js";
 import { UserProfileStore } from "../../services/user-personalization/user-profile-store.js";
 
@@ -33,8 +34,16 @@ export function registerMemoryCrudRoutes(app: FastifyInstance): void {
     const keyword = String(query.q ?? "").trim().toLowerCase();
     const limit = Math.min(Math.max(Number(query.limit) > 0 ? Number(query.limit) : 200, 1), 1000);
     try {
-      const allResult = (await runtime.memory.getAll({ topK: 10000 })) as { results?: Mem0Record[] };
-      const items = (allResult.results ?? [])
+      // mem0ai v3 getAll 强制 filters.user_id；actor 存量数据两种形式并存，逐形式扫
+      const records: Mem0Record[] = [];
+      for (const variant of actorIdVariants(actorId)) {
+        const allResult = (await runtime.memory.getAll({
+          topK: 10000,
+          filters: { user_id: variant },
+        })) as { results?: Mem0Record[] };
+        records.push(...(allResult.results ?? []));
+      }
+      const items = records
         .filter((m) => (m.metadata?.actorId ?? actorId) === actorId)
         .filter((m) => !keyword || String(m.memory ?? "").toLowerCase().includes(keyword))
         .sort((a, b) => String(b.updatedAt ?? b.createdAt ?? "").localeCompare(String(a.updatedAt ?? a.createdAt ?? "")))

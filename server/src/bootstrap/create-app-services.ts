@@ -146,6 +146,15 @@ import { MeituanService } from "../services/meituan-service.js";
 import { AlipayBotService } from "../services/alipay-bot-service.js";
 import { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import { ScheduleTaskService } from "../services/schedule-task-service.js";
+import { habitHintsFromSleepSamples } from "../services/schedule-reminder-policy.js";
+import {
+  getScheduleHabitStore,
+  initScheduleHabitStore,
+} from "../services/schedule-habit-store.js";
+import {
+  getPresenceFootprintStore,
+  initPresenceFootprintStore,
+} from "../rhythm/presence-footprint-store.js";
 import { ScheduleConflictService } from "../services/schedule-conflict-service.js";
 import { ScheduleBookingBridge } from "../services/schedule-booking-bridge.js";
 import { createCommitmentScheduleOutlet } from "../services/commitment-schedule-outlet.js";
@@ -558,6 +567,12 @@ export async function createAppServices(): Promise<AppServices> {
   // 未配置任何 provider 密钥时返回 null（仅保留已有 recap 行，不影响对话主链路）。
   getChatThreadStore().setRecapSummarizer(createLlmRollingRecapSummarizer());
   const scheduleTaskService = new ScheduleTaskService();
+  // 用户作息偏好（分级提醒的冷启动习惯源）：顶层初始化，与 brain 开关解耦——
+  // 设置接口 / 对话自述捕获在任何形态下都可用；habit provider 在 brain 块内装配。
+  initScheduleHabitStore();
+  // 在场足迹：作息由 agent 观察「用户何时在线」得出（工具调用 / 对话 / 设备上下线打点），
+  // 顶层初始化，与 brain 开关解耦——打点在任何形态下都要生效，否则观察链断供。
+  initPresenceFootprintStore();
   // 日程冲突检测 + 预订↔日程联动桥（程序层能力，LLM 只负责转述）
   const scheduleConflictService = new ScheduleConflictService(scheduleTaskService);
   const scheduleBookingBridge = new ScheduleBookingBridge(scheduleTaskService, scheduleConflictService);
@@ -1455,7 +1470,12 @@ export async function createAppServices(): Promise<AppServices> {
   }
   if (memoryFtsStore && process.env.AGENT_MEMORY_FTS_BACKFILL?.trim() !== "0") {
     const ftsBackfillTimer = setTimeout(() => {
-      void memoryFtsStore.backfillFromMem0(agenticMemoryRuntime?.memory ?? null).catch(() => {});
+      // 候选 actor：session 登记 ∪ journal 目录（mem0ai v3 getAll 须按 user_id 过滤）
+      const actorCandidates = new Set<string>(agentMemorySyncService.listSessionIds());
+      for (const id of getDailyJournalService()?.listActorIds?.() ?? []) actorCandidates.add(id);
+      void memoryFtsStore
+        .backfillFromMem0(agenticMemoryRuntime?.memory ?? null, [...actorCandidates])
+        .catch(() => {});
     }, 30_000);
     ftsBackfillTimer.unref();
   }
@@ -1840,9 +1860,12 @@ export async function createAppServices(): Promise<AppServices> {
   );
   let rhythmSleepSensor: SleepWindowSensor | null = null;
   let rhythmEngine: LifeRhythmEngine | null = null;
+  /** 分级提醒策略的作息画像回退源（rhythm 关闭时为 null，仅剩睡眠样本直读） */
+  let rhythmProfileStoreRef: RhythmProfileStore | null = null;
   if (rhythmEnabled) {
     const rhythmProfileStore = new RhythmProfileStore(join(process.cwd(), "data", "rhythm_profiles"));
     await rhythmProfileStore.load();
+    rhythmProfileStoreRef = rhythmProfileStore;
     rhythmEngine = new LifeRhythmEngine({ profileStore: rhythmProfileStore });
     rhythmSleepSensor = new SleepWindowSensor();
     rhythmEngine.registerSensor(rhythmSleepSensor);
@@ -2014,6 +2037,14 @@ export async function createAppServices(): Promise<AppServices> {
   }
   // 设备上下线广播：订阅 DeviceRegistry，推送给 ownerUserId 的 WS session
   deviceRegistry.subscribe((event) => {
+    // 在场足迹：设备上线（电脑/手机/平板接入）= 用户在场，作息的被动观察源之一。
+    // 与「工具调用 / 对话」同源打分；ownerUserId 与 actorId 不一致时只是多一份
+    // 独立档案，不会污染主档案。
+    const footprintOwner =
+      event.kind === "online" ? event.descriptor.ownerUserId : event.ownerUserId;
+    if (footprintOwner && footprintOwner !== "system") {
+      getPresenceFootprintStore()?.record(footprintOwner);
+    }
     let ownerUserId: string | undefined;
     let payload: { type: string; payload: Record<string, unknown> } | undefined;
     if (event.kind === "online") {
@@ -2422,6 +2453,55 @@ export async function createAppServices(): Promise<AppServices> {
     awarenessCortex.registerAnticipation(anticipationEngineService);
     // Stage 3 Task 4：注入 schedule-task-service，用于 meeting 状态识别
     awarenessCortex.registerScheduleTask(scheduleTaskService);
+    // 分级提醒策略的作息画像：优先用户自述/设定（冷启动立即可用），再回退
+    // AwarenessCortex 实时睡眠样本（10 分钟一拍）、节律画像消化态；样本 <3 条
+    // 返回 null，策略层走默认时刻（宁缺勿错）。
+    // 取值顺序：显式设定 > 睡眠样本(≥3) > 对话自述 > 节律画像维度。
+    scheduleTaskService.setReminderHabitProvider((sessionId) => {
+      const routine = getScheduleHabitStore()?.get(sessionId) ?? null;
+      if (routine?.source === "explicit") {
+        return {
+          sleepStartHour: routine.sleepStartHour,
+          wakeHour: routine.wakeHour,
+          sampleCount: 1,
+          source: "explicit",
+        };
+      }
+      // 被动观察（首选）：在场足迹——agent 记录用户何时在线，连续几晚即框出作息。
+      // 用户「做」什么比「说」什么更硬，且不像睡眠样本那样要求判出 sleeping 状态。
+      const observed = getPresenceFootprintStore()?.deriveSleepWindow(sessionId, {
+        lookbackDays: 14,
+      });
+      if (observed && observed.sleepStartHour != null) {
+        return {
+          sleepStartHour: observed.sleepStartHour,
+          wakeHour: observed.wakeHour,
+          sampleCount: observed.nightCount,
+          source: "observed",
+        };
+      }
+      const direct = habitHintsFromSleepSamples(
+        awarenessCortex?.getRecentSleepWindowSamples(sessionId, 14) ?? [],
+      );
+      if (direct) return direct;
+      if (routine) {
+        return {
+          sleepStartHour: routine.sleepStartHour,
+          wakeHour: routine.wakeHour,
+          sampleCount: 1,
+          source: "chat",
+        };
+      }
+      const sleep = rhythmProfileStoreRef?.get(sessionId)?.dimensions.sleep;
+      if (sleep && sleep.sampleCount >= 3 && sleep.windowStartHour != null) {
+        return {
+          sleepStartHour: sleep.windowStartHour,
+          wakeHour: sleep.windowEndHour,
+          sampleCount: sleep.sampleCount,
+        };
+      }
+      return null;
+    });
     // Task 20：节律引擎睡眠传感器接 AwarenessCortex 逐日睡眠样本
     // （brain 关闭时传感器无数据源，静默空转，其余维度不受影响）
     rhythmSleepSensor?.bindSource(awarenessCortex);

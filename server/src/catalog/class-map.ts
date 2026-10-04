@@ -124,9 +124,13 @@ const RULES: ClassRule[] = [
   { prefix: "agent_browser.", domain: "work", action: "execute", risk: "write" },
   { prefix: "shared_browser.", domain: "work", action: "execute", risk: "write" },
   // ── comms 通讯触达 ──
-  { exact: "phone.call_user", domain: "comms", action: "communicate", risk: "outbound" },
+  // phone.call_user：Agent 打给用户本人的站内 App 来电（无话费、不触第三方），
+  // 属 App 内触达（同 surface/notification 档），不是「外发第三方」——错标 outbound
+  // 会被 brain 安全门当高危拦死且聊天车道无确认出口，功能整体不可用（2026-10-04 真链探针实证）。
+  { exact: "phone.call_user", domain: "comms", action: "communicate", risk: "write" },
   { prefix: "phone.", domain: "comms" },
-  { prefix: "virtual", domain: "comms", action: "communicate", risk: "outbound" },
+  // virtual* 仅有号码申领/状态/解析三个管理类 skill（无真实外发），同上不属 outbound
+  { prefix: "virtual", domain: "comms", action: "communicate", risk: "write" },
   { prefix: "voice.", domain: "comms", action: "execute" },
   { prefix: "rhythm-reminder", domain: "comms", trigger: "scheduled" },
   { prefix: "schedule-user-reply", domain: "comms" },

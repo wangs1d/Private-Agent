@@ -4,6 +4,7 @@ import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getHumanLikeMemoryService } from "./human-like-memory-service.js";
 import { getAgenticMemoryRuntime, getMemoryComponents } from "../agentic-memory/index.js";
+import { actorIdVariants } from "../agentic-memory/actor-key.js";
 import { getMemoryReinforcementStore } from "../agentic-memory/memory-reinforcement.js";
 import { getDailyDigestService } from "./daily-digest-service.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
@@ -34,69 +35,102 @@ export async function clearAllMemoryForActor(
   // 1. 清空 Agent 主会话聊天线程（内存 + 持久层）
   let chatCleared = false;
   if (deps.externalChat?.clearSession) {
-    deps.externalChat.clearSession(primarySessionId);
-    deps.externalChat.clearSession(`notes:${actorId}`);
+    for (const variant of actorIdVariants(actorId)) {
+      deps.externalChat.clearSession(resolvePrimaryChatSessionId(variant, masterOn));
+      deps.externalChat.clearSession(`notes:${variant}`);
+    }
     chatCleared = true;
   }
 
   // 2. 记忆图谱（HumanLikeMemoryService）
   const humanMemory = getHumanLikeMemoryService();
-  const nodesCleared = humanMemory?.clearActorMemory(actorId) ?? 0;
+  const nodesCleared = humanMemory
+    ? actorIdVariants(actorId).reduce((sum, v) => sum + humanMemory.clearActorMemory(v), 0)
+    : 0;
 
-  // 3. 结构化记忆（agent-memory-sync）
-  const syncCleared = deps.agentMemorySyncService.clearActor(actorId);
+  // 3. 结构化记忆（agent-memory-sync）——任一形式清成功即视为已清
+  const syncCleared = actorIdVariants(actorId).reduce(
+    (cleared, v) => deps.agentMemorySyncService.clearActor(v) || cleared,
+    false,
+  );
 
-  // 4. Mem0 agentic 记忆（尽力而为：按 metadata.actorId 过滤后逐条删除）
+  // 4. Mem0 agentic 记忆（尽力而为）：mem0ai v3 的 getAll 强制要求 filters 带
+  //    user_id（此前 {topK} 裸调必抛，清空对 mem0 完全失效）；按 actorIdVariants
+  //    逐形式扫（userId 写入键历史上两种形式并存）再按 metadata.actorId 过滤删。
   let mem0Cleared = 0;
   const mem0 = getAgenticMemoryRuntime();
   if (mem0?.memory) {
     try {
       type Mem0Record = { id: string; metadata?: { actorId?: string } };
-      const allResult = (await mem0.memory.getAll({ topK: 10000 })) as {
-        results?: Mem0Record[];
-      };
-      const toDelete = (allResult.results ?? []).filter(
-        (m) => (m.metadata?.actorId ?? actorId) === actorId,
-      );
-      for (const m of toDelete) {
-        await mem0.memory.delete(m.id).catch(() => {});
+      for (const variant of actorIdVariants(actorId)) {
+        const allResult = (await mem0.memory.getAll({
+          topK: 10000,
+          filters: { user_id: variant },
+        })) as { results?: Mem0Record[] };
+        const toDelete = (allResult.results ?? []).filter(
+          (m) => (m.metadata?.actorId ?? actorId) === actorId,
+        );
+        for (const m of toDelete) {
+          await mem0.memory.delete(m.id).catch(() => {});
+        }
+        mem0Cleared += toDelete.length;
       }
-      mem0Cleared = toDelete.length;
     } catch (e) {
       console.warn("[memory-clear] clear mem0 failed:", e instanceof Error ? e.message : e);
     }
   }
 
   // 5. 当日摘要（daily-digest，每轮会被 getRelevantPromptDigest 注入）
-  const digestCleared = getDailyDigestService().clearActorDigests(actorId);
+  const digestCleared = actorIdVariants(actorId).reduce(
+    (sum, v) => sum + getDailyDigestService().clearActorDigests(v),
+    0,
+  );
 
   // 6. 短期任务栈 + 情景记忆（STM）
-  const stmCleared =
-    getShortTermMemoryGatewayService()?.clearSessions([primarySessionId, `notes:${actorId}`]) ?? 0;
+  const stmCleared = actorIdVariants(actorId).reduce((sum, v) => {
+    const sessionId = resolvePrimaryChatSessionId(v, masterOn);
+    return sum + (getShortTermMemoryGatewayService()?.clearSessions([sessionId, `notes:${v}`]) ?? 0);
+  }, 0);
 
   // 7. 对话时间线内存态（首次对话/累计轮次）
-  getConversationTimelineService()?.clearActor(actorId);
+  for (const variant of actorIdVariants(actorId)) {
+    getConversationTimelineService()?.clearActor(variant);
+  }
 
   // 8. 失效记忆目录缓存（MemoryInventory 60s TTL，避免旧缓存残留）
   const inventory = getGlobalMemoryInventory();
   if (inventory?.invalidate) {
-    inventory.invalidate(actorId);
+    for (const variant of actorIdVariants(actorId)) {
+      inventory.invalidate(variant);
+    }
   }
 
   // 9. agentic-memory 级联清理（P0-2 隐私闭环）：语义账本 / 承诺草稿板 /
   //    溯源依赖图 / bridge_links / 用户理解档案 / 结构化事实库 / FTS 词面索引
   //    ——此前清空 actor 后这些表的数据会残留。
+  //    按 actorIdVariants 逐形式 purge：ledger/provenance/bridge 等历史行两种
+  //    形式并存（journal 目录名下划线形写穿），单形式 purge 会漏（2026-10-04）。
   const components = getMemoryComponents();
-  const ledgerCleared = components.ledger?.purgeActor(actorId) ?? 0;
-  const commitmentsCleared = components.commitmentBoard?.purgeActor(actorId) ?? 0;
-  const provenanceCleared = components.provenance?.purgeActor(actorId) ?? 0;
-  const bridgeLinksCleared = components.bridge?.purgeActor(actorId) ?? 0;
-  const understandingCleared = components.understandingStore?.purgeActor(actorId) ?? 0;
-  const factsCleared = components.factStore?.purgeActor(actorId) ?? 0;
-  const ftsCleared = components.fts?.purgeActor(actorId) ?? 0;
-  // 召回强化/归档侧表行（含两阶段遗忘的 archived 行）：Mem0 记录上面第 4 步已删，
-  // 侧表行不回收会变成孤儿且归档量统计失真。
-  const reinforcementCleared = getMemoryReinforcementStore()?.purgeActor(actorId) ?? 0;
+  let ledgerCleared = 0;
+  let commitmentsCleared = 0;
+  let provenanceCleared = 0;
+  let bridgeLinksCleared = 0;
+  let understandingCleared = 0;
+  let factsCleared = 0;
+  let ftsCleared = 0;
+  let reinforcementCleared = 0;
+  for (const variant of actorIdVariants(actorId)) {
+    ledgerCleared += components.ledger?.purgeActor(variant) ?? 0;
+    commitmentsCleared += components.commitmentBoard?.purgeActor(variant) ?? 0;
+    provenanceCleared += components.provenance?.purgeActor(variant) ?? 0;
+    bridgeLinksCleared += components.bridge?.purgeActor(variant) ?? 0;
+    understandingCleared += components.understandingStore?.purgeActor(variant) ?? 0;
+    factsCleared += components.factStore?.purgeActor(variant) ?? 0;
+    ftsCleared += components.fts?.purgeActor(variant) ?? 0;
+    // 召回强化/归档侧表行（含两阶段遗忘的 archived 行）：Mem0 记录上面第 4 步已删，
+    // 侧表行不回收会变成孤儿且归档量统计失真。
+    reinforcementCleared += getMemoryReinforcementStore()?.purgeActor(variant) ?? 0;
+  }
   if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared + understandingCleared + factsCleared + ftsCleared + reinforcementCleared > 0) {
     console.info(
       `[memory-clear] agentic-memory 级联清理：ledger=${ledgerCleared} commitments=${commitmentsCleared} ` +

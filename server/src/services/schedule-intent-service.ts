@@ -13,7 +13,9 @@ export type ScheduleDraft = {
   recurrence: "none" | "daily" | "weekly" | "yearly";
   /** 事件时长（分钟）；用于冲突检测。缺省 = 时间点提醒（无区间）。 */
   durationMinutes?: number;
-  /** 提前量提醒（分钟）：如 [15] = 到点前 15 分钟先提醒一次。 */
+  /** 事件地点（如「协和医院」「首都机场T3」）：提醒策略层据此估算路程安排出发预留。 */
+  location?: string;
+  /** 提前量提醒（分钟）：如 [15] = 到点前 15 分钟先提醒一次。仅用户明确说了提前量才填。 */
   remindBeforeMinutes?: number[];
   reminderMessage?: string;
   action?: {
@@ -139,7 +141,8 @@ export class ScheduleIntentService {
       '    "runAt": "ISO-8601 string",',
       '    "recurrence": "none|daily|weekly|yearly",',
       '    "durationMinutes": "事件时长（分钟，整数，可选）。用户说了起止时间（如「9点到10点半开会」→ 90）或明确时长（「开会1小时」→ 60）时必须填写；只说「X点提醒我做某事」没有时长概念时省略",',
-      '    "remindBeforeMinutes": "提前量提醒（分钟数组，可选）。用户说「提前15分钟提醒我开会」→ [15]；会议/行程类默认建议 [15]",',
+      '    "location": "事件地点（可选）。用户说了具体地点（如「去协和医院看牙」「首都机场T3」）就填；系统据此估算路程并动态安排分级提醒（前晚备忘/起床闹钟/出发预留）；没说地点就不填",',
+      '    "remindBeforeMinutes": "提前量提醒（分钟数组，可选）。仅当用户明确说出提前量（如「提前15分钟提醒我开会」→ [15]）时填写；用户没说就省略——系统会按事项时间/重要程度/地点自动安排分级提醒，不要替用户默认填 [15]",',
       '    "reminderMessage": "到点时展示给用户的友好提醒，如「该吃药啦！记得按时服药」而非「喊我睡觉」或「睡觉」；不要把用户对助手的称呼（如「小弟」）写进文案（仅 reminder）",',
       '    "action": { "url": "https://...", "method": "POST", "body": {} }',
       "  }",
@@ -266,11 +269,11 @@ export function parseDurationFromUserText(text: string): number | undefined {
   return undefined;
 }
 
-/** 从用户原句抽取提前量（分钟）：「提前10分钟提醒我开会」→ [10]。 */
+/** 从用户原句抽取提前量（分钟）：「提前10分钟提醒我开会」→ [10]；「提前30/90/120分钟」均可（提前量不是小时，勿用 0-23 的小时解析器）。 */
 export function parseRemindBeforeFromUserText(text: string): number[] | undefined {
   const m = text.trim().match(/提前\s*([零一二两三四五六七八九十]{1,3}|\d+)\s*分钟/);
   if (!m) return undefined;
-  const n = parseChineseHourToken(m[1]!);
+  const n = parseCountToken(m[1]!);
   if (n == null || n <= 0 || n > 7 * 24 * 60) return undefined;
   return [n];
 }
@@ -317,6 +320,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
       ? Math.round(durationRaw)
       : undefined;
   const remindBeforeMinutes = normalizeRemindBeforeMinutes(v.remindBeforeMinutes);
+  const location = String(v.location ?? "").trim() || undefined;
   if (kind === "weather_brief") {
     if (!title) return null;
     return { title, shortTitle, description, kind: "weather_brief", category, runAt: runAtDate.toISOString(), recurrence };
@@ -331,6 +335,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
       runAt: runAtDate.toISOString(),
       recurrence,
       durationMinutes,
+      location,
       remindBeforeMinutes,
       reminderMessage,
     };
@@ -819,10 +824,16 @@ function parseRelativeDateTimeFromPrompt(text: string): Date | null {
 }
 
 function parseDateTimeFromPrompt(text: string, timezone?: string): Date | null {
-  const relative = parseRelativeDateTimeFromPrompt(text);
+  // 「提前X分钟/小时」是提醒偏移不是事件锚点：先剥掉再做时间解析，
+  // 否则「提前30分钟提醒我」会被相对时间正则误读成「30分钟后」（事件变成半小时后）。
+  const anchorText = text.replace(
+    /提前\s*[零一二两三四五六七八九十\d]{1,3}\s*(?:个)?\s*(?:半)?\s*(?:分钟|小时|钟头)/g,
+    " ",
+  );
+  const relative = parseRelativeDateTimeFromPrompt(anchorText);
   if (relative) return relative;
 
-  const hm = parseHourMinuteFromPrompt(text);
+  const hm = parseHourMinuteFromPrompt(anchorText);
   if (!hm) return null;
   const { hours, minutes } = hm;
   const now = new Date();
@@ -837,8 +848,8 @@ function parseDateTimeFromPrompt(text: string, timezone?: string): Date | null {
     0,
     0,
   );
-  if (/后天/.test(text)) target.setDate(target.getDate() + 2);
-  else if (/明天/.test(text)) target.setDate(target.getDate() + 1);
+  if (/后天/.test(anchorText)) target.setDate(target.getDate() + 2);
+  else if (/明天/.test(anchorText)) target.setDate(target.getDate() + 1);
   const utc = tz ? toUtcFromLocalTime(target, tz) : target;
   if (utc.getTime() <= now.getTime()) {
     target.setDate(target.getDate() + 1);

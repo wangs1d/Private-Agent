@@ -100,23 +100,6 @@ void main() {
       expect(c.agentActive, isTrue);
     });
 
-    test('setAgentSteps 去重且最多保留 5 条', () {
-      final DynamicIslandController c = DynamicIslandController();
-      final List<IslandAgentStep> steps = <IslandAgentStep>[
-        for (int i = 0; i < 7; i++)
-          IslandAgentStep(label: '步骤$i', state: 1, key: 't$i'),
-      ];
-      c.setAgentSteps(steps);
-      expect(c.agentSteps.length, 5);
-      expect(c.agentSteps.first.label, '步骤2');
-
-      // 同内容重复推送不触发 notifyListeners。
-      var notified = 0;
-      c.addListener(() => notified++);
-      c.setAgentSteps(c.agentSteps.toList());
-      expect(notified, 0);
-    });
-
     test('未读数与状态行刷新进环境数据', () {
       final DynamicIslandController c = DynamicIslandController();
       c.setAmbientUnread(3);
@@ -136,15 +119,6 @@ void main() {
       expect(c.ambientUnread, 7);
       c.setMessageHubUnread(0); // 聚合清零只撤自己的账
       expect(c.ambientUnread, 2);
-    });
-
-    test('IslandAgentStep 状态语义：0 进行中 / 1 成功 / 2 失败', () {
-      const IslandAgentStep running = IslandAgentStep(label: 'a');
-      const IslandAgentStep ok = IslandAgentStep(label: 'a', state: 1);
-      const IslandAgentStep err = IslandAgentStep(label: 'a', state: 2);
-      expect(running.state, 0);
-      expect(ok.state, 1);
-      expect(err.state, 2);
     });
   });
 

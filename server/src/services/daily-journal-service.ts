@@ -17,6 +17,7 @@
 import { mkdir, readFile, writeFile, appendFile, readdir, unlink } from "node:fs/promises";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
+import { sanitizeActorKey } from "../agentic-memory/actor-key.js";
 
 /** 单行内容截断（精简记录，防失控长文本） */
 const JOURNAL_MAX_LINE_CHARS = 160;
@@ -139,7 +140,9 @@ export class DailyJournalService {
   }
 
   private actorDir(actorId: string): string {
-    return join(this.rootDir, actorId.replace(/[^\w.-]/g, "_"));
+    // 保留 @：目录名必须能从原始 actorId 无损往返（2026-10-04 根修）——
+    // 此前 @ 被净化成 _，夜间固化拿目录名当 actorId，把下划线形式写穿记忆全家。
+    return join(this.rootDir, sanitizeActorKey(actorId));
   }
 
   private journalFile(actorId: string, dateKey: string): string {
@@ -215,8 +218,9 @@ export class DailyJournalService {
   }
 
   /**
-   * 列出有 journal 目录的 actorId（目录名为 sanitize 后的 id，特殊字符会被替换，
-   * 仅作夜间固化的 actor 兜底来源，精确名单以 AgentMemorySync.listSessionIds 为准）。
+   * 列出有 journal 目录的 actorId（目录名经 sanitizeActorKey 净化但保留 @，
+   * 邮箱 actor 可无损往返；仅作夜间固化的 actor 兜底来源，
+   * 精确名单以 AgentMemorySync.listSessionIds 为准）。
    */
   listActorIds(): string[] {
     try {

@@ -1,5 +1,6 @@
 import type { Memory } from "mem0ai/oss";
 import OpenAI from "openai";
+import { actorIdVariants } from "./actor-key.js";
 
 import {
   getMemoryTTLDays,
@@ -273,9 +274,23 @@ export class AgenticMemoryLifecycleService {
   }
 
   private async fetchAll(): Promise<Mem0MemoryItem[] | null> {
+    // mem0ai v3 的 getAll 强制 filters.user_id（裸 topK 必抛，2026-10-04 前本轮
+    // 周期审查整体静默失效），跨 actor 扫描改为按 reinforcement 登记的 actor
+    // 逐形式扫。盲区=从未被召回/归档过的记忆（其 actor 无登记行，首次召回后入列）；
+    // 去重/合并/归档本来就按 actor 分组，逐 actor 扫描语义不变。
+    const actorCandidates = this.reinforcement
+      ? [...new Set(this.reinforcement.listActorIds().flatMap((a) => actorIdVariants(a)))]
+      : [];
+    if (actorCandidates.length === 0) return null;
     try {
-      const allResult = (await this.memory.getAll({ topK: GET_ALL_TOP_K })) as unknown as Mem0GetAllResult;
-      const allMemories = allResult.results ?? [];
+      const allMemories: Mem0MemoryItem[] = [];
+      for (const variant of actorCandidates) {
+        const allResult = (await this.memory.getAll({
+          topK: GET_ALL_TOP_K,
+          filters: { user_id: variant },
+        })) as unknown as Mem0GetAllResult;
+        allMemories.push(...(allResult.results ?? []));
+      }
       if (allMemories.length >= GET_ALL_TOP_K) {
         console.warn(
           `[memory-lifecycle] getAll 命中 ${GET_ALL_TOP_K} 条上限，记忆库可能被截断扫描——` +

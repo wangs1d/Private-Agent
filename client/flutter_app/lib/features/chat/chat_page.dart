@@ -39,6 +39,7 @@ class ChatPage extends StatefulWidget {
     required this.onSend,
     this.agentName,
     this.agentAvatarUrl,
+    this.userAvatarUrl,
     this.agentMoodStyle,
     this.agentAvatarPreset,
     this.agentProfile,
@@ -126,6 +127,9 @@ class ChatPage extends StatefulWidget {
   /// 用户给agent起的名字
   final String? agentName;
   final String? agentAvatarUrl;
+
+  /// 当前用户头像的绝对 URL（main.dart 注入；null=未设置走缺省灰球）。
+  final String? userAvatarUrl;
   final String? agentMoodStyle;
   final String? agentAvatarPreset;
   final AgentProfileData? agentProfile;
@@ -206,13 +210,14 @@ class _ChatPageState extends State<ChatPage>
   /// 全局删除选择模式状态
   bool _deleteSelectionMode = false;
 
-  /// 触发删除的用户消息 ID（该消息始终被锁定选中，不可取消）
+  /// 触发删除的消息 ID（用户提问或 Agent 回复均可；确认栏渲染在它下方）
   String? _deleteTriggerMessageId;
 
-  /// 删除选择模式下被选中的消息 ID 集合（含触发用户消息+可选的agent回复）
+  /// 待删除态下被预选的消息 ID 集合 = 被点气泡所属的整轮问答对
   final Set<String> _selectedMessageIds = <String>{};
 
-  /// 进入删除选择模式：当前用户消息锁定选中，其agent回复默认全选可取消
+  /// 进入删除待确认态：把被点气泡所属的整轮问答对预选并高亮，
+  /// 确认栏渲染在被点的那条消息下方。
   void _enterDeleteMode(String messageId) {
     setState(() {
       _deleteSelectionMode = true;
@@ -222,37 +227,27 @@ class _ChatPageState extends State<ChatPage>
     });
   }
 
-  /// 切换单条消息的选中状态（触发消息不可取消）
-  void _toggleMessageSelection(String messageId, bool selected) {
-    if (messageId == _deleteTriggerMessageId) return; // 用户消息不可取消
-    setState(() {
-      if (selected) {
-        _selectedMessageIds.add(messageId);
-      } else {
-        _selectedMessageIds.remove(messageId);
-      }
-    });
-  }
-
-  /// 确认删除所有选中消息（仅删除被勾选的，倒序逐条删除避免索引偏移）
+  /// 确认删除：按「轮」提交，同一轮只触发一次删除。
+  ///
+  /// 删除单位是整轮问答对，而选中集合里可能同时含这一轮的多条气泡（用户提问 +
+  /// 若干 Agent 回复）。逐条提交会把同一轮重复删 N 遍（N 次网络请求 + N 次
+  /// 本地 store 删除）。这里先把每条选中气泡归约到它所属轮次的锚点（user 消息
+  /// id）去重，再按锚点提交一次。
   void _confirmDeleteSelection() {
     if (_selectedMessageIds.isEmpty || widget.onDeleteMessage == null) return;
 
-    // 按索引从大到小排序，倒序删除避免索引偏移
-    final List<MapEntry<int, String>> sorted = <MapEntry<int, String>>[];
+    final List<String> turnAnchors = <String>[];
     for (final String mid in _selectedMessageIds) {
-      final int idx =
-          widget.messages.indexWhere((ChatMessage m) => m.messageId == mid);
-      if (idx >= 0) {
-        sorted.add(MapEntry<int, String>(idx, mid));
+      final List<String> related = _getRelatedMessageIds(mid);
+      // 关联列表首元素即本轮的 user 消息（轮次锚点）；取不到时退化为自身
+      final String anchor = related.isEmpty ? mid : related.first;
+      if (!turnAnchors.contains(anchor)) {
+        turnAnchors.add(anchor);
       }
     }
-    sorted.sort((MapEntry<int, String> a, MapEntry<int, String> b) =>
-        b.key.compareTo(a.key));
 
-    // 倒序逐条删除
-    for (final MapEntry<int, String> entry in sorted) {
-      widget.onDeleteMessage!(entry.value);
+    for (final String anchor in turnAnchors) {
+      widget.onDeleteMessage!(anchor);
     }
 
     setState(() {
@@ -1196,7 +1191,8 @@ class _ChatPageState extends State<ChatPage>
     // 选择模式下，只有当前选中范围内的消息参与（触发用户消息 + 其agent回复）
     final bool inSelectableRange = _deleteSelectionMode &&
         _selectedMessageIds.contains(mainMessage.messageId);
-    // 当前消息是否为触发了删除模式的用户消息（锁定不可取消）
+    // 当前消息是否为触发了删除模式的那一轮入口消息（删除按钮挂在该气泡上，
+    // 可能是用户提问也可能是 Agent 回复；确认栏只在它下方渲染）
     final bool isTrigger = mainMessage.messageId == _deleteTriggerMessageId;
 
     return _HoverableMessageWidget(
@@ -1211,6 +1207,7 @@ class _ChatPageState extends State<ChatPage>
       contentSummary: contentSummary,
       agentName: widget.agentName,
       agentAvatarUrl: widget.agentAvatarUrl,
+      userAvatarUrl: widget.userAvatarUrl,
       agentMoodStyle: widget.agentMoodStyle,
       agentAvatarPreset: widget.agentAvatarPreset,
       onOpenAgentProfile: _showAgentProfilePopover,
@@ -1225,7 +1222,6 @@ class _ChatPageState extends State<ChatPage>
       inSelectableRange: inSelectableRange,
       isTrigger: isTrigger,
       onEnterDeleteMode: _enterDeleteMode,
-      onToggleSelection: _toggleMessageSelection,
       onDeleteConfirm: _confirmDeleteSelection,
       onDeleteCancel: _cancelDeleteMode,
       onUserAction: widget.onUserAction,
@@ -1234,34 +1230,43 @@ class _ChatPageState extends State<ChatPage>
     );
   }
 
-  /// 获取与当前消息关联的消息 ID 列表（用户消息+agent回复配对）
+  /// 获取与当前消息同属「一轮问答对」的全部消息 ID。
+  ///
+  /// 一轮 = 一条 user 消息 + 其后所有非 user 气泡（正文、工具/思考过程、分泡、
+  /// 卡片回执、后台任务回执……），直到（不含）下一条 user 消息。
+  ///
+  /// 旧实现只取「紧随其后的第一条 agent 回复」就 break，Agent 一轮里推了多条
+  /// 气泡（分泡 `assistant-<traceId>-bN`、任务回执等）时，删完只剩孤零零的
+  /// 另一半。这里改为取整轮，删除按钮才是「删掉这一问一答」。
   List<String> _getRelatedMessageIds(String messageId) {
     final int idx =
         widget.messages.indexWhere((ChatMessage m) => m.messageId == messageId);
-    if (idx < 0) return [messageId];
+    if (idx < 0) return <String>[messageId];
 
-    final List<String> ids = <String>[messageId];
-    final ChatMessage current = widget.messages[idx];
-
-    // 如果是用户消息，查找紧随其后的 agent 回复
-    if (current.role == "user") {
-      for (int i = idx + 1; i < widget.messages.length; i++) {
-        if (widget.messages[i].role != "user") {
-          ids.add(widget.messages[i].messageId);
-          break;
-        }
-      }
-    } else {
-      // 如果是 agent 消息，查找其前一条用户消息
+    // 轮次锚点：agent 气泡先回溯到它所属的 user 消息
+    int start = idx;
+    if (widget.messages[idx].role != "user") {
+      start = -1;
       for (int i = idx - 1; i >= 0; i--) {
         if (widget.messages[i].role == "user") {
-          ids.insert(0, widget.messages[i].messageId);
+          start = i;
           break;
         }
       }
+      // 没有归属的 user 消息（异常历史数据）→ 退化为只删这一条
+      if (start < 0) return <String>[messageId];
     }
 
-    return ids;
+    // 轮次右边界：下一条 user 消息（不含）
+    int end = start + 1;
+    while (end < widget.messages.length && widget.messages[end].role != "user") {
+      end++;
+    }
+
+    return widget.messages
+        .sublist(start, end)
+        .map((ChatMessage m) => m.messageId)
+        .toList();
   }
 
   /// 「为你推荐」悬停「填入输入框」小按钮路径：只把示例文案追加进输入框
@@ -1869,6 +1874,7 @@ class _HoverableMessageWidget extends StatelessWidget {
     this.contentSummary,
     this.agentName,
     this.agentAvatarUrl,
+    this.userAvatarUrl,
     this.agentMoodStyle,
     this.agentAvatarPreset,
     this.onOpenAgentProfile,
@@ -1886,7 +1892,6 @@ class _HoverableMessageWidget extends StatelessWidget {
     /// 是否为触发了删除模式的用户消息（锁定不可取消）
     required this.isTrigger,
     required this.onEnterDeleteMode,
-    required this.onToggleSelection,
     required this.onDeleteConfirm,
     required this.onDeleteCancel,
 
@@ -1916,6 +1921,9 @@ class _HoverableMessageWidget extends StatelessWidget {
   final ContentSummaryParseResult? contentSummary;
   final String? agentName;
   final String? agentAvatarUrl;
+
+  /// 当前用户头像的绝对 URL（ChatPage 透传；null=未设置走缺省灰球）。
+  final String? userAvatarUrl;
   final String? agentMoodStyle;
   final String? agentAvatarPreset;
   final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
@@ -1944,9 +1952,6 @@ class _HoverableMessageWidget extends StatelessWidget {
   /// 回调：进入删除选择模式
   final void Function(String messageId) onEnterDeleteMode;
 
-  /// 回调：切换单条消息选中状态
-  final void Function(String messageId, bool selected) onToggleSelection;
-
   /// 回调：确认删除
   final VoidCallback onDeleteConfirm;
 
@@ -1973,6 +1978,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       contentSummary: contentSummary,
       agentName: agentName,
       agentAvatarUrl: agentAvatarUrl,
+      userAvatarUrl: userAvatarUrl,
       agentMoodStyle: agentMoodStyle,
       agentAvatarPreset: agentAvatarPreset,
       onOpenAgentProfile: onOpenAgentProfile,
@@ -1984,7 +1990,6 @@ class _HoverableMessageWidget extends StatelessWidget {
       inSelectableRange: inSelectableRange,
       isTrigger: isTrigger,
       onEnterDeleteMode: onEnterDeleteMode,
-      onToggleSelection: onToggleSelection,
       onDeleteConfirm: onDeleteConfirm,
       onDeleteCancel: onDeleteCancel,
       onUserAction: onUserAction,
@@ -2007,6 +2012,7 @@ class _HoverableMessageContent extends StatefulWidget {
     this.contentSummary,
     this.agentName,
     this.agentAvatarUrl,
+    this.userAvatarUrl,
     this.agentMoodStyle,
     this.agentAvatarPreset,
     this.onOpenAgentProfile,
@@ -2018,7 +2024,6 @@ class _HoverableMessageContent extends StatefulWidget {
     required this.inSelectableRange,
     required this.isTrigger,
     required this.onEnterDeleteMode,
-    required this.onToggleSelection,
     required this.onDeleteConfirm,
     required this.onDeleteCancel,
     this.onUserAction,
@@ -2042,6 +2047,9 @@ class _HoverableMessageContent extends StatefulWidget {
   final ContentSummaryParseResult? contentSummary;
   final String? agentName;
   final String? agentAvatarUrl;
+
+  /// 当前用户头像的绝对 URL（ChatPage 透传；null=未设置走缺省灰球）。
+  final String? userAvatarUrl;
   final String? agentMoodStyle;
   final String? agentAvatarPreset;
   final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
@@ -2053,7 +2061,6 @@ class _HoverableMessageContent extends StatefulWidget {
   final bool inSelectableRange;
   final bool isTrigger;
   final void Function(String messageId) onEnterDeleteMode;
-  final void Function(String messageId, bool selected) onToggleSelection;
   final VoidCallback onDeleteConfirm;
   final VoidCallback onDeleteCancel;
 
@@ -2074,6 +2081,22 @@ class _HoverableMessageContent extends StatefulWidget {
 
 class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   final GlobalKey _avatarKey = GlobalKey();
+
+  /// 鼠标是否悬停在本条消息上：删除入口只在悬停时浮现（沿用「任务回执 hover
+  /// 才浮现取消入口」的既有语言，平时零视觉噪音）。
+  bool _hovering = false;
+
+  /// 「删除这一轮」入口在气泡外侧占的槽宽（按钮 22px + 与气泡之间 2px 间隙）
+  static const double _deleteEntrySlotWidth = 24;
+
+  /// 删除确认栏在气泡下方占用的「预留带」高度（栏高 ≈32 + 与气泡间隙 ≈18）。
+  ///
+  /// 必须让 Stack 自身带上这段高度，确认栏才落在本条目自己的 RenderBox 内。
+  /// 原因与删除入口同源：Flutter 的命中测试不会越过父级 RenderBox 的 `size`
+  /// 边界（`Stack` 只在自己 size 内参与命中测试，`clipBehavior: Clip.none`
+  /// 只管绘制、不管点击）。此前确认栏用 `Positioned(bottom: -56)` 画在气泡
+  /// 下方 —— 看得见、点不到，「删除」按钮因此完全无响应。
+  static const double _deleteConfirmBarBand = 50;
 
   // ===== 打字机式流式显示 =====
   // 逐字 reveal 的节奏控制(自适应语速 + 句末停顿)已抽到共享控制器
@@ -2137,32 +2160,47 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
   @override
   Widget build(BuildContext context) {
+    // 删除确认栏只在「触发删除的那轮入口气泡」下方出现（用户提问或 Agent 回复均可）
+    final bool showDeleteConfirmBar =
+        widget.deleteSelectionMode && widget.isTrigger;
     return MouseRegion(
       cursor: SystemMouseCursors.basic,
+      onEnter: (_) {
+        if (!_hovering) setState(() => _hovering = true);
+      },
+      onExit: (_) {
+        if (_hovering) setState(() => _hovering = false);
+      },
       child: Stack(
         clipBehavior: Clip.none,
         children: <Widget>[
-          // 原始消息卡片
-          RepaintBoundary(
-            child: Align(
-              alignment:
-                  widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
-              // Agent 消息整行（含头像）从左缘右移 36px，与窗口边缘留出呼吸感。
-              child: Padding(
-                padding: widget.isUser
-                    ? EdgeInsets.zero
-                    : const EdgeInsets.only(left: 36),
-                child: _buildMessageRow(context),
+          // 原始消息卡片 + 确认栏预留带：预留带只在这条消息是删除触发点时占位，
+          // 让 Stack 的 size 覆盖到确认栏，确认栏才可点击（见 _deleteConfirmBarBand）。
+          Padding(
+            padding: EdgeInsets.only(
+              bottom: showDeleteConfirmBar ? _deleteConfirmBarBand : 0,
+            ),
+            child: RepaintBoundary(
+              child: Align(
+                alignment: widget.isUser
+                    ? Alignment.centerRight
+                    : Alignment.centerLeft,
+                // Agent 消息整行（含头像）从左缘右移 36px，与窗口边缘留出呼吸感。
+                child: Padding(
+                  padding: widget.isUser
+                      ? EdgeInsets.zero
+                      : const EdgeInsets.only(left: 36),
+                  child: _buildMessageRow(context),
+                ),
               ),
             ),
           ),
-          // 删除选择模式下的确认/取消按钮栏（仅在触发删除的用户消息下方显示）
-          if (widget.deleteSelectionMode && widget.isTrigger)
+          // 删除确认/取消按钮栏：贴预留带底边，落在本条目自己的 RenderBox 内
+          if (showDeleteConfirmBar)
             Positioned(
               left: 0,
               right: 0,
-              top: 0,
-              bottom: -56,
+              bottom: 0,
               child: Align(
                 alignment: widget.isUser
                     ? Alignment.bottomRight
@@ -2171,10 +2209,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                   padding: EdgeInsets.only(right: widget.isUser ? 60 : 0),
                   child: _DeleteConfirmBar(
                     selectedCount: widget.selectedCount,
-                    isCurrentSelected: widget.isSelected,
-                    onToggleSelect: (v) {
-                      widget.onToggleSelection(widget.mainMessage.messageId, v);
-                    },
                     onConfirm: widget.onDeleteConfirm,
                     onCancel: widget.onDeleteCancel,
                   ),
@@ -2261,23 +2295,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     }
 
     if (widget.inSelectableRange) {
-      // 删除选择模式：左侧勾选 + 头像/气泡
+      // 待删除态：整轮高亮（删除单位固定是整轮问答对，不再逐条勾选，
+      // 避免出现「取消勾选某条气泡」的误导交互）。
       return Row(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.only(top: 12, right: 8),
-            child: Checkbox(
-              value: widget.isSelected,
-              onChanged: widget.isTrigger
-                  ? null
-                  : (bool? v) {
-                      widget.onToggleSelection(
-                          widget.mainMessage.messageId, v ?? true);
-                    },
-            ),
-          ),
           if (!widget.isUser) _buildAvatar(context, isUser: false),
           Flexible(child: _buildMessageColumn(bubble)),
           if (widget.isUser) _buildAvatar(context, isUser: true),
@@ -2290,9 +2313,77 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         if (!widget.isUser) _buildAvatar(context, isUser: false),
-        Flexible(child: _buildMessageColumn(bubble)),
+        // 删除入口（2026-10-04 用户定稿：放每条气泡自己的右下角）
+        Flexible(
+          child: _buildMessageColumn(
+            _wrapBubbleWithDeleteEntry(context, bubble),
+          ),
+        ),
         if (widget.isUser) _buildAvatar(context, isUser: true),
       ],
+    );
+  }
+
+  /// 「删除这一轮」入口：挂在**气泡外侧**的右下角（2026-10-04 用户定稿）。
+  ///
+  /// 为什么是「右侧留一条常驻空槽」而不是把按钮负偏移飘出去：
+  /// Flutter 的命中测试不会越过父级 RenderBox 的 size 边界（`clipBehavior:
+  /// Clip.none` 只管绘制不管点击），`Positioned(right: -22)` 会变成「看得见
+  /// 点不到」。所以按钮必须落在这条 24px 空槽里，槽位常驻、只有透明度随
+  /// hover 变化，避免出现时把气泡挤得抖动。
+  Widget _wrapBubbleWithDeleteEntry(BuildContext context, Widget bubble) {
+    return Stack(
+      children: <Widget>[
+        // 气泡 + 右侧 24px 空槽，空槽常驻以免 hover 时气泡被挤得抖动
+        Padding(
+          padding: const EdgeInsets.only(right: _deleteEntrySlotWidth),
+          child: bubble,
+        ),
+        // 按钮落在空槽里、贴着气泡右下角（槽位在气泡外侧，不是压在气泡上）
+        Positioned(
+          right: 0,
+          bottom: 0,
+          child: _buildDeleteEntryButton(context),
+        ),
+      ],
+    );
+  }
+
+  /// 删除入口按钮本体：小圆底 + 垃圾桶图标，点击进入该轮问答对的删除确认
+  /// （整轮预选、确认栏渲染都由 ChatPage 统一管理，这里只负责触发）。
+  Widget _buildDeleteEntryButton(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    // 删除能力未接线 / 已处于选择模式时不出现入口
+    final bool visible = _hovering &&
+        !widget.deleteSelectionMode &&
+        widget.onDeleteMessage != null;
+    return AnimatedOpacity(
+      opacity: visible ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 120),
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: Tooltip(
+          message: "删除这一轮",
+          child: Material(
+            // 小圆底衬：按钮落在气泡外侧，底衬保证在任意页面底色上都可辨认
+            color: cs.surfaceContainerHighest,
+            shape: const CircleBorder(),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () =>
+                  widget.onEnterDeleteMode(widget.mainMessage.messageId),
+              child: Padding(
+                padding: const EdgeInsets.all(4),
+                child: Icon(
+                  Icons.delete_outline,
+                  size: 14,
+                  color: cs.error,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -2406,6 +2497,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     final double avatarTop = AppTypography.avatarHeaderOffset;
     if (isUser) {
       final bool isDark = Theme.of(context).brightness == Brightness.dark;
+      const Widget fallbackIcon = Icon(
+        Icons.person_outline,
+        size: 18,
+        color: Colors.white,
+      );
+      final String? avatarUrl = widget.userAvatarUrl;
       return Container(
         width: 36,
         height: 36,
@@ -2436,11 +2533,21 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           ),
         ),
         alignment: Alignment.center,
-        child: const Icon(
-          Icons.person_outline,
-          size: 18,
-          color: Colors.white,
-        ),
+        // 有头像：图片填满圆内（发丝边外圈保留）；加载失败/未设置回退人形图标
+        child: avatarUrl == null || avatarUrl.isEmpty
+            ? fallbackIcon
+            : ClipOval(
+                child: Image.network(
+                  avatarUrl,
+                  width: 34,
+                  height: 34,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  errorBuilder:
+                      (BuildContext context, Object error, StackTrace? stackTrace) =>
+                          fallbackIcon,
+                ),
+              ),
       );
     }
 
@@ -2708,19 +2815,19 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 }
 
 
-/// 删除选择模式下的确认/取消按钮栏
+/// 删除确认栏：整轮问答对的高亮确认条。
+///
+/// 删除单位固定是「一轮问答对」，所以这里不再提供逐条勾选——勾选会暗示
+/// 「可以只删其中一条气泡」，而提交时仍按整轮归约，属误导。改为明示将
+/// 删除的条数 + 取消/确认两个动作。
 class _DeleteConfirmBar extends StatelessWidget {
   const _DeleteConfirmBar({
     required this.selectedCount,
-    required this.isCurrentSelected,
-    required this.onToggleSelect,
     required this.onConfirm,
     required this.onCancel,
   });
 
   final int selectedCount;
-  final bool isCurrentSelected;
-  final ValueChanged<bool> onToggleSelect;
   final VoidCallback onConfirm;
   final VoidCallback onCancel;
 
@@ -2730,29 +2837,11 @@ class _DeleteConfirmBar extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        // 勾选当前消息 + 显示已选数量
-        GestureDetector(
-          onTap: () => onToggleSelect(!isCurrentSelected),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Icon(
-                  isCurrentSelected
-                      ? Icons.check_box
-                      : Icons.check_box_outline_blank,
-                  size: 16,
-                  color:
-                      isCurrentSelected ? Colors.red[400] : cs.onSurfaceVariant,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  isCurrentSelected ? "已选择 ($selectedCount条)" : "取消选择",
-                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                ),
-              ],
-            ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Text(
+            "删除这一轮（$selectedCount 条）",
+            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
           ),
         ),
         const SizedBox(width: 8),
@@ -2763,34 +2852,23 @@ class _DeleteConfirmBar extends StatelessWidget {
           onPressed: onCancel,
         ),
         const SizedBox(width: 2),
-        // 确认删除按钮
+        // 确认删除按钮（整轮删除，始终可点）
         GestureDetector(
-          onTap: isCurrentSelected ? onConfirm : null,
+          onTap: onConfirm,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
             decoration: BoxDecoration(
-              color: isCurrentSelected
-                  ? Colors.red
-                  : cs.surfaceContainerHighest.withValues(alpha: 0.5),
+              color: Colors.red,
               borderRadius: BorderRadius.circular(14),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Icon(Icons.delete_outline,
-                    size: 15,
-                    color: isCurrentSelected
-                        ? Colors.white
-                        : cs.onSurfaceVariant.withValues(alpha: 0.4)),
+                Icon(Icons.delete_outline, size: 15, color: Colors.white),
                 const SizedBox(width: 4),
                 Text(
                   "删除",
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: isCurrentSelected
-                        ? Colors.white
-                        : cs.onSurfaceVariant.withValues(alpha: 0.4),
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.white),
                 ),
               ],
             ),

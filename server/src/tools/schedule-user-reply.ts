@@ -11,6 +11,13 @@ export function formatReminderDisplayMessage(subject: string): string {
   return formatReminderMessage(s);
 }
 
+/** 从工具结果读取分级提醒计划摘要（remindPlan 由 describeRemindPlan 生成）。 */
+function readRemindPlanSummary(result: Record<string, unknown>): string {
+  const plan = result.remindPlan as { summary?: unknown } | undefined;
+  const summary = typeof plan?.summary === "string" ? plan.summary.trim() : "";
+  return summary;
+}
+
 function formatRunAtLocal(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -62,11 +69,16 @@ export function formatScheduleToolResultForUser(
     const msg = formatReminderDisplayMessage(
       String(result.reminderMessage ?? result.title ?? "提醒"),
     );
+    // 分级提醒计划（睡前备忘/起床闹钟/出发预留）随创建结果回传，一句话带出让用户知情
+    const planSummary = readRemindPlanSummary(result);
+    const planClause = planSummary ? `（${planSummary}）` : "";
     if (recurrence === "daily" || recurrence === "weekly" || recurrence === "yearly") {
       const recurrenceText = recurrence === "daily" ? "每天" : recurrence === "weekly" ? "每周" : "每年";
-      return when ? `已设置${recurrenceText}重复提醒：${when} — ${msg}` : `已设置${recurrenceText}重复提醒：${msg}`;
+      return when
+        ? `已设置${recurrenceText}重复提醒：${when} — ${msg}${planClause}`
+        : `已设置${recurrenceText}重复提醒：${msg}`;
     }
-    return when ? `已设置提醒：${when} — ${msg}` : `已设置提醒：${msg}`;
+    return when ? `已设置提醒：${when} — ${msg}${planClause}` : `已设置提醒：${msg}`;
   }
   if (result.needsRecurrenceConfirm === true) {
     return String(result.hint ?? "请说明这是一次性提醒，还是每天/每周重复。");

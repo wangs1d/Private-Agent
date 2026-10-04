@@ -2,6 +2,7 @@ import "dart:async";
 
 import "package:flutter/material.dart";
 
+import "../../core/presentation/user_avatar.dart";
 import "../../core/services/device_api_client.dart";
 import "../../core/theme/app_theme.dart";
 import "../mailbox/inbox_message_box.dart";
@@ -33,6 +34,8 @@ class SidebarUserMenu extends StatefulWidget {
   const SidebarUserMenu({
     super.key,
     required this.userName,
+    this.userAvatarUrl,
+    this.onSetAvatar,
     this.inboxUnread = 0,
     required this.currentTheme,
     required this.onSetLightTheme,
@@ -46,6 +49,12 @@ class SidebarUserMenu extends StatefulWidget {
 
   /// 顶部头像右侧显示的用户名(暂用 "king" 占位,后续接账号系统)
   final String userName;
+
+  /// 用户头像绝对 URL（null=未设置，头像位渲染首字母球）
+  final String? userAvatarUrl;
+
+  /// 点击「设置头像」行:选图上传并即时刷新各处头像；null 时该行不渲染
+  final VoidCallback? onSetAvatar;
 
   /// 站内信未读数;>0 时在「站内信」行右侧显示红底白字小徽标
   final int inboxUnread;
@@ -100,6 +109,8 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
         return _UserMenuOverlay(
           anchor: anchor,
           userName: widget.userName,
+          userAvatarUrl: widget.userAvatarUrl,
+          onSetAvatar: widget.onSetAvatar,
           inboxUnread: widget.inboxUnread,
           currentTheme: widget.currentTheme,
           onSetLightTheme: () {
@@ -183,9 +194,12 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
               color: bgColor,
               borderRadius: BorderRadius.circular(8),
             ),
+            // 设置过头像后按钮本体也渲染真实头像（此前只传了 name，
+            // 导致侧栏底部始终显示首字母球，与菜单 header 不一致）
             child: _UserAvatar(
               name: widget.userName,
               variant: variant,
+              avatarUrl: widget.userAvatarUrl,
             ),
           ),
         ),
@@ -194,12 +208,19 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
   }
 }
 
-/// 圆形头像(只有 1 个字符的 fallback,没有真实图片资源时使用)
+/// 圆形头像(只有 1 个字符的 fallback;设置过头像后渲染真实图片)
 class _UserAvatar extends StatelessWidget {
-  const _UserAvatar({required this.name, required this.variant});
+  const _UserAvatar({
+    required this.name,
+    required this.variant,
+    this.avatarUrl,
+  });
 
   final String name;
   final AppThemeVariant variant;
+
+  /// 用户头像绝对 URL（null=未设置）
+  final String? avatarUrl;
 
   @override
   Widget build(BuildContext context) {
@@ -209,20 +230,24 @@ class _UserAvatar extends StatelessWidget {
     final Color bg = cs.primary;
     final Color fg = cs.onPrimary;
 
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        color: bg,
-        shape: BoxShape.circle,
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        initial,
-        style: TextStyle(
-          color: fg,
-          fontWeight: FontWeight.w600,
-          fontSize: 14,
+    return UserAvatar(
+      url: avatarUrl,
+      size: 32,
+      fallback: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: bg,
+          shape: BoxShape.circle,
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          initial,
+          style: TextStyle(
+            color: fg,
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+          ),
         ),
       ),
     );
@@ -256,11 +281,20 @@ class _UserMenuOverlay extends StatefulWidget {
     required this.onOpenFeedback,
     required this.onOpenDevices,
     required this.onLogout,
+    this.userAvatarUrl,
+    this.onSetAvatar,
   });
 
   final Rect anchor;
   final String userName;
   final int inboxUnread;
+
+  /// 用户头像绝对 URL（透传给头像位）
+  final String? userAvatarUrl;
+
+  /// 点击「设置头像」行（null 时该行不渲染）
+  final VoidCallback? onSetAvatar;
+
   final ThemeChoice currentTheme;
   final VoidCallback onSetLightTheme;
   final VoidCallback onSetDarkTheme;
@@ -420,7 +454,10 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  _Header(userName: widget.userName),
+                  _Header(
+                    userName: widget.userName,
+                    userAvatarUrl: widget.userAvatarUrl,
+                  ),
                   Divider(
                       height: 1, thickness: 1,
                       color: cs.outline.withValues(alpha: 0.2)),
@@ -438,6 +475,12 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                   Divider(
                       height: 1, thickness: 1,
                       color: cs.outline.withValues(alpha: 0.2)),
+                  if (widget.onSetAvatar != null)
+                    _Row(
+                      leading: const Icon(Icons.add_a_photo_outlined, size: 18),
+                      title: "设置头像",
+                      onTap: widget.onSetAvatar!,
+                    ),
                   _ThemeRow(
                     rowKey: _themeRowKey,
                     currentTheme: widget.currentTheme,
@@ -705,9 +748,12 @@ class _SubmenuItemState extends State<_SubmenuItem> {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.userName});
+  const _Header({required this.userName, this.userAvatarUrl});
 
   final String userName;
+
+  /// 用户头像绝对 URL（null=未设置）
+  final String? userAvatarUrl;
 
   @override
   Widget build(BuildContext context) {
@@ -717,7 +763,11 @@ class _Header extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
       child: Row(
         children: <Widget>[
-          _UserAvatar(name: userName, variant: variant),
+          _UserAvatar(
+            name: userName,
+            variant: variant,
+            avatarUrl: userAvatarUrl,
+          ),
           const SizedBox(width: 10),
           Expanded(
             child: Text(

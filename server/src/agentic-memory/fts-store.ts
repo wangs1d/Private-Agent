@@ -24,6 +24,7 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { isMemoryFtsEnabled, getMemoryFtsTopK } from "./env.js";
 import { openAgenticSqlite } from "./sqlite-store.js";
+import { actorIdVariants } from "./actor-key.js";
 import { tokenize } from "../services/memory-record-utils.js";
 
 /** 单条 FTS 命中（rank 列表元素；score 仅排序语义） */
@@ -49,7 +50,7 @@ export interface FtsIndexItem {
 
 /** Mem0 侧最小外观（存量回填用；与 bridge 的 BridgeMem0Like.getAll 同形） */
 export interface FtsMem0Like {
-  getAll?(config?: { topK?: number }): Promise<{
+  getAll?(config?: { topK?: number; filters?: { user_id?: string } }): Promise<{
     results?: Array<{ id: string; memory?: string; metadata?: Record<string, unknown>; createdAt?: string }>;
   }>;
 }
@@ -249,18 +250,28 @@ export class AgenticMemoryFtsStore {
   /**
    * 存量回填：FTS 上线前的旧记忆没有索引，启动时 fire-and-forget 一次
    * （与 bridge.backfillLinks 同款模式）。幂等：按 memory_id upsert 覆盖。
+   * actorIds：候选 actor 名单（调用方从 session/journal 登记处汇入）；
+   * mem0ai v3 getAll 强制 filters.user_id（裸 topK 必抛），按 actor 逐形式扫。
    */
-  async backfillFromMem0(memory: FtsMem0Like | null | undefined): Promise<{ indexed: number }> {
+  async backfillFromMem0(
+    memory: FtsMem0Like | null | undefined,
+    actorIds?: string[],
+  ): Promise<{ indexed: number }> {
     if (!memory?.getAll) return { indexed: 0 };
-    let allResult: Awaited<ReturnType<NonNullable<FtsMem0Like["getAll"]>>>;
+    const candidates = [...new Set((actorIds ?? []).flatMap((a) => actorIdVariants(a)))];
+    if (candidates.length === 0) return { indexed: 0 };
+    const records: Awaited<ReturnType<NonNullable<FtsMem0Like["getAll"]>>>["results"] = [];
     try {
-      allResult = await memory.getAll({ topK: 10000 });
+      for (const variant of candidates) {
+        const allResult = await memory.getAll({ topK: 10000, filters: { user_id: variant } });
+        records.push(...(allResult.results ?? []));
+      }
     } catch {
       return { indexed: 0 };
     }
-    const records = (allResult.results ?? []).filter((r) => r.id && r.memory);
     const byActor = new Map<string, FtsIndexItem[]>();
     for (const rec of records) {
+      if (!rec?.id || !rec.memory) continue;
       const actorId = typeof rec.metadata?.actorId === "string" ? rec.metadata.actorId : "";
       if (!actorId) continue;
       const list = byActor.get(actorId) ?? [];

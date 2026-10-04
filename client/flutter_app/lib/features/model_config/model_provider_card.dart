@@ -380,7 +380,7 @@ class ModelProviderCardState extends State<ModelProviderCard> {
             Expanded(
               child: OutlinedButton(
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: _c.textPrimary,
+                  foregroundColor: _c.textSecondary,
                   side: BorderSide(color: _c.fieldBorder ?? Colors.grey),
                   padding: const EdgeInsets.symmetric(vertical: 13),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
@@ -425,11 +425,15 @@ class ModelProviderCardState extends State<ModelProviderCard> {
   }
 
   Widget _buildSaveButton() {
+    // 主钮=微填充（accent ~12% 叠底 + 加重边框），不做实心黑白（2026-10-03 定调）
+    final Color accent = _c.textPrimary ?? Theme.of(context).colorScheme.onSurface;
     return FilledButton(
       style: FilledButton.styleFrom(
-        backgroundColor: _c.textPrimary,
-        foregroundColor: Theme.of(context).colorScheme.surface,
-        disabledBackgroundColor: _c.textPrimary?.withValues(alpha: 0.35),
+        backgroundColor: accent.withValues(alpha: 0.12),
+        foregroundColor: accent,
+        disabledBackgroundColor: accent.withValues(alpha: 0.05),
+        disabledForegroundColor: accent.withValues(alpha: 0.35),
+        side: BorderSide(color: accent.withValues(alpha: _saving ? 0.3 : 0.55)),
         padding: const EdgeInsets.symmetric(vertical: 13),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       ),
@@ -438,7 +442,7 @@ class ModelProviderCardState extends State<ModelProviderCard> {
       child: _saving
           ? SizedBox(
               width: 16, height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Theme.of(context).colorScheme.surface),
+              child: CircularProgressIndicator(strokeWidth: 2, color: accent),
             )
           : Text(widget.saveLabel, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
     );
@@ -461,14 +465,18 @@ class ModelProviderCardState extends State<ModelProviderCard> {
   }
 
   Widget _providerChip(String id, String label, bool selected) {
+    // 选中态=背景微变 + 文字提亮（2026-10-03 定调：不做黑白反转，太跳）
+    final Color selectedBg = (_c.textPrimary ?? Colors.white).withValues(alpha: 0.10);
+    final Color selectedBorder = (_c.textPrimary ?? Colors.white).withValues(alpha: 0.55);
     return ActionChip(
-      backgroundColor: selected ? _c.textPrimary : _c.fieldBg,
-      side: BorderSide(color: selected ? (_c.textPrimary ?? Colors.white) : (_c.fieldBorder ?? Colors.grey)),
+      backgroundColor: selected ? selectedBg : _c.fieldBg,
+      side: BorderSide(color: selected ? selectedBorder : (_c.fieldBorder ?? Colors.grey)),
       label: Text(
         label,
         style: TextStyle(
-          color: selected ? Theme.of(context).colorScheme.surface : _c.textSecondary,
+          color: selected ? _c.textPrimary : _c.textSecondary,
           fontSize: 12.5,
+          fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
         ),
       ),
       onPressed: () => _selectProvider(id),

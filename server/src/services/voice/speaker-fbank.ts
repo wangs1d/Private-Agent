@@ -192,7 +192,6 @@ export function computeFbank(
       let mean = 0;
       for (let f = 0; f < useFrames; f++) mean += feats[f * NUM_MEL_BINS + d]!;
       mean /= useFrames;
-      if (normalize === "none") continue;
       if (normalize === "mean") {
         for (let f = 0; f < useFrames; f++) {
           feats[f * NUM_MEL_BINS + d] = feats[f * NUM_MEL_BINS + d]! - mean;

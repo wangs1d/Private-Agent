@@ -233,6 +233,22 @@ export class MemoryReinforcementStore {
       return 0;
     }
   }
+
+  /**
+   * 有强化/归档痕迹的 actor 名单（lifecycle 全量扫描的枚举源）：
+   * mem0ai v3 的 getAll 强制 filters.user_id，跨 actor 扫描只能按 actor 逐个来。
+   * 覆盖面=发生过召回命中或归档的记忆；从未被召回的新 actor 会在首次召回后入列。
+   */
+  listActorIds(): string[] {
+    try {
+      const rows = this.db
+        .prepare(`SELECT DISTINCT actor_id FROM memory_reinforcement`)
+        .all() as Array<{ actor_id: string }>;
+      return rows.map((r) => r.actor_id).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
 }
 
 let singleton: MemoryReinforcementStore | null = null;

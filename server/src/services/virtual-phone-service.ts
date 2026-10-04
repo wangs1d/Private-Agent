@@ -365,8 +365,19 @@ export class VirtualPhoneService {
   private findActiveSessionByUser(toUserId: string): ActiveCallSession | undefined {
     const user = toUserId.trim();
     if (!user) return undefined;
-    for (const s of this.callSessions.values()) {
-      if (s.toUserId === user) return s;
+    const now = Date.now();
+    for (const [id, s] of this.callSessions) {
+      if (s.toUserId !== user) continue;
+      if (now - s.createdAt > CALL_SESSION_TTL_MS) {
+        // 超龄会话视为已死并就地清理：客户端异常路径（直接关通话窗/断线/丢
+        // hangup 事件）留下的残留不得永久占忙线（2026-10-04 实证：桌面挂断
+        // 按钮曾漏发 phone.call_hangup，残留会话把用户一切新呼叫挡成忙线）
+        this.callSessions.delete(id);
+        this.cancelCallReplyWaiters(id);
+        this.recordCallHistory(s, "stale_expired");
+        continue;
+      }
+      return s;
     }
     return undefined;
   }

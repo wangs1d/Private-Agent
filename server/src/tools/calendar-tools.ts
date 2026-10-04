@@ -8,6 +8,7 @@ import { buildConflictToolResult, precheckCreateConflict } from "../services/sch
 import type { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import type { ScheduleDraft } from "../services/schedule-intent-service.js";
 import type { CreateScheduleTaskInput, ScheduleTaskService } from "../services/schedule-task-service.js";
+import { describeRemindPlan } from "../services/schedule-reminder-policy.js";
 import {
   normalizeDurationMinutes,
   normalizeRemindBeforeMinutes,
@@ -73,6 +74,7 @@ export function buildScheduleCreateInput(
       timezone: tz,
       reminderMessage: draft.reminderMessage?.trim() || draft.description,
       durationMinutes: draft.durationMinutes,
+      location: draft.location?.trim() || undefined,
       remindBeforeMinutes: draft.remindBeforeMinutes,
     };
   }
@@ -161,7 +163,9 @@ export function registerCalendarTools(
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
         durationMinutes: task.durationMinutes,
+        location: task.location,
         remindBeforeMinutes: task.remindBeforeMinutes,
+        remindPlan: describeRemindPlan(task),
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage,
       };
@@ -219,6 +223,7 @@ export function registerCalendarTools(
       }
       if (kindRaw === "reminder") {
         const reminderMessage = String(input.reminderMessage ?? description).trim();
+        const location = String(input.location ?? "").trim() || undefined;
         const task = await scheduleTaskService.createTask({
           sessionId,
           title: title || undefined,
@@ -231,6 +236,7 @@ export function registerCalendarTools(
           timezone,
           reminderMessage,
           durationMinutes,
+          location,
           remindBeforeMinutes,
         });
         const response = {
@@ -245,7 +251,9 @@ export function registerCalendarTools(
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           durationMinutes: task.durationMinutes,
+          location: task.location,
           remindBeforeMinutes: task.remindBeforeMinutes,
+          remindPlan: describeRemindPlan(task),
           recurrence: task.recurrence,
           reminderMessage: task.reminderMessage,
         };
@@ -444,6 +452,7 @@ export function registerCalendarTools(
           input.remindBeforeMinutes !== undefined
             ? normalizeRemindBeforeMinutes(input.remindBeforeMinutes)
             : undefined,
+        location: input.location != null ? String(input.location).trim() || undefined : undefined,
         status:
           input.status === "active" || input.status === "paused" || input.status === "cancelled"
             ? input.status
@@ -462,7 +471,9 @@ export function registerCalendarTools(
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
         durationMinutes: task.durationMinutes,
+        location: task.location,
         remindBeforeMinutes: task.remindBeforeMinutes,
+        remindPlan: describeRemindPlan(task),
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage,
       };
@@ -561,6 +572,7 @@ export function registerCalendarTools(
       const category = parseScheduleTaskCategory(raw.category) ?? "itinerary";
       const durationMinutes = normalizeDurationMinutes(raw.durationMinutes);
       const remindBeforeMinutes = normalizeRemindBeforeMinutes(raw.remindBeforeMinutes);
+      const location = String(raw.location ?? "").trim() || undefined;
       try {
         if (conflictService) {
           const conflictResult = precheckCreateConflict(conflictService, {
@@ -589,6 +601,7 @@ export function registerCalendarTools(
           timezone,
           reminderMessage: String(raw.reminderMessage ?? description).trim(),
           durationMinutes,
+          location,
           remindBeforeMinutes,
         });
         results.push({
@@ -599,6 +612,7 @@ export function registerCalendarTools(
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           durationMinutes: task.durationMinutes,
+          remindPlan: describeRemindPlan(task),
         });
         created += 1;
       } catch (e) {

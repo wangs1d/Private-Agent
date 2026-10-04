@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { isIP } from "net";
 import { dirname, join } from "path";
 
+import { buildReminderPolicy, type ScheduleHabitHints, type SchedulePreReminder } from "./schedule-reminder-policy.js";
 import { taskHasOccurrenceInRange } from "./schedule-recurrence-expand.js";
 
 export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly" | "cron";
@@ -73,6 +74,12 @@ export type ScheduleTaskRecord = {
   durationMinutes?: number;
   /** 提前量提醒（分钟数组，如 [15,5]）：到点前按各偏移各推一次，主触发前不打断。 */
   remindBeforeMinutes?: number[];
+  /** 事件地点（如「协和医院」「首都机场T3」）：提醒策略层据此估算路程并安排出发预留。 */
+  location?: string;
+  /** 分级提醒脚本（提醒策略层写入，与 remindBeforeMinutes 按偏移一一对应；显式设置提前量时清除）。 */
+  preReminders?: SchedulePreReminder[];
+  /** 生成当前分段计划的因子指纹（如 "high/mid"），改期重算判定与排查用。 */
+  reminderPolicy?: string;
   /** 来源标记：manual=用户/LLM 直建；booking=预订下单联动；commitment=承诺板物化；ics=日历订阅导入；email=票务邮件提取。 */
   source?: "manual" | "booking" | "commitment" | "ics" | "email";
   /** 关联的本地预订订单号（source=booking 时写入，用于取消/改期反向同步）。 */
@@ -119,6 +126,7 @@ export type CreateScheduleTaskInput = {
   agentTask?: ScheduleAgentTaskConfig;
   durationMinutes?: number;
   remindBeforeMinutes?: number[];
+  location?: string;
   source?: "manual" | "booking" | "commitment" | "ics" | "email";
   sourceBookingOrderId?: string;
   sourceRefId?: string;
@@ -139,6 +147,7 @@ export type UpdateScheduleTaskInput = {
   agentTask?: ScheduleAgentTaskConfig;
   durationMinutes?: number;
   remindBeforeMinutes?: number[];
+  location?: string;
   status?: Extract<ScheduleTaskStatus, "active" | "paused" | "cancelled">;
 };
 
@@ -178,6 +187,26 @@ export function normalizeRemindBeforeMinutes(value: unknown): number[] | undefin
 /** 任务在给定起点时刻的结束时刻（UTC ms）；无 durationMinutes 时 = 起点（零长区间）。 */
 export function taskEndMs(startMs: number, durationMinutes?: number): number {
   return startMs + (durationMinutes && durationMinutes > 0 ? durationMinutes : 0) * 60_000;
+}
+
+/**
+ * 分级提醒策略的适用面：单次提醒类正事。ics 外部日历自带提醒、承诺物化
+ * 由承诺板管梯度提醒（双响治理定调见 commitment-schedule-outlet.ts）。
+ */
+function isReminderPolicyEligible(
+  task: Pick<
+    ScheduleTaskRecord,
+    "kind" | "recurrence" | "category" | "source" | "status"
+  >,
+): boolean {
+  return (
+    task.kind === "reminder" &&
+    task.recurrence === "none" &&
+    task.status === "active" &&
+    task.category !== "trivia" &&
+    task.source !== "ics" &&
+    task.source !== "commitment"
+  );
 }
 
 /**
@@ -232,6 +261,25 @@ export class ScheduleTaskService {
   private taskDeadLetterHandler?: (task: ScheduleTaskRecord) => void;
   /** 超窗未补发通知（到期任务超过补发窗口被记 missed 时调用一次） */
   private taskMissedHandler?: (task: ScheduleTaskRecord, plannedAt: string) => void;
+  /**
+   * 用户作息画像提供方（agent 对用户习惯的了解，bootstrap 接睡眠样本链/节律画像）：
+   * 分级提醒策略据此个性化睡前备忘与起床闹钟；返回 null/样本不足时策略层走默认值。
+   */
+  private reminderHabitProvider?: (sessionId: string) => ScheduleHabitHints | null | undefined;
+
+  setReminderHabitProvider(
+    provider: ((sessionId: string) => ScheduleHabitHints | null | undefined) | undefined,
+  ): void {
+    this.reminderHabitProvider = provider;
+  }
+
+  private habitHintsFor(sessionId: string): ScheduleHabitHints | null {
+    try {
+      return this.reminderHabitProvider?.(sessionId) ?? null;
+    } catch {
+      return null; // 画像读取失败不挡创建主链路
+    }
+  }
 
   setTaskDeadLetterHandler(handler: (task: ScheduleTaskRecord) => void): void {
     this.taskDeadLetterHandler = handler;
@@ -461,16 +509,42 @@ export class ScheduleTaskService {
       agentTask: input.agentTask,
       durationMinutes: normalizeDurationMinutes(input.durationMinutes),
       remindBeforeMinutes: normalizeRemindBeforeMinutes(input.remindBeforeMinutes),
+      location: input.location?.trim() || undefined,
       source: input.source,
       sourceBookingOrderId: input.sourceBookingOrderId?.trim() || undefined,
       sourceRefId: input.sourceRefId?.trim() || undefined,
       createdAt: now,
       updatedAt: now,
     };
+    this.applyReminderPolicyOnCreate(task, input);
     this.byTaskId.set(task.taskId, task);
     await this.persist();
     await this.emitTaskChange("created", task);
     return task;
+  }
+
+  /**
+   * 分级提醒策略（schedule-reminder-policy.ts）：用户没显式给提前量时，按事件
+   * 时间/重要程度/地点动态生成前晚备忘/起床闹钟/出发预留的分段计划。
+   * 显式 remindBeforeMinutes 优先（用户自己说了提前量），ics/commitment 上游
+   * 各有提醒分工不进策略层，trivia/周期任务不做分级。
+   */
+  private applyReminderPolicyOnCreate(task: ScheduleTaskRecord, input: CreateScheduleTaskInput): void {
+    if (input.remindBeforeMinutes != null) return;
+    if (!isReminderPolicyEligible(task)) return;
+    const plan = buildReminderPolicy({
+      runAt: task.runAt,
+      timezone: task.timezone,
+      description: task.description,
+      reminderMessage: task.reminderMessage,
+      location: task.location,
+      source: task.source,
+      habits: this.habitHintsFor(task.sessionId),
+    });
+    if (!plan) return;
+    task.remindBeforeMinutes = plan.remindBeforeMinutes;
+    task.preReminders = plan.preReminders;
+    task.reminderPolicy = plan.policyName;
   }
 
   async updateTask(taskId: string, input: UpdateScheduleTaskInput): Promise<ScheduleTaskRecord> {
@@ -508,6 +582,8 @@ export class ScheduleTaskService {
         input.remindBeforeMinutes !== undefined
           ? normalizeRemindBeforeMinutes(input.remindBeforeMinutes)
           : task.remindBeforeMinutes,
+      location:
+        input.location !== undefined ? input.location?.trim() || undefined : task.location,
       updatedAt: new Date().toISOString(),
     };
     if (
@@ -533,6 +609,7 @@ export class ScheduleTaskService {
         next.nextRunAt = null;
       }
     }
+    this.reconcileReminderPolicy(task, next, input);
     this.validateKindPayload(next.kind, next.reminderMessage, next.action, next.agentTask);
     this.byTaskId.set(taskId, next);
     await this.persist();
@@ -574,6 +651,62 @@ export class ScheduleTaskService {
     }
   }
 
+  /**
+   * 更新侧的策略对账：
+   *  - 用户显式给了 remindBeforeMinutes → 接管，清掉策略脚本与指纹（显式意愿优先）；
+   *  - 时间/内容/地点变了且任务原本是策略生成的（或本来就没有提前量）→ 按新值重算；
+   *  - 不再符合策略条件（改周期/改 trivia 等）→ 清掉整份计划。
+   */
+  private reconcileReminderPolicy(
+    previous: ScheduleTaskRecord,
+    next: ScheduleTaskRecord,
+    input: UpdateScheduleTaskInput,
+  ): void {
+    if (input.remindBeforeMinutes !== undefined) {
+      next.preReminders = undefined;
+      next.reminderPolicy = undefined;
+      next.firedPreReminderOffsets = undefined;
+      return;
+    }
+    const scheduleOrContentChanged =
+      (input.runAt !== undefined && input.runAt !== previous.runAt) ||
+      (input.timezone !== undefined && input.timezone !== previous.timezone) ||
+      (input.recurrence !== undefined && input.recurrence !== previous.recurrence) ||
+      (input.description !== undefined && input.description.trim() !== previous.description) ||
+      (input.reminderMessage !== undefined && input.reminderMessage.trim() !== (previous.reminderMessage ?? "")) ||
+      (input.location !== undefined && input.location.trim() !== (previous.location ?? "")) ||
+      (input.category !== undefined && input.category !== previous.category);
+    if (!scheduleOrContentChanged) return;
+    const wasPolicyGenerated =
+      next.reminderPolicy !== undefined || next.preReminders !== undefined;
+    if (!wasPolicyGenerated && next.remindBeforeMinutes !== undefined) return; // 显式提前量任务不碰
+    next.firedPreReminderOffsets = undefined;
+    if (!isReminderPolicyEligible(next)) {
+      next.preReminders = undefined;
+      next.reminderPolicy = undefined;
+      next.remindBeforeMinutes = undefined;
+      return;
+    }
+    const plan = buildReminderPolicy({
+      runAt: next.runAt,
+      timezone: next.timezone,
+      description: next.description,
+      reminderMessage: next.reminderMessage,
+      location: next.location,
+      source: next.source,
+      habits: this.habitHintsFor(next.sessionId),
+    });
+    if (plan) {
+      next.remindBeforeMinutes = plan.remindBeforeMinutes;
+      next.preReminders = plan.preReminders;
+      next.reminderPolicy = plan.policyName;
+    } else {
+      next.preReminders = undefined;
+      next.reminderPolicy = undefined;
+      next.remindBeforeMinutes = undefined;
+    }
+  }
+
   /** 提前量提醒：到点前按 remindBeforeMinutes 各偏移推送一次（不产生 run、不推进 nextRunAt）。 */
   private async firePreReminders(now: number): Promise<void> {
     if (!this.reminderHandler) return;
@@ -599,8 +732,11 @@ export class ScheduleTaskService {
       await this.persist();
       const base = task.reminderMessage || task.title || task.description;
       for (const dueOffset of dueOffsets.sort((a, b) => b - a)) {
+        // 策略段有专属脚本（睡前备忘/起床闹钟/该出门了…），无脚本段保持历史模板
+        const script = task.preReminders?.find((p) => p.offsetMinutes === dueOffset);
+        const message = script?.message ?? `【提前${dueOffset}分钟】${base}`;
         try {
-          await this.reminderHandler(updated, `【提前${dueOffset}分钟】${base}`);
+          await this.reminderHandler(updated, message);
         } catch {
           // 提前提醒推送失败不影响主触发链路
         }

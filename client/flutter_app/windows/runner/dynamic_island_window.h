@@ -19,8 +19,7 @@
 ///   - 内容态：胶囊横向撑开（图标 + 标题 + 尾注 / 呼吸活点 / 进度线）
 ///   - hover 态：360×58 环境胶囊（日期 · 下一日程 · 未读数；导航点 +
 ///     滚轮切换「今日/任务」，滚到「展开」进展开卡）
-///   - 展开态：胶囊本体向下生长成日程卡（圆角连续变形），头部行保留，
-///     含「任务动态」（agent 工具步骤流）与快捷按钮
+///   - 展开态：胶囊本体向下生长成日程卡（圆角连续变形），头部行保留
 ///   - 形变保护：morphing 期间吞掉点击/滚轮，避免按出半截状态
 ///   - 前台全屏（D3D 全屏 / 放映模式）时自动隐藏，退出后恢复
 ///
@@ -30,7 +29,7 @@
 /// 通过 MethodChannel `pai/dynamic_island` 与 Dart 端通信：
 ///   - Dart -> C++：create / destroy / setVisible / present / dismiss /
 ///     dismissAll / setAgenda / expand / collapse / setDpi /
-///     setAmbient（未读数 + agent 状态行）/ setAgentSteps（步骤流）
+///     setAmbient（未读数 + agent 状态行）
 ///   - C++ -> Dart：onNativeEvent（expandedChanged / action / tapped）
 class DynamicIslandWindow {
  public:
@@ -60,12 +59,6 @@ class DynamicIslandWindow {
     bool completed = false;
   };
 
-  /// 展开卡「任务动态」里的一行：agent 工具调用步骤流。
-  struct AgentStep {
-    std::string label;
-    int state = 0;  // 0=进行中 1=成功 2=失败
-  };
-
   /// 岛旁挂件点开的独立消息卡里的一行（与应用内隔离，不开主窗）。
   struct MessageRow {
     std::string title;    // utf8
@@ -75,7 +68,7 @@ class DynamicIslandWindow {
 
   enum class EventType {
     kExpandedChanged,  // payload: "true"/"false"（进入展开 / 回到胶囊）
-    kAction,           // 展开卡快捷按钮，payload = 按钮文案
+    kAction,           // 岛上动作出口，payload = 动作文案（如「打开消息」）
     kTapped,           // 胶囊本体被点击（展开/收起之外的未来扩展）
   };
   using EventCallback = std::function<void(EventType type, const std::string& payload)>;
@@ -102,7 +95,6 @@ class DynamicIslandWindow {
   void SetExpanded(bool expanded);
   /// 三级目标态（用户点击逐级下行：胶囊→hover→展开；收起逐级回退）。
   void SetStage(Stage stage);
-  void SetAgentSteps(std::vector<AgentStep> steps);
   void SetAmbient(int unread_count, bool agent_active,
                   const std::string& agent_status, int messages_unread = 0);
   /// 岛旁挂件的独立消息卡数据（最近会话预览行）。
@@ -132,9 +124,6 @@ class DynamicIslandWindow {
   static constexpr int kTopMargin = 5;       // 胶囊顶边距
   static constexpr int kRowH = 30;           // 日程行高
   static constexpr int kMaxRows = 5;         // 最多展示行数
-  static constexpr int kStepRowH = 26;       // 任务动态行高
-  static constexpr int kMaxSteps = 4;        // 任务动态最多行数
-  static constexpr int kBtnRowH = 42;        // 快捷按钮行高
   static constexpr int kHoverDotPitch = 20;  // hover 导航点间距（逻辑 px）
   static constexpr UINT kIslandWheelMsg = WM_APP + 0x49;  // 滚轮钩子 -> 窗口
   // 全屏抑制检查心跳（id=3，窗口存活期间常开）：与动画心跳（id=1）解耦。
@@ -165,7 +154,6 @@ class DynamicIslandWindow {
   void StartAnimTimer();
   void StopAnimTimer();
   void UpdateFullscreenSuppression();
-  int HoverButtonAt(int client_x, int client_y) const;
   int HoverDotAt(int client_x, int client_y) const;
   void FireEvent(EventType type, const std::string& payload);
   double AttentionScale() const;  // 当前 attention 缩放（1 = 无）
@@ -196,13 +184,11 @@ class DynamicIslandWindow {
   Entry entry_;
   bool has_entry_ = false;
   std::vector<AgendaItem> agenda_;
-  std::vector<AgentStep> agent_steps_;
   int ambient_unread_ = 0;
   bool agent_active_ = false;
   std::string agent_status_;  // utf8，hover「任务」页状态行
   int messages_unread_ = 0;   // 消息聚合未读：岛旁挂件数据源
   bool voice_talk_mode_ = false;  // 纯语音模式：对话全语音（悬停自动 glance）
-  std::vector<RECT> button_rects_;  // 展开卡快捷按钮区（物理像素，命中测试用）
   std::vector<RECT> hover_dot_rects_;  // hover 导航点命中区（物理像素）
   RECT messages_badge_rect_ = {};  // 岛旁消息挂件命中区（物理像素；空=未展示）
   std::vector<MessageRow> message_rows_;  // 独立消息卡预览行
@@ -229,7 +215,6 @@ class DynamicIslandWindow {
   // 鼠标交互
   bool hovering_ = false;
   bool tracking_mouse_ = false;
-  int hover_btn_ = -1;  // 展开卡快捷按钮 hover 索引
   int hover_dot_ = -1;  // hover 导航点 hover 索引
 
   // hover 滚轮钩子（仅悬停期间挂载，移出即卸）

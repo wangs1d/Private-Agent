@@ -27,6 +27,11 @@ function buildStoreWithTurns(turns: number, maxThreadMessages?: number): ChatThr
       },
       `assistant turn ${i}`,
       maxThreadMessages,
+      // clientMessageId 是 appendTurn 的第 7 个位置参数：只写进 userTurn 对象
+      // 不会生效（appendTurn 不从 userTurn 读它），此前这里从未真正打上标记，
+      // 导致按 id 定位（编辑/删除）的用例无法覆盖。
+      undefined,
+      `u-${i}`,
     );
   }
 
@@ -322,4 +327,108 @@ test("restore: 无时间戳的历史消息保持无帧，不得伪装成 just no
       "无时间戳的历史消息恢复时不应被补当前时间帧",
     );
   }
+});
+
+// ── 2026-10-04：按轮次删除（客户端「删除这一轮对话」按钮的服务侧契约）──
+// 背景：该按钮此前只能发 chat.clear_history（= clearAllMemoryForActor），
+// 删一条消息会把整个会话线程 + 全部 Agent 记忆清空。deleteTurn 只摘掉这一轮，
+// 其余历史上下文与记忆必须原样保留。
+test("deleteTurn: 只摘掉指定轮次，前后轮次上下文原样保留", () => {
+  const store = buildStoreWithTurns(3);
+  const sessionId = "chat-thread-store-test";
+
+  const result = store.deleteTurn(sessionId, "u-2");
+  assert.equal(result.ok, true, "已知 clientMessageId 应命中");
+  assert.equal(result.removed, 2, "一轮 = user 消息 + 该轮 assistant 回复");
+
+  const serialized = JSON.stringify(store.thread(sessionId, "system"));
+  assert.doesNotMatch(serialized, /user turn 2/, "被删的这一轮不应残留");
+  assert.doesNotMatch(serialized, /assistant turn 2/, "被删的这一轮回复不应残留");
+  assert.match(serialized, /user turn 1/, "更早的轮次必须保留");
+  assert.match(serialized, /user turn 3/, "更晚的轮次必须保留");
+});
+
+test("deleteTurn: 一轮含多条 assistant 气泡时整轮一起摘除", () => {
+  const store = buildStoreWithTurns(2);
+  const sessionId = "chat-thread-store-test";
+  // 同一轮追加一条后续气泡（分泡/卡片回执等场景）
+  store.appendAssistantFollowup(sessionId, "u-1", "assistant turn 1 的补充气泡");
+
+  const result = store.deleteTurn(sessionId, "u-1");
+  assert.equal(result.ok, true);
+  assert.equal(result.removed, 3, "user + 主回复 + 补充气泡应整轮摘除");
+
+  const serialized = JSON.stringify(store.thread(sessionId, "system"));
+  assert.doesNotMatch(serialized, /assistant turn 1/, "该轮所有回复气泡都应消失");
+  assert.match(serialized, /user turn 2/, "后续轮次不受影响");
+});
+
+test("deleteTurn: 未知 messageId / 空 id 不误删，返回原因码", () => {
+  const store = buildStoreWithTurns(2);
+  const sessionId = "chat-thread-store-test";
+
+  assert.deepEqual(
+    store.deleteTurn(sessionId, "u-999"),
+    { ok: false, reason: "message_not_found" },
+  );
+  assert.deepEqual(
+    store.deleteTurn(sessionId, ""),
+    { ok: false, reason: "missing_message_id" },
+  );
+  assert.deepEqual(
+    store.deleteTurn("no-such-session", "u-1"),
+    { ok: false, reason: "session_not_found" },
+  );
+
+  const serialized = JSON.stringify(store.thread(sessionId, "system"));
+  assert.match(serialized, /user turn 1/, "未命中时不得动任何历史");
+  assert.match(serialized, /user turn 2/, "未命中时不得动任何历史");
+});
+
+// ── 迁移兜底（2026-10-04）：clientMessageId 落盘之前的历史轮次，只能按原文定位 ──
+// 场景：本功能上线前落盘的线程没有 __clientMessageId 字段，服务端重启后按 id 找不到该轮，
+// 客户端同时带上被删消息原文 → 按纯文本唯一命中兜底，否则存量历史在服务端永远删不掉。
+
+test("deleteTurn: 按 id 定位不到时，按原文唯一命中兜底（旧线程）", () => {
+  const store = new ChatThreadStore(null);
+  const sessionId = "chat-thread-store-test";
+  // 不传 clientMessageId —— 等价于「重启后从磁盘恢复、旧消息没有 id 标记」
+  store.appendTurn(sessionId, "system", { text: "user turn 1" }, "assistant turn 1");
+  store.appendTurn(sessionId, "system", { text: "user turn 2" }, "assistant turn 2");
+
+  const result = store.deleteTurn(sessionId, "msg-from-old-build", "user turn 2");
+  assert.equal(result.ok, true, "原文唯一命中时应兜底删除");
+  assert.equal(result.removed, 2);
+
+  const serialized = JSON.stringify(store.thread(sessionId, "system"));
+  assert.doesNotMatch(serialized, /user turn 2/, "兜底也应整轮摘除");
+  assert.match(serialized, /user turn 1/, "其余轮次必须保留");
+});
+
+test("deleteTurn: 原文命中多条时拒绝兜底（宁可不删也不删错轮次）", () => {
+  const store = new ChatThreadStore(null);
+  const sessionId = "chat-thread-store-test";
+  store.appendTurn(sessionId, "system", { text: "帮我看下天气" }, "assistant A");
+  store.appendTurn(sessionId, "system", { text: "帮我看下天气" }, "assistant B");
+
+  const result = store.deleteTurn(sessionId, "msg-from-old-build", "帮我看下天气");
+  assert.deepEqual(result, { ok: false, reason: "ambiguous_text_match" });
+
+  const serialized = JSON.stringify(store.thread(sessionId, "system"));
+  assert.match(serialized, /assistant A/, "歧义时任何一轮都不得被删");
+  assert.match(serialized, /assistant B/, "歧义时任何一轮都不得被删");
+});
+
+test("deleteTurn: 原文兜底不覆盖按 id 命中的精确语义", () => {
+  const store = buildStoreWithTurns(2);
+  const sessionId = "chat-thread-store-test";
+
+  // 原文给了「user turn 1」（另一轮），id 指向 u-2 → 必须按 id 删 u-2
+  const result = store.deleteTurn(sessionId, "u-2", "user turn 1");
+  assert.equal(result.ok, true);
+  assert.equal(result.removed, 2);
+
+  const serialized = JSON.stringify(store.thread(sessionId, "system"));
+  assert.doesNotMatch(serialized, /assistant turn 2/, "被 id 指向的轮次应被删除");
+  assert.match(serialized, /user turn 1/, "原文指向的轮次不得被误删");
 });

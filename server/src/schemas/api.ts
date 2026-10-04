@@ -250,6 +250,8 @@ export const scheduleTaskCreateBodySchema = z
     cronExpression: z.string().min(1).max(120).optional(),
     webhookToken: z.string().min(1).max(160).optional(),
     reminderMessage: z.string().min(1).max(500).optional(),
+    location: z.string().max(200).optional(),
+    remindBeforeMinutes: z.array(z.number().positive().max(7 * 24 * 60)).max(5).optional(),
     action: z
       .object({
         url: z.string().url(),
@@ -314,6 +316,8 @@ export const scheduleTaskUpdateBodySchema = z.object({
   cronExpression: z.string().min(1).max(120).nullable().optional(),
   webhookToken: z.string().min(1).max(160).nullable().optional(),
   reminderMessage: z.string().min(1).max(500).optional(),
+  location: z.string().max(200).optional(),
+  remindBeforeMinutes: z.array(z.number().positive().max(7 * 24 * 60)).max(5).optional(),
   action: z
     .object({
       url: z.string().url(),

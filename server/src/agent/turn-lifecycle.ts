@@ -18,6 +18,9 @@ import { getConversationTimelineService } from "../services/conversation-timelin
 import { isNotesChatSessionId, isIncognitoChatSessionId } from "./master-chat-session.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import { getMemoryConsolidationService } from "../services/memory-consolidation-service.js";
+import { getScheduleHabitStore } from "../services/schedule-habit-store.js";
+import { getPresenceFootprintStore } from "../rhythm/presence-footprint-store.js";
+import { isEphemeralActorId } from "./actor-id.js";
 
 export type FinalizeTurnInput = {
   actorId: string;
@@ -158,6 +161,14 @@ export class TurnLifecycle {
     const full = input.assistantText.trim();
     // 隐身会话（incognito: 前缀）：画像观察整体跳过——聊可以，画像不长
     const incognito = isIncognitoChatSessionId(input.sessionId);
+    // 作息自述捕获（分级提醒的冷启动习惯源）：用户说「我一般1点半睡8点起」即入档，
+    // 确定性规则抽取、零 LLM；隐身会话跳过（画像不长），临时 actor 不落盘。
+    if (!incognito && !isEphemeralActorId(input.actorId)) {
+      // 在场足迹：用户发消息 = 人在线。与工具调用一起构成作息的被动观察源，
+      // 作息由 agent 自己观察得出，文本抽取只作补充。
+      getPresenceFootprintStore()?.record(input.actorId);
+      getScheduleHabitStore()?.captureFromUserText(input.actorId, input.userText);
+    }
     if (!full) {
       // 空回复轮也喂画像聚合器：用户半边仍入队（与原 brain-center 阶段3.6.1 行为对齐）
       if (!incognito) {

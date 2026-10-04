@@ -1,4 +1,5 @@
 import type { ProactiveOutboundMessageService } from "../proactive-outbound-message-service.js";
+import { getPresenceFootprintStore } from "../../rhythm/presence-footprint-store.js";
 import { HabitRuleStore, newHabitRuleId } from "./habit-rule-store.js";
 import { HabitMiner } from "./habit-miner.js";
 import type {
@@ -117,6 +118,8 @@ export class HabitLoopService {
     if (this.toolObservations.length > MAX_TOOL_OBSERVATIONS) {
       this.toolObservations.splice(0, this.toolObservations.length - MAX_TOOL_OBSERVATIONS);
     }
+    // 在场足迹：用户调工具 = 人在线。作息由 agent 自己观察得出，不靠文本抽取。
+    getPresenceFootprintStore()?.record(actorId, at);
     this.schedulePersistObservations();
     void this.checkToolPatternHit(actorId, tool, at).catch((err) => {
       console.warn("[HabitLoop] tool_pattern hit check failed:", err);

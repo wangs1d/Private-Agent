@@ -5,8 +5,6 @@ import "package:flutter/foundation.dart"
     show ChangeNotifier, debugPrint, visibleForTesting;
 import "package:http/http.dart" as http;
 
-import "../presentation/dynamic_island.dart";
-
 /// ZCode 式一键更新的应用内下载与静默安装编排。
 ///
 /// 流程：点「立即升级」→ 流式下载安装包到 %LOCALAPPDATA%\Nextbot\update
@@ -297,10 +295,6 @@ class ClientUpdateFlowController extends ChangeNotifier {
   void _notifyAt(DateTime now) {
     _lastNotify = now;
     notifyListeners();
-    // 灵动岛同步：下载中带进度条，其余阶段撤条目。
-    IslandRealFeeds.setUpdateProgress(
-      _phase == ClientUpdatePhase.downloading ? (progress ?? 0) : null,
-    );
   }
 
   /// apply_update.cmd 内容：参数经 %1~%3 传入（当前 PID / 安装包 / 应用 exe），

@@ -5,6 +5,7 @@
 #include <gdiplus.h>
 #include <mmsystem.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 
 #include <thread>
 
@@ -33,6 +34,46 @@ void IslandLifecycleLog(HWND hwnd, const wchar_t* event) {
   fwprintf(stderr, L"[DynamicIsland] %ls hwnd=0x%p tick=%llu\n", event, hwnd,
            static_cast<unsigned long long>(GetTickCount64()));
   fflush(stderr);
+}
+
+// ── 录屏豁免全屏抑制 ──
+// 拍摄灵动岛（录屏演示）是核心场景：录制期间即使系统上报 QUNS_BUSY
+// 也让岛保持显示；非录制态的全屏视频/游戏/演示模式照旧让位。
+// 名单按 exe 名匹配（大小写不敏感）。注意 ffmpeg.exe 绝不能入列——
+// 服务端代码沙箱会拉起 ffmpeg，会把「全屏视频 + 后台跑任务」误判成录制。
+constexpr const wchar_t* kRecorderProcessNames[] = {
+    L"gamebarftserver.exe",  // Xbox Game Bar 录制服务（Win+Alt+R）
+    L"obs64.exe",
+    L"obs32.exe",
+    L"snippingtool.exe",  // Win11 剪切工具录屏
+    L"screenclip.exe",
+    L"evcapture.exe",  // EV 录屏
+    L"bdcam.exe",      // Bandicam
+    L"camtasiarecorder.exe",
+    L"camtasiastudio.exe",
+    L"sharex.exe",
+    L"jianyingpro.exe",  // 剪映专业版
+    L"apowerrec.exe",    // 傲软录屏
+};
+
+bool IsScreenRecordingActive() {
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) return false;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  bool found = false;
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      for (const wchar_t* name : kRecorderProcessNames) {
+        if (_wcsicmp(entry.szExeFile, name) == 0) {
+          found = true;
+          break;
+        }
+      }
+    } while (!found && Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  return found;
 }
 
 
@@ -108,24 +149,6 @@ void DrawMailIcon(Gdiplus::Graphics& g, float cx, float cy, float w,
   g.DrawLine(&pen, cx - w / 2, cy - h / 2, cx, cy + h * 0.08f);
   g.DrawLine(&pen, cx + w / 2, cy - h / 2, cx, cy + h * 0.08f);
 }
-
-// 步骤状态勾/叉（展开卡「任务动态」行首）：勾=成功，叉=失败。
-void DrawCheckMark(Gdiplus::Graphics& g, float cx, float cy, float s,
-                   BYTE alpha) {
-  Gdiplus::Pen pen(Gdiplus::Color(alpha, 150, 235, 165), 1.7f);
-  g.DrawLine(&pen, cx - 3.5f * s, cy + 0.4f * s, cx - 0.8f * s, cy + 3.1f * s);
-  g.DrawLine(&pen, cx - 0.8f * s, cy + 3.1f * s, cx + 4.2f * s, cy - 3.2f * s);
-}
-
-void DrawCrossMark(Gdiplus::Graphics& g, float cx, float cy, float s,
-                   BYTE alpha) {
-  Gdiplus::Pen pen(Gdiplus::Color(alpha, 255, 130, 120), 1.7f);
-  g.DrawLine(&pen, cx - 3.1f * s, cy - 3.1f * s, cx + 3.1f * s, cy + 3.1f * s);
-  g.DrawLine(&pen, cx - 3.1f * s, cy + 3.1f * s, cx + 3.1f * s, cy - 3.1f * s);
-}
-
-const wchar_t* kActionLabels[] = {L"创建日程", L"打开简报", L"静音"};
-constexpr int kActionCount = 3;
 
 // 岛旁独立消息卡最多预览行数（超出部分不展示，数据源按最近排序）。
 constexpr int kMaxMessageRows = 5;
@@ -345,14 +368,6 @@ void DynamicIslandWindow::SetAgenda(std::vector<AgendaItem> items) {
   if (window_handle_ != nullptr) Render();
 }
 
-void DynamicIslandWindow::SetAgentSteps(std::vector<AgentStep> steps) {
-  if (steps.size() > static_cast<size_t>(kMaxSteps)) {
-    steps.erase(steps.begin(), steps.end() - kMaxSteps);
-  }
-  agent_steps_ = std::move(steps);
-  if (window_handle_ != nullptr) Render();
-}
-
 void DynamicIslandWindow::SetAmbient(int unread_count, bool agent_active,
                                      const std::string& agent_status,
                                      int messages_unread) {
@@ -533,17 +548,22 @@ void DynamicIslandWindow::CheckSuppression() {
 // 由 kSuppressTimerId 常开心跳驱动（与动画心跳无关，窗口存活期间一直跑）。
 // 注意：窗口定时器随窗口同死——窗口被销毁后本心跳也随之消失，
 // 「窗口失活后的重建」由 Dart 侧看门狗（周期 ping）负责，不在这里。
+// 录屏进程在跑时豁免三种忙碌态（IsScreenRecordingActive，见文件头说明），
+// 忙碌判定本身不变：录制一停，全屏/忙碌仍照常抑制。
 void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATION_STATE state;
   if (FAILED(SHQueryUserNotificationState(&state))) return;
-  const bool busy = state == QUNS_RUNNING_D3D_FULL_SCREEN ||
-                    state == QUNS_PRESENTATION_MODE || state == QUNS_BUSY;
+  const bool recording = IsScreenRecordingActive();
+  const bool busy = !recording && (state == QUNS_RUNNING_D3D_FULL_SCREEN ||
+                                   state == QUNS_PRESENTATION_MODE ||
+                                   state == QUNS_BUSY);
   // 取证日志：每 ~150s 一次心跳证明本心跳活着；转向时必记（含 visible_ 快照）。
   static int tick_count = 0;
   const bool heartbeat = (++tick_count % 75) == 1;
   if (heartbeat) {
-    wchar_t hb[128];
+    wchar_t hb[160];
     _snwprintf_s(hb, _countof(hb), _TRUNCATE,
-                 L"suppress-tick busy=%d suppressed=%d visible=%d", busy ? 1 : 0,
+                 L"suppress-tick busy=%d rec=%d suppressed=%d visible=%d",
+                 busy ? 1 : 0, recording ? 1 : 0,
                  suppressed_by_fullscreen_ ? 1 : 0, visible_ ? 1 : 0);
     IslandLifecycleLog(window_handle_, hb);
   }
@@ -584,10 +604,8 @@ int DynamicIslandWindow::CompactWidth() const {
 
 int DynamicIslandWindow::ExpandedHeight() const {
   const int rows = std::clamp(static_cast<int>(agenda_.size()), 0, kMaxRows);
-  const int steps = std::clamp(static_cast<int>(agent_steps_.size()), 0, kMaxSteps);
-  int h = 30 + 12 + 20 + rows * kRowH + (rows > 0 ? 6 : 0);
-  if (steps > 0) h += 6 + 20 + steps * kStepRowH + 4;
-  return h + kBtnRowH + 10;
+  const int h = 30 + 12 + 20 + rows * kRowH + (rows > 0 ? 6 : 0);
+  return h + 10;
 }
 
 void DynamicIslandWindow::StageLerpSize(double level, double* w, double* h,
@@ -699,10 +717,7 @@ void DynamicIslandWindow::OnWheelDelta(short delta) {
 // hover 态环境信息行：今日页 = 日期 · 下一日程 · 未读数；任务页 = agent 状态。
 std::wstring DynamicIslandWindow::BuildHoverLine() const {
   if (hover_tab_ == HoverTab::kAgent) {
-    const bool any_running = std::any_of(
-        agent_steps_.begin(), agent_steps_.end(),
-        [](const AgentStep& s) { return s.state == 0; });
-    if (agent_active_ || any_running) {
+    if (agent_active_) {
       std::wstring line = L"Agent";
       if (!agent_status_.empty()) line += L" · " + Utf8ToWide(agent_status_);
       return line;
@@ -759,7 +774,6 @@ void DynamicIslandWindow::Render() {
   }
   HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem_dc, dib));
 
-  button_rects_.clear();
   hover_dot_rects_.clear();
 
   {
@@ -1075,7 +1089,7 @@ void DynamicIslandWindow::Render() {
                    &line_brush);
     }
 
-    // ── 展开区：日程卡 + 任务动态（随 morph 越过 hover 档淡入）──
+    // ── 展开区：日程卡（随 morph 越过 hover 档淡入）──
     if (morph_ > 1.01) {
       const BYTE fade = static_cast<BYTE>(255 * Clamp01((morph_ - 1.0) * 1.2));
       const float pad = 18.0f * s;
@@ -1132,79 +1146,6 @@ void DynamicIslandWindow::Render() {
           y += static_cast<float>(kRowH) * s;
         }
         y += 6.0f * s;
-      }
-
-      // ── 任务动态：agent 工具步骤流（进行中转圈 / 成功勾 / 失败叉）──
-      const int step_rows =
-          std::min(static_cast<int>(agent_steps_.size()), kMaxSteps);
-      if (step_rows > 0) {
-        Gdiplus::SolidBrush step_div_brush(
-            Gdiplus::Color(static_cast<BYTE>(fade * 6 / 100), 255, 255, 255));
-        g.FillRectangle(&step_div_brush, cap_x + pad, y, cur_w - pad * 2,
-                        1.0f * s);
-        y += 6.0f * s;
-
-        Gdiplus::Font step_label_font(mem_dc, MakeIslandFont(S(14), 700));
-        Gdiplus::SolidBrush step_label_brush(
-            Gdiplus::Color(static_cast<BYTE>(fade * 85 / 100), 255, 255, 255));
-        g.DrawString(L"任务动态", -1, &step_label_font,
-                     Gdiplus::PointF(cap_x + pad, y), &step_label_brush);
-        y += 20.0f * s;
-
-        Gdiplus::Font step_font(mem_dc, MakeIslandFont(S(15), 650));
-        for (int i = 0; i < step_rows; i++) {
-          const AgentStep& st = agent_steps_[i];
-          const float glyph_cx = cap_x + pad + 5.0f * s;
-          const float glyph_cy = y + 9.0f * s;
-          if (st.state == 0) {
-            DrawTaskIcon(g, glyph_cx, glyph_cy, 4.5f * s, now_s_,
-                         static_cast<BYTE>(fade * 80 / 100));
-          } else if (st.state == 1) {
-            DrawCheckMark(g, glyph_cx, glyph_cy, s,
-                          static_cast<BYTE>(fade * 70 / 100));
-          } else {
-            DrawCrossMark(g, glyph_cx, glyph_cy, s,
-                          static_cast<BYTE>(fade * 80 / 100));
-          }
-          const std::wstring step_text = FitText(
-              g, Utf8ToWide(st.label), step_font,
-              cur_w - pad * 2 - 16.0f * s);
-          Gdiplus::SolidBrush step_brush(
-              Gdiplus::Color(static_cast<BYTE>(fade), 255, 255, 255));
-          g.DrawString(step_text.c_str(), -1, &step_font,
-                       Gdiplus::PointF(cap_x + pad + 14.0f * s, y),
-                       &step_brush);
-          y += static_cast<float>(kStepRowH) * s;
-        }
-        y += 4.0f * s;
-      }
-
-      // 快捷按钮行
-      Gdiplus::Font btn_font(mem_dc, MakeIslandFont(S(16), 650));
-      const float btn_h = 26.0f * s;
-      float bx = cap_x + 10.0f * s;
-      for (int i = 0; i < kActionCount; i++) {
-        Gdiplus::RectF m_btn;
-        g.MeasureString(kActionLabels[i], -1, &btn_font, Gdiplus::PointF(0, 0),
-                        &m_btn);
-        const float btn_w = m_btn.Width + 20.0f * s;
-        const bool hov = hovering_ && hover_btn_ == i;
-        if (hov) {
-          Gdiplus::SolidBrush btn_hover(Gdiplus::Color(
-              static_cast<BYTE>(fade * 9 / 100), 255, 255, 255));
-          Gdiplus::GraphicsPath btn_path;
-          RoundedPath(&btn_path, Gdiplus::RectF(bx, y, btn_w, btn_h), 8.0f * s);
-          g.FillPath(&btn_hover, &btn_path);
-        }
-        const BYTE a = static_cast<BYTE>(fade);
-        Gdiplus::SolidBrush btn_brush(Gdiplus::Color(a, 255, 255, 255));
-        g.DrawString(kActionLabels[i], -1, &btn_font,
-                     Gdiplus::PointF(bx + 10.0f * s, y + (btn_h - m_btn.Height) / 2.0f),
-                     &btn_brush);
-        RECT rc = {static_cast<LONG>(bx), static_cast<LONG>(y),
-                   static_cast<LONG>(bx + btn_w), static_cast<LONG>(y + btn_h)};
-        button_rects_.push_back(rc);
-        bx += btn_w + 4.0f * s;
       }
     }
 
@@ -1361,17 +1302,6 @@ void DynamicIslandWindow::Render() {
   ReleaseDC(nullptr, screen_dc);
 }
 
-int DynamicIslandWindow::HoverButtonAt(int client_x, int client_y) const {
-  for (size_t i = 0; i < button_rects_.size(); i++) {
-    const RECT& rc = button_rects_[i];
-    if (client_x >= rc.left && client_x <= rc.right && client_y >= rc.top &&
-        client_y <= rc.bottom) {
-      return static_cast<int>(i);
-    }
-  }
-  return -1;
-}
-
 int DynamicIslandWindow::HoverDotAt(int client_x, int client_y) const {
   for (size_t i = 0; i < hover_dot_rects_.size(); i++) {
     const RECT& rc = hover_dot_rects_[i];
@@ -1454,14 +1384,6 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         if (window_handle_ != nullptr) Render();
         return 0;
       }
-      const int btn = HoverButtonAt(cx, cy);
-      if (btn >= 0) {
-        char utf8[128] = {};
-        WideCharToMultiByte(CP_UTF8, 0, kActionLabels[btn], -1, utf8,
-                            sizeof(utf8), nullptr, nullptr);
-        FireEvent(EventType::kAction, utf8);
-        return 0;
-      }
       // hover 导航点：今日/任务切页，「展开」点进展开卡。
       if (std::abs(morph_ - 1.0) < 0.45) {
         const int dot = HoverDotAt(cx, cy);
@@ -1503,7 +1425,6 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
     case WM_MOUSEMOVE: {
       const int cx = GET_X_LPARAM(lparam);
       const int cy = GET_Y_LPARAM(lparam);
-      const int btn = HoverButtonAt(cx, cy);
       hovering_ = true;
       if (stage_target_ != Stage::kCompact) {
         KillTimer(hwnd, 2);  // 鼠标回到岛上：取消分级自动收回
@@ -1519,8 +1440,7 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         tracking_mouse_ = true;
       }
       const int dot = std::abs(morph_ - 1.0) < 0.45 ? HoverDotAt(cx, cy) : -1;
-      if (btn != hover_btn_ || dot != hover_dot_) {
-        hover_btn_ = btn;
+      if (dot != hover_dot_) {
         hover_dot_ = dot;
         Render();
       }
@@ -1529,7 +1449,6 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
     case WM_MOUSELEAVE:
       hovering_ = false;
       tracking_mouse_ = false;
-      hover_btn_ = -1;
       hover_dot_ = -1;
       UpdateWheelHook();
       Render();

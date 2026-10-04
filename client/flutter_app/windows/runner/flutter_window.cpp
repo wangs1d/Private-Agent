@@ -1015,45 +1015,6 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
     return;
   }
 
-  if (method == "setAgentSteps") {
-    // 展开卡「任务动态」：agent 工具步骤流（labels/states 等长对齐）。
-    std::vector<DynamicIslandWindow::AgentStep> steps;
-    if (args != nullptr) {
-      const auto labels_it = args->find(flutter::EncodableValue("labels"));
-      const auto states_it = args->find(flutter::EncodableValue("states"));
-      const flutter::EncodableList* labels = nullptr;
-      const flutter::EncodableList* states = nullptr;
-      if (labels_it != args->end()) {
-        labels = std::get_if<flutter::EncodableList>(&labels_it->second);
-      }
-      if (states_it != args->end()) {
-        states = std::get_if<flutter::EncodableList>(&states_it->second);
-      }
-      if (labels != nullptr) {
-        const size_t n = states != nullptr
-                             ? std::min(labels->size(), states->size())
-                             : labels->size();
-        for (size_t i = 0; i < n; i++) {
-          DynamicIslandWindow::AgentStep step;
-          if (const auto* label = std::get_if<std::string>(&labels->at(i))) {
-            step.label = *label;
-          }
-          if (states != nullptr) {
-            if (const auto* st = std::get_if<int32_t>(&states->at(i))) {
-              step.state = *st;
-            }
-          }
-          steps.push_back(std::move(step));
-        }
-      }
-    }
-    if (dynamic_island_window_) {
-      dynamic_island_window_->SetAgentSteps(std::move(steps));
-    }
-    result->Success(flutter::EncodableValue(true));
-    return;
-  }
-
   if (method == "setVoiceTalkMode") {
     // 纯语音模式点击说话开关（取代语音唤醒）。
     const bool enabled = GetEncodableBool(args, "enabled", false);

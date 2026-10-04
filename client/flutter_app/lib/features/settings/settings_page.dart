@@ -16,6 +16,7 @@ import "../../core/theme/app_theme.dart";
 import "../chat/voiceprint_registration_page.dart";
 import "../model_config/model_provider_card.dart";
 import "../model_config/model_provider_catalog.dart";
+import "sleep_routine_section.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
@@ -263,7 +264,14 @@ class _SettingsPageState extends State<SettingsPage> {
       _SettingsSection.phoneBridge => "手机桥接",
     };
     final Widget card = switch (_section) {
-      _SettingsSection.general => _buildGeneralCard(),
+      _SettingsSection.general => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            _buildGeneralCard(),
+            const SizedBox(height: 16),
+            const SleepRoutineSection(),
+          ],
+        ),
       _SettingsSection.model => _buildModelSection(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
     };

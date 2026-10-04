@@ -15,6 +15,14 @@ import {
 } from "../services/conversation-rolling-summarizer.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import {
+  absorbPersistedClientIds,
+  copyUserMessageClientId,
+  PERSISTED_CLIENT_ID_FIELD,
+  readPersistedClientIdField,
+  readUserMessageClientId,
+  tagUserMessageClientId,
+} from "./chat-thread-client-id.js";
+import {
   compactValidChatMessages,
   repairKimiAssistantToolCallReasoning,
   sanitizeToolCallMessageChain,
@@ -22,11 +30,11 @@ import {
 import { stripLeadingTimestampFrames } from "../utils/timestamp-frame.js";
 
 /**
- * 客户端生成的 messageId → 所属 thread 消息对象的反向索引。
- * 用 WeakMap 而非 Map：消息从 thread 中移除（删除/trim/重建）后随 GC 自动释放，不会泄漏；
- * 进程重启或从磁盘 reload 后旧消息没有 clientMessageId，无法编辑/删除，仅影响历史数据，可接受。
+ * clientMessageId 的绑定/落盘字段实现已抽到 {@link ./chat-thread-client-id.js}
+ * （避免 store ↔ persist 循环依赖）。这里重新导出，保持既有调用方
+ * （abstract-chat-provider、测试）的导入路径不变。
  */
-const userMessageClientIdMap = new WeakMap<ChatCompletionMessageParam, string>();
+export { PERSISTED_CLIENT_ID_FIELD, tagUserMessageClientId };
 
 /**
  * 落库协议标记剥离（2026-09-25）：线程是 LLM 上下文的唯一事实源，模型按
@@ -49,17 +57,6 @@ function stripProtocolMarkersForThread(text: string): string {
   return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-export function tagUserMessageClientId(
-  msg: ChatCompletionMessageParam,
-  clientMessageId: string | undefined,
-): void {
-  if (clientMessageId) userMessageClientIdMap.set(msg, clientMessageId);
-}
-
-function readUserMessageClientId(msg: ChatCompletionMessageParam): string | undefined {
-  return userMessageClientIdMap.get(msg);
-}
-
 function findUserMessageByClientId(
   thread: ChatCompletionMessageParam[],
   clientMessageId: string,
@@ -72,6 +69,45 @@ function findUserMessageByClientId(
     }
   }
   return null;
+}
+
+/** user 消息的纯文本（剥掉时间戳帧前缀 / 取文本分段），非 user 或取不到文本时 null。 */
+function readUserMessagePlainText(msg: ChatCompletionMessageParam): string | null {
+  if (msg.role !== "user") return null;
+  if (typeof msg.content === "string") {
+    return stripLeadingTimestampFrames(msg.content).trim();
+  }
+  if (Array.isArray(msg.content)) {
+    const first = msg.content[0];
+    if (first && typeof first === "object" && (first as { type?: string }).type === "text") {
+      const text = (first as { text?: string }).text ?? "";
+      return stripLeadingTimestampFrames(text).trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * 按纯文本查找 user 消息（迁移兜底，2026-10-04）。
+ *
+ * 用途：本功能上线前落盘的线程没有 `__clientMessageId` 字段，重启后按 id 定位不到；
+ * 客户端同时带上被删消息的原文，就能把这段存量历史也删掉。
+ *
+ * 返回**全部**命中：由调用方判断是否唯一——同一句话发过两次时宁可不动，也不能删错轮次。
+ */
+function findUserMessagesByPlainText(
+  thread: ChatCompletionMessageParam[],
+  text: string,
+): Array<{ index: number; msg: ChatCompletionMessageParam }> {
+  const target = text.trim();
+  if (!target) return [];
+  const out: Array<{ index: number; msg: ChatCompletionMessageParam }> = [];
+  for (let i = 0; i < thread.length; i++) {
+    const msg = thread[i];
+    if (!msg) continue;
+    if (readUserMessagePlainText(msg) === target) out.push({ index: i, msg });
+  }
+  return out;
 }
 
 const DEFAULT_SMART_TRIM_CONFIG = {
@@ -347,16 +383,34 @@ function cloneMessageWithClientId(
   content: ChatCompletionMessageParam["content"],
 ): ChatCompletionMessageParam {
   const cloned = { ...msg, content } as ChatCompletionMessageParam;
-  const clientId = readUserMessageClientId(msg);
-  if (clientId) userMessageClientIdMap.set(cloned, clientId);
+  copyUserMessageClientId(msg, cloned);
   return cloned;
+}
+
+/**
+ * 视图层剥离线程内部元数据（`__clientMessageId`，仅落盘定位用）。
+ * 只在真的带该字段时才克隆（沿用「绝不就地改线程对象」的原则），并把反向索引透传给克隆。
+ * 正常路径上恢复线程时已吸收并剥掉，这里是不让字段漏进 LLM 请求体的兜底。
+ */
+function stripPersistedClientIdField(
+  msg: ChatCompletionMessageParam,
+): ChatCompletionMessageParam {
+  const clientId = readPersistedClientIdField(msg);
+  if (!clientId) return msg;
+  const cloned = { ...(msg as unknown as Record<string, unknown>) };
+  delete cloned[PERSISTED_CLIENT_ID_FIELD];
+  const out = cloned as unknown as ChatCompletionMessageParam;
+  copyUserMessageClientId(msg, out);
+  return out;
 }
 
 export function buildTimestampFreeLlmView(
   msgs: ChatCompletionMessageParam[],
 ): TimestampFreeLlmView {
   const timeline: TimelineEntry[] = [];
-  const view = msgs.map((msg) => {
+  const view = msgs.map((raw) => {
+    // 内部元数据先剥掉：它既不参与时间轴，也不该出现在发往 LLM 的正文里。
+    const msg = stripPersistedClientIdField(raw);
     if (msg.role !== "user" && msg.role !== "assistant") return msg;
     const roleLabel = msg.role === "user" ? "用户" : "助手";
 
@@ -1115,35 +1169,18 @@ export class ChatThreadStore {
       t = adoptPrimaryThreadFromMasterThread(this.history, sessionId);
     }
     if (!t && this.persistence) {
-      const restored = this.persistence.loadRestoredMessages(sessionId);
-      if (restored?.length) {
-        const now = new Date();
-        t = [
-          { role: "system", content: sessionSys ?? defaultSystemPrompt },
-          ...repairKimiAssistantToolCallReasoning(
-            compactValidChatMessages(
-              restored.map((msg) => annotateMessageWithOwnTimeOrKeep(msg, now)),
-            ),
-          ),
-        ];
-        this.history.set(sessionId, t);
-      }
+      t = this.restoreThreadFromPersistence(
+        sessionId,
+        sessionSys ?? defaultSystemPrompt,
+      ) ?? undefined;
     }
     if (!t && this.persistence && !sessionId.includes(":")) {
       // 持久层同规则收养：裸会话无落盘数据但存量 master:{actorId} 有 → 复制恢复
-      const masterRestored = this.persistence.loadRestoredMessages(masterChatSessionId(sessionId));
-      if (masterRestored?.length) {
-        const now = new Date();
-        t = [
-          { role: "system", content: sessionSys ?? defaultSystemPrompt },
-          ...repairKimiAssistantToolCallReasoning(
-            compactValidChatMessages(
-              masterRestored.map((msg) => annotateMessageWithOwnTimeOrKeep(msg, now)),
-            ),
-          ),
-        ];
-        this.history.set(sessionId, t);
-      }
+      t = this.restoreThreadFromPersistence(
+        masterChatSessionId(sessionId),
+        sessionSys ?? defaultSystemPrompt,
+      ) ?? undefined;
+      if (t) this.history.set(sessionId, t);
     }
     if (!t) {
       t = [{ role: "system", content: sessionSys ?? defaultSystemPrompt }];
@@ -1152,6 +1189,60 @@ export class ChatThreadStore {
     // 防串台已根源解决：afterTurnCompleted 在轮次完成时调用 foldCompletedToolChains
     // 移除 raw tool 结果。这里无需再做事后隔断。
     return t;
+  }
+
+  /**
+   * 按持久层数据恢复一个会话线程（system 头 + 时间戳补帧 + 落盘 clientMessageId 回灌）。
+   * @returns 恢复出的线程（已存入内存），持久层没数据时 null
+   */
+  private restoreThreadFromPersistence(
+    sessionId: string,
+    systemPrompt: string,
+  ): ChatCompletionMessageParam[] | null {
+    const restored = this.persistence?.loadRestoredMessages(sessionId);
+    if (!restored?.length) return null;
+    const now = new Date();
+    const t: ChatCompletionMessageParam[] = [
+      { role: "system", content: systemPrompt },
+      ...repairKimiAssistantToolCallReasoning(
+        compactValidChatMessages(
+          restored.map((msg) => annotateMessageWithOwnTimeOrKeep(msg, now)),
+        ),
+      ),
+    ];
+    // 顺序不能反：先把落盘字段重新灌回反向索引，再剥掉字段。两者都必须在**最终**线程
+    // 对象上做（索引按对象身份索引，灌到克隆前的中间产物等于没灌）。
+    absorbPersistedClientIds(t);
+    this.history.set(sessionId, t);
+    return t;
+  }
+
+  /**
+   * 变更类操作（按 clientMessageId 删除/编辑/定位）前取线程。
+   *
+   * 为什么需要它：{@link thread} 的惰性恢复只在「读线程」时发生，而删除/编辑入口
+   * 直接读 `this.history`——进程刚重启（或该会话本进程还没聊过）时线程不在内存，
+   * 这些操作会一律以 `session_not_found` 静默失败，用户侧表现为「点了删除没反应」。
+   * 这里先按持久层恢复一次再操作。
+   *
+   * 与 {@link thread} 的区别：持久层也没数据时返回 null，**不**给未知会话凭空建
+   * 一个空线程（一次删除请求不该产生上下文）。
+   */
+  private threadForClientIdOperation(
+    sessionId: string,
+  ): ChatCompletionMessageParam[] | null {
+    const resident = this.history.get(sessionId);
+    if (resident) return resident;
+    const persistence = this.persistence;
+    if (!persistence) return null;
+    const hasPersisted =
+      persistence.hasPersistedMessages(sessionId) ||
+      (!sessionId.includes(":") &&
+        persistence.hasPersistedMessages(masterChatSessionId(sessionId)));
+    if (!hasPersisted) return null;
+    // 恢复逻辑复用 thread()（含 master:{actorId} 存量收养 + clientMessageId 回灌），
+    // 不另写一套，避免两处漂移。
+    return this.thread(sessionId, this.sessionSystemProvider?.() ?? "");
   }
 
   trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number, sessionId?: string): void {
@@ -1571,7 +1662,7 @@ export class ChatThreadStore {
     clientMessageId: string | undefined,
   ): boolean {
     if (!clientMessageId) return false;
-    const msgs = this.history.get(sessionId);
+    const msgs = this.threadForClientIdOperation(sessionId);
     if (!msgs) return false;
     const found = findUserMessageByClientId(msgs, clientMessageId);
     if (!found) return false;
@@ -1583,6 +1674,57 @@ export class ChatThreadStore {
   }
 
   /**
+   * 删除「一整轮问答对」：指定 clientMessageId 的 user 消息 + 其后的 assistant /
+   * tool 链，直到（不含）下一条 user 消息。后续轮次与 Agent 记忆原样保留。
+   *
+   * 与 {@link removeUserMessageAndAfter} 的区别：后者把该 user 消息之后的**全部**
+   * 内容截断（用于「编辑后重发」），本方法只摘掉这一轮——对应客户端「删除这一轮
+   * 对话」按钮。此前该按钮走 `chat.clear_history`（clearAllMemoryForActor），
+   * 删一条消息会把整个会话线程 + 全部 Agent 记忆一并清空，属误伤。
+   *
+   * 局限：命中依赖 clientMessageId。反向索引是进程内 WeakMap，进程重启后旧消息原本
+   * 定位不到（返回 message_not_found）——现已把 id 随线程一起落盘、恢复时回灌
+   * （见 {@link PERSISTED_CLIENT_ID_FIELD}），跨重启同样命中。
+   *
+   * 存量兜底：本功能上线**之前**落盘的线程没有该字段，重启后仍定位不到；此时若调用方
+   * 带上 `fallbackText`（被删消息原文），按纯文本唯一命中定位（见
+   * {@link findUserMessagesByPlainText}）。
+   *
+   * @returns 命中并删除时 `{ ok: true, removed: N }`；未命中带 reason
+   *   （`ambiguous_text_match` = 原文命中多条，拒绝删以免删错轮次）
+   */
+  deleteTurn(
+    sessionId: string,
+    clientMessageId: string | undefined,
+    fallbackText?: string,
+  ): { ok: boolean; reason?: string; removed?: number } {
+    if (!clientMessageId) return { ok: false, reason: "missing_message_id" };
+    const msgs = this.threadForClientIdOperation(sessionId);
+    if (!msgs) return { ok: false, reason: "session_not_found" };
+    let found = findUserMessageByClientId(msgs, clientMessageId);
+    if (!found && fallbackText?.trim()) {
+      // 迁移兜底：本功能上线前落盘的线程没有 clientMessageId 字段（重启后按 id 定位不到），
+      // 客户端同时带上原文 → 按纯文本定位。只在「唯一命中」时才用，同文本发过两次就放弃，
+      // 宁可返回未命中，也不删错轮次。
+      const byText = findUserMessagesByPlainText(msgs, fallbackText);
+      if (byText.length > 1) return { ok: false, reason: "ambiguous_text_match" };
+      found = byText[0] ?? null;
+    }
+    if (!found) return { ok: false, reason: "message_not_found" };
+
+    // 轮次右边界：向后扫到下一条 user 消息（不含）；到末尾则截断到末尾。
+    let end = found.index + 1;
+    while (end < msgs.length && msgs[end]?.role !== "user") {
+      end++;
+    }
+
+    const removed = end - found.index;
+    msgs.splice(found.index, removed);
+    this.persistence?.scheduleSave(sessionId, msgs);
+    return { ok: true, removed };
+  }
+
+  /**
    * 读取 user 消息的纯文本（去时间戳前缀），用于客户端编辑回填 / 服务端校验。
    * @returns 命中则返回文本，未命中返回 null
    */
@@ -1591,7 +1733,7 @@ export class ChatThreadStore {
     clientMessageId: string,
   ): string | null {
     if (!clientMessageId) return null;
-    const msgs = this.history.get(sessionId);
+    const msgs = this.threadForClientIdOperation(sessionId);
     if (!msgs) return null;
     const found = findUserMessageByClientId(msgs, clientMessageId);
     if (!found) return null;
@@ -1616,7 +1758,7 @@ export class ChatThreadStore {
     if (!clientMessageId) return { ok: false, reason: "missing_message_id" };
     const text = newText.trim();
     if (!text) return { ok: false, reason: "empty_text" };
-    const msgs = this.history.get(sessionId);
+    const msgs = this.threadForClientIdOperation(sessionId);
     if (!msgs) return { ok: false, reason: "session_not_found" };
     const found = findUserMessageByClientId(msgs, clientMessageId);
     if (!found) return { ok: false, reason: "message_not_found" };

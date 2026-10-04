@@ -50,6 +50,7 @@ import { registerCapabilityReadinessRoutes } from "./capability-readiness.js";
 import { registerChatSuggestionRoutes } from "./chat-suggestions.js";
 import { registerMemoryCrudRoutes } from "./memory-crud.js";
 import { registerProfileManageRoutes } from "./profile-manage.js";
+import { registerUserAvatarRoutes } from "./user-avatar.js";
 import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
@@ -263,6 +264,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerChatSuggestionRoutes(app);
   registerMemoryCrudRoutes(app);
   registerProfileManageRoutes(app);
+  // 用户头像（自包含，无 deps）：上传/查询/静态拉流
+  registerUserAvatarRoutes(app);
   // 声纹注册/验证（首启向导 + 语音对话说话人闸；引擎本地 ONNX，缺失时优雅降级）
   registerVoiceprintRoutes(app);
   registerPaymentGuardrailRoutes(app);

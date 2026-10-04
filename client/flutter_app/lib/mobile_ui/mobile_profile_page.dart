@@ -1,14 +1,20 @@
+import "dart:async";
+
+import "package:file_picker/file_picker.dart";
+import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 
 import "../core/config/api_config.dart";
+import "../core/presentation/user_avatar.dart";
+import "../core/services/user_avatar_api.dart";
 import "mobile_theme.dart";
 
 /// 手机端「我的」页。
 ///
-/// - 顶部账号卡片：头像首字母 + 当前账号 id + 服务器地址
+/// - 顶部账号卡片：头像（点击可设置，未设置时首字母）+ 当前账号 id + 服务器地址
 /// - 设置：主题(亮 / 暗 / 跟随系统)、每日简报入口
 /// - 账号：退出登录
-class MobileProfilePage extends StatelessWidget {
+class MobileProfilePage extends StatefulWidget {
   const MobileProfilePage({
     super.key,
     required this.themeMode,
@@ -26,6 +32,57 @@ class MobileProfilePage extends StatelessWidget {
   final VoidCallback onLogout;
 
   @override
+  State<MobileProfilePage> createState() => _MobileProfilePageState();
+}
+
+class _MobileProfilePageState extends State<MobileProfilePage> {
+  final UserAvatarApi _avatarApi = UserAvatarApi();
+
+  /// 用户头像相对路径（服务端 /agent/avatars/...；null=未设置）。
+  String? _userAvatarPath;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadAvatar());
+  }
+
+  /// 拉取当前账号头像（非关键链路：失败静默，账号卡回退首字母球）。
+  Future<void> _loadAvatar() async {
+    final String? path = await _avatarApi.fetchAvatarPath();
+    if (!mounted || path == _userAvatarPath) return;
+    setState(() => _userAvatarPath = path);
+  }
+
+  /// 点击账号卡头像：选图 → 上传 → 即时刷新。
+  Future<void> _setAvatar() async {
+    final FilePickerResult? picked = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      withData: true,
+    );
+    final PlatformFile? file = picked?.files.single;
+    if (file == null) return;
+    if (file.bytes == null || file.bytes!.isEmpty) {
+      // 选图期间页面可能已被销毁（返回/退出登录），此时 context 不可用
+      if (!mounted) return;
+      _toast("读取图片失败，请换一张试试");
+      return;
+    }
+    final String? path = await _avatarApi.uploadAvatar(file.bytes!, file.name);
+    if (!mounted) return;
+    if (path == null) {
+      _toast("头像上传失败，请稍后再试");
+      return;
+    }
+    setState(() => _userAvatarPath = path);
+    _toast("头像已更新");
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
     return Scaffold(
@@ -37,14 +94,19 @@ class MobileProfilePage extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.symmetric(vertical: 8),
         children: [
-          _AccountCard(actorId: ApiConfig.effectiveActorId, httpBase: ApiConfig.httpBase),
+          _AccountCard(
+            actorId: ApiConfig.effectiveActorId,
+            httpBase: ApiConfig.httpBase,
+            avatarUrl: UserAvatarApi.resolveUrl(_userAvatarPath),
+            onChangeAvatar: _setAvatar,
+          ),
           const SizedBox(height: 16),
           _GroupLabel(label: "设置"),
           _SectionCard(
             children: [
               _ThemeModeRow(
-                themeMode: themeMode,
-                onChanged: onThemeModeChanged,
+                themeMode: widget.themeMode,
+                onChanged: widget.onThemeModeChanged,
               ),
               _divider(context),
               _ListRow(
@@ -132,7 +194,7 @@ class MobileProfilePage extends StatelessWidget {
             TextButton(
               onPressed: () {
                 Navigator.of(ctx).pop();
-                onLogout();
+                widget.onLogout();
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text("已退出登录,会话已清空")),
                 );
@@ -148,16 +210,53 @@ class MobileProfilePage extends StatelessWidget {
 
 /// 顶部账号卡片。
 class _AccountCard extends StatelessWidget {
-  const _AccountCard({required this.actorId, required this.httpBase});
+  const _AccountCard({
+    required this.actorId,
+    required this.httpBase,
+    this.avatarUrl,
+    this.onChangeAvatar,
+  });
 
   final String actorId;
   final String httpBase;
+
+  /// 用户头像绝对 URL（null=未设置，渲染首字母球）。
+  final String? avatarUrl;
+
+  /// 点击头像更换头像（null 时不可点）。
+  final VoidCallback? onChangeAvatar;
 
   @override
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
     final String initial =
         actorId.isEmpty ? "U" : actorId.characters.first.toUpperCase();
+    final Widget avatarFallback = Container(
+      width: 52,
+      height: 52,
+      decoration: BoxDecoration(
+        color: p.accent,
+        shape: BoxShape.circle,
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        initial,
+        style: TextStyle(
+          color: p.onAccent,
+          fontSize: 20,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+    final Widget avatar = onChangeAvatar == null
+        ? UserAvatar(url: avatarUrl, size: 52, fallback: avatarFallback)
+        : GestureDetector(
+            onTap: onChangeAvatar,
+            child: Tooltip(
+              message: "点击设置头像",
+              child: UserAvatar(url: avatarUrl, size: 52, fallback: avatarFallback),
+            ),
+          );
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       padding: const EdgeInsets.all(18),
@@ -167,23 +266,7 @@ class _AccountCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Container(
-            width: 52,
-            height: 52,
-            decoration: BoxDecoration(
-              color: p.accent,
-              shape: BoxShape.circle,
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              initial,
-              style: TextStyle(
-                color: p.onAccent,
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
+          avatar,
           const SizedBox(width: 14),
           Expanded(
             child: Column(
