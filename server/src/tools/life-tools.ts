@@ -16,6 +16,7 @@ import {
   buildSuggestion,
   type ProductCatalog,
 } from "../recommendation/index.js";
+import type { ProductRecord } from "../recommendation/product-catalog.js";
 import {
   applyPersonalization,
   buildPersonalizationUserPrompt,
@@ -28,11 +29,38 @@ export interface SuggestPersonalizationDeps {
   catalog: ProductCatalog;
   personalization?: SuggestPersonalizationPort;
   /**
-   * 缺图候选的网搜补图端口：query 检索一张商品图，返回可直接渲染的
-   * 本地相对路径（如 /agent/images/:actorId/:file.png），无结果返回 null。
-   * 卡片「默认带图」由此保证；不注入时缺图候选保持无图（原行为）。
+   * 缺图候选的网搜补图端口（单图，降级路径）：query 检索一张商品图，返回可
+   * 直接渲染的本地相对路径，无结果返回 null。未提供多图端口时使用。
    */
   webImageSearch?: (query: string, actorId: string) => Promise<string | null>;
+  /**
+   * 缺图候选的多图网搜（图片三优先级第二级）：返回 ≤limit 张本地 PNG 地址。
+   * 与 pickProductImage 搭配构成「批量搜图 → VLM 选主体图」链路；
+   * 未注入时降级 webImageSearch 单图语义。
+   */
+  webImageCandidates?: (query: string, actorId: string, limit: number) => Promise<string[]>;
+  /**
+   * 商品图 VLM 质检选图（选图裁判，仅网搜兜底时启用）：对候选图打分返回
+   * 最适合「商品主体图」的一张；VLM 不可用/超时/全负分返回 null（调用方取首图）。
+   */
+  pickProductImage?: (
+    candidates: Array<{ url: string }>,
+    productName: string,
+    deadlineMs: number,
+  ) => Promise<string | null>;
+  /**
+   * 库未命中时的实时聚合端口（联盟 API，方案 P1-A）：返回标准化商品记录
+   * （内部已转 ProductRecord 并带 source=live）与溯源 notes；8s 死线由端口内保证。
+   */
+  liveSourcing?: (
+    query: string,
+    budget?: number,
+  ) => Promise<{ records: ProductRecord[]; notes: string[] }>;
+  /**
+   * 真实口碑聚合端口（P3：小红书 UGC，归属主推商品）：返回 null=无口碑
+   * （alias 未配置/失败/空），卡口碑区整体不渲染；6s 死线由 handler 保证。
+   */
+  ugcSearch?: (productName: string) => Promise<unknown>;
 }
 
 // 补图结果缓存：命中永久有效（转存 PNG 不可变且静态路由长缓存）；
@@ -41,18 +69,26 @@ export interface SuggestPersonalizationDeps {
 const SUGGEST_IMAGE_MISS_RETRY_MS = 10 * 60_000;
 // 补图整体死线：shopping.suggest 外圈工具超时默认 30s，给个性化 LLM 留余量
 const SUGGEST_IMAGE_FILL_DEADLINE_MS = 9_000;
+// 口碑聚合死线：与补图/个性化同预算池（30s 工具超时），收窄到 6s
+const SUGGEST_UGC_DEADLINE_MS = 6_000;
 
 type SuggestImageCache = Map<string, { url: string | null; cachedAt: number }>;
 
-/** 对无图候选并行网搜补图（有图候选不动——商品库一手图优先于网搜图）。 */
+/**
+ * 对无图候选并行补图（有图候选不动——官方/商品库一手图优先于网搜图）。
+ * 图片三优先级：联盟官方主图（live 记录自带，此处天然有图）＞多图网搜＋
+ * VLM 选主体图（webImageCandidates + pickProductImage）＞单图网搜（旧路径）。
+ * VLM 选图超时/失败/全负分时取首图兜底，不阻断推荐。
+ */
 async function fillCandidateImages(
   candidates: Array<{ productId: string; brand: string; name: string; image?: string }>,
   deps: SuggestPersonalizationDeps,
   cache: SuggestImageCache,
   actorId: string,
 ): Promise<void> {
-  const search = deps.webImageSearch;
-  if (!search) return;
+  const searchMulti = deps.webImageCandidates;
+  const searchSingle = deps.webImageSearch;
+  if (!searchMulti && !searchSingle) return;
   const pending = candidates.filter((c) => !c.image);
   if (pending.length === 0) return;
   const deadline = Date.now() + SUGGEST_IMAGE_FILL_DEADLINE_MS;
@@ -70,8 +106,29 @@ async function fillCandidateImages(
       const budget = deadline - Date.now();
       if (budget <= 0) return;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const label = `${c.brand} ${c.name}`.trim();
       const url = await Promise.race([
-        search(`${c.brand} ${c.name}`.trim(), actorId).catch(() => null),
+        (async () => {
+          if (searchMulti) {
+            try {
+              // 「产品图」后缀提高主体图命中率；3 张给 VLM 足够淘汰场景图/水印图
+              const urls = await searchMulti(`${label} 产品图`, actorId, 3);
+              if (urls.length === 0) return null;
+              if (deps.pickProductImage) {
+                const best = await deps.pickProductImage(
+                  urls.map((u) => ({ url: u })),
+                  label,
+                  Math.max(1_500, deadline - Date.now()),
+                );
+                if (best) return best;
+              }
+              return urls[0] ?? null;
+            } catch {
+              return null;
+            }
+          }
+          return searchSingle!(label, actorId).catch(() => null);
+        })(),
         new Promise<null>((resolve) => {
           timer = setTimeout(() => resolve(null), budget);
         }),
@@ -122,14 +179,31 @@ export function registerLifeTools(
     }
 
     // ① 确定性检索：商品库真实数据圈定候选（视频/价格/对比表都出自这里；
-    //    图片出自商品库 + 缺图时网搜补齐）
-    const recommendation = buildSuggestion(suggestDeps.catalog, { item, budget });
+    //    图片出自官方主图/商品库 + 缺图时网搜补齐）
+    let recommendation = buildSuggestion(suggestDeps.catalog, { item, budget });
+    // ①.2 库未命中 → 实时聚合兜底（方案 P1-A，2026-10-05 拍板：实时聚合为主、
+    //    种子库为冷启动缓存）：联盟 API 拉在售商品落库缓存后重检索。
+    //    端口内 8s 死线；未配置凭据/全失败返回空，保持「库无此品」的诚实话术。
+    const liveNotes: string[] = [];
+    if (!recommendation && suggestDeps.liveSourcing) {
+      try {
+        const live = await suggestDeps.liveSourcing(item, budget);
+        liveNotes.push(...(live.notes ?? []));
+        if (live.records.length > 0) {
+          suggestDeps.catalog.upsertLive(live.records);
+          recommendation = buildSuggestion(suggestDeps.catalog, { item, budget });
+        }
+      } catch {
+        // 实时聚合失败降级：与未命中同样如实告知，不阻断工具
+      }
+    }
     if (!recommendation) {
       return {
         ok: true,
         summary: `商品库中「${item}」无匹配商品`,
         item,
         budget,
+        ...(liveNotes.length > 0 ? { notes: liveNotes } : {}),
         suggestion: "如实告知库里没有匹配商品，可给泛选购建议；不编造在售商品。",
       };
     }
@@ -143,6 +217,29 @@ export function registerLifeTools(
       );
     } catch {
       // 补图失败静默降级：候选保持无图，不阻断推荐
+    }
+
+    // ①.6 真实口碑聚合（P3：小红书 UGC，归属主推商品）：6s 死线 race，
+    //    失败/空 → 不附口碑（卡片无口碑区），不阻断推荐。
+    if (suggestDeps.ugcSearch && recommendation.pick) {
+      const pickBase = suggestDeps.catalog.get(recommendation.pick.productId);
+      const pickLabel = pickBase
+        ? `${pickBase.brand} ${pickBase.name}`.trim()
+        : item;
+      try {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const ugc = await Promise.race([
+          Promise.resolve(suggestDeps.ugcSearch(pickLabel)).catch(() => null),
+          new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), SUGGEST_UGC_DEADLINE_MS);
+          }),
+        ]).finally(() => clearTimeout(timer));
+        if (ugc && typeof ugc === "object") {
+          recommendation.ugc = ugc as typeof recommendation.ugc;
+        }
+      } catch {
+        // 口碑失败静默降级：无口碑区
+      }
     }
 
     // ② 每轮实时决策：结合用户画像/习惯，由 LLM 当轮重排候选并改写推荐话术
@@ -182,6 +279,7 @@ export function registerLifeTools(
             recommendation: personalized,
             suggestionText: buildAdvisorSuggestionText(personalized),
             personalized: applied,
+            ...(liveNotes.length > 0 ? { notes: liveNotes } : {}),
           };
         }
       } catch {
@@ -195,6 +293,7 @@ export function registerLifeTools(
       budget,
       recommendation,
       suggestionText: buildAdvisorSuggestionText(recommendation),
+      ...(liveNotes.length > 0 ? { notes: liveNotes } : {}),
     };
   });
 

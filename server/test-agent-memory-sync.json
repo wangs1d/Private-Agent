@@ -1,12 +1,12 @@
 {
   "sessions": {
-    "actor-4": {
+    "actor-zombie": {
       "revision": 2,
       "entries": {
-        "memory_summary": "[2026-10-05T05:47:29.356Z] [topic:general] I live in Shanghai\n[2026-10-05T05:47:29.357Z] [topic:general] I live in Beijing",
+        "memory_commitments": "[2026-10-05T14:26:26.508Z] [topic:general] I will send the morning briefing at 8am",
+        "memory_summary": "[2026-10-05T14:26:26.508Z] [topic:general] I will send the morning briefing at 8am",
         "memory_summary_forgotten": "",
-        "memory_facts": "[2026-10-05T05:47:29.357Z] [topic:general] I live in Beijing",
-        "session_recap": "[2026-10-05T05:47:29.356Z] [topic:general] I live in Shanghai\n[2026-10-05T05:47:29.357Z] [topic:general] I live in Beijing"
+        "session_recap": "[2026-10-05T14:26:26.508Z] [topic:general] I will send the morning briefing at 8am"
       }
     }
   }

@@ -87,6 +87,20 @@ export class ImageGenerationService {
     return { ok: false, error: lastError };
   }
 
+  /**
+   * 把服务端已持有的 PNG 直接落盘（如购物流程登录/支付二维码截图），
+   * 复用 data/images/{actorId}/ 目录与 /agent/images/ 静态拉流路由。
+   * 命名规则与 resolveFilePath 校验保持一致：`{ts}-{uuid8}.png`。
+   */
+  async savePng(actorId: string, png: Buffer): Promise<string> {
+    const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
+    const dir = join(this.storageRoot, safeActorId);
+    await mkdir(dir, { recursive: true });
+    const fileName = `${Date.now()}-${randomUUID().slice(0, 8)}.png`;
+    await writeFile(join(dir, fileName), png);
+    return `/agent/images/${safeActorId}/${fileName}`;
+  }
+
   /** 把远程图片下载并统一转成 PNG 落盘，返回可访问的相对路径。 */
   async downloadAndStorePng(
     remoteUrl: string,

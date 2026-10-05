@@ -12,7 +12,7 @@ import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../ut
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ComputeQuotaService } from "./compute-quota-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
-import type { ToolRegistry } from "../tools/tool-registry.js";
+import type { ToolMediaCard, ToolRegistry } from "../tools/tool-registry.js";
 import type { VirtualPhoneService } from "./virtual-phone-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
@@ -293,6 +293,11 @@ export type HandleUserMessageOptions = {
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
   onBackgroundAssistantDelta?: (info: { messageId: string; delta: string; source: string }) => void;
   onBackgroundAssistantDone?: (info: { messageId: string; finalText: string; source: string }) => void;
+  /**
+   * 工具执行中途向聊天流推送媒体卡片（如购物登录/支付二维码）。
+   * WS 聊天主路径装配（chat.media_ready 挂到当前流式回复）；程序化调用方缺省为空。
+   */
+  pushMediaCards?: (cards: ToolMediaCard[]) => void;
   chatUserMessageId?: string;
   userId?: string;
   clientIp?: string;
@@ -1543,6 +1548,8 @@ if (route.plane === "task") {
       clientIp?: string;
       clientLocation?: ClientLocationWire;
       agentAccessMode?: AgentAccessMode;
+      /** 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配） */
+      pushMediaCards?: (cards: ToolMediaCard[]) => void;
     },
   ): Promise<{ ok: boolean; result?: Record<string, unknown> }> {
     if (!reply.toolName || !reply.toolInput) return { ok: true };
@@ -1586,6 +1593,8 @@ if (route.plane === "task") {
       requestLocation: () =>
         this.locationCoordinator?.requestLocation(actorId, `tool:${reply.toolName}`) ??
         Promise.resolve(null),
+      // 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配）
+      pushMediaCards: opts?.pushMediaCards,
     });
   }
 
@@ -2132,6 +2141,8 @@ if (route.plane === "task") {
           requestLocation: () =>
             this.locationCoordinator?.requestLocation(actorId, "tool:standard-llm-path") ??
             Promise.resolve(null),
+          // 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配）
+          pushMediaCards: opts?.pushMediaCards,
         },
       },
       {

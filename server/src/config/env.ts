@@ -100,6 +100,35 @@ export function getRuntimeTopologyConfig(env: NodeJS.ProcessEnv = process.env): 
   };
 }
 
+export type HttpsRuntimeConfig = {
+  enabled: boolean;
+  port: number;
+  /** null → 默认 server/certs/ */
+  certDir: string | null;
+  /** 启动时自动把本地根 CA 装入 Windows 用户信任库（Chrome/Edge 出锁标） */
+  autoTrust: boolean;
+  opensslBin: string | null;
+};
+
+/**
+ * 本地 HTTPS 双监听（utils/dev-https.ts）：默认开启，HTTP 端口行为零变化。
+ *   HTTPS_ENABLED=0   关闭 HTTPS 监听
+ *   HTTPS_PORT=3443   HTTPS 端口
+ *   TLS_CERT_DIR      证书目录（默认 server/certs/）
+ *   TLS_AUTO_TRUST=0  跳过 CA 自动装入 Windows 用户信任库
+ *   OPENSSL_BIN       指定 openssl 路径（默认 PATH / Git 自带副本）
+ */
+export function getHttpsRuntimeConfig(env: NodeJS.ProcessEnv = process.env): HttpsRuntimeConfig {
+  const portRaw = parseInteger(env.HTTPS_PORT, 3443);
+  return {
+    enabled: parseBoolean(env.HTTPS_ENABLED, true),
+    port: portRaw > 0 && portRaw < 65536 ? portRaw : 3443,
+    certDir: env.TLS_CERT_DIR?.trim() || null,
+    autoTrust: parseBoolean(env.TLS_AUTO_TRUST, true),
+    opensslBin: env.OPENSSL_BIN?.trim() || null,
+  };
+}
+
 /**
  * Loop Orchestrator 启用开关。
  *

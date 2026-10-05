@@ -16,8 +16,16 @@ import type { SuggestCandidate, SuggestResult } from "./suggest-engine.js";
 
 export type PersonalizationLlmOutput = {
   summary?: string;
+  pick?: {
+    productId?: unknown;
+    headline?: unknown;
+  };
+  alternatives?: Array<{
+    productId?: unknown;
+    whenChoose?: unknown;
+  }>;
   candidates?: Array<{
-    productId?: string;
+    productId?: unknown;
     reasons?: unknown;
     cautions?: unknown;
   }>;
@@ -30,16 +38,18 @@ export type SuggestPersonalizationPort = {
   llmComplete: ((system: string, userText: string) => Promise<string>) | null;
 };
 
-export const PERSONALIZATION_RULES_PROMPT = `你是购物建议的个性化组织器。基于【用户画像与习惯】和【候选商品数据】，为这位用户实时组织本轮推荐话术。
+export const PERSONALIZATION_RULES_PROMPT = `你是购物建议的个性化组织器。基于【用户画像与习惯】和【候选商品数据】，为这位用户实时组织本轮推荐——必须给出立场：先定主推，再说明备选什么时候值得选。
 
 要求：
 1) 只使用画像与商品数据中出现的事实（参数/价格/评价/用户画像条目），禁止编造参数、编造评价、编造用户没有表达过的偏好
-2) 结合用户画像与习惯改写每个候选的 reasons：落到用户的具体场景（通勤/预算/已有设备/作息/偏好），每条不超过 30 字
-3) cautions 同样按用户场景改写（对这位用户真正要紧的注意点放前面）
-4) 重排 candidates：最贴合该用户的在前；明确不适合该用户的候选可以剔除
-5) summary 一句话（不超过 40 字），直接给结论，说明为什么这么排
-6) 只输出 JSON，格式：
-{"summary":"…","candidates":[{"productId":"…","reasons":["…"],"cautions":["…"]}]}
+2) pick：从候选中定 1 个主推（排第一），headline 一句话（≤40字）说清「为什么是它」——必须引用该用户画像/场景与商品事实的匹配点（预算/通勤/已有设备/作息/偏好），不写空话
+3) alternatives：给每个备选一句 whenChoose（≤30字）——什么情况下选它而不是主推（如「预算再压 300」「更在乎佩戴」）；没有差异化价值的备选可以不给
+4) 结合用户画像与习惯改写每个候选的 reasons：落到用户的具体场景，每条不超过 30 字
+5) cautions 同样按用户场景改写（对这位用户真正要紧的注意点放前面）
+6) candidates 顺序 = 推荐顺序（主推在前）；明确不适合该用户的候选可以剔除
+7) summary 一句话（不超过 40 字），直接给结论，说明为什么这么排
+8) 只输出 JSON，格式：
+{"summary":"…","pick":{"productId":"…","headline":"…"},"alternatives":[{"productId":"…","whenChoose":"…"}],"candidates":[{"productId":"…","reasons":["…"],"cautions":["…"]}]}
 不要输出任何解释文字。`;
 
 export function buildPersonalizationUserPrompt(input: {
@@ -100,17 +110,47 @@ export function applyPersonalization(
   }
   if (personalized.length === 0) return { result, applied: false };
 
-  return {
-    result: {
-      ...result,
-      summary:
-        typeof parsed.summary === "string" && parsed.summary.trim().length > 0
-          ? parsed.summary.trim()
-          : result.summary,
-      candidates: personalized,
-    },
-    applied: true,
+  // 立场回填：LLM 主推必须是候选之一，且把它排到首位（pick 与 candidates[0] 一致）；
+  // 非法/缺失时保留引擎的确定性立场（首位即主推），不因个性化失败而失去立场。
+  const finalResult: SuggestResult = {
+    ...result,
+    summary:
+      typeof parsed.summary === "string" && parsed.summary.trim().length > 0
+        ? parsed.summary.trim()
+        : result.summary,
+    candidates: personalized,
   };
+  const pickId = typeof parsed.pick?.productId === "string" ? parsed.pick.productId : "";
+  const pickBase = byId.get(pickId);
+  const pickIdx = personalized.findIndex((c) => c.productId === pickId);
+  if (pickBase && pickIdx >= 0) {
+    if (pickIdx > 0) {
+      const picked = personalized.splice(pickIdx, 1)[0]!;
+      personalized.unshift(picked);
+    }
+    finalResult.pick = {
+      productId: pickId,
+      headline:
+        typeof parsed.pick?.headline === "string" && parsed.pick.headline.trim().length > 0
+          ? parsed.pick.headline.trim()
+          : result.pick?.headline ?? pickBase.reasons[0] ?? "",
+    };
+  }
+  if (Array.isArray(parsed.alternatives)) {
+    const alts: NonNullable<SuggestResult["alternatives"]> = [];
+    for (const alt of parsed.alternatives) {
+      const id = typeof alt?.productId === "string" ? alt.productId : "";
+      const when = typeof alt?.whenChoose === "string" ? alt.whenChoose.trim() : "";
+      // 只接受「未被剔除的已知候选」的定位，且不与既有引擎定位冲突合并
+      if (!id || id === finalResult.pick?.productId || !when) continue;
+      if (!byId.has(id) || !personalized.some((c) => c.productId === id)) continue;
+      if (alts.some((a) => a.productId === id)) continue;
+      alts.push({ productId: id, whenChoose: when.slice(0, 40) });
+    }
+    if (alts.length > 0) finalResult.alternatives = alts;
+  }
+
+  return { result: finalResult, applied: true };
 }
 
 function toStringList(raw: unknown, fallback: string[], max: number): string[] {

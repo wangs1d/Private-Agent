@@ -117,6 +117,49 @@ export class BrowserSessionService {
     return statuses.find((s) => s.siteId === siteId)!;
   }
 
+  /**
+   * 登录态捕获写入（「一次登录一直使用」）。
+   *
+   * 与手动 importCookies 的区别：
+   *   - 扫码登录成功 / 用户本人在内置浏览器登录后，由服务端自动捕获调用——
+   *     用户本人的登录动作即授权，新行可直接置 agentAllowed=true；
+   *   - 已有行只刷新 Cookie，授权**只升不降**（绝不静默重置/清除）：
+   *     手动导入后未授权（agentAllowed=false）的行不会被本次捕获悄悄升权，
+   *     除非显式传 opts.agentAllowed=true；
+   *   - 无删除语义：不清理旧行、不过滤过期 cookie（由使用方检测登录失效）。
+   */
+  async updateCookiesFromLogin(
+    actorId: string,
+    siteId: string,
+    cookies: ImportedBrowserCookie[],
+    opts?: { agentAllowed?: boolean },
+  ): Promise<BrowserSiteStatus> {
+    if (!isBrowserSessionSiteId(siteId)) {
+      throw new Error(`不支持的站点 siteId: ${siteId}`);
+    }
+    const normalized = normalizeCookies(cookies, siteId);
+    if (normalized.length === 0) {
+      throw new Error("捕获的 cookies 为空或域名与站点不匹配");
+    }
+
+    const now = new Date().toISOString();
+    const file = await this.loadActor(actorId);
+    const previous = file.sites[siteId];
+    const row: PersistedBrowserSiteSession = {
+      siteId,
+      label: BROWSER_SESSION_SITES[siteId].label,
+      cookiesEnc: encryptJson(normalized),
+      importedAt: previous?.importedAt ?? now,
+      updatedAt: now,
+      agentAllowed: previous?.agentAllowed === true || opts?.agentAllowed === true,
+      cookieCount: normalized.length,
+    };
+    file.sites[siteId] = row;
+    await this.saveActor(file);
+    const statuses = await this.listStatuses(actorId);
+    return statuses.find((s) => s.siteId === siteId)!;
+  }
+
   async revoke(actorId: string, siteId: string): Promise<void> {
     if (!isBrowserSessionSiteId(siteId)) {
       throw new Error(`不支持的站点 siteId: ${siteId}`);
@@ -196,6 +239,15 @@ function normalizeCookies(
     const name = String(raw.name ?? "").trim();
     const value = String(raw.value ?? "");
     if (!name) continue;
+    // RFC 6265：cookie value 不得包含分号/逗号/空白/引号/反斜杠等——
+    // 带 ';' 的值会在 Playwright addCookies 处变成晦涩的 "Invalid cookie fields"，
+    // 常见原因是导出格式不对（整段 "k=v; k2=v2" 粘进了 value）。这里提前给出可读报错。
+    if (/[;,\s"\\]/.test(value)) {
+      throw new Error(
+        `Cookie「${name}」的 value 含非法字符（; , 空白 引号等）。` +
+          `请检查导出格式：应导出 JSON 数组（[{ name, value, domain, ... }]），不要把整段 "k=v; k2=v2" 文本粘进单个 value`,
+      );
+    }
     const domain = String(raw.domain ?? "").trim().replace(/^\./, "");
     if (domain) {
       const host = domain.toLowerCase();

@@ -1,11 +1,13 @@
 import { randomUUID } from "crypto";
 
+import type { Page } from "playwright";
+
 import { resolveActorId } from "../agent/actor-id.js";
 import { redactCredentials } from "../security/redact.js";
 import type { AuditService } from "./audit-service.js";
 import type { AlipayBotService } from "./alipay-bot-service.js";
 import type { BrowserSessionService } from "./browser-session-service.js";
-import type { BrowserSessionSiteId } from "./browser-session-sites.js";
+import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "./browser-session-sites.js";
 import type { ImportedBrowserCookie } from "./browser-session-types.js";
 import {
   localDateKey,
@@ -14,6 +16,12 @@ import {
   type ShoppingOrderStore,
   type StoredShoppingOrder,
 } from "./shopping-order-store.js";
+import {
+  ShoppingBrowserExecutor,
+  ShoppingPageUnavailableError,
+  type ShoppingPageLease,
+} from "./shopping-platforms/browser-executor.js";
+import { detectLoginPage, getLoginWaitMs, waitForLogin } from "./shopping-platforms/login-gate.js";
 import { getShoppingPlatformAdapter, listSupportedPlatforms } from "./shopping-platforms/index.js";
 import type {
   CheckoutSnapshot,
@@ -22,6 +30,8 @@ import type {
   SearchFilters,
   ShoppingPlatformAdapter,
 } from "./shopping-platforms/index.js";
+import { SharedBrowserCdpGateway } from "./shared-browser/cdp-gateway.js";
+import { SharedBrowserCoordinator } from "./shared-browser-coordinator.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 
 /** 单笔金额上限（CNY）。可用 SHOPPING_ORDER_MAX_AMOUNT_<平台大写>_CNY 按平台覆盖（演出票等高价类目调高）。 */
@@ -47,6 +57,33 @@ function getDailyBudgetCny(): number {
 function getConfirmationTtlMs(): number {
   const v = Number.parseInt(process.env.SHOPPING_ORDER_CONFIRMATION_TTL_MS ?? "300000", 10);
   return Number.isFinite(v) && v > 0 ? v : 300_000;
+}
+
+/** Playwright Cookie → ImportedBrowserCookie（过滤非法 value；expires≤0 的会话 Cookie 存 undefined）。 */
+function toImportedCookies(
+  raw: Array<{
+    name: string;
+    value: string;
+    domain?: string;
+    path?: string;
+    expires?: number;
+    httpOnly?: boolean;
+    secure?: boolean;
+    sameSite?: string;
+  }>,
+): ImportedBrowserCookie[] {
+  return raw
+    .filter((c) => c.name && c.value && !/[;,\s"\\]/.test(c.value))
+    .map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain || undefined,
+      path: c.path || undefined,
+      expires: typeof c.expires === "number" && c.expires > 0 ? c.expires : undefined,
+      httpOnly: c.httpOnly || undefined,
+      secure: c.secure || undefined,
+      sameSite: c.sameSite || undefined,
+    }));
 }
 
 /** 阶段一存活的 Playwright Page + 上下文，供阶段二复用。 */
@@ -77,82 +114,40 @@ interface PendingConfirmation {
 /** 服务返回的通用结构。 */
 export type ShoppingOrderResult =
   | { ok: true; summary: string } & Record<string, unknown>
-  | { ok: false; error: string; retryable?: boolean; /** 订单无收银台链接时置位，引导用户去平台 App 支付 */ needManualPayment?: boolean; paymentUrl?: string };
-
-/** Playwright 动态加载（避免在未安装时启动失败）。 */
-async function loadPlaywright(): Promise<typeof import("playwright") | null> {
-  try {
-    return await import("playwright");
-  } catch {
-    return null;
-  }
-}
-
-/** 把 ImportedBrowserCookie 转成 Playwright addCookies 格式（参照 browser-page-fetch.ts）。 */
-function toPlaywrightCookies(
-  pageUrl: string,
-  cookies: ImportedBrowserCookie[],
-): Array<{
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-  expires?: number;
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: "Strict" | "Lax" | "None";
-}> {
-  let defaultHost = "";
-  try {
-    defaultHost = new URL(pageUrl).hostname;
-  } catch {
-    /* ignore */
-  }
-  return cookies.map((c) => {
-    const domain = (c.domain ?? defaultHost).replace(/^\./, "");
-    const sameSite = normalizeSameSite(c.sameSite);
-    return {
-      name: c.name,
-      value: c.value,
-      domain: domain.startsWith(".") ? domain : `.${domain}`,
-      path: c.path ?? "/",
-      expires: c.expires,
-      httpOnly: c.httpOnly,
-      secure: c.secure,
-      sameSite,
+  | {
+      ok: false;
+      error: string;
+      retryable?: boolean;
+      /** 订单无收银台链接时置位，引导用户去平台 App 支付 */
+      needManualPayment?: boolean;
+      paymentUrl?: string;
+      /** 登录等待超时/需要登录时携带二维码截图地址（供卡片渲染与 LLM 转述） */
+      loginRequired?: { platform: string; imageUrl: string };
     };
-  });
-}
-
-function normalizeSameSite(raw?: string): "Strict" | "Lax" | "None" | undefined {
-  if (!raw) return undefined;
-  const s = raw.toLowerCase();
-  if (s === "strict") return "Strict";
-  if (s === "lax") return "Lax";
-  if (s === "none") return "None";
-  return undefined;
-}
-
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 /**
  * 购物/下单编排服务。
  *
- * 在服务端后台启动 Playwright 无头浏览器，注入用户预先导入并授权的 Cookie，
- * 驱动浏览器多步操作完成搜索/下单/查单/取消。
+ * 页面执行策略（内置浏览器优先 + 无头兜底）：
+ * - 客户端在线且开启调试端口时，经 CDP 在用户可见的内置浏览器（WebView2）里
+ *   新开标签页执行——登录态即用户自身，免 Cookie 导入，操作全程可见可接管；
+ * - 否则回退服务端无头 Chromium + 已导入授权 Cookie；
+ * - 无 Cookie 且二维码可呈现（聊天在线）时，允许匿名打开 + 扫码登录门：
+ *   检测到登录页 → 截二维码推送聊天 → 等待扫码（SHOPPING_LOGIN_WAIT_MS，
+ *   默认 120s）→ 自动继续原流程。
  *
  * 安全护栏：
- * - 复用 browser-session 双重门禁（有 Cookie 且 agentAllowed=true）
  * - 平台白名单（getAdapter 返回 null 即拒绝）
  * - 金额上限（SHOPPING_ORDER_MAX_AMOUNT_CNY 默认 5000）
  * - 两阶段确认 token 5 分钟 TTL
- * - 审计日志（每次操作落 AuditService）
+ * - 审计日志（每次操作落 AuditService，含 browserMode）
  */
 export class ShoppingOrderService {
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
   /** 定期清理过期 token + 关闭存活 Page */
   private cleanupTimer: NodeJS.Timeout | null = null;
+  /** 页面获取器（内置浏览器优先 + 无头兜底）；未注入时以缺省依赖构造（单测兼容） */
+  private readonly browserExecutor: ShoppingBrowserExecutor;
 
   constructor(
     private readonly deps: {
@@ -162,8 +157,19 @@ export class ShoppingOrderService {
       store?: ShoppingOrderStore;
       /** 支付宝钱包通道（shopping.pay.* 收银台代付）。未注入时 pay 工具返回明确错误。 */
       alipayBot?: AlipayBotService;
+      /** 页面获取器。缺省用新建 coordinator/gateway（shared 不可用 → 直接走无头）。 */
+      browserExecutor?: ShoppingBrowserExecutor;
+      /** 图片落盘（登录/支付二维码截图）。缺省时只推 URL 不可用，依赖浏览器可见性。 */
+      imageStore?: { savePng(actorId: string, png: Buffer): Promise<string> };
     },
   ) {
+    this.browserExecutor =
+      deps.browserExecutor ??
+      new ShoppingBrowserExecutor({
+        coordinator: new SharedBrowserCoordinator(),
+        gateway: new SharedBrowserCdpGateway(),
+        browserSessionService: deps.browserSessionService,
+      });
     // 每 60 秒清理一次过期确认 + 关闭存活 Page
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 60_000);
     this.cleanupTimer.unref?.();
@@ -188,81 +194,226 @@ export class ShoppingOrderService {
     return listSupportedPlatforms();
   }
 
+  // ============ 页面租约 + 登录门（内置浏览器优先 + 无头兜底） ============
+
+  /** 平台显示名（京东/淘宝/…），未收录时回退 platform 标识。 */
+  private platformLabel(platform: string): string {
+    return BROWSER_SESSION_SITES[platform as BrowserSessionSiteId]?.label ?? platform;
+  }
+
+  /**
+   * 统一页面执行壳：获取租约（shared 优先/无头兜底）→ 稳定等待 → 登录门 → run → 释放。
+   * Cookie 软获取：有则注入（headless 免扫码），未导入/未授权不再硬拒（内置浏览器路径不需要）。
+   */
+  private async withShoppingPage(
+    ctx: ToolContext,
+    platform: string,
+    targetUrl: string,
+    run: (page: Page, mode: "shared" | "headless") => Promise<ShoppingOrderResult>,
+    opts: {
+      interactiveLogin?: boolean;
+      /** 页面获取不可用时的自定义兜底（如 track 回退本地订单记录）。 */
+      onUnavailable?: (err: ShoppingPageUnavailableError) => ShoppingOrderResult;
+    } = {},
+  ): Promise<ShoppingOrderResult> {
+    const actorId = resolveActorId(ctx);
+    let cookies: ImportedBrowserCookie[] = [];
+    const cookieResult = await this.getCookieAndSiteId(actorId, platform);
+    if (cookieResult.ok) cookies = cookieResult.cookies;
+
+    const interactiveLogin = opts.interactiveLogin ?? ctx.pushMediaCards != null;
+    let lease: ShoppingPageLease;
+    try {
+      lease = await this.browserExecutor.acquirePage(actorId, platform, targetUrl, {
+        cookies,
+        interactiveLogin,
+      });
+    } catch (err) {
+      if (err instanceof ShoppingPageUnavailableError) {
+        return opts.onUnavailable
+          ? opts.onUnavailable(err)
+          : { ok: false, error: err.message, retryable: false };
+      }
+      throw err;
+    }
+
+    try {
+      // 落页稳定后再过登录门（SPA/跳转需要时间）
+      await lease.page.waitForTimeout(2_500).catch(() => {});
+      const gate = await this.ensureLoggedIn(ctx, lease, platform, targetUrl);
+      if (gate) return gate;
+      const result = await run(lease.page, lease.mode);
+      // 登录态捕获（一次登录一直使用）：shared=用户本人在内置浏览器的登录态（视为授权）；
+      // headless=运行期平台刷新的 Cookie 回写更新（授权只升不降，不删除）。
+      await this.persistLoginCookies(
+        ctx,
+        lease.page,
+        platform,
+        targetUrl,
+        lease.mode === "shared" ? "shared_login" : "headless_refresh",
+        lease.mode === "shared" ? { agentAllowed: true } : {},
+      );
+      return result;
+    } finally {
+      await lease.release();
+    }
+  }
+
+  /**
+   * 登录门：命中登录页 → 截二维码落盘 → 经 ctx.pushMediaCards 推聊天卡片
+   * （shared 模式浏览器本身也可见）→ 等待扫码后自动继续。
+   * 无需登录返回 null；等待超时返回结构化失败（含 loginRequired.imageUrl）。
+   */
+  private async ensureLoggedIn(
+    ctx: ToolContext,
+    lease: ShoppingPageLease,
+    platform: string,
+    targetUrl: string,
+  ): Promise<ShoppingOrderResult | null> {
+    // 两次检测：部分平台（如京东）登录跳转由 JS 延迟触发，落页稳定后再补检一次
+    let det = await detectLoginPage(platform, lease.page);
+    if (!det.isLogin) {
+      await lease.page.waitForTimeout(1_500).catch(() => {});
+      det = await detectLoginPage(platform, lease.page);
+    }
+    if (!det.isLogin) return null;
+
+    const actorId = resolveActorId(ctx);
+    let imageUrl: string | undefined;
+    if (this.deps.imageStore) {
+      try {
+        const png = await lease.page.screenshot({ type: "png" });
+        imageUrl = await this.deps.imageStore.savePng(actorId, png);
+      } catch {
+        /* 截图失败不阻塞登录等待（shared 模式浏览器本身可见；headless 降级为纯等待） */
+      }
+    }
+
+    const label = this.platformLabel(platform);
+    if (imageUrl) {
+      ctx.pushMediaCards?.([
+        {
+          type: "image",
+          title: `请扫码登录${label}`,
+          thumbnailUrl: imageUrl,
+          mediaUrl: imageUrl,
+          caption: `扫码后自动继续，最长等待 ${Math.round(getLoginWaitMs() / 1000)} 秒`,
+        },
+      ]);
+    }
+
+    await this.audit(ctx, "login_gate", platform, {
+      mode: lease.mode,
+      reason: det.reason,
+      imageUrl,
+      pushed: Boolean(imageUrl && ctx.pushMediaCards),
+    });
+
+    const wait = await waitForLogin(platform, lease.page, targetUrl);
+    if (!wait.ok) {
+      return {
+        ok: false,
+        error:
+          `${wait.error}。请扫码登录${label}后重试` +
+          (lease.mode === "headless" && !imageUrl ? "（二维码无法呈现：客户端不在线且图片服务未装配）" : ""),
+        retryable: true,
+        ...(imageUrl ? { loginRequired: { platform, imageUrl } } : {}),
+      };
+    }
+
+    // 扫码登录成功：立即捕获登录态（一次登录一直使用——之后无头兜底免重复扫码）
+    await this.persistLoginCookies(ctx, lease.page, platform, targetUrl, "scan_login", {
+      agentAllowed: true,
+    });
+    return null;
+  }
+
+  /**
+   * 登录态捕获（「一次登录一直使用」）：把当前页面上下文中该平台域的 Cookie
+   * 加密落库。按 targetUrl 限定范围——shared 模式经 CDP 连的是用户真实浏览器
+   * profile，不限定范围会抓到所有站点的 Cookie。授权语义见
+   * BrowserSessionService.updateCookiesFromLogin（只升不降）。失败静默：
+   * 捕获是增强不是依赖，不影响主流程。
+   */
+  private async persistLoginCookies(
+    ctx: ToolContext,
+    page: Page,
+    platform: string,
+    targetUrl: string,
+    source: "scan_login" | "shared_login" | "headless_refresh",
+    opts: { agentAllowed?: boolean } = {},
+  ): Promise<void> {
+    try {
+      const raw = await page.context().cookies(targetUrl);
+      const mapped = toImportedCookies(raw);
+      if (mapped.length === 0) return;
+      await this.deps.browserSessionService.updateCookiesFromLogin(
+        resolveActorId(ctx),
+        platform,
+        mapped,
+        opts,
+      );
+      await this.audit(ctx, "cookies_persisted", platform, { source, count: mapped.length });
+    } catch {
+      /* 捕获失败不影响主流程（下次成功执行会再捕获） */
+    }
+  }
+
   async searchProduct(
     ctx: ToolContext,
     platform: string,
     query: string,
     filters?: SearchFilters,
   ): Promise<ShoppingOrderResult> {
-    const actorId = resolveActorId(ctx);
     const adapter = this.requireAdapter(platform);
     if (!adapter) {
       return { ok: false, error: `平台「${platform}」暂不支持。已实现：${listSupportedPlatforms().join("/")}` };
     }
     const limit = Math.min(Math.max(filters?.limit ?? 5, 1), 10);
 
-    const cookieResult = await this.getCookieAndSiteId(actorId, platform);
-    if (!cookieResult.ok) return cookieResult;
+    return this.withShoppingPage(ctx, platform, adapter.searchUrl(query, filters), async (page, mode) => {
+      try {
+        const products = await adapter.extractProducts(page, limit);
 
-    const pw = await loadPlaywright();
-    if (!pw) {
-      return {
-        ok: false,
-        error: "Playwright 未安装。请在 server 目录执行: npx playwright install chromium",
-        retryable: false,
-      };
-    }
+        // 二次过滤：maxPrice
+        const filtered = filters?.maxPrice
+          ? products.filter((p) => p.price == null || p.price <= (filters.maxPrice as number))
+          : products;
 
-    const { chromium } = pw;
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
-    try {
-      const url = adapter.searchUrl(query, filters);
-      const context = await browser.newContext({ userAgent: USER_AGENT, locale: "zh-CN" });
-      await context.addCookies(toPlaywrightCookies(url, cookieResult.cookies));
-      const page = await context.newPage();
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 });
-      await page.waitForTimeout(3_000);
+        await this.audit(ctx, "search", platform, {
+          query,
+          limit,
+          resultCount: filtered.length,
+          browserMode: mode,
+        });
 
-      const products = await adapter.extractProducts(page, limit);
+        if (filtered.length === 0) {
+          return {
+            ok: true,
+            summary: `在${platform}搜索「${query}」未找到商品（可能登录态失效或页面结构变更）`,
+            products: [],
+            platform,
+            query,
+            hint: "若无结果，请在客户端内置浏览器登录该平台后重试，或确认 Cookie 未过期且已授权 agentAllowed=true",
+          };
+        }
 
-      // 二次过滤：maxPrice
-      const filtered = filters?.maxPrice
-        ? products.filter((p) => p.price == null || p.price <= (filters.maxPrice as number))
-        : products;
-
-      await this.audit(ctx, "search", platform, { query, limit, resultCount: filtered.length });
-
-      if (filtered.length === 0) {
         return {
           ok: true,
-          summary: `在${platform}搜索「${query}」未找到商品（可能登录态失效或页面结构变更）`,
-          products: [],
+          summary: `在${platform}搜索「${query}」找到 ${filtered.length} 个商品`,
+          products: filtered,
           platform,
           query,
-          hint: "若无结果，请确认 Cookie 未过期且已授权 agentAllowed=true",
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: redactCredentials(`搜索失败：${message}${message.includes("Executable doesn't exist") ? "（请在 server 目录执行: npx playwright install chromium）" : ""}`),
+          retryable: /timeout|navigation/i.test(message),
         };
       }
-
-      return {
-        ok: true,
-        summary: `在${platform}搜索「${query}」找到 ${filtered.length} 个商品`,
-        products: filtered,
-        platform,
-        query,
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false,
-        error: redactCredentials(`搜索失败：${message}${message.includes("Executable doesn't exist") ? "（请在 server 目录执行: npx playwright install chromium）" : ""}`),
-        retryable: /timeout|navigation/i.test(message),
-      };
-    } finally {
-      await browser.close().catch(() => {});
-    }
+    });
   }
 
   async placeOrder(
@@ -317,34 +468,38 @@ export class ShoppingOrderService {
       product = products[0];
     }
 
+    let cookies: ImportedBrowserCookie[] = [];
     const cookieResult = await this.getCookieAndSiteId(actorId, platform);
-    if (!cookieResult.ok) return cookieResult;
+    if (cookieResult.ok) cookies = cookieResult.cookies;
 
-    const pw = await loadPlaywright();
-    if (!pw) {
-      return { ok: false, error: "Playwright 未安装。请在 server 目录执行: npx playwright install chromium", retryable: false };
+    const firstUrl = product.url ?? adapter.searchUrl(item);
+    let lease: ShoppingPageLease;
+    try {
+      lease = await this.browserExecutor.acquirePage(actorId, platform, firstUrl, {
+        cookies,
+        interactiveLogin: ctx.pushMediaCards != null,
+      });
+    } catch (err) {
+      if (err instanceof ShoppingPageUnavailableError) {
+        return { ok: false, error: err.message, retryable: false };
+      }
+      throw err;
     }
 
-    const { chromium } = pw;
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
+    // 阶段一成功时租约转交 ActiveSession（阶段二/过期时释放）；其余路径 finally 释放
+    let keepAlive = false;
     try {
-      const context = await browser.newContext({ userAgent: USER_AGENT, locale: "zh-CN" });
-      const firstUrl = product.url ?? adapter.searchUrl(item);
-      await context.addCookies(toPlaywrightCookies(firstUrl, cookieResult.cookies));
-      const page = await context.newPage();
+      await lease.page.waitForTimeout(2_500).catch(() => {});
+      const gate = await this.ensureLoggedIn(ctx, lease, platform, firstUrl);
+      if (gate) return gate;
 
-      const snapshot = await adapter.navigateToCheckout(page, product, qty);
+      const snapshot = await adapter.navigateToCheckout(lease.page, product, qty);
       if (!snapshot.ok) {
-        await context.close().catch(() => {});
         return { ok: false, error: snapshot.error ?? "走到结算页失败", retryable: snapshot.retryable };
       }
 
       // 单笔金额上限校验（平台覆盖优先，演出票等高价类目用 SHOPPING_ORDER_MAX_AMOUNT_<平台>_CNY 调高）
       if (snapshot.totalPrice != null && snapshot.totalPrice > getMaxAmountCny(platform)) {
-        await context.close().catch(() => {});
         await this.audit(ctx, "place_blocked_amount", platform, {
           item, quantity: qty, totalPrice: snapshot.totalPrice, limit: getMaxAmountCny(platform),
         });
@@ -360,7 +515,6 @@ export class ShoppingOrderService {
         const dateKey = localDateKey(new Date());
         const used = await this.deps.store.sumAmountOnDate(actorId, dateKey);
         if (used + snapshot.totalPrice > getDailyBudgetCny()) {
-          await context.close().catch(() => {});
           await this.audit(ctx, "place_blocked_daily_budget", platform, {
             item, quantity: qty, totalPrice: snapshot.totalPrice, usedToday: used, dailyBudget: getDailyBudgetCny(),
           });
@@ -372,7 +526,7 @@ export class ShoppingOrderService {
         }
       }
 
-      // 生成确认 token，保留存活 Page
+      // 生成确认 token，保留存活 Page（租约由 session.close 在阶段二/过期时释放）
       const token = randomUUID();
       const session: ActiveSession = {
         platform,
@@ -385,7 +539,7 @@ export class ShoppingOrderService {
         close: async () => {
           if (session.closed) return;
           session.closed = true;
-          await context.close().catch(() => {});
+          await lease.release().catch(() => {});
         },
       };
       const pending: PendingConfirmation = {
@@ -401,7 +555,7 @@ export class ShoppingOrderService {
       this.pendingConfirmations.set(token, pending);
 
       await this.audit(ctx, "place_stage1", platform, {
-        item, quantity: qty, totalPrice: snapshot.totalPrice, token,
+        item, quantity: qty, totalPrice: snapshot.totalPrice, token, browserMode: lease.mode,
       });
 
       const summaryParts: string[] = [
@@ -412,6 +566,17 @@ export class ShoppingOrderService {
         snapshot.addressSummary ? `收货：${snapshot.addressSummary}` : "",
       ].filter(Boolean);
 
+      // 登录态捕获（一次登录一直使用）：与本页执行的其他路径同语义
+      await this.persistLoginCookies(
+        ctx,
+        lease.page,
+        platform,
+        firstUrl,
+        lease.mode === "shared" ? "shared_login" : "headless_refresh",
+        lease.mode === "shared" ? { agentAllowed: true } : {},
+      );
+
+      keepAlive = true;
       return {
         ok: true,
         summary: summaryParts.join("，"),
@@ -432,8 +597,9 @@ export class ShoppingOrderService {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { ok: false, error: redactCredentials(`走到结算页失败：${message}`), retryable: /timeout|navigation/i.test(message) };
+    } finally {
+      if (!keepAlive) await lease.release().catch(() => {});
     }
-    // 注意：阶段一不关闭 browser，由 session.close() 在阶段二/过期时关闭
   }
 
   private async executePlaceStage2(
@@ -469,52 +635,71 @@ export class ShoppingOrderService {
       let submitResult;
       if (pending.session && !pending.session.closed) {
         // 阶段一保留的 context 已关闭，但 Page 还在？实际上 context.close 会关闭 page。
-        // 这里改为：阶段二重新启动浏览器注入 Cookie，重新走到结算页，再提交。
+        // 这里改为：阶段二重新获取页面，重新走到结算页，再提交。
         // （保持简单：不复用 Page，因为 context/page 生命周期管理复杂，重建更稳）
         await pending.session.close().catch(() => {});
       }
 
-      // 重建浏览器，重新走到结算页
+      let cookies: ImportedBrowserCookie[] = [];
       const cookieResult = await this.getCookieAndSiteId(pending.actorId, platform);
-      if (!cookieResult.ok) {
-        this.pendingConfirmations.delete(confirmationToken);
-        return cookieResult;
-      }
+      if (cookieResult.ok) cookies = cookieResult.cookies;
 
-      const pw = await loadPlaywright();
-      if (!pw) {
-        return { ok: false, error: "Playwright 未安装", retryable: false };
-      }
-
-      const { chromium } = pw;
-      const browser = await chromium.launch({
-        headless: true,
-        args: ["--disable-blink-features=AutomationControlled"],
-      });
+      const product: ProductSummary = {
+        title: pending.snapshot.itemTitle ?? pending.item,
+        url: pending.snapshot.checkoutUrl,
+      };
+      const firstUrl = product.url ?? adapter.searchUrl(pending.item);
+      let lease: ShoppingPageLease;
       try {
-        const product: ProductSummary = {
-          title: pending.snapshot.itemTitle ?? pending.item,
-          url: pending.snapshot.checkoutUrl,
-        };
-        const context = await browser.newContext({ userAgent: USER_AGENT, locale: "zh-CN" });
-        const firstUrl = product.url ?? adapter.searchUrl(pending.item);
-        await context.addCookies(toPlaywrightCookies(firstUrl, cookieResult.cookies));
-        const page = await context.newPage();
+        lease = await this.browserExecutor.acquirePage(pending.actorId, platform, firstUrl, {
+          cookies,
+          interactiveLogin: ctx.pushMediaCards != null,
+        });
+      } catch (err) {
+        if (err instanceof ShoppingPageUnavailableError) {
+          this.pendingConfirmations.delete(confirmationToken!);
+          return { ok: false, error: err.message, retryable: false };
+        }
+        throw err;
+      }
+
+      try {
+        await lease.page.waitForTimeout(2_500).catch(() => {});
+        const gate = await this.ensureLoggedIn(ctx, lease, platform, firstUrl);
+        if (gate) {
+          this.pendingConfirmations.delete(confirmationToken!);
+          return gate;
+        }
 
         // 若 checkoutUrl 存在且仍有效，直接 goto 结算页；否则重新走 navigateToCheckout
         if (pending.snapshot.checkoutUrl && /^https:\/\//i.test(pending.snapshot.checkoutUrl)) {
-          await page.goto(pending.snapshot.checkoutUrl, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
-          await page.waitForTimeout(2_000);
+          if (lease.page.url() !== pending.snapshot.checkoutUrl) {
+            await lease.page
+              .goto(pending.snapshot.checkoutUrl, { waitUntil: "domcontentloaded", timeout: 15_000 })
+              .catch(() => {});
+            await lease.page.waitForTimeout(2_000).catch(() => {});
+          }
         } else {
-          const reSnap = await adapter.navigateToCheckout(page, product, pending.quantity);
+          const reSnap = await adapter.navigateToCheckout(lease.page, product, pending.quantity);
           if (!reSnap.ok) {
+            this.pendingConfirmations.delete(confirmationToken!);
             return { ok: false, error: reSnap.error ?? "重新走到结算页失败", retryable: reSnap.retryable };
           }
         }
 
-        submitResult = await adapter.submitOrder(page);
+        submitResult = await adapter.submitOrder(lease.page);
+
+        // 登录态捕获（一次登录一直使用）：提交后平台的最新 Cookie 回写更新
+        await this.persistLoginCookies(
+          ctx,
+          lease.page,
+          platform,
+          firstUrl,
+          lease.mode === "shared" ? "shared_login" : "headless_refresh",
+          lease.mode === "shared" ? { agentAllowed: true } : {},
+        );
       } finally {
-        await browser.close().catch(() => {});
+        await lease.release().catch(() => {});
       }
 
       this.pendingConfirmations.delete(confirmationToken);
@@ -608,82 +793,73 @@ export class ShoppingOrderService {
       }
     }
 
-    const cookieResult = await this.getCookieAndSiteId(actorId, platform);
-    if (!cookieResult.ok) {
-      // Cookie 门禁不过：有本地记录时兜底返回本地快照
-      if (localOrder) return this.localOrderResult(platform, localOrder, "平台 Cookie 未导入/未授权，以下为本地记录（非实时）");
-      return cookieResult;
-    }
+    return this.withShoppingPage(
+      ctx,
+      platform,
+      adapter.orderListUrl(),
+      async (page, mode) => {
+        try {
+          await page.waitForTimeout(500).catch(() => {});
 
-    const pw = await loadPlaywright();
-    if (!pw) {
-      if (localOrder) return this.localOrderResult(platform, localOrder, "Playwright 未安装，以下为本地记录（非实时）");
-      return { ok: false, error: "Playwright 未安装。请在 server 目录执行: npx playwright install chromium", retryable: false };
-    }
+          const orders: OrderStatus[] = await adapter.readOrderStatus(page, platformOrderId);
 
-    const { chromium } = pw;
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
-    try {
-      const url = adapter.orderListUrl();
-      const context = await browser.newContext({ userAgent: USER_AGENT, locale: "zh-CN" });
-      await context.addCookies(toPlaywrightCookies(url, cookieResult.cookies));
-      const page = await context.newPage();
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 });
-      await page.waitForTimeout(3_000);
+          await this.audit(ctx, "track", platform, { orderId, resultCount: orders.length, browserMode: mode });
 
-      const orders: OrderStatus[] = await adapter.readOrderStatus(page, platformOrderId);
-
-      await this.audit(ctx, "track", platform, { orderId, resultCount: orders.length });
-
-      if (orders.length === 0) {
-        // 平台侧没查到：本地有记录则兜底
-        if (localOrder) {
-          return this.localOrderResult(platform, localOrder, "平台订单页未查到该订单（可能状态页改版或订单已归档），以下为本地记录");
-        }
-        return {
-          ok: true,
-          summary: orderId ? `未在${platform}找到订单 ${orderId}` : `在${platform}未找到订单`,
-          orders: [],
-          platform,
-        };
-      }
-
-      // 状态回写本地（能识别的状态词才更新，避免覆盖为 null）
-      if (localOrder && this.deps.store) {
-        for (const o of orders) {
-          if (o.orderId && o.orderId === localOrder.platformOrderId) {
-            const mapped = mapPlatformStatusText(o.status ?? o.statusDesc);
-            if (mapped) await this.deps.store.update(localOrder.orderId, { status: mapped });
-            break;
+          if (orders.length === 0) {
+            // 平台侧没查到：本地有记录则兜底
+            if (localOrder) {
+              return this.localOrderResult(platform, localOrder, "平台订单页未查到该订单（可能状态页改版或订单已归档），以下为本地记录");
+            }
+            return {
+              ok: true,
+              summary: orderId ? `未在${platform}找到订单 ${orderId}` : `在${platform}未找到订单`,
+              orders: [],
+              platform,
+            };
           }
+
+          // 状态回写本地（能识别的状态词才更新，避免覆盖为 null）
+          if (localOrder && this.deps.store) {
+            for (const o of orders) {
+              if (o.orderId && o.orderId === localOrder.platformOrderId) {
+                const mapped = mapPlatformStatusText(o.status ?? o.statusDesc);
+                if (mapped) await this.deps.store.update(localOrder.orderId, { status: mapped });
+                break;
+              }
+            }
+          }
+
+          // 关联本地单号到返回项
+          const enriched = orders.map((o) => ({
+            ...o,
+            localOrderId:
+              localOrder && o.orderId && o.orderId === localOrder.platformOrderId ? localOrder.orderId : undefined,
+          }));
+
+          return {
+            ok: true,
+            summary: `查询到 ${orders.length} 个${platform}订单`,
+            orders: enriched,
+            platform,
+          };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (localOrder) {
+            return this.localOrderResult(platform, localOrder, `平台查询失败（${message}），以下为本地记录`);
+          }
+          return { ok: false, error: `查询订单失败：${message}`, retryable: /timeout|navigation/i.test(message) };
         }
-      }
-
-      // 关联本地单号到返回项
-      const enriched = orders.map((o) => ({
-        ...o,
-        localOrderId:
-          localOrder && o.orderId && o.orderId === localOrder.platformOrderId ? localOrder.orderId : undefined,
-      }));
-
-      return {
-        ok: true,
-        summary: `查询到 ${orders.length} 个${platform}订单`,
-        orders: enriched,
-        platform,
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (localOrder) {
-        return this.localOrderResult(platform, localOrder, `平台查询失败（${message}），以下为本地记录`);
-      }
-      return { ok: false, error: `查询订单失败：${message}`, retryable: /timeout|navigation/i.test(message) };
-    } finally {
-      await browser.close().catch(() => {});
-    }
+      },
+      {
+        onUnavailable: (err) => {
+          // 页面获取不可用（无 Cookie 且内置浏览器不在线）：有本地记录时兜底返回本地快照
+          if (localOrder) {
+            return this.localOrderResult(platform, localOrder, "平台 Cookie 未导入/未授权且内置浏览器不在线，以下为本地记录（非实时）");
+          }
+          return { ok: false, error: err.message, retryable: false };
+        },
+      },
+    );
   }
 
   /** 本地订单快照兜底返回（平台侧不可用时）。 */
@@ -798,59 +974,44 @@ export class ShoppingOrderService {
     platform: string,
     orderId: string,
   ): Promise<ShoppingOrderResult> {
-    const actorId = resolveActorId(ctx);
     const adapter = this.requireAdapter(platform);
     if (!adapter) return { ok: false, error: `平台「${platform}」暂不支持` };
 
-    const cookieResult = await this.getCookieAndSiteId(actorId, platform);
-    if (!cookieResult.ok) return cookieResult;
+    return this.withShoppingPage(ctx, platform, adapter.orderListUrl(), async (page, mode) => {
+      try {
+        await page.waitForTimeout(500).catch(() => {});
 
-    const pw = await loadPlaywright();
-    if (!pw) return { ok: false, error: "Playwright 未安装", retryable: false };
+        const result = await adapter.cancelOrder(page, orderId);
 
-    const { chromium } = pw;
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
-    try {
-      const url = adapter.orderListUrl();
-      const context = await browser.newContext({ userAgent: USER_AGENT, locale: "zh-CN" });
-      await context.addCookies(toPlaywrightCookies(url, cookieResult.cookies));
-      const page = await context.newPage();
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 });
-      await page.waitForTimeout(3_000);
+        await this.audit(ctx, "cancel_stage2", platform, {
+          orderId, ok: result.ok, error: result.error, browserMode: mode,
+        });
 
-      const result = await adapter.cancelOrder(page, orderId);
-
-      await this.audit(ctx, "cancel_stage2", platform, { orderId, ok: result.ok, error: result.error });
-
-      // 平台取消成功 → 同步本地订单状态（按本地单号或平台单号匹配）
-      if (result.ok && this.deps.store) {
-        const actorId2 = resolveActorId(ctx);
-        const local = orderId.startsWith("so_")
-          ? await this.deps.store.get(orderId)
-          : await this.deps.store.findByPlatformOrder(actorId2, platform, orderId);
-        if (local && local.actorId === actorId2) {
-          await this.deps.store.update(local.orderId, { status: "cancelled" });
+        // 平台取消成功 → 同步本地订单状态（按本地单号或平台单号匹配）
+        if (result.ok && this.deps.store) {
+          const actorId2 = resolveActorId(ctx);
+          const local = orderId.startsWith("so_")
+            ? await this.deps.store.get(orderId)
+            : await this.deps.store.findByPlatformOrder(actorId2, platform, orderId);
+          if (local && local.actorId === actorId2) {
+            await this.deps.store.update(local.orderId, { status: "cancelled" });
+          }
         }
-      }
 
-      if (!result.ok) {
-        return { ok: false, error: result.error ?? "取消订单失败", retryable: result.retryable };
+        if (!result.ok) {
+          return { ok: false, error: result.error ?? "取消订单失败", retryable: result.retryable };
+        }
+        return {
+          ok: true,
+          summary: `已在${platform}取消订单 ${orderId}`,
+          platform,
+          orderId,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: `取消订单失败：${message}`, retryable: /timeout|navigation/i.test(message) };
       }
-      return {
-        ok: true,
-        summary: `已在${platform}取消订单 ${orderId}`,
-        platform,
-        orderId,
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: `取消订单失败：${message}`, retryable: /timeout|navigation/i.test(message) };
-    } finally {
-      await browser.close().catch(() => {});
-    }
+    });
   }
 
   // ============ 支付（shopping.pay.*） ============
@@ -882,9 +1043,6 @@ export class ShoppingOrderService {
     if (order.status === "cancelled" || order.status === "failed") {
       return { ok: false, error: `订单 ${order.orderId} 已 ${order.status}，无法支付` };
     }
-    if (!this.deps.alipayBot) {
-      return { ok: false, error: "支付宝钱包服务未装配（alipayBot 未注入），请在平台 App 内完成支付" };
-    }
     if (!order.paymentUrl) {
       return {
         ok: false,
@@ -903,6 +1061,64 @@ export class ShoppingOrderService {
         paymentUrl: order.paymentUrl,
         needManualPayment: true,
       };
+    }
+
+    // 内置浏览器在线 → 直接在用户可见浏览器打开收银台并推收款二维码
+    // （登录态/支付动作都由用户本人完成，不阻塞；状态用 shopping.pay.check 查询）
+    const sharedLease = await this.browserExecutor.tryOpenSharedPage(actorId, order.paymentUrl).catch(() => null);
+    if (sharedLease) {
+      let qrImageUrl: string | undefined;
+      try {
+        await sharedLease.page.waitForTimeout(3_000).catch(() => {});
+        if (this.deps.imageStore) {
+          try {
+            qrImageUrl = await this.deps.imageStore.savePng(
+              actorId,
+              await sharedLease.page.screenshot({ type: "png" }),
+            );
+          } catch {
+            /* 收银台截图失败不阻塞支付引导 */
+          }
+        }
+        if (qrImageUrl) {
+          ctx.pushMediaCards?.([
+            {
+              type: "image",
+              title: `支付宝收款码（${order.platform}订单）`,
+              thumbnailUrl: qrImageUrl,
+              mediaUrl: qrImageUrl,
+              caption: `金额 ¥${order.amountCny ?? "以收银台为准"}；也可直接在内置浏览器收银台页面支付`,
+            },
+          ]);
+        }
+      } finally {
+        await sharedLease.release().catch(() => {});
+      }
+
+      await this.audit(ctx, "pay_shared_cashier", order.platform, {
+        localOrderId: order.orderId,
+        platformOrderId: order.platformOrderId,
+        qrImageUrl,
+        browserMode: "shared",
+      });
+
+      return {
+        ok: true,
+        summary:
+          `已在内置浏览器打开「${order.title}」的支付宝收银台` +
+          `${qrImageUrl ? "，收款二维码已推送到聊天" : ""}，请扫码或在内置浏览器完成支付`,
+        orderId: order.orderId,
+        platform: order.platform,
+        amountCny: order.amountCny,
+        paymentUrl: order.paymentUrl,
+        ...(qrImageUrl ? { qrImageUrl } : {}),
+        browserMode: "shared",
+        hint: "支付完成后用 shopping.pay.check 确认状态并同步订单",
+      };
+    }
+
+    if (!this.deps.alipayBot) {
+      return { ok: false, error: "内置浏览器不在线且支付宝钱包服务未装配（alipayBot 未注入），请在平台 App 内完成支付" };
     }
 
     try {
@@ -1026,7 +1242,9 @@ export class ShoppingOrderService {
       if (cookies.length === 0) {
         return {
           ok: false,
-          error: `未导入 ${platform} 的 Cookie。请先在客户端 POST /integrations/browser-sessions/import 导入，再 POST /consent 授权 agentAllowed=true`,
+          error:
+            `未导入 ${platform} 的 Cookie。可在客户端内置浏览器登录后重试（无需 Cookie）；` +
+            `或导入并授权 Cookie：POST /integrations/browser-sessions/import + POST /consent（agentAllowed=true）`,
         };
       }
       return { ok: true, cookies, siteId };

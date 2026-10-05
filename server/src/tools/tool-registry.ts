@@ -15,6 +15,16 @@ import type { SkillManager } from "../skills/index.js";
 
 import type { ClientLocationWire } from "../types/client-location.js";
 
+/** 工具执行中途推送给客户端的媒体卡（chat.media_ready cards 项的结构子集）。 */
+export type ToolMediaCard = {
+  type: "image" | "video";
+  title: string;
+  thumbnailUrl: string;
+  mediaUrl?: string;
+  /** 图下说明文字（如「请扫码登录京东」） */
+  caption?: string;
+};
+
 export type ToolContext = {
   sessionId: string;
   /** 稳定用户标识（优先）；与 `sessionId` 二选一由 {@link resolveActorId} 合并 */
@@ -30,6 +40,12 @@ export type ToolContext = {
    * 由位置类工具（weather.get_local 等）在缺少经纬度时使用。
    */
   requestLocation?: (reason?: string) => Promise<ClientLocationWire | null>;
+  /**
+   * 工具执行中途向聊天流推送媒体卡片（如购物登录/支付二维码），
+   * 经 chat.media_ready 挂到当前流式回复上。聊天主路径装配；
+   * 主动任务等无流式上下文的调用方为空，工具自行降级。
+   */
+  pushMediaCards?: (cards: ToolMediaCard[]) => void;
   /** 默认沙箱；`full` 时开放高权限工具 */
   agentAccessMode?: AgentAccessMode;
   /** 电脑桥接在线时允许 desktop.visual.* */

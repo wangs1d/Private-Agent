@@ -18,6 +18,12 @@ export interface ProductSummary {
   url?: string;
   shop?: string;
   itemId?: string;
+  /**
+   * 商品主图（联盟 API 官方图源：淘宝 white_image/pict_url、京东 imageInfo、
+   * 拼多多 goods_image_url）。推荐线以它为「产品主体图」第一优先级；
+   * Playwright adapter 未提取该字段时留空。
+   */
+  imageUrl?: string;
 }
 
 /** 结算页快照（阶段一返回）。 */

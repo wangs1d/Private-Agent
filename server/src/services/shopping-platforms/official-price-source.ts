@@ -106,6 +106,8 @@ export function parseTaobaoTbkResponse(raw: string): ProductSummary[] {
         url?: string;
         click_url?: string;
         white_image?: string;
+        pict_url?: string;
+        small_images?: string[];
         shop_title?: string;
       }>;
     };
@@ -119,6 +121,8 @@ export function parseTaobaoTbkResponse(raw: string): ProductSummary[] {
       url: it.click_url || it.url || undefined,
       itemId: it.num_iid != null ? String(it.num_iid) : undefined,
       shop: it.shop_title || undefined,
+      // 白底图（商品主体图）优先，退化到类目主图；推荐线图片第一优先级
+      imageUrl: it.white_image || it.pict_url || undefined,
     }));
 }
 
@@ -134,7 +138,7 @@ export function taobaoTbkClient(cfg: TaobaoTbkConfig, post: HttpPostForm = postF
         format: "json",
         v: "2.0",
         sign_method: "md5",
-        fields: "num_iid,title,zk_final_price,reserve_price,click_url,url,shop_title",
+        fields: "num_iid,title,zk_final_price,reserve_price,click_url,url,shop_title,white_image,pict_url",
         q: query,
         adzone_id: cfg.adzoneId,
         page_size: String(Math.min(Math.max(limit, 1), 20)),
@@ -173,8 +177,7 @@ export function parseJdUnionResponse(raw: string): ProductSummary[] {
           priceInfo?: { price?: number; lowestPrice?: number };
           imageInfo?: { imageList?: Array<{ url?: string }> };
           shopInfo?: { shopName?: string };
-          materialUrl?: string;
-        };
+          materialUrl?: string;        };
       }>;
     };
   };
@@ -188,6 +191,8 @@ export function parseJdUnionResponse(raw: string): ProductSummary[] {
       url: d.materialUrl || undefined,
       itemId: d.skuId != null ? String(d.skuId) : undefined,
       shop: d.shopInfo?.shopName || undefined,
+      // 京东联盟商品主图（imageList 首张），推荐线图片第一优先级
+      imageUrl: d.imageInfo?.imageList?.find((img) => img?.url)?.url || undefined,
     }));
 }
 
@@ -257,9 +262,11 @@ export function parsePddDdkResponse(raw: string): ProductSummary[] {
       return {
         title: String(it.goods_name),
         price: cents != null && cents > 0 ? cents / 100 : undefined,
-        url: it.goods_image_url || undefined,
         itemId: it.goods_sign || (it.goods_id != null ? String(it.goods_id) : undefined),
         shop: it.shop_name || undefined,
+        // 修正：goods_image_url 是商品主图，此前误填进 url（点开会落到一张图片）；
+        // 商品落地页 URL 需用 goods_sign 生成推广链接，此处不冒充
+        imageUrl: it.goods_image_url || undefined,
       } satisfies ProductSummary;
     });
 }

@@ -373,6 +373,12 @@ export class AgentMemorySyncService {
       /(?:^|\s)(?:user|i|we)\s+(?:really\s+)?(?:prefer|prefers|like|likes|dislike|dislikes|hate|hates)\s+(.+)$/,
       /(?:^|\s)(?:user|i|we)\s+(?:do not want|dont want|does not want|doesnt want|want|wants)\s+(.+)$/,
       /(?:^|\s)(?:用户|我)?\s*(?:喜欢|偏好|习惯|不喜欢|讨厌|不要|别)\s*(.+)$/,
+      // 购物偏好（2026-10-05 扩充，推荐线 P4）：「想买 X / 在用 X / 一直用 X」
+      // 是品类/品牌偏好的高频口语句式，进 user_profile 后 personalize 的
+      // 推荐决策能引用（如「你在用的 XM5 已是旗舰」）；金额预算不在此抽
+      // （subject 语义弱），预算随原话留在画像摘要里。
+      /(?:^|\s)(?:用户|我)?\s*(?:想买|想入手|打算买|准备买|考虑买|想换|想添置)\s*(.+)$/,
+      /(?:^|\s)(?:用户|我)?\s*(?:一直|都|全)?(?:在用|用的?是|用着)\s*(.+)$/,
     ];
 
     for (const pattern of patterns) {

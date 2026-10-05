@@ -19,7 +19,9 @@ import {
 import { createExternalChatProviderFromEnv } from "../external-model/index.js";
 import { createPictureKit } from "@private-ai-agent/picture";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
-import { createRecommendationCatalog } from "../recommendation/index.js";
+import { createRecommendationCatalog, fetchLiveProducts, liveProductToRecord } from "../recommendation/index.js";
+import { aggregateXiaohongshuUgc } from "../recommendation/ugc-aggregator.js";
+import { pickBestProductImage } from "../services/product-image-scorer.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
@@ -279,6 +281,7 @@ import type { ToolContext } from "../tools/tool-registry.js";
 import { resolveActorId } from "../agent/actor-id.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import { SharedBrowserCoordinator } from "../services/shared-browser-coordinator.js";
+import { ShoppingBrowserExecutor } from "../services/shopping-platforms/browser-executor.js";
 import { SharedBrowserCdpGateway } from "../services/shared-browser/cdp-gateway.js";
 import {
   DesktopSceneWatcherService,
@@ -795,28 +798,9 @@ export async function createAppServices(): Promise<AppServices> {
   const socialOutreachService = new SocialOutreachService();
   // 初始化代码执行沙盒服务（python/node 子进程，独立工作目录 data/sandbox/{actorId}/{workspaceId}/）。
   const codeSandboxService = new CodeSandboxService();
-  // 初始化购物/下单服务（后台 Playwright 无头浏览器，注入用户 Cookie 代用户下单）。
+  // 初始化购物/下单服务（页面执行：内置浏览器优先 + 无头兜底 + 扫码登录门）。
   // 本地订单表 data/shopping/orders.json（单日预算统计依据）+ 支付宝钱包通道（收银台代付）。
   const shoppingOrderStore = new ShoppingOrderStore(join(process.cwd(), "data", "shopping", "orders.json"));
-  const shoppingOrderService = new ShoppingOrderService({
-    browserSessionService,
-    audit: auditService,
-    store: shoppingOrderStore,
-    alipayBot: alipayBotService,
-  });
-  // 初始化购物比价服务（跨平台同款比价 + 降价监控 + 保险/服务调研对比，只读零副作用）。
-  // 到价推送 onPriceAlert 在 ProactivityHub 装配段经 setOnPriceAlert 晚接线。
-  const shoppingCompareService = new ShoppingCompareService({
-    shoppingOrderService,
-    upstreamSearchService,
-    officialPriceGateway: new OfficialPriceGateway(),
-    dataDir: join(process.cwd(), "data", "shopping"),
-  });
-  // 初始化 Agent 虚拟浏览器服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
-  const agentBrowserService = new AgentBrowserService({
-    browserSessionService,
-    audit: auditService,
-  });
   // 共用浏览器桥：用户与 Agent 共用客户端内嵌浏览器（WebView2）。
   // Agent 的 shared_browser.* 动作经此转发到用户正在看的浏览器执行；
   // 所有 invoke/失败写审计（AuditService）。
@@ -824,6 +808,38 @@ export async function createAppServices(): Promise<AppServices> {
   // 可信输入网关（CDP 桥）：总开关 SHARED_BROWSER_CDP_ENABLED（默认关）；
   // 客户端显式开启调试端口并上报端点后，trusted 工具用 Playwright 直连用户浏览器。
   const sharedBrowserCdpGateway = new SharedBrowserCdpGateway();
+  // 购物页面获取器：客户端在线且开启调试端口时优先在用户可见内置浏览器执行
+  // （登录态即用户自身，免 Cookie 导入）；否则回退无头 + Cookie；支持扫码登录门。
+  const shoppingBrowserExecutor = new ShoppingBrowserExecutor({
+    coordinator: sharedBrowserCoordinator,
+    gateway: sharedBrowserCdpGateway,
+    browserSessionService,
+  });
+  const shoppingOrderService = new ShoppingOrderService({
+    browserSessionService,
+    audit: auditService,
+    store: shoppingOrderStore,
+    alipayBot: alipayBotService,
+    browserExecutor: shoppingBrowserExecutor,
+    imageStore: imageGenerationService,
+  });
+  // 初始化购物比价服务（跨平台同款比价 + 降价监控 + 保险/服务调研对比，只读零副作用）。
+  // 到价推送 onPriceAlert 在 ProactivityHub 装配段经 setOnPriceAlert 晚接线。
+  // 联盟网关单例：比价线与推荐实时聚合线（shopping.suggest 库未命中兜底）共用。
+  const officialPriceGateway = new OfficialPriceGateway();
+  const shoppingCompareService = new ShoppingCompareService({
+    shoppingOrderService,
+    upstreamSearchService,
+    officialPriceGateway,
+    dataDir: join(process.cwd(), "data", "shopping"),
+  });
+  // 初始化 Agent 虚拟浏览器服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
+  const agentBrowserService = new AgentBrowserService({
+    browserSessionService,
+    audit: auditService,
+  });
+  // 共用浏览器桥（sharedBrowserCoordinator / sharedBrowserCdpGateway）已提前到
+  // shopping-order 装配段创建：购物页面获取器（内置浏览器优先）复用同一实例。
   // 初始化统一预订服务（方案 A：网约车/家政/餐厅共用编排——两阶段确认 +
   // 单笔/单日限额 + 订单落库 + 承诺板跟踪；Provider 按 BOOKING_MODE 组装）。
   // 承诺板在下方 agentic-memory 装配段构造后经 setCommitmentBoard 注入。
@@ -1941,14 +1957,48 @@ export async function createAppServices(): Promise<AppServices> {
   );
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService, {
     catalog: recommendationCatalog,
-    // 缺图候选网搜补图：searchImages 拿真实图源并转存 PNG（本地相对路径），
-    // 保证 product_compare 卡默认带图；无结果/失败返回 null 静默降级。
+    // 库未命中 → 联盟 API 实时聚合兜底（推荐数据源 P1-A 决策：实时聚合为主、
+    // 种子库为冷启动缓存）：拉在售商品转 ProductRecord 落库缓存后重检索，
+    // 与比价线共用同一 OfficialPriceGateway 单例；8s 死线在 fetchLiveProducts 内。
+    liveSourcing: async (query, budget) => {
+      const live = await fetchLiveProducts(
+        { gateway: officialPriceGateway },
+        query,
+        { budgetMax: budget },
+      );
+      return {
+        records: live.products.map((p) => liveProductToRecord(p, query)),
+        notes: live.notes,
+      };
+    },
+    // 缺图候选多图网搜（图片三优先级第二级）：searchImages 拿 3 张真实图源并
+    // 转存 PNG（本地相对路径），交给 pickProductImage 做 VLM 主体图质检。
     // 转存落固定共享命名空间（非触发用户个人目录）：照片按 productId 进程级
     // 缓存跨用户复用，图是功能共享资产、不属于任何账号（盘上无清理任务）。
+    webImageCandidates: async (query, _actorId, limit) => {
+      const res = await upstreamSearchService.searchImages(query, limit, "shared-product-img");
+      return res.items.map((it) => it.mediaUrl).filter((u): u is string => Boolean(u));
+    },
+    // VLM 选图裁判（image-caption 同源主模型）：网搜图混入场景图/水印图时
+    // 挑出「商品主体图」；不可用/超时/全负分返回 null，取首图兜底。
+    pickProductImage: async (candidates, productName, deadlineMs) => {
+      const best = await pickBestProductImage(candidates, { productName, timeoutMs: deadlineMs });
+      return best ? candidates[best.bestIndex]?.url ?? null : null;
+    },
+    // 单图补图降级路径（未注入 webImageCandidates 时使用；当前已注入多图链路，
+    // 保留此端口保证依赖裁剪环境仍有可用兜底）。
     webImageSearch: async (query) => {
       const res = await upstreamSearchService.searchImages(query, 1, "shared-product-img");
       return res.items[0]?.mediaUrl ?? null;
     },
+    // 真实口碑聚合（P3：小红书 UGC，归属主推商品）：与社交域共用同一
+    // mcporter 通道；alias 未配置/失败/空返回 null，卡片无口碑区不阻断推荐。
+    ugcSearch: (productName: string) =>
+      aggregateXiaohongshuUgc(
+        { search: (q, limit) => upstreamSearchService.searchXiaohongshu(q, limit) },
+        productName,
+        { deadlineMs: 6_000 },
+      ),
     // 每轮实时决策：结合用户画像/习惯（长期画像 + 记忆 KV），由 ephemeral LLM
     // 单轮调用重排候选并按用户场景改写推荐话术；不可用/失败降级商品库原始文案。
     personalization: {

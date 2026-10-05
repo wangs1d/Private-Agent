@@ -44,13 +44,42 @@ export interface ToolCardPayload {
     priceLabel?: string;
     image?: string;
   }>;
-  /** product_compare 卡：参数对比（已转置：维度为行、sides 为列） */
+  /** product_compare 卡：转置参数表（维度为行、sides 为列） */
   compare?: {
     dims: string[];
     rows: Array<{ label: string; values: string[] }>;
   };
   /** product_compare 卡：评测/试色视频入口 */
   videos?: Array<{ title: string; url?: string; source?: string }>;
+  /**
+   * product_pick 卡（立场化推荐）：主推商品 + 备选定位。
+   * sides/items/compare/videos 同时保留（兼容旧客户端 fallback 渲染）。
+   */
+  pick?: {
+    productId: string;
+    label: string;
+    priceLabel?: string;
+    image?: string;
+    headline?: string;
+    reasons: string[];
+    cautions: string[];
+    channels?: Array<{ name: string; priceCny: number; url?: string }>;
+  };
+  alternatives?: Array<{
+    productId: string;
+    label: string;
+    priceLabel?: string;
+    image?: string;
+    whenChoose?: string;
+  }>;
+  /** product_pick 卡：真实口碑摘要（小红书 UGC，归属主推；无口碑缺省） */
+  ugc?: {
+    platformLabel?: string;
+    mentions?: number;
+    pros?: string[];
+    cons?: string[];
+    posts?: Array<{ title: string; url?: string }>;
+  };
 }
 
 type ToolCardBuilder = (result: Record<string, unknown>) => ToolCardPayload | null;
@@ -100,15 +129,33 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
             name?: unknown;
             priceLabel?: unknown;
             image?: unknown;
+            channels?: unknown;
             reasons?: unknown;
             cautions?: unknown;
             videos?: unknown;
           }>;
+          pick?: { productId?: unknown; headline?: unknown };
+          alternatives?: Array<{ productId?: unknown; whenChoose?: unknown }>;
+          source?: unknown;
+          ugc?: Record<string, unknown>;
           compare?: { dims?: unknown; rows?: unknown };
         }
       | undefined
       | null;
     if (!rec || !Array.isArray(rec.candidates) || rec.candidates.length === 0) return null;
+
+    const pickId = typeof rec.pick?.productId === "string" ? rec.pick.productId : "";
+    const pickHeadline = typeof rec.pick?.headline === "string" ? rec.pick.headline.trim() : "";
+    const altWhen = new Map<string, string>();
+    for (const alt of Array.isArray(rec.alternatives) ? rec.alternatives : []) {
+      if (
+        typeof alt?.productId === "string" &&
+        typeof alt?.whenChoose === "string" &&
+        alt.whenChoose.trim()
+      ) {
+        altWhen.set(alt.productId, alt.whenChoose.trim());
+      }
+    }
 
     const sides: NonNullable<ToolCardPayload["sides"]> = [];
     const items: ToolCardItem[] = [];
@@ -117,6 +164,7 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     let index = 0;
     for (const c of rec.candidates.slice(0, 3)) {
       const side = sideNames[index] ?? String(index + 1);
+      const pid = typeof c.productId === "string" ? c.productId : "";
       const brand = str(c.brand);
       const name = str(c.name);
       const label = [brand, name].filter(Boolean).join(" ") || `候选${index + 1}`;
@@ -132,6 +180,8 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       for (const t of (Array.isArray(c.cautions) ? c.cautions : []).filter((x) => typeof x === "string")) {
         items.push({ type: "warn", text: t as string, side, sideLabel: label });
       }
+      const when = pid ? altWhen.get(pid) : undefined;
+      if (when) items.push({ type: "num", text: `▸ 什么时候选它：${when}`, side, sideLabel: label });
       for (const v of (Array.isArray(c.videos) ? c.videos : []).filter(
         (x): x is { title?: unknown; url?: unknown; source?: unknown } => typeof x === "object" && x !== null,
       )) {
@@ -170,17 +220,91 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
 
     const first = rec.candidates[0];
     const query = str(r.query) || str(r.item) || "选品";
+    const firstIsPick = first && typeof first.productId === "string" && first.productId === pickId;
+    const firstLabel = first ? [str(first.brand), str(first.name)].filter(Boolean).join(" ") : "";
+
+    // 立场化结构（product_pick 新卡型）：pick + alternatives + 渠道价 CTA
+    const pickPayload = firstIsPick
+      ? {
+          productId: String(first!.productId),
+          label: firstLabel,
+          priceLabel: str(first!.priceLabel) || undefined,
+          image: str(first!.image) || undefined,
+          headline: pickHeadline || undefined,
+          reasons: (Array.isArray(first!.reasons) ? first!.reasons : []).filter(
+            (x): x is string => typeof x === "string",
+          ),
+          cautions: (Array.isArray(first!.cautions) ? first!.cautions : []).filter(
+            (x): x is string => typeof x === "string",
+          ),
+          channels: Array.isArray(first!.channels)
+            ? (first!.channels as Array<Record<string, unknown>>)
+                .map((ch) => ({
+                  name: str(ch.name),
+                  priceCny: typeof ch.priceCny === "number" ? ch.priceCny : 0,
+                  ...(str(ch.url) ? { url: str(ch.url) } : {}),
+                }))
+                .filter((ch) => ch.name && ch.priceCny > 0)
+            : undefined,
+        }
+      : undefined;
+    const alternativesPayload = rec.candidates
+      .slice(1, 3)
+      .map((c) => {
+        const pid = typeof c.productId === "string" ? c.productId : "";
+        return {
+          productId: pid,
+          label: [str(c.brand), str(c.name)].filter(Boolean).join(" ") || "备选",
+          priceLabel: str(c.priceLabel) || undefined,
+          image: str(c.image) || undefined,
+          whenChoose: pid ? altWhen.get(pid) : undefined,
+        };
+      });
+
+    // 口碑摘要（P3 UGC）：仅透传可信字段（LLM 不参与内容生成，服务端聚合保证）
+    const rawUgc = rec.ugc;
+    const ugcPayload =
+      rawUgc && typeof rawUgc === "object"
+        ? {
+            platformLabel: str(rawUgc.platformLabel) || undefined,
+            mentions: typeof rawUgc.mentions === "number" ? rawUgc.mentions : undefined,
+            pros: Array.isArray(rawUgc.pros)
+              ? (rawUgc.pros as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 3)
+              : undefined,
+            cons: Array.isArray(rawUgc.cons)
+              ? (rawUgc.cons as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 2)
+              : undefined,
+            posts: Array.isArray(rawUgc.posts)
+              ? (rawUgc.posts as Array<Record<string, unknown>>)
+                  .map((p) => ({ title: str(p.title), ...(str(p.url) ? { url: str(p.url) } : {}) }))
+                  .filter((p) => p.title)
+                  .slice(0, 4)
+              : undefined,
+          }
+        : undefined;
+
     return {
       title:
-        rec.candidates.length > 1
-          ? `对比结论 · 二选一并排看`
-          : `推荐结论 · ${first ? [str(first.brand), str(first.name)].filter(Boolean).join(" ") : query}`,
-      cardType: "product_compare",
+        firstIsPick && firstLabel
+          ? `主推 · ${firstLabel}`
+          : rec.candidates.length > 1
+            ? `对比结论 · 二选一并排看`
+            : `推荐结论 · ${firstLabel || query}`,
+      cardType: "product_pick",
       sides,
       items,
       ...(compare && compare.rows.length > 0 ? { compare } : {}),
       ...(videos.length > 0 ? { videos } : {}),
-      footer: "参数来自商品库，价格以实际渠道为准",
+      ...(pickPayload ? { pick: pickPayload } : {}),
+      ...(alternativesPayload.length > 0 ? { alternatives: alternativesPayload } : {}),
+      ...(ugcPayload && ((ugcPayload.mentions ?? 0) > 0 || (ugcPayload.posts?.length ?? 0) > 0)
+        ? { ugc: ugcPayload }
+        : {}),
+      footer:
+        pickHeadline ||
+        (rec.source === "live"
+          ? "实时在售价来自联盟接口，以实际渠道为准"
+          : "参数来自商品库，价格以实际渠道为准"),
     };
   },
 
@@ -446,10 +570,14 @@ function buildCardMarker(payload: ToolCardPayload, leadText: string): string {
     actions: [],
     speak: "",
     cardId,
-    // 扩展卡型的附加协议字段（product_compare 的分侧大图/转置对比表/视频入口）
+    // 扩展卡型的附加协议字段（product_compare 的分侧大图/转置对比表/视频入口；
+    // product_pick 的立场化主推/备选定位/渠道价 CTA）
     ...(payload.sides ? { sides: payload.sides } : {}),
     ...(payload.compare ? { compare: payload.compare } : {}),
     ...(payload.videos ? { videos: payload.videos } : {}),
+    ...(payload.pick ? { pick: payload.pick } : {}),
+    ...(payload.alternatives ? { alternatives: payload.alternatives } : {}),
+    ...(payload.ugc ? { ugc: payload.ugc } : {}),
   });
   const parts: string[] = [];
   if (leadText.trim()) parts.push(leadText.trim());

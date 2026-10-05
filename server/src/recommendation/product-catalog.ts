@@ -51,6 +51,10 @@ export type ProductRecord = {
   reviewSummary: ProductReviewSummary;
   media: ProductMedia[];
   seededAt: number;
+  /** 来源：seed=种子/运营录入；live=联盟API实时聚合落库（live-sourcing.ts） */
+  source?: "seed" | "live";
+  /** live 记录的聚合时间（epoch ms），价格刷新/回访对比用 */
+  liveFetchedAt?: number;
 };
 
 export class ProductCatalog {
@@ -64,7 +68,9 @@ export class ProductCatalog {
     if (existing && Array.isArray(existing) && existing.length > 0) {
       this.products = existing;
     } else {
-      this.products = SEED_PRODUCTS;
+      // 必须克隆：SEED_PRODUCTS 是模块级常量，upsertLive 等 mutator 会 push/
+      // 替换元素——直接引用会让多实例（测试/多 dataDir）共享同一底层数组串数据
+      this.products = JSON.parse(JSON.stringify(SEED_PRODUCTS)) as ProductRecord[];
       writeJson(this.path, this.products);
     }
   }
@@ -75,6 +81,28 @@ export class ProductCatalog {
 
   get(productId: string): ProductRecord | undefined {
     return this.products.find((p) => p.id === productId);
+  }
+
+  /**
+   * 实时聚合结果落库（live-sourcing.ts 调用）：按 id 去重插入，已存在的
+   * live 记录整体替换（拿最新价/图）；seed 记录不受影响。同步落盘。
+   */
+  upsertLive(records: ProductRecord[]): void {
+    let changed = false;
+    for (const rec of records) {
+      if (rec.source !== "live") continue;
+      const idx = this.products.findIndex((p) => p.id === rec.id);
+      if (idx >= 0) {
+        if (this.products[idx]!.source !== "live") continue; // 不覆盖 seed/运营数据
+        this.products[idx] = rec;
+      } else {
+        this.products.push(rec);
+      }
+      changed = true;
+    }
+    if (!changed) return;
+    this.dirty = true;
+    this.flush();
   }
 
   /**

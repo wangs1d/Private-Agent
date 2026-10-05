@@ -11,3 +11,6 @@ SUBAGENT-REFACTORING.md
 # 测试是记忆系统的回归防线，必须入库（2026-08-29 移除对 test/ 的忽略）。
 # 一次性调试脚本请放 scripts/（历史脚本归档于 scripts/archive/）。
 __tests__/
+
+# 本地 HTTPS 开发证书（自签根 CA + 服务器证书，启动时自动生成，含私钥不入库）
+certs/

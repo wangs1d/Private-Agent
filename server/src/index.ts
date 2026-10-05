@@ -1,7 +1,8 @@
 import { loadServerEnv } from "./config/load-server-env.js";
 import { setupGlobalHttpAgent } from "./config/http-agent.js";
 import { exitIfDevPortInUse, isDevListenConflict } from "./utils/port-in-use.js";
-import { getRuntimeConfig, getRuntimeTopologyConfig, getServerEdition } from "./config/env.js";
+import { getRuntimeConfig, getRuntimeTopologyConfig, getServerEdition, getHttpsRuntimeConfig } from "./config/env.js";
+import { startDevHttpsListener } from "./utils/dev-https.js";
 
 // remote 拓扑下本入口（embedded 单进程形态）不再使用：改用 runtime-main + gateway-main，
 // 否则会出现双世界装配与 sidecar 端口冲突。
@@ -137,6 +138,18 @@ try {
   throw err;
 }
 
+// ─── HTTPS 双监听：浏览器访问 https://<本机IP>:3443/chat 时地址栏不再显示"不安全" ───
+// 与 HTTP 同实例同路由（含 wss）；HTTP 端口行为零变化，Flutter/WS 客户端不受影响。
+// 失败（无 openssl / 端口占用 / 自动信任被拒）只降级提示，不阻塞启动。
+let devHttpsHandle: Awaited<ReturnType<typeof startDevHttpsListener>> = null;
+try {
+  devHttpsHandle = await startDevHttpsListener(services.app, getHttpsRuntimeConfig(), (line) =>
+    services.app.log.info(line),
+  );
+} catch (err) {
+  services.app.log.warn(`[https] HTTPS 监听启动失败，回退纯 HTTP：${err instanceof Error ? err.message : String(err)}`);
+}
+
 // ─── Webhook: Agent 上线事件（通过 HookBus 自动外推） ───
 services.hookBus.emit("agent.online", {
   port: runtime.port,
@@ -199,6 +212,7 @@ const performShutdown = (): void => {
   stopDesktopBridge();
   stopFunasrEarly();
   stopOpenClawModelSync();
+  void devHttpsHandle?.close();
   void services.app.close().finally(() => process.exit(0));
 };
 shutdown = performShutdown;

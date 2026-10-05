@@ -8,14 +8,28 @@ import type { SuggestResult } from "./suggest-engine.js";
 
 export function buildAdvisorSuggestionText(result: SuggestResult): string {
   const lines: string[] = [];
+  const pick = result.pick;
+  const first = result.candidates[0];
+  // 立场先行：主推 + 为什么是它（让模型口头回复第一句就给结论，而不是罗列）
+  if (pick && first && pick.productId === first.productId && pick.headline) {
+    lines.push(`主推：${[first.brand, first.name].filter(Boolean).join(" ")}｜${first.priceLabel}`);
+    lines.push(`  为什么：${pick.headline}`);
+  }
   for (const c of result.candidates) {
     lines.push(`【${c.brand} ${c.name}｜${c.priceLabel}】`);
     for (const r of c.reasons) lines.push(`  + ${r}`);
     for (const t of c.cautions) lines.push(`  - ${t}`);
+    const alt = result.alternatives?.find((a) => a.productId === c.productId);
+    if (alt) lines.push(`  ▸ 什么时候选它：${alt.whenChoose}`);
     if (c.image) lines.push(`  图：${c.image}`);
     for (const v of c.videos) {
       lines.push(`  视频：${v.title}${v.url ? `（${v.url}）` : ""}`);
     }
+  }
+  if (result.source) {
+    lines.push(
+      `数据来源：${result.source === "live" ? "联盟API实时在售价（以实际渠道为准）" : "商品库参考价（以实际渠道为准）"}`,
+    );
   }
   if (result.compare && result.compare.rows.length > 0) {
     lines.push("对比：");

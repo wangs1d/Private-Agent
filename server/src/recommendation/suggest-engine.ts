@@ -21,6 +21,8 @@ export type SuggestCandidate = {
   /** 参考价区间，如「¥1899–2249」 */
   priceLabel: string;
   image?: string;
+  /** 渠道价明细（product_pick 卡的「去比价/去购买」CTA 数据源；种子库多为参考价无 url） */
+  channels?: Array<{ name: string; priceCny: number; url?: string }>;
   reasons: string[];
   cautions: string[];
   videos: SuggestVideo[];
@@ -32,10 +34,47 @@ export type SuggestCompare = {
   rows: Array<{ label: string; values: string[] }>;
 };
 
+/** 主推（立场核心：推谁 + 为什么是它） */
+export type SuggestPick = {
+  productId: string;
+  /** 主推理由一句话，落到用户场景（个性化 LLM 产出；降级为商品库首条依据） */
+  headline: string;
+};
+
+/** 备选的差异化定位（什么时候选它而不是主推） */
+export type SuggestAlternative = {
+  productId: string;
+  whenChoose: string;
+};
+
+/** 真实口碑摘要（UGC，P3：归属主推商品，小红书聚合） */
+export type SuggestUgcPost = { title: string; url?: string };
+export type SuggestUgc = {
+  platform: string;
+  platformLabel: string;
+  /** 命中帖子数（可信度展示） */
+  mentions: number;
+  /** 好评/避雷摘要（来自真实帖子标题，非编造；缺省=该桶无命中） */
+  pros?: string[];
+  cons?: string[];
+  /** 来源帖子（卡上可点） */
+  posts: SuggestUgcPost[];
+};
+
 export type SuggestResult = {
   query: string;
   summary: string;
   candidates: SuggestCandidate[];
+  /** 立场：主推谁（candidates 排序后首位即主推，pick.headline 是给用户的理由） */
+  pick?: SuggestPick;
+  /** 备选定位（与 candidates[1..] 一一对应） */
+  alternatives?: SuggestAlternative[];
+  /** 数据来源：catalog=自有商品库；live=联盟API实时聚合（或混合） */
+  source?: "catalog" | "live";
+  /** 聚合过程说明（溯源：哪些平台失败/未配置），透传到工具回执 */
+  notes?: string[];
+  /** 真实口碑摘要（P3 UGC：归属主推商品；聚合失败/空时缺省） */
+  ugc?: SuggestUgc;
   compare?: SuggestCompare;
 };
 
@@ -51,20 +90,34 @@ function priceLabelOf(p: ProductRecord): string {
 
 function toCandidate(p: ProductRecord): SuggestCandidate {
   const review = p.reviewSummary;
-  const reasons = [
-    ...review.pros.slice(0, 2).map((x) => `口碑优点：${x}`),
-    `适合：${review.suitedFor}`,
-  ];
-  const cautions = [
-    ...review.cons.slice(0, 2).map((x) => `注意：${x}`),
-    ...(review.avoidIf ? [`不适合：${review.avoidIf}`] : []),
-  ];
+  // live 实时商品无口碑快照（UGC 聚合接入前）：依据改用实时在售价/渠道，不装作有口碑
+  const hasReview = review.pros.length > 0 || review.sampleSize > 0;
+  const reasons = hasReview
+    ? [
+        ...review.pros.slice(0, 2).map((x) => `口碑优点：${x}`),
+        `适合：${review.suitedFor}`,
+      ]
+    : [
+        `实时在售价 ${priceLabelOf(p)}`,
+        ...(p.channels[0]?.name ? [`在售渠道：${p.channels[0].name}`] : []),
+      ];
+  const cautions = hasReview
+    ? [
+        ...review.cons.slice(0, 2).map((x) => `注意：${x}`),
+        ...(review.avoidIf ? [`不适合：${review.avoidIf}`] : []),
+      ]
+    : [];
   return {
     productId: p.id,
     brand: p.brand,
     name: p.name,
     priceLabel: priceLabelOf(p),
     image: p.image,
+    channels: p.channels.map((c) => ({
+      name: c.name,
+      priceCny: c.priceCny,
+      ...(c.url ? { url: c.url } : {}),
+    })),
     reasons,
     cautions,
     videos: p.media
@@ -113,7 +166,9 @@ function catalogCompare(products: ProductRecord[]): {
  * 从商品库确定性构建购物建议。
  * - item 支持多关键词（如「XM5 Bose」），catalog.search 按命中计分；
  * - 候选 ≤ maxCandidates（默认 3）；≥2 时附转置对比表；
- * - 全部字段来自商品库（pros/cons/suitedFor/avoidIf/参数/渠道价），可溯源。
+ * - 全部字段来自商品库（pros/cons/suitedFor/avoidIf/参数/渠道价），可溯源；
+ * - 立场（pick/alternatives）为确定性降级形态：首位即主推。个性化 LLM
+ *   可用时会重排并改写 headline/whenChoose（personalize.ts），本函数不依赖它。
  */
 export function buildSuggestion(
   catalog: ProductCatalog,
@@ -127,6 +182,9 @@ export function buildSuggestion(
   if (found.length === 0) return null;
 
   const candidates = found.map(toCandidate);
+  const [first, ...rest] = candidates;
+  const headline =
+    first?.reasons[0] ?? `综合匹配度最高${first ? `（${first.priceLabel}）` : ""}`;
   return {
     query: input.item,
     summary:
@@ -134,6 +192,18 @@ export function buildSuggestion(
         ? `商品库中「${input.item}」匹配到 ${candidates.length} 款：${shortName(found[0]!)}`
         : `商品库中「${input.item}」匹配到 ${candidates.length} 款，已并排对比`,
     candidates,
+    pick: first
+      ? { productId: first.productId, headline }
+      : undefined,
+    ...(rest.length > 0
+      ? {
+          alternatives: rest.map((c) => ({
+            productId: c.productId,
+            whenChoose: c.reasons[0] ?? "预算或偏好不同时的备选",
+          })),
+        }
+      : {}),
+    source: found.some((p) => p.source === "live") ? "live" : "catalog",
     ...(candidates.length >= 2 ? { compare: buildCompare(found) } : {}),
   };
 }

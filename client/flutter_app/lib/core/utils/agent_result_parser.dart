@@ -217,6 +217,135 @@ class AgentResultCompareTable {
   final List<MapEntry<String, List<String>>> rows;
 }
 
+/// product_pick 卡（立场化推荐）：主推商品（图+价+主推理由+渠道价 CTA）。
+class AgentResultPick {
+  const AgentResultPick({
+    required this.productId,
+    required this.label,
+    this.priceLabel,
+    this.image,
+    this.headline,
+    this.reasons = const <String>[],
+    this.cautions = const <String>[],
+    this.channels = const <AgentResultPickChannel>[],
+  });
+
+  factory AgentResultPick.fromJson(Map<String, dynamic> json) => AgentResultPick(
+        productId: json["productId"]?.toString() ?? "",
+        label: json["label"]?.toString() ?? "",
+        priceLabel: json["priceLabel"]?.toString(),
+        image: json["image"]?.toString(),
+        headline: json["headline"]?.toString(),
+        reasons: (json["reasons"] as List<dynamic>? ?? const <dynamic>[])
+            .map((e) => e.toString())
+            .toList(growable: false),
+        cautions: (json["cautions"] as List<dynamic>? ?? const <dynamic>[])
+            .map((e) => e.toString())
+            .toList(growable: false),
+        channels: (json["channels"] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<Map<String, dynamic>>()
+            .map(AgentResultPickChannel.fromJson)
+            .toList(growable: false),
+      );
+
+  final String productId;
+  final String label;
+  final String? priceLabel;
+  final String? image;
+  /// 为什么是它（个性化主推理由，引用用户场景匹配点）
+  final String? headline;
+  final List<String> reasons;
+  final List<String> cautions;
+  final List<AgentResultPickChannel> channels;
+}
+
+/// product_pick 卡：渠道实时价（「去比价/去购买」CTA 数据源）。
+class AgentResultPickChannel {
+  const AgentResultPickChannel({required this.name, required this.priceCny, this.url});
+
+  factory AgentResultPickChannel.fromJson(Map<String, dynamic> json) =>
+      AgentResultPickChannel(
+        name: json["name"]?.toString() ?? "",
+        priceCny: (json["priceCny"] as num?)?.toDouble() ?? 0,
+        url: json["url"]?.toString(),
+      );
+
+  final String name;
+  final double priceCny;
+  final String? url;
+}
+
+/// product_pick 卡：备选商品（差异化定位「什么时候选它」）。
+class AgentResultPickAlt {
+  const AgentResultPickAlt({
+    required this.productId,
+    required this.label,
+    this.priceLabel,
+    this.image,
+    this.whenChoose,
+  });
+
+  factory AgentResultPickAlt.fromJson(Map<String, dynamic> json) => AgentResultPickAlt(
+        productId: json["productId"]?.toString() ?? "",
+        label: json["label"]?.toString() ?? "",
+        priceLabel: json["priceLabel"]?.toString(),
+        image: json["image"]?.toString(),
+        whenChoose: json["whenChoose"]?.toString(),
+      );
+
+  final String productId;
+  final String label;
+  final String? priceLabel;
+  final String? image;
+  final String? whenChoose;
+}
+
+/// product_pick 卡：真实口碑摘要（小红书 UGC，服务端聚合，归属主推）。
+class AgentResultUgc {
+  const AgentResultUgc({
+    this.platformLabel,
+    this.mentions = 0,
+    this.pros = const <String>[],
+    this.cons = const <String>[],
+    this.posts = const <AgentResultUgcPost>[],
+  });
+
+  factory AgentResultUgc.fromJson(Map<String, dynamic> json) => AgentResultUgc(
+        platformLabel: json["platformLabel"]?.toString(),
+        mentions: (json["mentions"] as num?)?.toInt() ?? 0,
+        pros: (json["pros"] as List<dynamic>? ?? const <dynamic>[])
+            .map((e) => e.toString())
+            .toList(growable: false),
+        cons: (json["cons"] as List<dynamic>? ?? const <dynamic>[])
+            .map((e) => e.toString())
+            .toList(growable: false),
+        posts: (json["posts"] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<Map<String, dynamic>>()
+            .map(AgentResultUgcPost.fromJson)
+            .toList(growable: false),
+      );
+
+  final String? platformLabel;
+  final int mentions;
+  final List<String> pros;
+  final List<String> cons;
+  final List<AgentResultUgcPost> posts;
+}
+
+/// product_pick 卡：口碑来源帖（标题+链接，可点）。
+class AgentResultUgcPost {
+  const AgentResultUgcPost({required this.title, this.url});
+
+  factory AgentResultUgcPost.fromJson(Map<String, dynamic> json) =>
+      AgentResultUgcPost(
+        title: json["title"]?.toString() ?? "",
+        url: json["url"]?.toString(),
+      );
+
+  final String title;
+  final String? url;
+}
+
 /// product_compare 卡：评测/试色视频入口
 class AgentResultCardVideo {
   const AgentResultCardVideo({required this.title, this.url, this.source});
@@ -252,6 +381,9 @@ class AgentResultData {
     this.sides = const <AgentResultCardSide>[],
     this.compare,
     this.videos = const <AgentResultCardVideo>[],
+    this.pick,
+    this.alternatives = const <AgentResultPickAlt>[],
+    this.ugc,
     this.extra,
   });
 
@@ -313,6 +445,15 @@ class AgentResultData {
   /// product_compare 卡：评测/试色视频入口。
   final List<AgentResultCardVideo> videos;
 
+  /// product_pick 卡（立场化推荐）：主推商品（含主推理由与渠道价 CTA）。
+  final AgentResultPick? pick;
+
+  /// product_pick 卡：备选商品（差异化定位「什么时候选它」）。
+  final List<AgentResultPickAlt> alternatives;
+
+  /// product_pick 卡：真实口碑摘要（小红书 UGC，归属主推；无口碑为 null）。
+  final AgentResultUgc? ugc;
+
   /// 卡片私有载荷透传（morning_briefing 等自渲染卡携带的原始数据）。
   /// 通用卡不读它；由对应 cardType 的渲染分支自行解析。
   final Map<String, dynamic>? extra;
@@ -356,6 +497,16 @@ class AgentResultData {
           .whereType<Map<String, dynamic>>()
           .map(AgentResultCardVideo.fromJson)
           .toList(growable: false),
+      pick: json["pick"] is Map<String, dynamic>
+          ? AgentResultPick.fromJson(json["pick"] as Map<String, dynamic>)
+          : null,
+      alternatives: (json["alternatives"] as List<dynamic>? ?? const <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .map(AgentResultPickAlt.fromJson)
+          .toList(growable: false),
+      ugc: json["ugc"] is Map<String, dynamic>
+          ? AgentResultUgc.fromJson(json["ugc"] as Map<String, dynamic>)
+          : null,
     );
   }
 
@@ -393,6 +544,45 @@ class AgentResultData {
               if (e.url != null) "url": e.url,
               if (e.source != null) "source": e.source,
             }).toList(),
+        if (pick != null)
+          "pick": <String, dynamic>{
+            "productId": pick!.productId,
+            "label": pick!.label,
+            if (pick!.priceLabel != null) "priceLabel": pick!.priceLabel,
+            if (pick!.image != null) "image": pick!.image,
+            if (pick!.headline != null) "headline": pick!.headline,
+            "reasons": pick!.reasons,
+            "cautions": pick!.cautions,
+            "channels": pick!.channels
+                .map((AgentResultPickChannel c) => <String, dynamic>{
+                      "name": c.name,
+                      "priceCny": c.priceCny,
+                      if (c.url != null) "url": c.url,
+                    })
+                .toList(),
+          },
+        "alternatives": alternatives
+            .map((AgentResultPickAlt a) => <String, dynamic>{
+                  "productId": a.productId,
+                  "label": a.label,
+                  if (a.priceLabel != null) "priceLabel": a.priceLabel,
+                  if (a.image != null) "image": a.image,
+                  if (a.whenChoose != null) "whenChoose": a.whenChoose,
+                })
+            .toList(),
+        if (ugc != null)
+          "ugc": <String, dynamic>{
+            if (ugc!.platformLabel != null) "platformLabel": ugc!.platformLabel,
+            "mentions": ugc!.mentions,
+            "pros": ugc!.pros,
+            "cons": ugc!.cons,
+            "posts": ugc!.posts
+                .map((AgentResultUgcPost p) => <String, dynamic>{
+                      "title": p.title,
+                      if (p.url != null) "url": p.url,
+                    })
+                .toList(),
+          },
         if (groupTitle != null) "groupTitle": groupTitle,
         if (sideA != null) "sideA": sideA,
         if (sideB != null) "sideB": sideB,

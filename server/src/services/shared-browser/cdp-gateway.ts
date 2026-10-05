@@ -69,6 +69,34 @@ export class SharedBrowserCdpGateway {
     return pages[pages.length - 1];
   }
 
+  /**
+   * 新开一个标签页并导航到目标 URL（供 shopping-order 等服务端流程复用
+   * 用户可见的内置浏览器与登录态）。新开标签而非复用当前页，避免打断
+   * 用户正在看的页面；失败返回 null（调用方自行回退）。
+   */
+  async openPage(url: string, opts: { timeoutMs?: number } = {}): Promise<Page | null> {
+    const browser = this.browser;
+    if (!browser || !browser.isConnected()) return null;
+    const context = browser.contexts()[0];
+    if (!context) return null;
+    try {
+      const page = await context.newPage();
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: opts.timeoutMs ?? 20_000 });
+      return page;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 关闭由 openPage 打开的标签页（只关自己开的，不碰用户其他页面）。 */
+  async closePage(page: Page): Promise<void> {
+    try {
+      if (!page.isClosed()) await page.close();
+    } catch {
+      // ignore
+    }
+  }
+
   /** 可信点击（Playwright 定位引擎 + 真实输入事件）。 */
   async click(opts: {
     text?: string;

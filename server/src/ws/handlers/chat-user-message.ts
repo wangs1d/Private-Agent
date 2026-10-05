@@ -978,6 +978,26 @@ async function processBatchedMessage(
       // 任务面异步收尾（2026-09-08）：plane=task 派发后台任务后本轮立即结束，
       // 对话窗回到空闲态；结果由后台完成后以 source=task_plane 独立消息回灌。
       taskPlaneAsync: true,
+      // 中途推卡：工具执行中把二维码等媒体即时挂到当前流式回复（chat.media_ready，
+      // 复用「边说边出图」客户端渲染路径）；购物登录/支付扫码等待期间用户可实时看到。
+      pushMediaCards: (cards) => {
+        if (isStale()) return;
+        try {
+          ctx.socket.send(
+            JSON.stringify({
+              type: "chat.media_ready",
+              payload: {
+                sessionId: msgActor,
+                messageId: assistantMessageId,
+                traceId: batched.originalMessageId,
+                cards,
+              },
+            }),
+          );
+        } catch {
+          /* 中途推卡失败不阻塞工具执行 */
+        }
+      },
       onAssistantDelta: (delta) => {
         // 实时流式：delta 即刻喂分段器（增量去重由分段器内部保证）；
         // 同时累积原始流式文本，供最终残差计算与兜底。knowledge_qa 缓冲模式

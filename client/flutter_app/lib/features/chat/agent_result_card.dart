@@ -7,6 +7,7 @@ import "../../core/services/video_preview_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/link_utils.dart";
 import "travel_plan_launcher.dart";
+import "product_pick_card.dart";
 import "travel_plan_models.dart";
 import "travel_image_warmer.dart";
 import "travel_theme.dart";
@@ -90,6 +91,10 @@ class AgentResultCard extends StatelessWidget {
         case "product_compare":
           // 注意：这是 shopping.suggest（开源保留）的二分化对比卡， oss 不闸
           return _ProductCompareCard(data: data, cs: cs);
+        case "product_pick":
+          // 立场化推荐卡（开源保留，同 product_compare 策略不闸）：
+          // 主推大图 +「为什么是它」+ 渠道实时价 CTA + 备选横滑。
+          return ProductPickCard(data: data, cs: cs);
         case "morning_briefing":
           // 简报卡（岛上条目退役后简报的聊天流落点）：extra 携带原始简报
           // 载荷，渲染复用 MorningBriefingCard（与兜底 Dialog 同一组件）。

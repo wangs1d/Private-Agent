@@ -12,8 +12,12 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - shopping.pay.submit    支付宝收银台代付（仅限拿到 alipay 收银台链接的订单）
  *   - shopping.pay.check     订单支付状态查询 + 本地状态同步
  *
- * 核心定位：在**服务端后台启动 Playwright 无头浏览器**，注入用户预先导入并授权
- * 的 Cookie，直接在后台完成下单/查单/取消，把结果呈现给用户。
+ * 核心定位：**优先在用户可见的客户端内置浏览器（WebView2）里执行**——登录态即
+ * 用户自身，免 Cookie 导入；客户端不在线时回退服务端无头浏览器 + 已导入授权
+ * Cookie；遇到登录页会自动截图二维码推送聊天并等待扫码（最长
+ * SHOPPING_LOGIN_WAIT_MS，默认 120s）后自动继续，无需用户手动重试。
+ * 登录态持久化：扫码成功 / 用户本人在内置浏览器登录后，平台 Cookie 自动加密
+ * 落库且授权只升不降——一次登录长期有效，运行期平台刷新的 Cookie 也会回写更新。
  *
  * 与现有能力的边界：
  *   - shopping.compare.*：只读比价/降价监控，不下单；买前比价 → 本工具族下单
@@ -152,9 +156,9 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "shopping.order.track",
       description:
-        "查询订单状态/物流：优先经后台无头浏览器打开平台订单页实时刷新；传本地单号（so_*）或平台订单号均可。\n" +
+        "查询订单状态/物流：优先在用户可见的客户端内置浏览器打开平台订单页实时刷新（登录态即用户自身），客户端不在线时回退无头浏览器+Cookie；传本地单号（so_*）或平台订单号均可。\n" +
         "适用场景：用户说「帮我查一下淘宝订单」「京东那个订单到哪了」等。\n" +
-        "平台 Cookie 未导入/未授权或平台查询失败时，自动回退返回本地订单记录（标注非实时）。\n" +
+        "遇到登录页会自动把二维码推送给用户并等待扫码后继续；平台查询失败且无本地记录时回退本地订单快照（标注非实时）。\n" +
         "未传 orderId 时返回平台最近订单列表；查本地订单列表请用 shopping.order.list（零副作用）。",
       parameters: {
         type: "object",
@@ -248,7 +252,8 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "shopping.pay.submit",
       description:
         "对本地订单发起支付宝收银台代付。**仅当订单捕获到支付宝收银台链接**（cashier/qr.alipay.com）时可用：" +
-        "经用户本人支付宝钱包拉起收银台，实际扣款由用户在支付宝 App 内确认，agent 不持有支付凭据。\n" +
+        "内置浏览器在线时直接在用户可见浏览器打开收银台并推送收款二维码（用户扫码或在浏览器内完成支付）；" +
+        "否则经用户本人支付宝钱包拉起收银台，实际扣款由用户在支付宝 App 内确认，agent 不持有支付凭据。\n" +
         "订单没有收银台链接或平台使用自有收银台（淘宝/京东/美团等大多数情况）时返回明确指引，" +
         "此时应提示用户去平台 App 完成支付。orderId 使用本地单号（so_*，shopping.order.place 返回的 localOrderId）。\n" +
         "调用前必须向用户复述订单摘要并获得明确同意。",

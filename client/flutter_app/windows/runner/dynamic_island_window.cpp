@@ -470,6 +470,15 @@ void DynamicIslandWindow::StartAttention(const std::string& title,
     morph_start_s_ = now_s_ - 1.0;
     morph_active_ = false;
   }
+  // 提醒豁免全屏抑制：抑制中上提醒立即唤回（busy 已被 attention_active
+  // 豁免，恢复分支重新 ShowWindow+定位），不等 2s 心跳。
+  if (suppressed_by_fullscreen_) {
+    UpdateFullscreenSuppression();
+    // now_s_ 冻结在抑制前而时间轴连续——就地重算。attention 保持期必须
+    // 从「可见」起算，否则抑制期间消耗的秒数吃掉 hold（预告档 6s 唤回
+    // 时会只剩 1s）。
+    now_s_ = static_cast<double>(GetTickCount64() - anim_epoch_ms_) / 1000.0;
+  }
   attention_start_s_ = now_s_;
   // 待机态来提醒：注入临时条目让胶囊有内容可显（结束由 Dart 侧收口）。
   if (!has_entry_ && !attention_title_.empty()) {
@@ -521,7 +530,11 @@ void DynamicIslandWindow::SetDpiScale(double scale) {
 void DynamicIslandWindow::StartAnimTimer() {
   if (window_handle_ == nullptr || anim_timer_on_) return;
   anim_timer_on_ = true;
-  anim_epoch_ms_ = GetTickCount64();
+  // epoch 只在首次赋值：抑制唤回（SW_HIDE+StopAnimTimer→再启）若重置
+  // epoch，now_s_ 时间轴清零，attention_start_s_/morph_start_s_ 这些旧轴
+  // 锚点全部错位——全屏提醒先 t<0 不播、再延迟开演、hold 完才复位，
+  // 「提醒播完不消失」即此根因。
+  if (anim_epoch_ms_ == 0) anim_epoch_ms_ = GetTickCount64();
   SetTimer(window_handle_, 1, 16, nullptr);
 }
 
@@ -556,12 +569,17 @@ void DynamicIslandWindow::CheckSuppression() {
 // 「窗口失活后的重建」由 Dart 侧看门狗（周期 ping）负责，不在这里。
 // 录屏进程在跑时豁免三种忙碌态（IsScreenRecordingActive，见文件头说明），
 // 忙碌判定本身不变：录制一停，全屏/忙碌仍照常抑制。
+// 提醒豁免（2026-10-05 拍板）：提醒 attention 进行中即使全屏也上屏——
+// 「现在不看会错过」的唯一强打断态；attention 播完/点击收口后由各结束点
+// 回推一次本函数立即让位，心跳 2s 兜底。
 void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATION_STATE state;
   if (FAILED(SHQueryUserNotificationState(&state))) return;
   const bool recording = IsScreenRecordingActive();
-  const bool busy = !recording && (state == QUNS_RUNNING_D3D_FULL_SCREEN ||
-                                   state == QUNS_PRESENTATION_MODE ||
-                                   state == QUNS_BUSY);
+  const bool attention_active = attention_start_s_ >= 0;
+  const bool busy = !recording && !attention_active &&
+                    (state == QUNS_RUNNING_D3D_FULL_SCREEN ||
+                     state == QUNS_PRESENTATION_MODE ||
+                     state == QUNS_BUSY);
   // 取证日志：每 ~150s 一次心跳证明本心跳活着；转向时必记（含 visible_ 快照）。
   static int tick_count = 0;
   const bool heartbeat = (++tick_count % 75) == 1;
@@ -807,6 +825,8 @@ void DynamicIslandWindow::Render() {
         has_entry_ = false;
         entry_ = Entry{};
       }
+      // 提醒结束立即让位：全屏环境仍在时回抑制态（幂等），不等下一跳。
+      UpdateFullscreenSuppression();
     }
     // 基座几何（不含 attention）；attention 靠围绕胶囊中心的变换放大。
     const float cap_x = (phys_w - cur_w) / 2.0f;
@@ -1387,6 +1407,8 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         if (entry_.id == "attention") ClearEntry();
         else Render();
         FireEvent(EventType::kAction, "打开日程");
+        // 提前收口后立即让位：全屏环境仍在时回抑制态，不等下一跳。
+        UpdateFullscreenSuppression();
         return 0;
       }
       // 岛旁消息挂件：点击展开独立消息卡（不唤起主窗口，与应用内隔离）。

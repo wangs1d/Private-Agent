@@ -137,7 +137,7 @@ test("补图后的回执经 tool-card-registry 出卡时 sides 带图", async ()
     const payload = JSON.parse(
       text!.split("[AGENT_RESULT_CARD_START]\n")[1]!.split("\n[AGENT_RESULT_CARD_END]")[0]!,
     ) as { cardType: string; sides: Array<{ image?: string }> };
-    assert.equal(payload.cardType, "product_compare");
+    assert.equal(payload.cardType, "product_pick");
     assert.ok(payload.sides.length >= 1);
     assert.ok(
       payload.sides.every((s) => Boolean(s.image)),

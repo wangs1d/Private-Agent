@@ -2,11 +2,14 @@
   "description": "本地开发默认 URL（与 npm run dev:all 一致）",
   "server": {
     "http": "http://127.0.0.1:3000",
+    "https": "https://127.0.0.1:3443",
     "ws": "ws://127.0.0.1:3000/ws",
-    "chatWeb": "http://127.0.0.1:3000/chat"
+    "chatWeb": "http://127.0.0.1:3000/chat",
+    "chatWebHttps": "https://127.0.0.1:3443/chat"
   },
   "flutterDartDefine": {
     "HTTP_BASE": "http://127.0.0.1:3000",
     "WS_URL": "ws://127.0.0.1:3000"
-  }
+  },
+  "notes": "HTTPS 为附加监听（浏览器专用，消除地址栏不安全标志），Flutter 客户端继续走 HTTP；详见 docs/dev-https.md"
 }
