@@ -356,15 +356,19 @@ class DynamicIslandLauncher {
   }
 
   /// 提醒时刻的 attention 动画：放大 2 倍 + 高亮脉冲。
+  /// [holdSeconds] = 保持段时长（秒），0 用原生默认档（预告）；
+  /// 到点提醒传长驻留（如 26），点击胶囊可提前收口并回「打开日程」action。
   Future<void> attention({
     required String title,
     String trailing = '',
+    double holdSeconds = 0,
   }) async {
     if (!_nativeReady) return;
     try {
       await _channel.invokeMethod<bool>('attention', <String, Object?>{
         'title': title,
         'trailing': trailing,
+        'holdS': holdSeconds,
       });
     } on PlatformException catch (_) {}
   }
@@ -439,9 +443,9 @@ void handleIslandAction(String label) => _islandActionHandler(label);
 
 // ───────────────────────── 行程预告调度器 ─────────────────────────
 
-/// 行程提醒的提前量策略：按事项标题关键词分类，不同事情不同提前时间。
-/// v1 策略表在客户端；服务端 schedule.reminder_fired 也可作为提醒源汇入
-/// 同一条 attention 通路。
+/// 行程预告的提前量策略表：按事项标题关键词分类（命中多个取最靠前）。
+/// 提醒时刻本身已统一收归服务端；本表只剩两个消费面：
+/// 胶囊预告窗口闸（[withinPreviewWindow]）与预告尾注文案（[trailingFor]）。
 class IslandReminderPolicy {
   IslandReminderPolicy._();
 
@@ -472,6 +476,18 @@ class IslandReminderPolicy {
     return tierCount > 1 ? '$base · 第${tierIndex + 1}次提醒' : '$base 后';
   }
 
+  /// 「下一事项」胶囊的预告窗口 = 该事项的首档提醒提前量。
+  /// 岛上预告与提醒同节奏：进入提醒节奏才上岛倒计时，还有很久不占胶囊
+  /// （2026-10-05 定调：「根据情况按一定时间提前预示」）。
+  static int previewLeadMinutesFor(String title) => leadMinutesFor(title).first;
+
+  /// 预告窗口闸（纯函数可测）：未带 minutesAhead 的注入方（E2E 台账）视为已在窗口内。
+  static bool withinPreviewWindow(Map<String, Object?> next) {
+    final int minutesAhead = (next['minutesAhead'] as num?)?.toInt() ?? 0;
+    return minutesAhead <=
+        previewLeadMinutesFor((next['title'] ?? '').toString());
+  }
+
   static bool _contains(String title, List<String> keys) {
     for (final String k in keys) {
       if (title.contains(k)) return true;
@@ -480,74 +496,29 @@ class IslandReminderPolicy {
   }
 }
 
-/// 行程预告调度器：从今日日程生成各提前档的提醒时刻，
-/// 到点让岛播放 attention 动画（放大 2 倍 + 高亮）。
-/// 接真实数据：main.dart 把今日日程喂给 [refresh]；
-/// 服务端 schedule.reminder_fired 事件也可直接调 [fireNow]。
+/// 行程预告调度器：提前预示的「提醒时刻」已统一收归服务端
+/// （schedule.reminder_fired 事件，含 preReminder 分段与到点档，2026-10-05
+/// 合并定调——客户端关键词 Timer 重复触发已删）。本类只剩 [fireNow]：
+/// 收到服务端事件后驱动岛的 attention 动画。
 class IslandReminderScheduler {
   IslandReminderScheduler._();
 
   static final IslandReminderScheduler instance = IslandReminderScheduler._();
 
-  final List<Timer> _timers = <Timer>[];
-
-  /// 用今日日程重建提醒计划（幂等：清掉旧 timer 再排）。
-  void refresh(List<Map<String, Object?>> agenda) {
-    cancelAll();
-    final DateTime now = DateTime.now();
-    for (final Map<String, Object?> item in agenda) {
-      final Object? timeRaw = item['time'];
-      if (timeRaw is! String || timeRaw.length < 4) continue;
-      final int? hour = int.tryParse(timeRaw.substring(0, 2));
-      final int? minute = int.tryParse(timeRaw.substring(3, 5));
-      if (hour == null || minute == null) continue;
-      final DateTime start =
-          DateTime(now.year, now.month, now.day, hour, minute);
-      if (item['completed'] == true || !start.isAfter(now)) continue;
-      final String title = (item['title'] ?? '').toString();
-      final List<int> leads = IslandReminderPolicy.leadMinutesFor(title);
-      for (int i = 0; i < leads.length; i++) {
-        final int lead = leads[i];
-        final DateTime fireAt = start.subtract(Duration(minutes: lead));
-        if (!fireAt.isAfter(now)) continue;
-        final int tier = i;
-        final int tiers = leads.length;
-        _timers.add(Timer(fireAt.difference(now), () {
-          fireNow(
-            title: title,
-            minutesAhead: lead,
-            tierIndex: tier,
-            tierCount: tiers,
-          );
-        }));
-      }
-    }
-  }
-
-  void cancelAll() {
-    for (final Timer t in _timers) {
-      t.cancel();
-    }
-    _timers.clear();
-  }
-
-  /// 立即触发一次提醒动画（调度器到点 / 服务端 reminder_fired 共用）。
-  /// [trailingOverride] 非空时直接作为尾注文案（服务端已算好提前量的场景）。
+  /// 立即触发一次提醒动画。
+  /// 内容只显示事情本身（[title]，2026-10-05 定调：不加尾注/说明文案）。
+  /// [holdSeconds] 保持段时长（秒）：预告档不传（默认 6s 收回）；
+  /// 到点档传长驻留（如 26 → 约 30s），点击胶囊提前收口并跳日程页。
   void fireNow({
     required String title,
-    int minutesAhead = 0,
-    int tierIndex = 0,
-    int tierCount = 1,
-    String? trailingOverride,
+    double holdSeconds = 0,
   }) {
     final DynamicIslandLauncher launcher = DynamicIslandLauncher.instance;
-    launcher.attention(
-      title: title,
-      trailing: trailingOverride ??
-          IslandReminderPolicy.trailingFor(minutesAhead, tierIndex, tierCount),
-    );
-    // 提醒动画结束后胶囊回落：6 秒后清掉提醒条目。
-    Timer(const Duration(seconds: 6), () {
+    launcher.attention(title: title, holdSeconds: holdSeconds);
+    // 提醒动画结束后胶囊回落：默认 6 秒；长驻留档 = 保持段 + 入出场余量。
+    final int dismissMs =
+        holdSeconds > 0 ? ((holdSeconds + 1.0) * 1000).round() : 6000;
+    Timer(Duration(milliseconds: dismissMs), () {
       DynamicIslandController.instance.dismiss('attention');
     });
   }
@@ -604,13 +575,21 @@ class IslandRealFeeds {
 
   /// 日程倒计时（今日日程同步驱动）+ 展开卡内容 + 提醒计划。
   /// [agenda] 为完整今日安排（含已完成，供展开卡）；[next] 为最近未完成项。
+  ///
+  /// 胶囊预告有提前量窗口闸（[IslandReminderPolicy.withinPreviewWindow]）：
+  /// 事项进入首档提醒提前量才上岛倒计时，还有很久时胶囊回待机态。
+  /// （提前预示的「提醒时刻」统一由服务端 reminder_fired 驱动，
+  /// 此处只管胶囊倒计时与展开卡内容。）
   static void setSchedule({
     required List<Map<String, Object?>> agenda,
     Map<String, Object?>? next,
   }) {
     _l.setAgenda(agenda);
-    IslandReminderScheduler.instance.refresh(agenda);
     if (next == null) {
+      _c.dismiss('schedule.next');
+      return;
+    }
+    if (!IslandReminderPolicy.withinPreviewWindow(next)) {
       _c.dismiss('schedule.next');
       return;
     }

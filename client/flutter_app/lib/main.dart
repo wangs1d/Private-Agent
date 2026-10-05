@@ -1014,6 +1014,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         unawaited(_markAllMessageHubRead());
         return;
       }
+      if (label == '打开日程') {
+        // 到点提醒点击胶囊提前收口的确认出口：唤起主窗口 + 打开日程双栏面板。
+        unawaited(windowManager.show());
+        unawaited(windowManager.focus());
+        if (mounted) _openSchedulePanel();
+        return;
+      }
       unawaited(windowManager.show());
       unawaited(windowManager.focus());
     });
@@ -1432,6 +1439,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "schedule.reminder_fired") {
           await AmbientFeedsController.instance
               .onScheduleReminderFired(payload);
+        }
+        if (type == "hub.message_arrived") {
+          await AmbientFeedsController.instance
+              .onHubMessageArrived(payload);
         }
         if (type == "surface.show") {
           // Surface-on-Demand：服务端 surface.show 工具召唤桌面悬浮卡。

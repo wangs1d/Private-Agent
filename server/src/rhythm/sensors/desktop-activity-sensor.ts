@@ -9,6 +9,8 @@ import type { RhythmObservation, RhythmSensor } from "../types.js";
 export class DesktopActivitySensor implements RhythmSensor {
   readonly id = "desktop-activity";
   readonly dimensions = ["focus" as const, "overtime" as const];
+  /** 桌面信号链自检：客户端在线时每轮应有活跃观察 */
+  readonly expectsObservations = true;
 
   constructor(private readonly signalHub: Pick<LifeSignalHubService, "recentSignals">) {}
 

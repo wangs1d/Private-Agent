@@ -958,8 +958,9 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
   if (method == "attention") {
     const std::string title = GetEncodableString(args, "title", "");
     const std::string trailing = GetEncodableString(args, "trailing", "");
+    const double hold_s = GetEncodableDouble(args, "holdS", 0.0);
     if (dynamic_island_window_) {
-      dynamic_island_window_->StartAttention(title, trailing);
+      dynamic_island_window_->StartAttention(title, trailing, hold_s);
     }
     result->Success(flutter::EncodableValue(true));
     return;

@@ -19,11 +19,13 @@ import type {
   RhythmDimension,
   RhythmDimensionModel,
   RhythmDimensionStates,
+  RhythmEngineHealth,
   RhythmInsight,
   RhythmObservation,
   RhythmProfile,
   RhythmProfileUpdate,
   RhythmSensor,
+  RhythmSensorHealth,
   ReminderFeedbackOutcome,
 } from "./types.js";
 
@@ -60,6 +62,25 @@ export class LifeRhythmEngine {
   /** 在线推送的观察缓冲（recordContactOutcome），随下次 runAnalysis 消费 */
   private readonly pushedObservations = new Map<string, RhythmObservation[]>();
   private running = false;
+  /** 采样链健康记账（/api/proactivity/sensors 的 rhythm 块）：0 样本空转不再无人知晓 */
+  private readonly sensorHealthBook = new Map<
+    string,
+    {
+      dimensions: RhythmDimension[];
+      expectsObservations: boolean;
+      collectCount: number;
+      errorCount: number;
+      observationCount: number;
+      lastCollectAt: string | null;
+      lastOkAt: string | null;
+      lastErrorAt: string | null;
+      lastError?: string;
+    }
+  >();
+  private analysisRunCount = 0;
+  private lastAnalysisAt: string | null = null;
+  /** stalled 判定：声明应有产出的传感器连续 N 轮零观察 */
+  private static readonly STALL_THRESHOLD_RUNS = 3;
 
   constructor(private readonly opts: LifeRhythmEngineOptions) {
     const models = opts.dimensionModels ?? [
@@ -209,16 +230,28 @@ export class LifeRhythmEngine {
         ? new Date(`${profile.lastAnalyzedDay}T00:00:00`)
         : new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-      // 1) 传感器拉取（单传感器失败不阻塞整体）
+      // 1) 传感器拉取（单传感器失败不阻塞整体；健康记账防 0 样本空转无人知晓）
       const collected: RhythmObservation[] = [];
       for (const sensor of this.sensors) {
+        const book = this.sensorHealthBookFor(sensor);
+        book.collectCount += 1;
+        book.lastCollectAt = now.toISOString();
         try {
           const observations = await sensor.collect(actorId, since);
-          if (Array.isArray(observations)) collected.push(...observations);
+          if (Array.isArray(observations)) {
+            collected.push(...observations);
+            book.observationCount += observations.length;
+          }
+          book.lastOkAt = now.toISOString();
         } catch (error) {
+          book.errorCount += 1;
+          book.lastErrorAt = now.toISOString();
+          book.lastError = error instanceof Error ? error.message : String(error);
           console.error(`[RhythmEngine] sensor ${sensor.id} collect failed:`, error);
         }
       }
+      this.analysisRunCount += 1;
+      this.lastAnalysisAt = now.toISOString();
       // 2) 在线推送的观察一并消费
       const pushed = this.pushedObservations.get(actorId) ?? [];
       this.pushedObservations.delete(actorId);
@@ -275,6 +308,52 @@ export class LifeRhythmEngine {
     } finally {
       this.running = false;
     }
+  }
+
+  private sensorHealthBookFor(sensor: RhythmSensor) {
+    let book = this.sensorHealthBook.get(sensor.id);
+    if (!book) {
+      book = {
+        dimensions: [...sensor.dimensions],
+        expectsObservations: sensor.expectsObservations === true,
+        collectCount: 0,
+        errorCount: 0,
+        observationCount: 0,
+        lastCollectAt: null,
+        lastOkAt: null,
+        lastErrorAt: null,
+      };
+      this.sensorHealthBook.set(sensor.id, book);
+    }
+    return book;
+  }
+
+  /** 采样链健康快照（诊断面板用）：per-sensor 计数 + stalled 判定 */
+  health(): RhythmEngineHealth {
+    const sensors: RhythmSensorHealth[] = this.sensors.map((sensor) => {
+      const book = this.sensorHealthBookFor(sensor);
+      return {
+        sensorId: sensor.id,
+        dimensions: book.dimensions,
+        collectCount: book.collectCount,
+        errorCount: book.errorCount,
+        observationCount: book.observationCount,
+        lastCollectAt: book.lastCollectAt,
+        lastOkAt: book.lastOkAt,
+        lastErrorAt: book.lastErrorAt,
+        ...(book.lastError ? { lastError: book.lastError } : {}),
+        stalled:
+          book.expectsObservations &&
+          book.collectCount >= LifeRhythmEngine.STALL_THRESHOLD_RUNS &&
+          book.observationCount === 0,
+      };
+    });
+    return {
+      analysisRunCount: this.analysisRunCount,
+      lastAnalysisAt: this.lastAnalysisAt,
+      enabled: this.sensors.length > 0,
+      sensors,
+    };
   }
 }
 

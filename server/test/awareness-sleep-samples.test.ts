@@ -88,3 +88,66 @@ test("短于 30 分钟的会话不入样（防噪声阈值回归）", () => {
   anyCortex.trackSleepWindow("u@x.com", "sleeping", "idle");
   assert.equal(cortex.getRecentSleepWindowSamples("u_x.com").length, 0);
 });
+
+test("重启接续：恢复的挂起会话在重启后首次非睡眠提交时落账，入睡起点不漂移", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "awareness-sleep-restart-"));
+  try {
+    // 实例1：用户 7 小时前入睡（未醒），落盘
+    const c1 = new AwarenessCortex();
+    c1.setPersistPath(dir);
+    const startedAt = Date.now() - 7 * HOUR;
+    (c1 as unknown as { trackSleepWindow: Function }).trackSleepWindow("u@x.com", "idle", "sleeping");
+    (c1 as unknown as { ongoingSleepSession: Map<string, number> }).ongoingSleepSession.set(
+      "u_x.com",
+      startedAt,
+    );
+    c1.flushSleepSamples();
+
+    // 实例2（模拟 tsx watch 重启）：latest 状态表为空，恢复挂起会话；
+    // 期间又发生过一次「进入 sleeping」的首次提交——不得覆盖入睡起点
+    const c2 = new AwarenessCortex();
+    c2.setPersistPath(dir);
+    const any2 = c2 as unknown as {
+      trackSleepWindow: Function;
+      ongoingSleepSession: Map<string, number>;
+    };
+    any2.trackSleepWindow("u@x.com", undefined, "sleeping");
+    assert.equal(any2.ongoingSleepSession.get("u_x.com"), startedAt, "重启后入睡起点保持原值");
+    // 早晨醒来：prev 缺失的首次非睡眠提交也要关会话落账
+    any2.trackSleepWindow("u@x.com", undefined, "idle");
+    const samples = c2.getRecentSleepWindowSamples("u@x.com");
+    assert.equal(samples.length, 1, "重启前的夜应落成样本");
+    const spanHours = samples[0]!.endHour - samples[0]!.startHour;
+    assert.ok(
+      Math.abs(spanHours - 7) < 0.2,
+      `样本时长应≈7h（起点不漂移到重启点），实际 ${spanHours}`,
+    );
+    assert.equal(any2.ongoingSleepSession.has("u_x.com"), false, "会话已关闭");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("恢复时丢弃超过 48h 的陈旧挂起会话（多天残账不污染样本）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "awareness-sleep-stale-"));
+  try {
+    const c1 = new AwarenessCortex();
+    c1.setPersistPath(dir);
+    (c1 as unknown as { ongoingSleepSession: Map<string, number> }).ongoingSleepSession.set(
+      "stale.com",
+      Date.now() - 72 * HOUR,
+    );
+    c1.flushSleepSamples();
+    const c2 = new AwarenessCortex();
+    c2.setPersistPath(dir);
+    const any2 = c2 as unknown as {
+      trackSleepWindow: Function;
+      ongoingSleepSession: Map<string, number>;
+    };
+    assert.equal(any2.ongoingSleepSession.has("stale.com"), false, "陈旧残账恢复即丢弃");
+    any2.trackSleepWindow("stale.com", undefined, "idle");
+    assert.equal(c2.getRecentSleepWindowSamples("stale.com").length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

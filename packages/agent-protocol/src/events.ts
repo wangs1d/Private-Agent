@@ -168,6 +168,12 @@ export const ServerEventType = {
   ScheduleTasksChanged: "schedule.tasks_changed",
   /** 定时提醒到点触发（服务端调度器执行后推送） */
   ScheduleReminderFired: "schedule.reminder_fired",
+  /**
+   * 生活消息入站（邮件 / 微信服务通知 / 通用消息桥等 MessageHub 汇入源）：
+   * 客户端收到后经灵动岛 attention 即时告知（2026-10-05 定调：消息类统一上岛，
+   * 岛=告知、弹窗=决策）。仅判重后的新消息推送（ingestInbound 命中去重不触发）。
+   */
+  HubMessageArrived: "hub.message_arrived",
   ToolCall: "tool.call",
   ToolResult: "tool.result",
   WalletSimulateResult: "wallet.simulate.result",

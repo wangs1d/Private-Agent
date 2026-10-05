@@ -166,4 +166,39 @@ void main() {
       expect(c.entry, isNull);
     });
   });
+
+  group('IslandReminderPolicy 下一事项预告窗口闸', () {
+    test('还在很久不预告，进入该事项首档提前量窗口才预告', () {
+      // 普通事项窗口 30 分：睡前列表里的「该休息啦」下午不占胶囊。
+      expect(IslandReminderPolicy.withinPreviewWindow(
+          <String, Object?>{'title': '该休息啦', 'minutesAhead': 430}),
+          isFalse, reason: '还有 7 小时 10 分不该预告');
+      expect(IslandReminderPolicy.withinPreviewWindow(
+          <String, Object?>{'title': '该休息啦', 'minutesAhead': 31}),
+          isFalse);
+      expect(IslandReminderPolicy.withinPreviewWindow(
+          <String, Object?>{'title': '该休息啦', 'minutesAhead': 30}),
+          isTrue);
+      // 会议类窗口 25 分。
+      expect(IslandReminderPolicy.withinPreviewWindow(
+          <String, Object?>{'title': '设计评审', 'minutesAhead': 26}),
+          isFalse);
+      expect(IslandReminderPolicy.withinPreviewWindow(
+          <String, Object?>{'title': '设计评审', 'minutesAhead': 25}),
+          isTrue);
+      // 出行类窗口最宽（180 分）——按情况放宽。
+      expect(IslandReminderPolicy.withinPreviewWindow(
+          <String, Object?>{'title': '去机场赶航班', 'minutesAhead': 181}),
+          isFalse);
+      expect(IslandReminderPolicy.withinPreviewWindow(
+          <String, Object?>{'title': '去机场赶航班', 'minutesAhead': 180}),
+          isTrue);
+    });
+
+    test('E2E 台账注入未带 minutesAhead：视为已在窗口内放行', () {
+      expect(IslandReminderPolicy.withinPreviewWindow(
+          <String, Object?>{'title': '设计评审', 'trailing': '25 分钟后'}),
+          isTrue);
+    });
+  });
 }

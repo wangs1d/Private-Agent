@@ -358,6 +358,10 @@ void DynamicIslandWindow::SetEntry(const Entry& entry) {
 }
 
 void DynamicIslandWindow::ClearEntry() {
+  // attention 进行中的临时条目不许被外部清：30s 日程 ticker 会推 clearEntry
+  // 把它抹掉，胶囊缩回 108px 待机光球档再放大——「放大态变 1/4 大小」根因。
+  // 临时条目由 attention 时间线走完时自清（见 Render 复位点）。
+  if (attention_start_s_ >= 0 && entry_.id == "attention") return;
   has_entry_ = false;
   entry_ = Entry{};
   if (window_handle_ != nullptr) Render();
@@ -452,10 +456,12 @@ void DynamicIslandWindow::SetExpanded(bool expanded) {
 }
 
 void DynamicIslandWindow::StartAttention(const std::string& title,
-                                         const std::string& trailing) {
+                                         const std::string& trailing,
+                                         double hold_s) {
   PlayAttentionChime();
   attention_title_ = Utf8ToWide(title);
   attention_trailing_ = Utf8ToWide(trailing);
+  attention_hold_s_ = hold_s > 0 ? hold_s : kAttnHoldS;
   // 展开态来提醒：瞬时收起（不播收缩动画），attention 恒以小胶囊为基准。
   if (stage_target_ != Stage::kCompact) {
     stage_target_ = Stage::kCompact;
@@ -495,9 +501,9 @@ double DynamicIslandWindow::AttentionScale() const {
     const double e = 1 + c3 * std::pow(x - 1, 3) + c1 * std::pow(x - 1, 2);
     return 1.0 + (kAttentionScale - 1.0) * e;
   }
-  if (t < kAttnInS + kAttnHoldS) return kAttentionScale;
-  if (t < kAttnInS + kAttnHoldS + kAttnOutS) {
-    const double x = (t - kAttnInS - kAttnHoldS) / kAttnOutS;
+  if (t < kAttnInS + attention_hold_s_) return kAttentionScale;
+  if (t < kAttnInS + attention_hold_s_ + kAttnOutS) {
+    const double x = (t - kAttnInS - attention_hold_s_) / kAttnOutS;
     return kAttentionScale + (1.0 - kAttentionScale) * EaseOutCubic(x);
   }
   return 1.0;  // 已结束（调用方负责清 attention_start_s_）
@@ -792,9 +798,15 @@ void DynamicIslandWindow::Render() {
     double att = AttentionScale();
     if (attention_start_s_ >= 0 &&
         now_s_ - attention_start_s_ >
-            kAttnInS + kAttnHoldS + kAttnOutS) {
+            kAttnInS + attention_hold_s_ + kAttnOutS) {
       attention_start_s_ = -1;  // 动画播完自动复位
       att = 1.0;
+      if (entry_.id == "attention") {
+        // 临时条目随提醒结束退场（就地清，勿调 ClearEntry——本帧正在 Render，
+        // 递归重入；且此处 attention 已复位，ClearEntry 的进行中守卫也不适用）。
+        has_entry_ = false;
+        entry_ = Entry{};
+      }
     }
     // 基座几何（不含 attention）；attention 靠围绕胶囊中心的变换放大。
     const float cap_x = (phys_w - cur_w) / 2.0f;
@@ -1368,6 +1380,15 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
       if (IsMorphing()) return 0;
       const int cx = GET_X_LPARAM(lparam);
       const int cy = GET_Y_LPARAM(lparam);
+      // attention 进行中点击 = 知道了：提前收口（临时条目一并清），
+      // 并让 Dart 打开日程页（到点提醒的确认出口，2026-10-05 定调）。
+      if (attention_start_s_ >= 0) {
+        attention_start_s_ = -1;
+        if (entry_.id == "attention") ClearEntry();
+        else Render();
+        FireEvent(EventType::kAction, "打开日程");
+        return 0;
+      }
       // 岛旁消息挂件：点击展开独立消息卡（不唤起主窗口，与应用内隔离）。
       if (messages_unread_ > 0 &&
           messages_badge_rect_.right > messages_badge_rect_.left &&

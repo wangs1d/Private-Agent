@@ -15,6 +15,9 @@ export type SleepSampleSource = {
 export class SleepWindowSensor implements RhythmSensor {
   readonly id = "sleep-window";
   readonly dimensions = ["sleep" as const];
+  /** 睡眠样本链自检：源已绑定且 runtime 在跑时每轮应有观察；零观察=断供（2026-10-05 事故教训） */
+  readonly expectsObservations = true;
+
   private source: SleepSampleSource | null = null;
 
   /** bootstrap 在 AwarenessCortex 实例化后注入（brain 关闭时保持 null，无观察产出） */

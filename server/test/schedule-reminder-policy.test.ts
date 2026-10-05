@@ -225,6 +225,21 @@ test("createTask：牙医提醒自动生成三段计划；显式提前量/trivia
       sourceRefId: "c-1",
     });
     assert.equal(commitment.preReminders, undefined);
+
+    // ics 日历事件：事件本身无提醒数据，纳入分级策略补位
+    // （客户端关键词 Timer 已按「提醒统一信服务端」定调删除）
+    const ics = await service.createTask({
+      ...base,
+      category: "itinerary" as const,
+      description: "日历订阅「工作」自动导入",
+      reminderMessage: "团队周会",
+      runAt: DENTIST_RUN_AT,
+      source: "ics" as const,
+      sourceRefId: "ics-evt-1",
+    });
+    assert.ok(ics.preReminders?.length);
+    assert.ok(ics.remindBeforeMinutes?.length);
+    assert.ok(ics.reminderPolicy);
   });
 });
 

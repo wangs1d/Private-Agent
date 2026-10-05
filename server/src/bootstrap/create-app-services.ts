@@ -478,6 +478,8 @@ import { OutcomeStore } from "../proactivity/outcome-store.js";
 import { TopicDismissTracker } from "../proactivity/topic-dismiss-tracker.js";
 // ─── 五层主动性架构（传感→评估→仲裁→目标→表达）───
 import { SensorKernel, registerFeeder } from "../proactivity/sensors/kernel.js";
+import type { Signal } from "../proactivity/sensors/types.js";
+import { ScreenFocusSensor } from "../rhythm/sensors/screen-focus-sensor.js";
 import { ScreenSensor } from "../proactivity/sensors/screen-sensor.js";
 import { FileWatcherSensor } from "../proactivity/sensors/file-watcher.js";
 import { ClipboardSensor, isClipboardSensorEnabled } from "../proactivity/sensors/clipboard-sensor.js";
@@ -964,8 +966,12 @@ export async function createAppServices(): Promise<AppServices> {
   let onReminderOfflineToPipeline:
     | ((taskId: string, sessionId: string, title: string, message: string, runAt: string) => void)
     | undefined;
-  scheduleTaskService.setReminderHandler(async (task, message) => {
+  scheduleTaskService.setReminderHandler(async (task, message, options) => {
     const displayMessage = formatReminderDisplayMessage(message);
+    // 到点提醒 vs 提前量预告：客户端据此分流（岛默认短档 / 岛长驻留档；
+    // 2026-10-05 定调提醒统一归灵动岛，桌面弹窗退役为纯决策出口）。
+    // 预告段无 task.title 时给出段名，避免岛上只有泛化「提醒」。
+    const preReminder = options?.preReminder === true;
     const wsDelivered = wsConnectionRegistry.trySend(
       task.sessionId,
       JSON.stringify({
@@ -973,8 +979,10 @@ export async function createAppServices(): Promise<AppServices> {
         payload: {
           taskId: task.taskId,
           title: task.title,
+          shortTitle: task.shortTitle,
           message: displayMessage,
           reminderMessage: message,
+          preReminder,
           recurrence: task.recurrence,
           status: task.status,
           nextRunAt: task.nextRunAt,
@@ -1862,6 +1870,8 @@ export async function createAppServices(): Promise<AppServices> {
   let rhythmEngine: LifeRhythmEngine | null = null;
   /** 分级提醒策略的作息画像回退源（rhythm 关闭时为 null，仅剩睡眠样本直读） */
   let rhythmProfileStoreRef: RhythmProfileStore | null = null;
+  /** 屏幕状态条件化的信号源（proactivity 内核 signals 日志；内核创建后赋值） */
+  let screenSignalSourceRef: (() => Signal[]) | null = null;
   if (rhythmEnabled) {
     const rhythmProfileStore = new RhythmProfileStore(join(process.cwd(), "data", "rhythm_profiles"));
     await rhythmProfileStore.load();
@@ -1871,6 +1881,9 @@ export async function createAppServices(): Promise<AppServices> {
     rhythmEngine.registerSensor(rhythmSleepSensor);
     rhythmEngine.registerSensor(new DesktopActivitySensor(lifeSignalHubService));
     rhythmEngine.registerSensor(new InteractionSignalSensor(lifeSignalHubService));
+    // 屏幕状态条件化（receptivity）：内核 signals 日志（含 screen_foreground 分类）
+    // → 开会/写代码/游戏等强勿扰时段的弱负观察。内核在本函数较后创建，用闭包延迟取。
+    rhythmEngine.registerSensor(new ScreenFocusSensor(() => screenSignalSourceRef?.() ?? []));
     rhythmEngine.subscribe(createReminderReschedulerConsumer(scheduleTaskService, rhythmEngine));
     rhythmEngine.subscribe(createReceptiveHoursWriterConsumer(userPersonalizationService));
     rhythmEngine.subscribe(createProactiveCandidateSourceConsumer(lifeSignalHubService, rhythmEngine));
@@ -4472,6 +4485,8 @@ export async function createAppServices(): Promise<AppServices> {
   /** 管道 outcome 存储（提升为命名引用：CostCalibrator 定时读取） */
   let outcomesStoreForCalibrator: InstanceType<typeof OutcomeStore> | null = null;
   const sensorKernel = new SensorKernel({ dataPath: proactivityFabricPath });
+  // 屏幕状态条件化信号源：内核 signals 日志（落盘持久，重启不丢；最近 600 条覆盖数日窗口）
+  screenSignalSourceRef = () => sensorKernel.recentLog(600);
   const screenSensor = new ScreenSensor({ visualPort: desktopVisual });
   const scheduleSensor = new ScheduleSensor({ listTasks: () => scheduleTaskService.listAllTasks() });
   sensorKernel.register(screenSensor);
@@ -5655,7 +5670,28 @@ export async function createAppServices(): Promise<AppServices> {
         ? "critical"
         : undefined,
   });
-  messageHubService.onInbound = (input) => {
+  messageHubService.onInbound = (input, message) => {
+    // 生活消息入站 → 灵动岛即时告知（2026-10-05 定调：消息类统一上岛，
+    // 岛=告知、弹窗=决策）。显示行取消息首行（邮件=主题行、服务通知=正文首行，
+    // 都是「事情本身」）；仅判重后的新消息走到这里（ingestInbound 去重不触发）。
+    const hubIslandLine = (message.text
+      .split("\n")
+      .map((l) => l.trim())
+      .find(Boolean) ?? "").slice(0, 40);
+    wsConnectionRegistry.trySend(
+      input.actorId,
+      JSON.stringify({
+        type: ServerEventType.HubMessageArrived,
+        payload: {
+          platform: input.platform,
+          title: input.title ?? "",
+          sender: input.senderName ?? input.participantName ?? "",
+          summary: hubIslandLine,
+          importance:
+            (message.meta as { importance?: string } | undefined)?.importance ?? "normal",
+        },
+      }),
+    );
     messageWatchTrigger.handleInbound(input);
     // 入站消息 → 传感内核 message 流（unread_burst 评估器数据源；30min 窗口 ≥3 条触发）
     messageFeeder({
@@ -5804,6 +5840,8 @@ export async function createAppServices(): Promise<AppServices> {
     proactivePushService,
     proactivityFabric: {
       sensorHealth: () => sensorKernel.health(),
+      // 节律采样链健康（睡眠/桌面/屏幕条件化传感器是否还在产出观察）
+      rhythmHealth: () => rhythmEngine?.health() ?? null,
       // 邮件反应链测试注入（2026-10-01）：模拟邮件走真实 handleIncoming 链，
       // actorId 缺省取邮箱配置的归属用户（自动接入后=注册邮箱账号）
       mailTestInject: async (mail) =>

@@ -164,6 +164,35 @@ export type RhythmSensor = {
   id: string;
   dimensions: RhythmDimension[];
   collect(actorId: string, since: Date): RhythmObservation[] | Promise<RhythmObservation[]>;
+  /**
+   * 健康自检标记：该传感器正常每轮都应有观察产出（true），还是天然常空
+   * （false/缺省，如位置传感器在定位关闭时合法返回空）。只影响 stalled 判定。
+   */
+  expectsObservations?: boolean;
+};
+
+/** 传感器采集健康（采样链自检：0 样本空转不再无人知晓） */
+export type RhythmSensorHealth = {
+  sensorId: string;
+  dimensions: RhythmDimension[];
+  collectCount: number;
+  errorCount: number;
+  observationCount: number;
+  lastCollectAt: string | null;
+  lastOkAt: string | null;
+  lastErrorAt: string | null;
+  lastError?: string;
+  /** 连续多轮零观察且传感器声明应有产出 → 采样链疑断（健康面板红点） */
+  stalled: boolean;
+};
+
+/** 引擎整体健康（/api/proactivity/sensors 的 rhythm 块） */
+export type RhythmEngineHealth = {
+  analysisRunCount: number;
+  lastAnalysisAt: string | null;
+  /** 引擎可用性：bootstrap 装配且 rhythm 开关打开 */
+  enabled: boolean;
+  sensors: RhythmSensorHealth[];
 };
 
 /** 模型器：纯统计，ingest 返回新状态；confidence 不足时消费方应静默跳过 */

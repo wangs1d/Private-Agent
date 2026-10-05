@@ -49,6 +49,8 @@ const FEEDBACK_SUPPRESSIBLE_KINDS = new Set([
 export type ProactivityFabricDeps = {
   /** 传感器健康快照（L1） */
   sensorHealth: () => unknown;
+  /** 节律采样链健康（睡眠/桌面/屏幕条件化传感器是否还在产出观察） */
+  rhythmHealth?: () => unknown;
   /** 当前仲裁快照 + 预览裁决（L3） */
   arbiterPreview: () => unknown;
   /** 目标板统计（L4） */
@@ -230,7 +232,13 @@ export function registerProactivityPipelineRoutes(
   // GET /api/proactivity/sensors —— L1 传感层健康面板：谁活着、谁熔断、最近产出
   app.get("/api/proactivity/sensors", async () => {
     if (!deps.fabric) return { ok: false, error: "fabric not wired" };
-    return { ok: true, sensors: deps.fabric.sensorHealth(), goals: deps.fabric.goalStats() };
+    return {
+      ok: true,
+      sensors: deps.fabric.sensorHealth(),
+      goals: deps.fabric.goalStats(),
+      // 节律采样链健康（rhythm 未启用时为 null）：per-sensor 计数 + stalled 红点
+      rhythm: deps.fabric.rhythmHealth?.() ?? null,
+    };
   });
 
   // P3 自诊断（2026-10-01）：「主动性到底干没干活 / 为什么没说话」——

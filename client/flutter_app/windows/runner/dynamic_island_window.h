@@ -104,7 +104,10 @@ class DynamicIslandWindow {
   /// 纯语音模式标志（对话全语音免点击）：开启后胶囊态悬停自动 glance
   /// 环境行，无需点击进 hover。
   void SetVoiceTalkMode(bool enabled);
-  void StartAttention(const std::string& title, const std::string& trailing);
+  /// 提醒 attention 动画。hold_s = 保持高亮段时长（秒），<=0 用默认档；
+  /// 到点提醒传长驻留（如 26s），点击胶囊可提前收口（并回 kAction「打开日程」）。
+  void StartAttention(const std::string& title, const std::string& trailing,
+                      double hold_s = 0.0);
   void SetDpiScale(double scale);
   /// Dart 看门狗兜底：直推一次全屏抑制检查（原生 WM_TIMER 心跳失效时，
   /// 退出全屏后岛卡在隐藏态的恢复全靠这条）。
@@ -135,7 +138,7 @@ class DynamicIslandWindow {
   // （用户多轮反馈锚定的绝对大小，勿再上调到 2.0）。
   static constexpr double kAttentionScale = 1.6;
   static constexpr double kAttnInS = 0.45;   // 入场（easeOutBack）
-  static constexpr double kAttnHoldS = 4.0;  // 保持高亮脉冲
+  static constexpr double kAttnHoldS = 4.0;  // 保持高亮脉冲（预告档默认）
   static constexpr double kAttnOutS = 0.35;  // 缩回
 
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam,
@@ -209,6 +212,7 @@ class DynamicIslandWindow {
 
   // attention 提醒动画：0=无，>0 = attention 开始时刻（now_s_ 基准）
   double attention_start_s_ = -1.0;
+  double attention_hold_s_ = kAttnHoldS;  // 本次保持段时长（秒），可变档
   std::wstring attention_title_;    // 高亮时显示的标题（可选，空=沿用当前 entry）
   std::wstring attention_trailing_;
 

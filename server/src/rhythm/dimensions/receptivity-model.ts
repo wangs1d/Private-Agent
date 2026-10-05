@@ -3,6 +3,8 @@ import type { ReceptivityDimensionState, RhythmDimensionModel, RhythmObservation
 const EWMA_ALPHA = 0.25;
 /** 位置移动观察的（更低）更新步长：不是真实触达反馈，只作弱负信号 */
 const MOVEMENT_ALPHA = 0.15;
+/** 屏幕占用观察（开会/写代码/玩游戏等强勿扰状态）的弱负步长：同移动，弱于真实反馈 */
+const SCREEN_BUSY_ALPHA = 0.15;
 
 export const EMPTY_RECEPTIVITY_STATE: ReceptivityDimensionState = {
   byHour: new Array<number>(24).fill(0),
@@ -22,6 +24,10 @@ export const EMPTY_RECEPTIVITY_STATE: ReceptivityDimensionState = {
  * （value=0 移动中）以更低步长把对应时段的接受度拉向 0——通勤/外出时
  * 主动消息大概率被忽略。只消费移动负信号：静止（value=1）不贡献，
  * 避免高频位置上报虚增接受度；attempts 也只计真实触达反馈（置信度口径不变）。
+ *
+ * 屏幕状态扩展：screen-focus 传感器的 kind="screen_busy" 观察（开会/写代码/
+ * 游戏…占用时段，value=0）以同等的弱负步长拉低对应小时——主动感知不只
+ * 「几点听得进话」，还有「什么状态下听得进话」。
  */
 export class ReceptivityDimensionModel implements RhythmDimensionModel<ReceptivityDimensionState> {
   readonly dimension = "receptivity" as const;
@@ -45,6 +51,15 @@ export class ReceptivityDimensionModel implements RhythmDimensionModel<Receptivi
         if (obs.value >= 0.5) continue; // 静止不贡献（位置传感器实际只产 value=0）
         byHour[hour] = (byHour[hour] ?? 0) * (1 - MOVEMENT_ALPHA);
         byWeekday[weekday] = (byWeekday[weekday] ?? 0) * (1 - MOVEMENT_ALPHA);
+        continue;
+      }
+
+      if (obs.kind === "screen_busy") {
+        // 屏幕状态条件化（screen-focus 传感器）：开会/写代码/游戏等强勿扰时段，
+        // 弱负信号把该小时接受度拉向 0；普通状态不产出观察，不虚增接受度
+        if (obs.value >= 0.5) continue;
+        byHour[hour] = (byHour[hour] ?? 0) * (1 - SCREEN_BUSY_ALPHA);
+        byWeekday[weekday] = (byWeekday[weekday] ?? 0) * (1 - SCREEN_BUSY_ALPHA);
         continue;
       }
 

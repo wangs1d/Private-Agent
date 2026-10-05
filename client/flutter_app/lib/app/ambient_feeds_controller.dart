@@ -79,31 +79,78 @@ class AmbientFeedsController {
     }
   }
 
-  /// 日程到点提醒：后台走系统通知（点开回前台），前台改道灵动岛
-  /// attention 动画（服务端已算好提前量，message 直接作为尾注）。
+  /// 日程提醒触达分流（2026-10-05 定调：提醒统一归灵动岛，桌面弹窗退役
+  /// 为纯决策出口——岛 = 告知，弹窗 = 等用户拍板）：
+  ///   - 提前量预告（preReminder == true，睡前备忘/起床闹钟/该出门了…）：
+  ///     走灵动岛 attention 默认档（约 6s 收回）——「灵动岛 = 预告」；
+  ///   - 到点提醒（preReminder != true）：走灵动岛长驻留档（约 30s，
+  ///     点击胶囊提前收口并打开日程页），提示音由 attention 档自带；
+  ///   - 移动端后台一律走系统通知（前台仍回落灵动岛）。
   Future<void> onScheduleReminderFired(Map<String, dynamic> payload) async {
     try {
-      final String title =
-          payload["title"]?.toString().trim().isNotEmpty == true
-              ? payload["title"]!.toString().trim()
-              : "提醒";
+      final String title = _reminderTitle(payload);
       final String message =
           payload["message"]?.toString().trim().isNotEmpty == true
               ? payload["message"]!.toString().trim()
               : (payload["reminderMessage"]?.toString().trim() ?? "到点了");
+      final bool isPreReminder = payload["preReminder"] == true;
 
       if (isMobile && _backgrounded) {
         unawaited(LocalNotificationService.show(title: title, body: message));
       } else {
+        // 岛上只显示事情本身（title），不重复展示说明文案（2026-10-05 定调）。
         IslandReminderScheduler.instance.fireNow(
           title: title,
-          trailingOverride: message,
+          // 到点档加长驻留（原生保持段 26s + 入出场 ≈ 30s）；
+          // 提前量预告用默认短档。
+          holdSeconds: isPreReminder ? 0 : 26,
         );
       }
 
       await syncSchedule?.call();
     } catch (e, st) {
       debugPrint("[schedule] schedule.reminder_fired failed: $e\n$st");
+    }
+  }
+
+  /// 提醒标题回退链：title → shortTitle → reminderMessage → 「提醒」。
+  /// shortTitle 是任务创建时给的短名（如「吃药」），比泛化的「提醒」可读。
+  String _reminderTitle(Map<String, dynamic> payload) {
+    for (final String key in const <String>[
+      "title",
+      "shortTitle",
+      "reminderMessage",
+    ]) {
+      final String v = payload[key]?.toString().trim() ?? "";
+      if (v.isNotEmpty) return v;
+    }
+    return "提醒";
+  }
+
+  /// 生活消息入站（邮件 / 微信服务通知 / 通用消息桥等 MessageHub 汇入源）→
+  /// 灵动岛即时告知（2026-10-05 定调：消息类统一上岛；岛=告知，弹窗=决策）。
+  /// 显示行 = 服务端摘好的 summary（消息首行=事情本身），空则回落来源标题。
+  /// 手机后台不打扰（重要消息走系统通知，非重要静默等用户回来看聚合）。
+  Future<void> onHubMessageArrived(Map<String, dynamic> payload) async {
+    try {
+      final String summary = payload["summary"]?.toString().trim() ?? "";
+      final String sourceTitle = payload["title"]?.toString().trim() ?? "";
+      final String display = summary.isNotEmpty
+          ? summary
+          : (sourceTitle.isNotEmpty ? sourceTitle : "新消息");
+      final bool high = payload["importance"]?.toString() == "high";
+
+      if (isMobile && _backgrounded) {
+        if (high) {
+          unawaited(LocalNotificationService.show(
+            title: display, body: sourceTitle,
+          ));
+        }
+        return;
+      }
+      IslandReminderScheduler.instance.fireNow(title: display);
+    } catch (e, st) {
+      debugPrint("[hub] hub.message_arrived failed: $e\n$st");
     }
   }
 

@@ -153,9 +153,18 @@ export type UpdateScheduleTaskInput = {
 
 export type WeatherBriefHandler = (task: ScheduleTaskRecord) => Promise<Record<string, unknown>>;
 
+/**
+ * 提醒触达上下文：
+ *   - preReminder：提前量分段提醒（睡前备忘/起床闹钟/该出门了…）。语义是「预告」，
+ *     客户端走轻触达（灵动岛），不走到点弹窗；
+ *   - 缺省（到点）：任务到点时的一次提醒，客户端走到点弹窗（桌面原生玻璃卡）。
+ */
+export type ScheduleReminderOptions = { preReminder?: boolean };
+
 export type ScheduleReminderHandler = (
   task: ScheduleTaskRecord,
   message: string,
+  options?: ScheduleReminderOptions,
 ) => Promise<void>;
 
 export type AgentTaskHandler = (task: ScheduleTaskRecord) => Promise<Record<string, unknown>>;
@@ -190,8 +199,11 @@ export function taskEndMs(startMs: number, durationMinutes?: number): number {
 }
 
 /**
- * 分级提醒策略的适用面：单次提醒类正事。ics 外部日历自带提醒、承诺物化
- * 由承诺板管梯度提醒（双响治理定调见 commitment-schedule-outlet.ts）。
+ * 分级提醒策略的适用面：单次提醒类正事。承诺物化由承诺板管梯度提醒
+ * （双响治理定调见 commitment-schedule-outlet.ts）。
+ * ics 日历事件原被排除（「外部日历自带提醒」），但事件本身并无提醒数据——
+ * 岛的提前预示此前靠客户端关键词 Timer 撑着；该客户端调度器已按
+ * 「提醒统一信服务端」定调（2026-10-05）删除，ics 纳入本策略补位。
  */
 function isReminderPolicyEligible(
   task: Pick<
@@ -204,7 +216,6 @@ function isReminderPolicyEligible(
     task.recurrence === "none" &&
     task.status === "active" &&
     task.category !== "trivia" &&
-    task.source !== "ics" &&
     task.source !== "commitment"
   );
 }
@@ -736,7 +747,7 @@ export class ScheduleTaskService {
         const script = task.preReminders?.find((p) => p.offsetMinutes === dueOffset);
         const message = script?.message ?? `【提前${dueOffset}分钟】${base}`;
         try {
-          await this.reminderHandler(updated, message);
+          await this.reminderHandler(updated, message, { preReminder: true });
         } catch {
           // 提前提醒推送失败不影响主触发链路
         }

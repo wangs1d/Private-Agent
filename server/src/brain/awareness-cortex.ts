@@ -141,6 +141,10 @@ const TRAVEL_CANDIDATE_PATTERN =
 const RECENT_HISTORY_LIMIT = 20;
 const TRAVEL_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const SLEEP_INACTIVE_MS = 30 * 60 * 1000;
+/** 单场睡眠会话上限：超过视为跨天陈旧残账（宕机/重启链/测试残留），丢弃不记 */
+const SLEEP_SESSION_MAX_MS = 20 * 60 * 60 * 1000;
+/** 恢复时丢弃超过该时长的挂起会话（多天前的残账永远等不到真实「睡醒」） */
+const SLEEP_ONGOING_STALE_MS = 48 * 60 * 60 * 1000;
 const INFERENCE_SIGNAL_SCAN = 50;
 /**
  * 动态睡眠窗口学习相关常量。
@@ -264,7 +268,11 @@ export class AwarenessCortex {
           this.sleepWindowSamples.set(key, entry.samples.slice(-50));
         }
         if (typeof entry.ongoingSince === "number") {
-          this.ongoingSleepSession.set(key, entry.ongoingSince);
+          // 超过 48h 的挂起会话是多天前的残账（runtime 长期未跑/测试 actor），
+          // 真实「睡醒」永远等不来，恢复即丢弃，避免陈旧时长污染将来的样本
+          if (Date.now() - entry.ongoingSince <= SLEEP_ONGOING_STALE_MS) {
+            this.ongoingSleepSession.set(key, entry.ongoingSince);
+          }
         }
       }
       const total = [...this.sleepWindowSamples.values()].reduce((n, s) => n + s.length, 0);
@@ -691,10 +699,14 @@ export class AwarenessCortex {
   /**
    * 跟踪用户的 sleeping 时段，用于动态学习个性化睡眠窗口。
    *
-   * - 从其他状态进入 sleeping → 记录会话起点
-   * - 从 sleeping 切换到其他状态 → 关闭会话，写入样本
+   * - 从其他状态进入 sleeping → 记录会话起点（已有挂起会话时不覆盖：重启恢复的
+   *   会话要保留真实入睡时刻，否则样本起点漂移到重启点）
+   * - 从 sleeping 切换到其他状态 → 关闭会话，写入样本。重启后 latest 状态表为空，
+   *   首次提交 prev 为 undefined——此时只要磁盘恢复了挂起会话，同样视为
+   *   「睡醒」关闭落账（否则重启前开始的夜晚永远等不到样本，学习链断供）
    * - 跨天会话按实际进入/离开时间记录（endHour 可小于 startHour，如 23.5→6.25）
-   * - 不足 30 分钟的"短暂打盹"不记入样本（避免噪声）
+   * - 不足 30 分钟的"短暂打盹"不记入样本（避免噪声）；超过单场上限的视为
+   *   陈旧恢复残账，丢弃不记（runtime 跨多天宕机/测试残留）
    */
   private trackSleepWindow(
     actorId: string,
@@ -704,19 +716,23 @@ export class AwarenessCortex {
     const now = Date.now();
     const key = AwarenessCortex.sleepKey(actorId);
     if (nextActivity === "sleeping" && prevActivity !== "sleeping") {
-      // 进入 sleeping：记录会话起点
-      this.ongoingSleepSession.set(key, now);
-      this.schedulePersist();
+      // 进入 sleeping：记录会话起点（保留已恢复的更早起点）
+      if (!this.ongoingSleepSession.has(key)) {
+        this.ongoingSleepSession.set(key, now);
+        this.schedulePersist();
+      }
       return;
     }
-    if (nextActivity !== "sleeping" && prevActivity === "sleeping") {
-      // 离开 sleeping：关闭会话，写入样本
+    if (nextActivity !== "sleeping" && (prevActivity === "sleeping" || (!prevActivity && this.ongoingSleepSession.has(key)))) {
+      // 离开 sleeping：关闭会话，写入样本（含重启后 prev 缺失的首次提交）
       const startTs = this.ongoingSleepSession.get(key);
       this.ongoingSleepSession.delete(key);
       if (!startTs) return;
       const durationMs = now - startTs;
       // 不足 30 分钟不算睡眠样本（短暂打盹/误判）
       if (durationMs < SLEEP_INACTIVE_MS) return;
+      // 超过单场上限（20h）：跨多天的陈旧残账（宕机/重启链/测试残留），丢弃
+      if (durationMs > SLEEP_SESSION_MAX_MS) return;
       const startDate = new Date(startTs);
       const endDate = new Date(now);
       const dateStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-${String(
