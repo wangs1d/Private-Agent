@@ -101,6 +101,8 @@ const RULES: ClassRule[] = [
   { prefix: "email.", domain: "social" },
   { prefix: "sms.", domain: "social" },
   { prefix: "message", domain: "social" },
+  // 微信接入：扫码登录/查连接状态都是用户在环的轻操作，按只读处理
+  { prefix: "wechat.", domain: "social", action: "query", risk: "read" },
   { prefix: "friend.", domain: "self", action: "manage", risk: "write" },
   // ── media 娱乐 ──
   { prefix: "media.", domain: "media" },

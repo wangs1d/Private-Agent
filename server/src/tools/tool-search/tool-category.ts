@@ -130,6 +130,12 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: [],
   },
   {
+    name: "wechat",
+    summary: "微信接入（扫码登录/连接状态）",
+    prefixes: ["wechat."],
+    secondaryTools: [],
+  },
+  {
     name: "smart_home",
     summary: "智能家居控制（灯/空调/窗帘/插座）",
     prefixes: ["smart_home."],

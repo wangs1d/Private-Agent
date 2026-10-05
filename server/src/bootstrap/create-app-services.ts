@@ -230,6 +230,7 @@ import { registerAgentIdentityTools } from "../tools/agent-identity-tools.js";
 import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerPaymentTools } from "../tools/payment-tools.js";
 import { QrAssistService } from "../services/qr-assist-service.js";
+import { registerWechatClawTools } from "../tools/wechat-claw-tools.js";
 import { registerMeituanTools } from "../tools/meituan-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
 import { registerAgentVoiceTools } from "../tools/agent-voice-tools.js";
@@ -835,9 +836,11 @@ export async function createAppServices(): Promise<AppServices> {
     dataDir: join(process.cwd(), "data", "shopping"),
   });
   // 初始化 Agent 虚拟浏览器服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
+  // open 撞白名单站点登录页时，经 QrAssistService 自动把登录二维码推到聊天。
   const agentBrowserService = new AgentBrowserService({
     browserSessionService,
     audit: auditService,
+    qrAssist: new QrAssistService({ imageStore: imageGenerationService }),
   });
   // 共用浏览器桥（sharedBrowserCoordinator / sharedBrowserCdpGateway）已提前到
   // shopping-order 装配段创建：购物页面获取器（内置浏览器优先）复用同一实例。
@@ -4112,6 +4115,8 @@ export async function createAppServices(): Promise<AppServices> {
 
   const wechatClawBindingService = new WechatClawBindingService();
   void wechatClawBindingService.load();
+  // 微信接入聊天工具族：login_qr 经通用推卡通道把登录二维码实时推到聊天流
+  registerWechatClawTools(toolRegistry, wechatClawBindingService, new QrAssistService({ imageStore: imageGenerationService }));
   const wechatClawBridgeService = new WechatClawBridgeService(runtime, {
     weatherPrefsService,
     ttsService,

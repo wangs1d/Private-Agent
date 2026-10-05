@@ -21,6 +21,8 @@ import type { AuditService } from "./audit-service.js";
 import type { BrowserSessionService } from "./browser-session-service.js";
 import { resolveSiteIdFromUrl } from "./browser-session-sites.js";
 import type { ImportedBrowserCookie } from "./browser-session-types.js";
+import { detectLoginPage } from "./shopping-platforms/login-gate.js";
+import type { QrAssistService } from "./qr-assist-service.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 
 // ─── 环境变量 ──────────────────────────────────────────────────────────────
@@ -181,6 +183,8 @@ export class AgentBrowserService {
     private readonly deps: {
       browserSessionService: BrowserSessionService;
       audit?: AuditService;
+      /** 通用二维码推送：打开站点撞登录页时自动推二维码到聊天（best-effort）。 */
+      qrAssist?: QrAssistService;
     },
   ) {
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 60_000);
@@ -284,11 +288,32 @@ export class AgentBrowserService {
 
       const title = await page.title().catch(() => "");
 
+      // 通用「需要扫码自动推」：白名单站点撞登录页时，登录二维码自动推到聊天
+      // （不阻塞会话——Agent 可继续描述页面或等用户扫码后重试）
+      let loginQrImageUrl: string | undefined;
+      if (siteId && this.deps.qrAssist) {
+        const login = await detectLoginPage(siteId, page).catch(() => ({ isLogin: false }));
+        if (login.isLogin) {
+          loginQrImageUrl =
+            (await this.deps.qrAssist
+              .pushPageCard(
+                ctx,
+                {
+                  title: "打开网页需要登录",
+                  caption: "登录页二维码已推给你，扫码后让我重新打开即可带上登录态",
+                },
+                page,
+              )
+              .catch(() => undefined)) ?? undefined;
+        }
+      }
+
       await this.audit(ctx, "open", sessionId, {
         url: trimmedUrl,
         siteId: siteId ?? undefined,
         cookieInjected,
         title,
+        loginQrPushed: Boolean(loginQrImageUrl),
       });
 
       return {
@@ -298,11 +323,14 @@ export class AgentBrowserService {
         title,
         cookieInjected,
         siteId: siteId ?? undefined,
-        hint: cookieInjected
-          ? undefined
-          : siteId
-            ? `检测到 ${siteId} 站点但用户未导入/授权 Cookie，以未登录状态访问。如需登录态操作，引导用户在设置中导入 Cookie 并开启 agentAllowed。`
-            : undefined,
+        ...(loginQrImageUrl ? { loginQrImageUrl } : {}),
+        hint: loginQrImageUrl
+          ? "该站点需要登录，已把登录二维码推送到聊天；用户扫码后重新执行操作即可。"
+          : cookieInjected
+            ? undefined
+            : siteId
+              ? `检测到 ${siteId} 站点但用户未导入/授权 Cookie，以未登录状态访问。如需登录态操作，引导用户在设置中导入 Cookie 并开启 agentAllowed。`
+              : undefined,
       };
     } catch (e) {
       await browser.close().catch(() => {});

@@ -23,6 +23,8 @@ process.env.SHOPPING_LOGIN_WAIT_MS = process.env.SHOPPING_LOGIN_WAIT_MS ?? "6000
 const { BrowserSessionService } = await import("../src/services/browser-session-service.js");
 const { ShoppingOrderService } = await import("../src/services/shopping-order-service.js");
 const { ImageGenerationService } = await import("../src/services/image-generation-service.js");
+const { QrAssistService } = await import("../src/services/qr-assist-service.js");
+const { tryAttachToolResultCard } = await import("../src/services/tool-card-registry.js");
 
 const ACTOR = "test-jd-channel-user";
 let pushedCards: Array<Record<string, unknown>> = [];
@@ -198,6 +200,48 @@ try {
   } finally {
     await persistService.dispose().catch(() => {});
   }
+
+  // ── 6. 通用二维码推送（QrAssistService）+ 支付确认按钮卡 ────────────
+  banner("测试 6：通用推卡（dataURL→落盘→聊天卡片）+ 支付确认按钮卡 marker");
+  try {
+    const qrAssist = new QrAssistService({ imageStore });
+    const tinyPng = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const before = pushedCards.length;
+    const qrUrl = await qrAssist.pushQrImage(
+      ctxWithPush,
+      { title: "测试：请扫码", caption: "通道验证" },
+      { dataUrl: `data:image/png;base64,${tinyPng.toString("base64")}` },
+    );
+    const qrSaved = qrUrl != null && (await stat(join(tempRoot, "images", qrUrl.replace("/agent/images/", ""))).then((s) => s.size > 0).catch(() => false));
+    const qrPushed = pushedCards.length === before + 1 && pushedCards[pushedCards.length - 1].title === "测试：请扫码";
+    console.log(`qrUrl: ${qrUrl}\n落盘: ${qrSaved ? "✅" : "❌"}  推卡: ${qrPushed ? "✅" : "❌"}`);
+
+    const payMarker = tryAttachToolResultCard(
+      "已在内置浏览器打开收银台",
+      "shopping.pay.submit",
+      { ok: true, orderId: "so_channel_test", platform: "jd", amountCny: 42.5, itemTitle: "通道测试商品" },
+    );
+    const markerOk =
+      payMarker != null &&
+      payMarker.includes("[AGENT_RESULT_CARD_START]") &&
+      payMarker.includes("shopping_pay_done") &&
+      payMarker.includes("我已完成支付");
+    console.log(`支付确认按钮卡 marker: ${markerOk ? "✅" : "❌"}`);
+    if (markerOk && payMarker) {
+      console.log(payMarker.split("\n").slice(0, 6).join("\n").slice(0, 500));
+    }
+    if (qrSaved && qrPushed && markerOk) {
+      console.log("✅ 通用推卡 + 支付确认按钮卡全链路可用");
+    } else {
+      failures++;
+    }
+  } catch (err) {
+    failures++;
+    console.error("❌ 测试 6 异常：", err instanceof Error ? err.stack : err);
+  }
 } catch (err) {
   failures++;
   console.error("\n❌ 脚本异常：", err instanceof Error ? err.stack : err);
@@ -208,7 +252,7 @@ try {
 
 console.log(
   failures === 0
-    ? "\n===== 结论：通道 + 登录门 + 二维码推送 + 登录态持久化全链路可用；接入客户端内置浏览器与真实扫码后即可取到真实订单 ====="
+    ? "\n===== 结论：通道 + 登录门 + 二维码推送 + 登录态持久化 + 通用推卡/支付确认卡 全链路可用 ====="
     : `\n===== 结论：${failures} 项失败 =====`,
 );
 process.exit(failures === 0 ? 0 : 1);
