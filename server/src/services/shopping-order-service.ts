@@ -22,6 +22,7 @@ import {
   type ShoppingPageLease,
 } from "./shopping-platforms/browser-executor.js";
 import { detectLoginPage, getLoginWaitMs, waitForLogin } from "./shopping-platforms/login-gate.js";
+import { QrAssistService } from "./qr-assist-service.js";
 import { getShoppingPlatformAdapter, listSupportedPlatforms } from "./shopping-platforms/index.js";
 import type {
   CheckoutSnapshot,
@@ -148,6 +149,8 @@ export class ShoppingOrderService {
   private cleanupTimer: NodeJS.Timeout | null = null;
   /** 页面获取器（内置浏览器优先 + 无头兜底）；未注入时以缺省依赖构造（单测兼容） */
   private readonly browserExecutor: ShoppingBrowserExecutor;
+  /** 通用二维码/图片推送（登录页截图等）；未注入时按 imageStore 构造（单测兼容） */
+  private readonly qrAssist: QrAssistService;
 
   constructor(
     private readonly deps: {
@@ -161,6 +164,8 @@ export class ShoppingOrderService {
       browserExecutor?: ShoppingBrowserExecutor;
       /** 图片落盘（登录/支付二维码截图）。缺省时只推 URL 不可用，依赖浏览器可见性。 */
       imageStore?: { savePng(actorId: string, png: Buffer): Promise<string> };
+      /** 通用二维码推送服务。缺省时按 imageStore 构造。 */
+      qrAssist?: QrAssistService;
     },
   ) {
     this.browserExecutor =
@@ -170,6 +175,7 @@ export class ShoppingOrderService {
         gateway: new SharedBrowserCdpGateway(),
         browserSessionService: deps.browserSessionService,
       });
+    this.qrAssist = deps.qrAssist ?? new QrAssistService({ imageStore: deps.imageStore });
     // 每 60 秒清理一次过期确认 + 关闭存活 Page
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 60_000);
     this.cleanupTimer.unref?.();
@@ -278,35 +284,22 @@ export class ShoppingOrderService {
     }
     if (!det.isLogin) return null;
 
-    const actorId = resolveActorId(ctx);
-    let imageUrl: string | undefined;
-    if (this.deps.imageStore) {
-      try {
-        const png = await lease.page.screenshot({ type: "png" });
-        imageUrl = await this.deps.imageStore.savePng(actorId, png);
-      } catch {
-        /* 截图失败不阻塞登录等待（shared 模式浏览器本身可见；headless 降级为纯等待） */
-      }
-    }
-
     const label = this.platformLabel(platform);
-    if (imageUrl) {
-      ctx.pushMediaCards?.([
-        {
-          type: "image",
-          title: `请扫码登录${label}`,
-          thumbnailUrl: imageUrl,
-          mediaUrl: imageUrl,
-          caption: `扫码后自动继续，最长等待 ${Math.round(getLoginWaitMs() / 1000)} 秒`,
-        },
-      ]);
-    }
+    // 通用二维码推送：登录页截图 → 落盘 → 聊天卡片（best-effort）
+    const imageUrl = await this.qrAssist.pushPageCard(
+      ctx,
+      {
+        title: `请扫码登录${label}`,
+        caption: `扫码后自动继续，最长等待 ${Math.round(getLoginWaitMs() / 1000)} 秒`,
+      },
+      lease.page,
+    );
 
     await this.audit(ctx, "login_gate", platform, {
       mode: lease.mode,
       reason: det.reason,
       imageUrl,
-      pushed: Boolean(imageUrl && ctx.pushMediaCards),
+      pushed: Boolean(imageUrl),
     });
 
     const wait = await waitForLogin(platform, lease.page, targetUrl);
@@ -1063,34 +1056,12 @@ export class ShoppingOrderService {
       };
     }
 
-    // 内置浏览器在线 → 直接在用户可见浏览器打开收银台并推收款二维码
-    // （登录态/支付动作都由用户本人完成，不阻塞；状态用 shopping.pay.check 查询）
+    // 内置浏览器在线 → 直接在用户可见浏览器打开收银台（收银台二维码页面本身可见；
+    // 聊天侧由 shopping.pay.submit 的确定性附卡出「支付确认」按钮卡，不走图片卡）
     const sharedLease = await this.browserExecutor.tryOpenSharedPage(actorId, order.paymentUrl).catch(() => null);
     if (sharedLease) {
-      let qrImageUrl: string | undefined;
       try {
         await sharedLease.page.waitForTimeout(3_000).catch(() => {});
-        if (this.deps.imageStore) {
-          try {
-            qrImageUrl = await this.deps.imageStore.savePng(
-              actorId,
-              await sharedLease.page.screenshot({ type: "png" }),
-            );
-          } catch {
-            /* 收银台截图失败不阻塞支付引导 */
-          }
-        }
-        if (qrImageUrl) {
-          ctx.pushMediaCards?.([
-            {
-              type: "image",
-              title: `支付宝收款码（${order.platform}订单）`,
-              thumbnailUrl: qrImageUrl,
-              mediaUrl: qrImageUrl,
-              caption: `金额 ¥${order.amountCny ?? "以收银台为准"}；也可直接在内置浏览器收银台页面支付`,
-            },
-          ]);
-        }
       } finally {
         await sharedLease.release().catch(() => {});
       }
@@ -1098,20 +1069,17 @@ export class ShoppingOrderService {
       await this.audit(ctx, "pay_shared_cashier", order.platform, {
         localOrderId: order.orderId,
         platformOrderId: order.platformOrderId,
-        qrImageUrl,
         browserMode: "shared",
       });
 
       return {
         ok: true,
         summary:
-          `已在内置浏览器打开「${order.title}」的支付宝收银台` +
-          `${qrImageUrl ? "，收款二维码已推送到聊天" : ""}，请扫码或在内置浏览器完成支付`,
+          `已在内置浏览器打开「${order.title}」的支付宝收银台，请在浏览器内或支付宝 App 完成支付`,
         orderId: order.orderId,
         platform: order.platform,
         amountCny: order.amountCny,
         paymentUrl: order.paymentUrl,
-        ...(qrImageUrl ? { qrImageUrl } : {}),
         browserMode: "shared",
         hint: "支付完成后用 shopping.pay.check 确认状态并同步订单",
       };
@@ -1136,12 +1104,31 @@ export class ShoppingOrderService {
           error: `支付宝代付发起失败：${res.error ?? res.stderr?.slice(0, 200) ?? "未知错误"}（请确认已开通并绑定本人支付宝钱包，或在平台 App 内手动支付）`,
         };
       }
+      // 通用二维码推送：CLI 产出的收银台二维码实时推到聊天流（headless 场景
+      // 用户看不到浏览器页面，聊天里的二维码是唯一支付入口；best-effort）
+      let qrImageUrl: string | undefined;
+      if (Array.isArray(res.media) && res.media.length > 0) {
+        qrImageUrl =
+          (await this.qrAssist
+            .pushQrImage(
+              ctx,
+              {
+                title: `请扫码支付（${order.platform}订单）`,
+                caption: `¥${order.amountCny ?? "以收银台为准"} · ${order.title}`,
+              },
+              { filePath: String(res.media[0]) },
+            )
+            .catch(() => null)) ?? undefined;
+      }
       return {
         ok: true,
-        summary: `已为你拉起「${order.title}」的支付宝收银台（¥${order.amountCny ?? "以收银台为准"}），请在支付宝 App 内确认支付`,
+        summary:
+          `已为你拉起「${order.title}」的支付宝收银台（¥${order.amountCny ?? "以收银台为准"}），请在支付宝 App 内确认支付` +
+          `${qrImageUrl ? "，二维码已推送到聊天" : ""}`,
         orderId: order.orderId,
         platform: order.platform,
         amountCny: order.amountCny,
+        ...(qrImageUrl ? { qrImageUrl } : {}),
         stdout: res.stdout.slice(0, 800),
         hint: "支付完成后用 shopping.pay.check 确认状态并同步订单",
       };

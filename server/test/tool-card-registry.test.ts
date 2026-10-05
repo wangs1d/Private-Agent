@@ -69,6 +69,30 @@ test("unregistered tool → null", () => {
   assert.equal(buildToolCard("", { ok: true }), null);
 });
 
+test("shopping.pay.submit: ok → 支付确认按钮卡（actions 非空）", () => {
+  const p = buildToolCard("shopping.pay.submit", {
+    ok: true,
+    summary: "已在内置浏览器打开收银台",
+    orderId: "so_123",
+    platform: "蜜雪冰城",
+    amountCny: 9.9,
+    paymentUrl: "https://cashier.alipay.com/x",
+    browserMode: "shared",
+  });
+  assert.ok(p);
+  assert.equal(p.cardType, "order");
+  assert.equal(p.actions?.length, 2);
+  assert.equal(p.actions?.[0]?.id, "shopping_pay_done");
+  assert.equal(p.actions?.[0]?.label, "我已完成支付，帮我确认");
+  assert.deepEqual(p.actions?.[0]?.payload, { localOrderId: "so_123", platform: "蜜雪冰城" });
+  assert.equal(p.actions?.[1]?.label, "稍后再说");
+  assert.ok(p.items.some((i) => i.text.includes("¥9.9")));
+
+  // 失败/缺单号 → null（回退文本路由，不打扰用户）
+  assert.equal(buildToolCard("shopping.pay.submit", { ok: false, error: "x" }), null);
+  assert.equal(buildToolCard("shopping.pay.submit", { ok: true }), null);
+});
+
 test("tryAttach: 前导正文 + 卡标记；异常输入 → null", () => {
   const out = tryAttachToolResultCard("查好了。", "wallet.get_balance", {
     balance: 42,

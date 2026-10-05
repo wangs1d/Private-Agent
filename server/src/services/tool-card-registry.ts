@@ -80,6 +80,17 @@ export interface ToolCardPayload {
     cons?: string[];
     posts?: Array<{ title: string; url?: string }>;
   };
+  /**
+   * 操作按钮（客户端渲染为 AgentActionChoiceCard，点击经 chat.user_action 回传，
+   * 由 LLM 按按钮 label 语义理解执行——通用按钮模式，无服务端 actionId 硬路由）。
+   * 如支付确认卡：「我已完成支付，帮我确认」/「稍后再说」。
+   */
+  actions?: Array<{
+    id: string;
+    label: string;
+    variant?: "primary" | "secondary" | "ghost";
+    payload?: Record<string, unknown>;
+  }>;
 }
 
 type ToolCardBuilder = (result: Record<string, unknown>) => ToolCardPayload | null;
@@ -432,6 +443,47 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       cardType: "order",
     };
   },
+
+  /**
+   * shopping.pay.submit → 支付确认按钮卡（L1 确定性附卡，不依赖 LLM 转发）。
+   * 收银台已拉起（内置浏览器打开或 alipay-bot 代付）后，给用户
+   * 「我已完成支付」/「稍后再说」按钮；点击经 chat.user_action 转为等价
+   * user_message，由 LLM 调 shopping.pay.check 同步状态。按钮不直接触发
+   * 资金动作——支付前的确认仍由两阶段 confirmationToken 把守。
+   */
+  "shopping.pay.submit": (r) => {
+    if (r.ok !== true) return null;
+    const localOrderId = str(r.orderId) || str(r.localOrderId);
+    if (!localOrderId) return null;
+    const platform = str(r.platform);
+    const amount = num(r.amountCny);
+    const itemTitle = str(r.itemTitle);
+    const items: ToolCardItem[] = [
+      {
+        type: "check",
+        text: `订单：${itemTitle || localOrderId}`,
+      },
+      {
+        type: amount != null && amount > 0 ? "num" : "check",
+        text: `平台：${platform || "未知"}${amount != null && amount > 0 ? ` · 金额：¥${amount}` : ""}`,
+      },
+    ];
+    return {
+      title: "💳 支付确认",
+      items,
+      footer: "完成支付后点击确认，我会同步订单状态",
+      cardType: "order",
+      actions: [
+        {
+          id: "shopping_pay_done",
+          label: "我已完成支付，帮我确认",
+          variant: "primary",
+          payload: { localOrderId, platform },
+        },
+        { id: "shopping_pay_later", label: "稍后再说", variant: "secondary" },
+      ],
+    };
+  },
 };
 
 /** 搜索回执 items → search_result 卡 payload；空结果返回 null（回退文本路由） */
@@ -567,7 +619,8 @@ function buildCardMarker(payload: ToolCardPayload, leadText: string): string {
     items: payload.items,
     footer: payload.footer ?? "",
     cardType: payload.cardType,
-    actions: [],
+    // 带按钮的确认卡（支付确认等）：非空时客户端渲染为 AgentActionChoiceCard
+    actions: payload.actions ?? [],
     speak: "",
     cardId,
     // 扩展卡型的附加协议字段（product_compare 的分侧大图/转置对比表/视频入口；

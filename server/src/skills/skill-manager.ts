@@ -834,6 +834,8 @@ export class SkillManager {
       chatUserMessageId: context.chatUserMessageId,
       permissions: grantedPerms,
       grantedPermissions: grantedPerms,
+      // 透传中途推卡（如支付宝钱包绑定二维码）：sandbox 以 ...context 展开进执行上下文
+      pushMediaCards: context.pushMediaCards,
     });
 
     // Curator 统计：执行成功记录一次使用（"越用越强"的量化依据）

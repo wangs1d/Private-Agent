@@ -2,12 +2,17 @@ import QRCode from "qrcode";
 import { resolveActorId } from "../agent/actor-id.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { PaymentService } from "../services/payment-service.js";
+import type { QrAssistService } from "../services/qr-assist-service.js";
 import { getPaymentConfig, getPaymentGuardrailConfig } from "../config/payment-config.js";
 
 const PROVIDERS = ["wechat", "alipay"] as const;
 const METHODS = ["native", "h5"] as const;
 
-export function registerPaymentTools(registry: ToolRegistry, paymentService: PaymentService): void {
+export function registerPaymentTools(
+  registry: ToolRegistry,
+  paymentService: PaymentService,
+  qrAssist?: QrAssistService,
+): void {
   const config = getPaymentConfig();
 
   registry.register("payment.create_order", async (input, context) => {
@@ -60,6 +65,7 @@ export function registerPaymentTools(registry: ToolRegistry, paymentService: Pay
     }
 
     let qrCodeDataUrl: string | undefined;
+    let qrImageUrl: string | undefined;
     if (result.payUrl) {
       try {
         qrCodeDataUrl = await QRCode.toDataURL(result.payUrl, {
@@ -69,6 +75,18 @@ export function registerPaymentTools(registry: ToolRegistry, paymentService: Pay
         });
       } catch {
         qrCodeDataUrl = undefined;
+      }
+      // 通用二维码推送：聊天流里直接可见，用户无需等 LLM 转述
+      if (qrCodeDataUrl && qrAssist) {
+        qrImageUrl =
+          (await qrAssist.pushQrImage(
+            context,
+            {
+              title: `请扫码支付（${provider === "wechat" ? "微信支付" : "支付宝"}）`,
+              caption: `金额 ¥${result.amount} · ${result.description}`,
+            },
+            { dataUrl: qrCodeDataUrl },
+          )) ?? undefined;
       }
     }
 
@@ -84,6 +102,7 @@ export function registerPaymentTools(registry: ToolRegistry, paymentService: Pay
       description: result.description,
       status: result.status,
       qrCodeDataUrl,
+      ...(qrImageUrl ? { qrImageUrl } : {}),
       payUrl: result.payUrl,
       createdAt: result.createdAt,
       instruction:

@@ -229,6 +229,7 @@ import { registerAgentAccountTools } from "../tools/agent-account-tools.js";
 import { registerAgentIdentityTools } from "../tools/agent-identity-tools.js";
 import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerPaymentTools } from "../tools/payment-tools.js";
+import { QrAssistService } from "../services/qr-assist-service.js";
 import { registerMeituanTools } from "../tools/meituan-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
 import { registerAgentVoiceTools } from "../tools/agent-voice-tools.js";
@@ -1057,7 +1058,7 @@ export async function createAppServices(): Promise<AppServices> {
   
   registerAgentAccountTools(toolRegistry, agentAccountService);
   registerWalletTools(toolRegistry, friendService);
-  registerPaymentTools(toolRegistry, paymentService);
+  registerPaymentTools(toolRegistry, paymentService, new QrAssistService({ imageStore: imageGenerationService }));
   registerMeituanTools(toolRegistry, meituanService);
   // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：好友/中继/虚拟电话工具族
   if (!isOssEdition()) {
@@ -1198,6 +1199,7 @@ export async function createAppServices(): Promise<AppServices> {
   // 注册支付宝 AI 支付内置Skills（真实购买能力，封装项目内置 alipay-bot CLI）
   registerAlipayPaymentBuiltinSkills((skill) => skillManager.register(skill), {
     alipayBotService,
+    qrAssist: new QrAssistService({ imageStore: imageGenerationService }),
   });
 
   // 注册商家下单内置Skills（官方「智能体接入」模式：下单→alipay_ 短链→submit-payment 支付）

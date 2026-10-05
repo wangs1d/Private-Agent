@@ -1,9 +1,12 @@
 import { resolveActorId } from "../../agent/actor-id.js";
 import type { AlipayBotService } from "../../services/alipay-bot-service.js";
+import type { QrAssistService } from "../../services/qr-assist-service.js";
 import type { SkillDefinition } from "../types.js";
 
 type Deps = {
   alipayBotService: AlipayBotService;
+  /** 通用二维码推送（把 CLI 产出的绑定/收款二维码实时推到聊天流）。缺省时不推。 */
+  qrAssist?: QrAssistService;
 };
 
 /** 按当前会话/用户解析出的稳定用户标识，取该用户的独立钱包实例。 */
@@ -52,7 +55,7 @@ function extractAuthLink(stdout: string): string {
  *   本 skill 走支付宝官方 AI 支付通道，用户扫二维码即可完成真实付款。
  */
 export function createAlipayPaymentBuiltinSkills(deps: Deps): SkillDefinition[] {
-  const { alipayBotService } = deps;
+  const { alipayBotService, qrAssist } = deps;
 
   /** 1. 查询支付能力状态 */
   const check_wallet: SkillDefinition = {
@@ -145,6 +148,16 @@ export function createAlipayPaymentBuiltinSkills(deps: Deps): SkillDefinition[] 
         : undefined;
       const result = await walletFor(context, alipayBotService).applyWallet({ agentName, code });
       const link = result.ok ? extractAuthLink(result.stdout) : "";
+      // 通用二维码推送：CLI 产出的绑定二维码直接推到聊天流（best-effort）
+      let qrImageUrl: string | undefined;
+      if (result.ok && qrAssist && Array.isArray(result.media) && result.media.length > 0) {
+        qrImageUrl =
+          (await qrAssist.pushQrImage(
+            context,
+            { title: "请扫码开通支付宝支付", caption: "扫码完成授权后即可帮你真实付款" },
+            { filePath: String(result.media[0]) },
+          )) ?? undefined;
+      }
       return {
         ok: result.ok,
         actorId,
@@ -152,9 +165,10 @@ export function createAlipayPaymentBuiltinSkills(deps: Deps): SkillDefinition[] 
         stderr: result.stderr,
         media: result.media,
         error: result.error,
+        ...(qrImageUrl ? { qrImageUrl } : {}),
         summary: result.ok
           ? link
-            ? `已生成开通链接。请向用户发送引导（自然语气，无需自我介绍）：先授权支付宝支付，之后才能帮你下单付款。链接用 markdown 可点击格式： [点此开通支付宝支付](${link})，附原文：${link}`
+            ? `已生成开通链接。请向用户发送引导（自然语气，无需自我介绍）：先授权支付宝支付，之后才能帮你下单付款。链接用 markdown 可点击格式： [点此开通支付宝支付](${link})，附原文：${link}${qrImageUrl ? "。二维码已推送到聊天" : ""}`
             : "已生成支付宝支付功能开通入口，请向用户提供链接完成授权"
           : "申请开通失败，请查看 error",
       };
@@ -260,6 +274,16 @@ export function createAlipayPaymentBuiltinSkills(deps: Deps): SkillDefinition[] 
         return { ok: false, error: "缺少 intentSummary（意图摘要）", actorId };
       }
       const result = await walletFor(context, alipayBotService).submitPayment(sessionId, paymentLink, intentSummary);
+      // 通用二维码推送：收银台/收款码二维码直接推到聊天流（best-effort）
+      let payQrImageUrl: string | undefined;
+      if (result.ok && qrAssist && Array.isArray(result.media) && result.media.length > 0) {
+        payQrImageUrl =
+          (await qrAssist.pushQrImage(
+            context,
+            { title: "请扫码完成支付宝支付", caption: intentSummary.slice(0, 60) },
+            { filePath: String(result.media[0]) },
+          )) ?? undefined;
+      }
       return {
         ok: result.ok,
         actorId,
@@ -267,6 +291,7 @@ export function createAlipayPaymentBuiltinSkills(deps: Deps): SkillDefinition[] 
         stderr: result.stderr,
         media: result.media,
         error: result.error,
+        ...(payQrImageUrl ? { qrImageUrl: payQrImageUrl } : {}),
       };
     },
   };
