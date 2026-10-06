@@ -96,7 +96,6 @@ class RightSidePanel extends StatefulWidget {
     this.onMessages,
     this.onGallery,
     this.onBrowser,
-    this.onReportLocation,
     this.messagesUnread = 0,
   });
 
@@ -114,9 +113,6 @@ class RightSidePanel extends StatefulWidget {
 
   /// 站内信未读总数（供「消息」工具渲染角标；0 不显示）。
   final int messagesUnread;
-
-  /// 天气面板拿到实时位置后回调上报（填充服务端位置缓存，供 Agent 按需复用）。
-  final void Function(Map<String, dynamic> location)? onReportLocation;
 
   @override
   State<RightSidePanel> createState() => _RightSidePanelState();
@@ -992,11 +988,12 @@ class _RightSidePanelState extends State<RightSidePanel> {
           label: "日程",
           onTap: widget.onSchedule,
           subLabelBuilder: () => _scheduleSubLabel),
-      _ToolSpec(
-          id: "gallery",
-          icon: Icons.photo_library_outlined,
-          label: "图库",
-          onTap: widget.onGallery),
+      // 图库入口暂时隐藏（功能暂不接入）
+      // _ToolSpec(
+      //     id: "gallery",
+      //     icon: Icons.photo_library_outlined,
+      //     label: "图库",
+      //     onTap: widget.onGallery),
       _ToolSpec(
           id: "browser",
           icon: Icons.public_outlined,

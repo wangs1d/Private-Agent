@@ -260,6 +260,14 @@ class WsChatService {
     return false;
   }
 
+  /// 离线待发队列里是否已有同类事件。
+  ///
+  /// 用于避免断线期间用户反复点击导致同类请求堆积（例如连点呼叫，恢复后
+  /// 一次性补发好几通电话，除第一通外全撞忙线护栏）。只读查询，无副作用。
+  bool hasPendingEvent(String type) {
+    return _pendingOutbound.any((_PendingWsEvent e) => e.type == type);
+  }
+
   bool sendContactFeedback({
     required String sessionId,
     required String channel,

@@ -1,5 +1,7 @@
 import {
   MINIMAX_REALTIME_OUTPUT_SAMPLE_RATE,
+  REALTIME_INPUT_CHUNK_BYTES,
+  REALTIME_INPUT_CHUNK_DELAY_MS,
   type MiniMaxRealtimeService,
   type PersistentRealtimeClient,
   type RealtimeTurnResult,
@@ -35,6 +37,18 @@ export interface MinimaxDuplexSessionDeps {
   callVoiceContext?: (callId: string) => string | null;
 }
 
+/**
+ * 判"说完"所需的尾部静音时长（毫秒），可用 VOICE_ENDPOINT_SILENCE_MS 覆盖。
+ *
+ * 这段等待是用户感知延迟的第一节，且完全由我们自己决定：调得太长就迟钝，
+ * 太短会在句中自然停顿时抢话。原值 700ms 偏保守，550ms 更接近对话节奏。
+ */
+const DEFAULT_ENDPOINT_SILENCE_MS = (() => {
+  const raw = process.env.VOICE_ENDPOINT_SILENCE_MS?.trim();
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n >= 200 && n <= 2000 ? n : 550;
+})();
+
 export class MinimaxDuplexSession {
   readonly id: string;
   readonly engine = "minimax-realtime" as const;
@@ -51,13 +65,24 @@ export class MinimaxDuplexSession {
   private readonly pcmBuffers: Buffer[] = [];
   private pcmBytes = 0;
 
+  /** 上行诊断窗口状态：累计字节、峰值 RMS、窗口起点 */
+  private uplinkBytesWindow = 0;
+  private uplinkPeakRmsWindow = 0;
+  private uplinkWindowStart = Date.now();
+  /** 非 listening 状态的持续起点（看门狗用，防状态机卡死导致上行永久丢弃） */
+  private busySince: number | null = null;
+  /** 本轮音频推送的预计耗时（毫秒，见 REALTIME_INPUT_CHUNK_DELAY_MS） */
+  private audioDispatchMs = 0;
+
   constructor(
     id: string,
     private readonly sink: (msg: DuplexServerMessage) => void,
     private readonly deps: MinimaxDuplexSessionDeps,
   ) {
     this.id = id;
-    this.detector = new EndpointDetector({ silenceMs: deps.endpointSilenceMs ?? 700 });
+    this.detector = new EndpointDetector({
+      silenceMs: deps.endpointSilenceMs ?? DEFAULT_ENDPOINT_SILENCE_MS,
+    });
   }
 
   getState(): DuplexSessionState {
@@ -125,15 +150,58 @@ export class MinimaxDuplexSession {
   // ------------------------------------------------------------------ //
 
   feedAudio(pcmBase64: string): void {
-    if (this.state !== "listening") {
-      // 半双工：回复生成/播报期间的上行音频丢弃（防扬声器回流污染上下文）
-      return;
-    }
     const pcm = Buffer.from(pcmBase64, "base64");
     if (pcm.length === 0) return;
+
+    // 先看门控：thinking/speaking 期间的上行直接丢弃（防扬声器回流污染上下文）。
+    // 这里必须给出可观测证据——否则「说了没反应」无法区分是客户端没送上来、
+    // 还是被状态机丢掉了。
+    if (this.state !== "listening") {
+      const stuckMs = this.busySince ? Date.now() - this.busySince : 0;
+      if (stuckMs > 30_000) {
+        // 看门狗：回合理论上几十秒内必完成，超时说明客户端断连/回合挂起，
+        // 强制回到 listening，否则本次通话的上行会被永久丢弃
+        console.warn(
+          `[minimax-duplex:${this.id}] 状态 ${this.state} 已持续 ${stuckMs}ms，` +
+            `强制回到 listening（防上行被永久丢弃）`,
+        );
+        this.setState("listening");
+      }
+      return;
+    }
+
     this.pcmBuffers.push(pcm);
     this.pcmBytes += pcm.length;
     const event = this.detector.feed(pcm, this.config.sampleRate);
+
+    // 诊断窗口（5s）：打印收到的字节数与峰值 RMS，直接回答「音频有没有上来、
+    // 电平够不够触发 VAD」
+    this.uplinkBytesWindow += pcm.length;
+    if (this.detector.rms > this.uplinkPeakRmsWindow) {
+      this.uplinkPeakRmsWindow = this.detector.rms;
+    }
+    const now = Date.now();
+    if (now - this.uplinkWindowStart >= 5000) {
+      const peak = Math.round(this.uplinkPeakRmsWindow);
+      const threshold = this.detector.effectiveThreshold;
+      const verdict =
+        this.uplinkBytesWindow === 0
+          ? "未收到任何上行音频（检查客户端麦克风/半双工门控）"
+          : peak < threshold
+            ? `峰值 ${peak} < 生效阈值 ${threshold}（下限 ${this.detector.speechThreshold} / 底噪 ${Math.round(
+                this.detector.noise,
+              )}×3），说话不会被识别`
+            : `峰值 ${peak} ≥ 生效阈值 ${threshold}，可触发 VAD`;
+      console.info(
+        `[minimax-duplex:${this.id}] vad probe bytes=${this.uplinkBytesWindow} ` +
+          `sampleRate=${this.config.sampleRate} noise=${Math.round(this.detector.noise)} ` +
+          `inSpeech=${this.detector.hasSpeech} → ${verdict}`,
+      );
+      this.uplinkBytesWindow = 0;
+      this.uplinkPeakRmsWindow = 0;
+      this.uplinkWindowStart = now;
+    }
+
     if (event === "endpoint") {
       void this.runAudioTurn();
     }
@@ -189,6 +257,11 @@ export class MinimaxDuplexSession {
     if (pcm.length < this.config.sampleRate * 2 * 0.3) return;
     const gen = ++this.generation;
     this.setState("thinking");
+    this.audioDispatchMs = Math.ceil(pcm.length / REALTIME_INPUT_CHUNK_BYTES) * REALTIME_INPUT_CHUNK_DELAY_MS;
+    console.info(
+      `[minimax-duplex:${this.id}] VAD 断句 ${(pcm.length / this.config.sampleRate / 2).toFixed(2)}s 音频，` +
+        `将分 ${Math.ceil(pcm.length / REALTIME_INPUT_CHUNK_BYTES)} 块推送（推送耗时约 ${this.audioDispatchMs}ms）`,
+    );
     await this.runTurn("", { pcm16k: pcm }, gen);
   }
 
@@ -213,6 +286,15 @@ export class MinimaxDuplexSession {
   private emitTurnOutput(userText: string, turn: RealtimeTurnResult): void {
     const asrText = (turn.asrText ?? "").trim() || userText;
     this.sink({ type: "asr.final", text: asrText });
+
+    const audioSec = turn.audio.length / MINIMAX_REALTIME_OUTPUT_SAMPLE_RATE / 2;
+    console.info(
+      `[minimax-duplex:${this.id}] 回合完成：推送 ${this.audioDispatchMs}ms → 首包语音 ${turn.firstAudioMs}ms ` +
+        `→ 整轮 ${turn.totalMs}ms（回复 ${audioSec.toFixed(2)}s 音频）` +
+        (turn.firstAudioMs != null && turn.totalMs - turn.firstAudioMs > 800
+          ? ` ⚠ 首包后又等了 ${turn.totalMs - turn.firstAudioMs}ms 才下发，这段是纯等待`
+          : ""),
+    );
 
     if (!turn.transcript.trim() && turn.audio.length === 0) {
       this.sink({ type: "error", message: "本轮没有产生回复", recoverable: true });
@@ -266,6 +348,8 @@ export class MinimaxDuplexSession {
   private setState(state: DuplexSessionState): void {
     if (this.state === state) return;
     this.state = state;
+    // listening = 受理上行；其余状态的持续时长由 feedAudio 里的看门狗盯着
+    this.busySince = state === "listening" ? null : Date.now();
     this.sink({ type: "state", state });
   }
 }

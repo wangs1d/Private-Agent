@@ -25,9 +25,12 @@ test("personal fact statements trigger recall", () => {
   assert.equal(shouldRecallLongTerm({ text: "我叫李雷，在杭州工作" }).trigger, true);
 });
 
-test("new session opening triggers recall", () => {
-  assert.equal(shouldRecallLongTerm({ text: "在吗", threadMessageCount: 0 }).trigger, true);
-  assert.equal(shouldRecallLongTerm({ text: "在吗", threadMessageCount: 1 }).trigger, true);
+test("new session opening does NOT trigger recall (2026-10-06 治啰嗦 P1)", () => {
+  // 新会话开场不再无条件触发跨会话召回——情节块（recap/召回）只在显式记忆
+  // 线索/个人事实/指代升级时注入；跨会话衔接交给恒驻速览（结构化事实）与
+  // brain.recall 按需检索（对齐 ChatGPT/Claude/Letta 的按需召回设计）。
+  assert.equal(shouldRecallLongTerm({ text: "在吗", threadMessageCount: 0 }).trigger, false);
+  assert.equal(shouldRecallLongTerm({ text: "以后叫我王哥", threadMessageCount: 0 }).trigger, false);
 });
 
 test("second turn in session does NOT trigger new_session recall (串台根治)", () => {

@@ -161,7 +161,17 @@ import { ScheduleConflictService } from "../services/schedule-conflict-service.j
 import { ScheduleBookingBridge } from "../services/schedule-booking-bridge.js";
 import { createCommitmentScheduleOutlet } from "../services/commitment-schedule-outlet.js";
 import { IcsSubscriptionService, readIcsWatchConfig } from "../services/ics-subscription-service.js";
-import { MailScheduleBridge } from "../services/mail-schedule-extractor.js";
+import {
+  MailScheduleBridge,
+  suppressMailInterrupt,
+  type MailScheduleSyncReport,
+} from "../services/mail-schedule-extractor.js";
+import { estimateDriveMinutes } from "../services/route-duration-service.js";
+
+/** 出发预留起点的新鲜度阈值：最近已知定位超过该时长改走按需实时定位 */
+const ROUTE_ORIGIN_FRESH_MS = 2 * 60 * 60_000;
+/** 路程估时整体预算：策略计算（建任务/改期）不能被外网路线请求拖死 */
+const ROUTE_ESTIMATE_BUDGET_MS = 6_000;
 import { SessionService } from "../services/session-service.js";
 import { TtsService } from "../services/tts-service.js";
 import { VirtualPhoneService } from "../services/virtual-phone-service.js";
@@ -2172,6 +2182,7 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     scheduleTaskService,
     shortTermMemoryGateway,
+    featureCatalog,
   });
   const agentCore = createAgentCore({
     toolRegistry,
@@ -3028,6 +3039,35 @@ export async function createAppServices(): Promise<AppServices> {
   locationCoordinatorRef.current = locationCoordinator;
   // 安全守护 SOS 的按需定位同样取此处创建的协调器
   wellnessLocationRef.current = locationCoordinator;
+
+  // 分级提醒策略的实时路程因子（2026-10-05）：出发预留不再按 venue 静态表，
+  // 用「用户当前位置 × 任务地点」的驾车实时路程。位置取用顺序：最近已知定位
+  // （2 小时内新鲜）→ 按需向客户端请求实时 GPS（8s 等待，复用协调器新鲜缓存）
+  // → 都没有则回退静态表（行为不劣于现状）。整体 6s 预算，策略计算不拖死建任务。
+  scheduleTaskService.setRouteEstimator(async (input) => {
+    if (!input.location?.trim()) return null;
+    let origin: { latitude: number; longitude: number } | undefined;
+    const sample = locationHistoryService?.latest(input.sessionId);
+    if (sample && Date.now() - Date.parse(sample.recordedAt) <= ROUTE_ORIGIN_FRESH_MS) {
+      origin = { latitude: sample.latitude, longitude: sample.longitude };
+    } else {
+      const live = await locationCoordinator
+        .requestLocation(input.sessionId, "schedule-depart-route")
+        .catch(() => null);
+      if (live) origin = { latitude: live.latitude, longitude: live.longitude };
+    }
+    if (!origin) return null;
+    const budget = <T>(p: Promise<T>, ms: number): Promise<T | null> =>
+      Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))]);
+    return budget(
+      estimateDriveMinutes({
+        destinationText: input.location,
+        origin,
+        osrmFallback: (from, to) => travelPlanningService.computeRoute(from, to),
+      }),
+      ROUTE_ESTIMATE_BUDGET_MS,
+    );
+  });
 
   // ─── 位置能力（方案 A-D）：默认全部关闭（隐私优先），LOCATION_TRACKING_MODE=continuous 显式开启 ───
   // 方案 C 地理围栏：用户显式创建围栏才存在位置触发，独立于持续模式常驻装配。
@@ -4924,36 +4964,44 @@ export async function createAppServices(): Promise<AppServices> {
             app.log.warn(`[mail-watch] 账单邮件自动入账失败（忽略）: ${e instanceof Error ? e.message : String(e)}`);
           });
       }
-      // 票务/日历提取支路：非票务邮件内部廉价预筛直接跳过，零成本
-      void mailScheduleBridge
-        .onMail(mail)
-        .then((report) => {
-          if (report && report.created + report.updated + report.cancelled > 0) {
+      // 票务/日历提取支路 + 提醒闸门（2026-10-05 邮箱=信息采集定调）：
+      // 提取先于闸门完成——邮件一旦成功识别为票务/预订（哪怕草稿全被时间闸
+      // skipped，如过期票），就不再当场 high 打扰：提醒交给日程策略层按事件
+      // 时间自动排（前晚备忘/出发预留），桥内那条 medium 汇总保留。
+      // 未识别为票务的（验证码/账单/航班延误类模板未命中）保持原闸门当场提醒。
+      void (async () => {
+        let ticketReport: MailScheduleSyncReport | null = null;
+        try {
+          ticketReport = await mailScheduleBridge.onMail(mail);
+          if (ticketReport && ticketReport.created + ticketReport.updated + ticketReport.cancelled > 0) {
             app.log.info(
-              `[mail-watch] 票务邮件已同步日程（${mail.subject}）: +${report.created} ~${report.updated} -${report.cancelled}`,
+              `[mail-watch] 票务邮件已同步日程（${mail.subject}）: +${ticketReport.created} ~${ticketReport.updated} -${ticketReport.cancelled}`,
             );
           }
-        })
-        .catch((e) => {
+        } catch (e) {
           app.log.warn(`[mail-watch] 票务邮件日程提取失败（忽略）: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        // 提醒闸门：只有 critical/high 当场提醒（promotional 在 MailWatch 内已被
+        // 过滤不会到这里；normal 静默落库）。此处白名单式判断，新增分级默认不推送。
+        if (classification.importance !== "critical" && classification.importance !== "high") return;
+        if (suppressMailInterrupt(ticketReport)) return;
+        proactivityHub.submitIntent({
+          actorId: mail.actorId,
+          kind: "life_reminder",
+          // high/critical → high：验证码/传票/逾期这类邮件时效以分钟计（验证码
+          // 10 分钟作废），降档会被静默时段吞到明早——时效即价值，必须当场提醒。
+          // （governor 静默规则本就给 high 开了豁免通道；medium 留给普通关注件。）
+          importance: classification.importance === "critical" || classification.importance === "high" ? "high" : "medium",
+          title: `邮件：${mail.subject || "（无主题）"}`,
+          summary:
+            `收到来自 ${mail.from} 的${classification.importance === "critical" ? "重要" : "需要关注"}邮件` +
+            `「${mail.subject || "（无主题）"}」` +
+            `${mail.textSnippet ? `，开头内容：${mail.textSnippet.slice(0, 120)}` : ""}。` +
+            `像助手汇报要事一样自然提起，问用户要不要现在处理；不要复述成资讯播报。`,
+          mode: "speak",
+          source: "email",
         });
-      if (classification.importance === "normal") return;
-      proactivityHub.submitIntent({
-        actorId: mail.actorId,
-        kind: "life_reminder",
-        // high/critical → high：验证码/传票/逾期这类邮件时效以分钟计（验证码
-        // 10 分钟作废），降档会被静默时段吞到明早——时效即价值，必须当场提醒。
-        // （governor 静默规则本就给 high 开了豁免通道；medium 留给普通关注件。）
-        importance: classification.importance === "critical" || classification.importance === "high" ? "high" : "medium",
-        title: `邮件：${mail.subject || "（无主题）"}`,
-        summary:
-          `收到来自 ${mail.from} 的${classification.importance === "critical" ? "重要" : "需要关注"}邮件` +
-          `「${mail.subject || "（无主题）"}」` +
-          `${mail.textSnippet ? `，开头内容：${mail.textSnippet.slice(0, 120)}` : ""}。` +
-          `像助手汇报要事一样自然提起，问用户要不要现在处理；不要复述成资讯播报。`,
-        mode: "speak",
-        source: "email",
-      });
+      })();
     },
   });
   mailWatchService.start();

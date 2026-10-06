@@ -524,12 +524,16 @@ class IslandReminderScheduler {
   }
 }
 
-/// 启动灵动岛（应用初始化时调用一次）：绑定控制器。
-/// 数据全部来自真实事件源（IslandRealFeeds），无演示模式。
+/// 启动灵动岛（应用初始化时调用一次；E2E 引导也会调用，全链幂等）：
+/// 绑定控制器。数据全部来自真实事件源（IslandRealFeeds），无演示模式。
 Future<void> initDynamicIsland() async {
-  if (kDebugMode) {
+  if (kDebugMode && !_debugExtensionRegistered) {
     // 真机取证口：VM service 直查岛的原生窗口创建状态，并现场探测一次
     // create 调用（带 3 秒超时）——用于诊断「岛没上屏」类问题（2026-09-28）。
+    // 幂等闸：main 与 E2E 引导两条路径都会进这里，重复注册直接抛
+    // 「Extension already registered」把调用方 future 炸掉（2026-10-05
+    // 岛 E2E 复跑抓出：bootstrap 整体死于首行，data_ready 永不写）。
+    _debugExtensionRegistered = true;
     developer.registerExtension('ext.pai.debug.islandState', (method, parameters) async {
       final DynamicIslandLauncher l = DynamicIslandLauncher.instance;
       final Map<String, Object?> info = <String, Object?>{
@@ -555,6 +559,9 @@ Future<void> initDynamicIsland() async {
 }
 
 // ───────────────────────── 真实数据喂点 ─────────────────────────
+
+/// ext.pai.debug.islandState 注册闸（initDynamicIsland 幂等用）。
+bool _debugExtensionRegistered = false;
 
 /// 各真实事件源 → 岛条目的统一入口（main.dart 各 WS 处理器/服务调用）。
 /// 全部走控制器同 id 幂等刷新；移除条件满足时 dismiss。

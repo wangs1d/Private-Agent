@@ -405,26 +405,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           );
         };
 
-        // 呼叫失败以对话方式主动告知：落一条 agent 气泡进聊天流（与任务面收尾
-        // 同构的 chat.assistant_done 帧，source=task_plane，客户端按普通
-        // assistant 消息入列并持久化）。error.event 只承载协议级错误码且
-        // 此前被客户端静默吞掉，用户对「为什么没打通」毫无感知。
-        const pushCallFailureChatNote = (userId: string, message: string): void => {
-          if (!userId || !message) return;
-          safeSocketSend(
-            ws,
-            JSON.stringify({
-              type: ServerEventType.ChatAssistantDone,
-              payload: {
-                sessionId: userId,
-                messageId: `assistant-callfail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                finalText: message,
-                toolCalls: [],
-                source: "task_plane",
-              },
-            }),
-          );
-        };
+        // 呼叫失败只回 error.event（客户端关外呼窗并 toast 提示原因），
+        // 不再往聊天流落文字气泡：语音电话的内容不以文字方式进聊天记录。
 
         let event: EventEnvelope;
         try {
@@ -482,7 +464,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           });
           if (!callResult.ok) {
             sendUnifiedError("PHONE_CALL_FAILED", callResult.error ?? "呼叫失败");
-            pushCallFailureChatNote(boundActorId, callResult.error ?? "呼叫失败，请稍后重试");
             return;
           }
           socket.send(
@@ -514,7 +495,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           });
           if (!callResult.ok) {
             sendUnifiedError("PHONE_CALL_FAILED", callResult.error ?? "呼叫失败");
-            pushCallFailureChatNote(boundActorId, callResult.error ?? "呼叫失败，请稍后重试");
             return;
           }
           socket.send(

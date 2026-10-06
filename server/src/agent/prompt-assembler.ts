@@ -237,10 +237,12 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   if (m.currentUserState) dynamicContext.push(`【当下状态】\n${m.currentUserState}`);
   if (m.userLocation) dynamicContext.push(`【用户位置】\n${m.userLocation}`);
   if (m.frequentPlaces) dynamicContext.push(`【常去地点】\n${m.frequentPlaces}`);
-  // 记忆图联想检索：保留专属免责（项目硬约束：该块必须带免责声明）
+  // 记忆图联想检索：保留专属免责（项目硬约束：该块必须带免责声明）。
+  // 衔接口径（2026-10-06 治啰嗦 P2-6 合并）：旧事只在话题相关时顺着提，
+  // 不主动翻旧账、不以承接话开头——与【消息时间戳】的【话题切换】禁令同源。
   if (m.narrativeRecall) {
     dynamicContext.push(
-      `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n（引用某条记忆时向用户亮明出处，如"我记得你之前提过…"，便于用户确认与纠错）\n${m.narrativeRecall}`,
+      `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n（仅当与当前话题相关时才引用，可自然带出处如"你之前提过…"；不主动翻旧账，不以"接着上次"开头）\n${m.narrativeRecall}`,
     );
   }
   // 短期上下文家族（4→1）：工作记忆 / 最近对话 / 今日日志 / 今日摘要

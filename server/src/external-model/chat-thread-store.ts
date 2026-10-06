@@ -404,9 +404,20 @@ function stripPersistedClientIdField(
   return out;
 }
 
+export type TimestampFreeLlmViewOptions = {
+  /**
+   * 是否注入【对话时间轴】system 块（2026-10-06 按需时间上下文闸）。
+   * 默认 true（旧行为）；时间闸关闭的轮次传 false——正文剥离照常执行
+   * （防 `[ts:]` 复述的根修不回退），只是不再附时间轴块。
+   */
+  includeTimeline?: boolean;
+};
+
 export function buildTimestampFreeLlmView(
   msgs: ChatCompletionMessageParam[],
+  options: TimestampFreeLlmViewOptions = {},
 ): TimestampFreeLlmView {
+  const includeTimeline = options.includeTimeline !== false;
   const timeline: TimelineEntry[] = [];
   const view = msgs.map((raw) => {
     // 内部元数据先剥掉：它既不参与时间轴，也不该出现在发往 LLM 的正文里。
@@ -445,8 +456,8 @@ export function buildTimestampFreeLlmView(
   });
 
   // 时间轴注入点：最后一条 user 消息（本轮输入）之前。条目过少（<2，如 ephemeral 单轮）
-  // 时时间轴无增量价值，跳过注入，只保留剥离。
-  if (timeline.length >= 2) {
+  // 时时间轴无增量价值，跳过注入，只保留剥离。includeTimeline=false（时间闸关）同样只剥离。
+  if (includeTimeline && timeline.length >= 2) {
     let lastUserIdx = -1;
     for (let i = view.length - 1; i >= 0; i--) {
       if (view[i]?.role === "user") {

@@ -121,6 +121,7 @@ class DynamicIslandWindow {
   static constexpr int kWindowH = 460;
   static constexpr int kCapsuleH = 38;       // compact 胶囊高
   static constexpr int kRestCapsuleW = 108;  // 待机胶囊宽（用户拍板：长度 2 倍、高度不变）
+  static constexpr int kAttentionCapsuleW = 180;  // 提醒小胶囊宽（用户拍板：提醒改小形态，不带 1.6 放大）
   static constexpr int kExpandedW = 380;     // 展开卡宽
   static constexpr int kHoverW = 360;        // hover 态宽（声明档，环境信息 + 导航点）
   static constexpr int kHoverH = 58;         // hover 态高（胶囊 → 展开的中间层）
@@ -133,10 +134,9 @@ class DynamicIslandWindow {
   // busy 隐藏岛时会停动画心跳省 CPU，恢复检查不能跟它同生死——
   // 否则退出全屏后没有任何代码再把岛唤回（曾死锁：岛一去不回）。
   static constexpr UINT kSuppressTimerId = 3;
-  // attention 提醒动画：整体放大倍数与各阶段时长（秒）。
-  // 1.6 系数 ≈ 底座加粗加大后渲染出来仍是「最初小胶囊的 2 倍」观感
-  // （用户多轮反馈锚定的绝对大小，勿再上调到 2.0）。
-  static constexpr double kAttentionScale = 1.6;
+  // attention 提醒动画：各阶段时长（秒）。2026-10-05 用户拍板：提醒不再放大，
+  // 小胶囊形态（kAttentionCapsuleW）+ 脉冲细环承担注意力信号，尺寸恒为 1。
+  static constexpr double kAttentionScale = 1.0;
   static constexpr double kAttnInS = 0.45;   // 入场（easeOutBack）
   static constexpr double kAttnHoldS = 4.0;  // 保持高亮脉冲（预告档默认）
   static constexpr double kAttnOutS = 0.35;  // 缩回

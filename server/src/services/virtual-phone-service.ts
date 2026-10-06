@@ -83,6 +83,30 @@ const CALL_HISTORY_TTL_DAYS = (() => {
 })();
 
 /**
+ * 用户主动呼叫 Agent 的默认振铃时长（毫秒）。
+ *
+ * 原为 5s：振铃加 realtime 麦克风起流合计近 7s 全程无声音，用户据此判定
+ * 「通话没打通」——历史里出现过点了呼叫 0.74s 就 user_hangup 的记录，
+ * 那时服务端还没走到 connected。压到 2.5s：留住「呼叫中」的过程感，
+ * 又不会让用户对着没声音的界面干等。可用环境变量覆盖（0 表示跳过振铃）。
+ */
+const DEFAULT_USER_CALL_RING_MS = (() => {
+  const n = Number(process.env.VIRTUAL_PHONE_USER_CALL_RING_MS ?? 2_500);
+  return Number.isFinite(n) && n >= 0 ? n : 2_500;
+})();
+
+/**
+ * realtime 语音模式下接通瞬间的开场问候。
+ *
+ * duplex 实时语音要等客户端二次 WS 握手再开麦克风，这段空窗服务端原本
+ * 一言不发（connected 帧不带 transcript/tts），用户听不到任何「已接通」的
+ * 信号。补一句极短问候异步下发，既当接通提示音，又不抢用户话轮
+ * （客户端只在 TTS 播放期间门控麦克风，播完自动恢复）。
+ */
+const REALTIME_GREETING_TEXT =
+  process.env.VIRTUAL_PHONE_REALTIME_GREETING?.trim() || "我在，你说吧";
+
+/**
  * 按持久化路径串行化的全局写队列（同进程所有 VirtualPhoneService 实例共享）。
  * 同一文件多实例并发落盘时：Windows 上并发 rename 同一目标会 EPERM，
  * 串行化后写入永远原子且有序。
@@ -923,10 +947,21 @@ export class VirtualPhoneService {
 
     const ringCfg = params.ringPhase ?? {};
     const enableRinging = ringCfg.enableRingingPhase !== false;
-    const ringDurationMs = ringCfg.ringDurationMs ?? 5_000; // 用户主动呼叫默认5秒振铃
+    const ringDurationMs = ringCfg.ringDurationMs ?? DEFAULT_USER_CALL_RING_MS; // 用户主动呼叫的振铃时长
 
     const toPhone = this.byActor.get(toActorId);
     const callId = randomUUID();
+
+    // 登记通话会话（提前到振铃前）：振铃 5s 空窗期二呼也要撞忙线护栏，
+    // 且振铃期内用户挂断可正常走 closeCall 收尾。
+    this.registerCallSession({
+      callId,
+      fromActorId: toActorId,
+      toUserId: fromUserId,
+      direction: "user_to_agent",
+      createdAt: Date.now(),
+      initialTranscript: (params.userMessage ?? "").trim(),
+    });
 
     // ---- 阶段 1：振铃中 ----
     const ringingPayload: Record<string, unknown> = {
@@ -954,6 +989,11 @@ export class VirtualPhoneService {
       await new Promise<void>((resolve) => setTimeout(resolve, ringDurationMs));
     }
 
+    // 振铃期内用户已挂断：会话已被 closeCall 清理，不再推进接通续体
+    if (!this.callSessions.has(callId)) {
+      return { ok: true, callId };
+    }
+
     // 推送「连接中」状态
     this.wsRegistry.trySend(
       fromUserId,
@@ -970,15 +1010,7 @@ export class VirtualPhoneService {
       }),
     );
 
-    // 登记通话会话：接通后用户可在通话中继续回复（phone.call_reply 路由进 Agent）
-    this.registerCallSession({
-      callId,
-      fromActorId: toActorId,
-      toUserId: fromUserId,
-      direction: "user_to_agent",
-      createdAt: Date.now(),
-      initialTranscript: (params.userMessage ?? "").trim(),
-    });
+    // 登记已提前到振铃前（见上），接通后用户可继续经 phone.call_reply 路由进 Agent
 
     // Agent 回应生成走异步续体：不阻塞本次 WS 事件处理（避免 Agent 回合
     // 期间同 socket 的后续消息——如 call_reply——被串行阻塞）。
@@ -1022,6 +1054,12 @@ export class VirtualPhoneService {
           },
         }),
       );
+      // 接入后立即补一句开场问候。connected 帧刻意不带音频（合成要 1s 上下，
+      // 不能拖慢接通），音频就绪后改走 voice_reply 通道下发——客户端已有该
+      // 通道的完整播报逻辑，无需改动。
+      void this.emitRealtimeGreeting(args).catch((err) => {
+        console.error("[virtual-phone] realtime greeting failed:", err);
+      });
       return;
     }
 
@@ -1064,6 +1102,38 @@ export class VirtualPhoneService {
             ? { format: ttsResult.format, base64: ttsResult.base64 }
             : { format: null, skippedReason: ttsResult.reason },
           message: "Agent 已接听",
+        },
+      }),
+    );
+  }
+
+  /**
+   * realtime 语音接通后的开场问候：异步合成 TTS，就绪后经 voice_reply 下发。
+   *
+   * 两处防呆：合成期间用户可能已挂断（下发前重新校验通话仍在）；TTS 不可用
+   * 则静默跳过——connected 帧已经先发出去了，不能让一句提示音反过来拖垮通话。
+   */
+  private async emitRealtimeGreeting(args: {
+    callId: string;
+    fromUserId: string;
+    toActorId: string;
+  }): Promise<void> {
+    const greeting = REALTIME_GREETING_TEXT.trim();
+    if (!greeting) return;
+    const ttsResult = await this.tts.synthesizeMp3Base64(greeting).catch(() =>
+      ({ ok: false as const, reason: "tts_synth_failed" }),
+    );
+    if (!ttsResult.ok) return;
+    if (!this.callSessions.has(args.callId)) return; // 合成期间用户已挂断
+    this.wsRegistry.trySend(
+      args.fromUserId,
+      JSON.stringify({
+        type: ServerEventType.VirtualPhoneVoiceReply,
+        payload: {
+          callId: args.callId,
+          toActorId: args.toActorId,
+          transcript: greeting,
+          tts: { format: ttsResult.format, base64: ttsResult.base64 },
         },
       }),
     );

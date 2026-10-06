@@ -51,6 +51,16 @@ class PhoneCallSession extends ChangeNotifier {
   bool voiceReady = false;
   bool _voiceStarting = false;
 
+  /// 当前语音通路服务的通话 ID：用于识别上一通电话残留的状态，
+  /// 见 [_startRealtimeVoice] 的重建判断。
+  String _voiceCallId = "";
+
+  /// 麦克风电平（0-1，每 2s 随诊断窗口刷新）；通话 UI 据此提示「没听到你说话」
+  double micLevel = 0;
+
+  /// 麦克风是否采集到足以触发服务端 VAD 的声音（false 时说话不会被识别）
+  bool get micHasSignal => VoiceDuplexService.instance.micHasSignal;
+
   /// WS 发送通道（main.dart initState 绑定）
   bool Function(String type, Map<String, dynamic> payload)? transport;
 
@@ -149,8 +159,19 @@ class PhoneCallSession extends ChangeNotifier {
   // ---- realtime 语音通路（MiniMax 端到端通话） ----
 
   Future<void> _startRealtimeVoice() async {
-    if (_voiceStarting || voiceReady) return;
     if (phase != PhoneCallPhase.inCall || callId.isEmpty) return;
+    // 幂等收窄到「确属本次通话且连接确实还活着」。
+    //
+    // 此前只看 voiceReady：上一通电话若没走到 end()（用户直接关掉通话窗、
+    // 服务端没推 ended、App 被重启打断），voiceReady 会残留 true，新通话进来
+    // 时这里直接 return，不再建 duplex 连接——表现就是「接通了但永远没声音」。
+    // 补上 callId 归属校验 + 实际连接存活校验后，残留状态会被自动重建。
+    if (voiceReady &&
+        _voiceCallId == callId &&
+        VoiceDuplexService.instance.isReady) {
+      return;
+    }
+    if (_voiceStarting) return;
     _voiceStarting = true;
     voiceState = "连接实时语音…";
     notifyListeners();
@@ -159,6 +180,11 @@ class PhoneCallSession extends ChangeNotifier {
     duplex
       ..onStateChanged = _onVoiceStateChanged
       ..onTurnCompleted = _onVoiceTurnCompleted
+      ..onMicProbe = () {
+        if (!isActive) return;
+        micLevel = duplex.micLevel.value;
+        notifyListeners();
+      }
       ..onError = (String message, bool recoverable) {
         if (!isActive) return;
         voiceState = recoverable ? "请再说一遍" : "语音链路异常";
@@ -167,35 +193,53 @@ class PhoneCallSession extends ChangeNotifier {
       ..onConnectionLost = () {
         if (!isActive) return;
         voiceReady = false;
+        _voiceCallId = "";
         voiceState = "语音已断开";
         notifyListeners();
       };
 
-    final bool ok = await duplex.start(sessionId: callId);
-    _voiceStarting = false;
-    if (!ok || !isActive) {
+    try {
+      final bool ok = await duplex.start(sessionId: callId);
+      if (!ok || !isActive) {
+        voiceReady = false;
+        _voiceCallId = "";
+        if (isActive) voiceState = "实时语音不可用";
+        notifyListeners();
+        return;
+      }
+      voiceReady = true;
+      _voiceCallId = callId;
+      voiceState = "聆听中，请直接说话";
+      notifyListeners();
+      final bool micOk = await duplex.startMic();
+      if (!micOk && isActive) {
+        voiceState = "麦克风不可用";
+        notifyListeners();
+      }
+    } catch (e) {
+      // 兜底：确保 _voiceStarting 一定复位，否则本会话再也无法重试建连
+      debugPrint("[PhoneCallSession] realtime voice failed: $e");
       voiceReady = false;
-      voiceState = "实时语音不可用";
-      notifyListeners();
-      return;
-    }
-    voiceReady = true;
-    voiceState = "聆听中，请直接说话";
-    notifyListeners();
-    final bool micOk = await duplex.startMic();
-    if (!micOk && isActive) {
-      voiceState = "麦克风不可用";
-      notifyListeners();
+      _voiceCallId = "";
+      if (isActive) {
+        voiceState = "实时语音异常";
+        notifyListeners();
+      }
+    } finally {
+      _voiceStarting = false;
     }
   }
 
   void _stopRealtimeVoice() {
     _voiceStarting = false;
     voiceReady = false;
+    _voiceCallId = "";
+    micLevel = 0;
     voiceState = "";
     final VoiceDuplexService duplex = VoiceDuplexService.instance;
     duplex.onStateChanged = null;
     duplex.onTurnCompleted = null;
+    duplex.onMicProbe = null;
     duplex.onError = null;
     duplex.onConnectionLost = null;
     unawaited(duplex.stop());

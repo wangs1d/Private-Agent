@@ -293,3 +293,15 @@ test("时间闸：过去行程（历史邮件导入）不建日程；ICS 会议�
     assert.equal(intents.length, 1);
   });
 });
+
+// ── 邮件提醒闸门决策（suppressMailInterrupt，2026-10-05 邮箱=信息采集）──
+
+test("suppressMailInterrupt：识别为票务即免打扰（与物化结果无关），null 保持原闸门", async () => {
+  const { suppressMailInterrupt } = await import("../src/services/mail-schedule-extractor.js");
+  // 非票务/提取失败 → 不免打扰（验证码/账单/航班延误照旧当场提醒）
+  assert.equal(suppressMailInterrupt(null), false);
+  // 识别为票务：物化成功
+  assert.equal(suppressMailInterrupt({ created: 1, updated: 0, cancelled: 0, skipped: 0 }), true);
+  // 识别为票务：草稿全被时间闸 skipped（过期票/退票无原票）→ 仍免打扰
+  assert.equal(suppressMailInterrupt({ created: 0, updated: 0, cancelled: 0, skipped: 2 }), true);
+});

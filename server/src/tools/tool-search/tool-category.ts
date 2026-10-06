@@ -83,8 +83,14 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   },
   {
     name: "message",
-    summary: "消息读取与回复（含代发建议）",
+    summary: "消息读取与回复（微信/QQ/飞书/短信/邮件，含代发建议）",
     prefixes: ["messages."],
+    secondaryTools: [],
+  },
+  {
+    name: "email",
+    summary: "邮件/短信主动发送（收件由邮件盯件自动进消息中心）",
+    prefixes: ["email.", "sms."],
     secondaryTools: [],
   },
   {

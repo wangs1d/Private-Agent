@@ -25,16 +25,12 @@ import {
   type TicketType,
 } from "./travel-ticket-store.js";
 import { geocodeCity, WeatherService } from "../../services/weather-service.js";
+import { amapDrivingRoute, amapGeocode } from "../../services/route-duration-service.js";
 
 type Deps = {
   travelPlanningService: PlanningService;
   weatherService: WeatherService;
 };
-
-const AMAP_KEY = process.env.AMAP_WEB_KEY || "";
-const AMAP_GEO_BASE = "https://restapi.amap.com/v3/geocode/geo";
-const AMAP_DRIVING_BASE = "https://restapi.amap.com/v3/direction/driving";
-const AMAP_TIMEOUT_MS = 8_000;
 
 /** "2026-09-10 08:30" / ISO / "08:30"（早于当前则视为明天）→ Date */
 function parseFlexibleTime(raw: string): Date | null {
@@ -60,50 +56,6 @@ function formatHM(d: Date): string {
 function formatLocal(d: Date): string {
   const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   return `${ymd} ${formatHM(d)}`;
-}
-
-/** 高德地理编码：地名 → "lng,lat"（国内地名准确；失败返回 null） */
-async function amapGeocode(address: string, city?: string): Promise<string | null> {
-  if (!AMAP_KEY) return null;
-  const params = new URLSearchParams({ key: AMAP_KEY, address });
-  if (city) params.set("city", city);
-  try {
-    const res = await fetch(`${AMAP_GEO_BASE}?${params}`, { signal: AbortSignal.timeout(AMAP_TIMEOUT_MS) });
-    const json = (await res.json()) as { status?: string; geocodes?: Array<{ location?: string }> };
-    if (json.status === "1" && json.geocodes?.[0]?.location) return json.geocodes[0].location!;
-  } catch {
-    // 降级
-  }
-  return null;
-}
-
-/** 高德驾车路径规划：返回 {durationMin, distanceKm}（含实时路况时长估算） */
-async function amapDrivingRoute(origin: string, destination: string): Promise<{ durationMin: number; distanceKm: number } | null> {
-  if (!AMAP_KEY) return null;
-  const params = new URLSearchParams({
-    key: AMAP_KEY,
-    origin,
-    destination,
-    extensions: "base",
-    strategy: "2",
-  });
-  try {
-    const res = await fetch(`${AMAP_DRIVING_BASE}?${params}`, { signal: AbortSignal.timeout(AMAP_TIMEOUT_MS) });
-    const json = (await res.json()) as {
-      status?: string;
-      route?: { paths?: Array<{ duration?: string; distance?: string }> };
-    };
-    const path = json.route?.paths?.[0];
-    if (json.status === "1" && path?.duration) {
-      return {
-        durationMin: Math.round(Number(path.duration) / 60),
-        distanceKm: Math.round(Number(path.distance ?? 0) / 100) / 10,
-      };
-    }
-  } catch {
-    // 降级
-  }
-  return null;
 }
 
 export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] {

@@ -237,8 +237,8 @@ export function createProfileUpdateHandler(_deps: MemoryGovernanceModuleDeps): T
       section,
       recorded: line || match,
       hint: failures.length === 0
-        ? "已写入画像。向用户明确复述记下的内容（说话算话），一句就好，不要啰嗦"
-        : "写入校验未通过，如实告知用户这条可能没记上",
+        ? "已写入画像。回复里自然带过即可（如「记上了」），不要复述档案字段、分区或写入过程"
+        : "写入未生效。先用更贴近旧行原文的定位词重试一次；仍失败则一句话说明这条没记上即可，不要向用户展开校验、字段或档案结构细节",
     };
   };
 }

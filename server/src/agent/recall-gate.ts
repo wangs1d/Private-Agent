@@ -7,8 +7,12 @@
  * 触发白名单（满足任一）：
  *  1. 显式记忆线索：用户明确提到记忆/上次/之前说过等（MEMORY_EXPLICIT_RE /
  *     MEMORY_RECALL_HINT_RE / META_CONVERSATION_RECALL_RE）；
- *  2. 新会话开场：thread 很短（首轮/新会话），注入一次跨会话记忆衔接；
- *  3. 个人事实陈述：用户主动陈述自我信息（我叫/我在…工作），走个人化写入路径。
+ *  2. 个人事实陈述：用户主动陈述自我信息（我叫/我在…工作），走个人化写入路径。
+ *
+ *  2026-10-06 治啰嗦 P1：「新会话开场必触发」已删除——主流 agent（ChatGPT/Claude/
+ *  Letta）均无「新会话自动倒一段上次对话」机制；跨会话衔接交给恒驻的用户速览
+ *  （结构化事实块）与按需检索（brain.recall 工具）。新会话首轮不再自动注入
+ *  session_recap/narrativeRecall 等情节块，模型不再被旧话题素材顶着想什么都提。
  *
  * 触发时检索 query 只用用户原文（禁止拼接任务/偏好/openLoops 等加料，
  * 那是召回串台的根因——检索结果永远偏向旧任务簇）。
@@ -60,7 +64,6 @@ export type RecallGateResult = {
   trigger: boolean;
   reason:
     | "memory_cue" // 显式记忆线索
-    | "new_session" // 新会话开场
     | "personal_fact" // 个人事实陈述
     | "anaphora_escalation" // 指代消解失败升级：会话长于窗口，指代可能落在窗口外
     | "off"; // 未触发（默认）
@@ -73,18 +76,9 @@ function envPositiveInt(name: string, fallback: number): number {
 }
 
 /**
- * 新会话开场判定阈值：仅 thread 内 user/assistant 消息总数 ≤ 阈值视为新会话
- * （本 session 首条用户消息）。可用 AGENT_MEMORY_RECALL_NEW_SESSION_MAX_MSGS 覆盖。
- * 原阈值 2 的误判（串台根因之一）：首轮问答完成后 thread 已有 2 条消息，
- * 第二轮（如任务追问"你确定？"）仍命中 new_session → relationshipMemory/
- * 跨会话记忆全量注入任务轮 → agent 用角色关系语境盖过任务语境。
- * 修正后跨会话衔接只在真正的会话开场注入一次。
- */
-const NEW_SESSION_THREAD_MAX = envPositiveInt("AGENT_MEMORY_RECALL_NEW_SESSION_MAX_MSGS", 1);
-/**
- * 指代升级判定阈值：thread 消息数超过此值说明早期轮次已被截出窗口，
- * 模糊指代（"那个/它/继续"）有可能指向窗口外内容，需要升级长期检索。
- * 可用 AGENT_MEMORY_RECALL_ANAPHORA_MIN_MSGS 覆盖。
+ * 旧「新会话开场判定阈值」已废弃（2026-10-06 治啰嗦 P1）：new_session 触发分支
+ * 已删除，AGENT_MEMORY_RECALL_NEW_SESSION_MAX_MSGS 不再读取。保留占位注释防止
+ * 误恢复——跨会话衔接的正确入口是恒驻速览（结构化事实）与 brain.recall 按需检索。
  */
 const ANAPHORA_ESCALATION_THREAD_MIN = envPositiveInt("AGENT_MEMORY_RECALL_ANAPHORA_MIN_MSGS", 24);
 
@@ -114,14 +108,9 @@ export function shouldRecallLongTerm(input: RecallGateInput): RecallGateResult {
     return { trigger: true, reason: "personal_fact" };
   }
 
-  // 3. 新会话开场（thread 未知时不触发，保守）
-  const count = input.threadMessageCount ?? -1;
-  if (count >= 0 && count <= NEW_SESSION_THREAD_MAX) {
-    return { trigger: true, reason: "new_session" };
-  }
-
-  // 4. 指代消解失败升级：模糊指代/短追问 + 会话已长于注入窗口
+  // 3. 指代消解失败升级：模糊指代/短追问 + 会话已长于注入窗口
   // （短会话内 LLM 从最近轮次即可消解；只有历史被截断后，"那个"才可能指向窗口外）
+  const count = input.threadMessageCount ?? -1;
   if (input.ambiguousFollowUp && count >= ANAPHORA_ESCALATION_THREAD_MIN) {
     return { trigger: true, reason: "anaphora_escalation" };
   }

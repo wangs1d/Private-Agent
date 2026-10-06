@@ -302,6 +302,18 @@ export type MailScheduleSyncReport = {
   skipped: number;
 };
 
+/**
+ * 邮件提醒闸门决策（2026-10-05 邮箱=信息采集定调）：邮件只要被成功识别为
+ * 票务/预订（提取出草稿——哪怕全被时间闸 skipped，如过期票/退票通知），
+ * 就免当场 high 打扰：提醒交给日程策略层按事件时间自动排。
+ * 返回 null（非票务/提取失败，如航班延误通知未命中模板）→ 保持原闸门当场提醒。
+ */
+export function suppressMailInterrupt(
+  report: MailScheduleSyncReport | null | undefined,
+): boolean {
+  return report != null;
+}
+
 export class MailScheduleBridge {
   private readonly tasks: ScheduleTaskService;
   private readonly notify: ((intent: ProactiveIntent) => void) | null;

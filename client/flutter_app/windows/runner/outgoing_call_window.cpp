@@ -19,15 +19,11 @@
 
 namespace {
 
-// ── 内部布局 ──
-constexpr int kAvatarCx = OutgoingCallWindow::kWindowWidth / 2;  // 头像盘圆心 x
-constexpr int kAvatarCy = 112;               // 头像盘圆心 y
-constexpr int kAvatarR = 38;                 // 头像盘半径
-constexpr int kNameTop = 162;                // 名称 top
-constexpr int kSubTop = 192;                 // 副标题 top
-constexpr int kDividerY = 232;               // 分隔线 y
+// ── 内部布局（无头像/名称/标题文字的紧凑版：副标题贴顶） ──
+constexpr int kSubTop = 52;                  // 副标题 top
+constexpr int kDividerY = 92;                // 分隔线 y
 constexpr int kPillLeft = 96;                // 挂断胶囊 left
-constexpr int kPillTop = 254;                // 挂断胶囊 top
+constexpr int kPillTop = 116;                // 挂断胶囊 top
 constexpr int kPillW = 108;
 constexpr int kPillH = 38;
 
@@ -143,22 +139,16 @@ void OutgoingCallWindow::Paint(HWND hwnd, HDC hdc) {
   // ── 半透明玻璃底（逐像素 alpha，拖到任何背景都是活的） ──
   call_vis::DrawGlassBase(s);
 
-  // ── 标题栏 ──
-  call_vis::PaintTitleBar(s, kWindowWidth, title_min_hover_,
-                          title_close_hover_);
-
-  // ── 金属盘头像（静态） ──
-  const wchar_t* initial =
-      !caller_initial_.empty()
-          ? caller_initial_.c_str()
-          : (!caller_name_.empty() ? caller_name_.c_str() : nullptr);
-  call_vis::PaintAvatarDisc(s, kAvatarCx, kAvatarCy, kAvatarR,
-                            initial ? std::wstring(initial) : std::wstring());
-
-  // ── 名称（18px 白 Semibold） ──
-  RECT name_rc = {20, kNameTop, kWindowWidth - 20, kNameTop + 26};
-  call_vis::DrawCenteredText(s, name_rc, caller_name_, call_vis::kNameColor,
-                             18, FW_SEMIBOLD, L"Microsoft YaHei UI");
+  // ── 标题栏仅保留最小化/关闭两钮（—=收起 ×=取消呼叫），不画信号条与标题文字 ──
+  const call_vis::TitleRects tr = call_vis::TitleRectsFor(kWindowWidth);
+  call_vis::DrawGlyph(s, tr.minimize, call_vis::kGlyphMinimize,
+                      title_min_hover_ ? call_vis::kNameColor
+                                       : call_vis::kSubColor,
+                      10, L"Segoe MDL2 Assets");
+  call_vis::DrawGlyph(s, tr.close, call_vis::kGlyphClose,
+                      title_close_hover_ ? call_vis::kNameColor
+                                         : call_vis::kSubColor,
+                      10, L"Segoe MDL2 Assets");
 
   // ── 副标题（12px 中灰；呼叫中文案追加动画点） ──
   std::wstring sub = subtitle_;

@@ -19,20 +19,16 @@
 
 namespace {
 
-// ── 内部布局 ──
-constexpr int kAvatarCx = ConnectedCallWindow::kWindowWidth / 2;  // 头像盘圆心 x
-constexpr int kAvatarCy = 122;               // 头像盘圆心 y
-constexpr int kAvatarR = 38;                 // 头像盘半径
-constexpr int kNameTop = 172;                // 名称 top
-constexpr int kStatusTop = 202;              // 状态行（波形+计时）top
+// ── 内部布局（无头像/名称/标题文字的紧凑版：状态行贴顶，下面钮组不变） ──
+constexpr int kStatusTop = 52;               // 状态行（波形+计时）top
 constexpr int kStatusH = 18;                 // 状态行高
-constexpr int kDividerY = 240;               // 分隔线 y
+constexpr int kDividerY = 90;                // 分隔线 y
 constexpr int kToggleSize = 46;              // 静音/免提直径
-constexpr int kToggleCy = 272;               // 切换钮圆心 y
+constexpr int kToggleCy = 122;               // 切换钮圆心 y
 constexpr int kMuteCx = 110;                 // 静音圆心 x
 constexpr int kSpeakerCx = 190;              // 免提圆心 x
 constexpr int kPillLeft = 96;                // 挂断胶囊 left
-constexpr int kPillTop = 306;                // 挂断胶囊 top
+constexpr int kPillTop = 156;                // 挂断胶囊 top
 constexpr int kPillW = 108;
 constexpr int kPillH = 38;
 
@@ -251,34 +247,16 @@ void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
   // ── 半透明玻璃底（逐像素 alpha，拖到任何背景都是活的） ──
   call_vis::DrawGlassBase(s);
 
-  // ── 标题栏 ──
-  call_vis::PaintTitleBar(s, kWindowWidth, title_min_hover_,
-                          title_close_hover_);
-
-  // ── 金属盘头像 + 播报呼吸光环（双层相位错开） ──
-  if (talking_) {
-    const double t = (pulse_phase_ % 30) / 30.0;
-    const double t2 = fmod(t + 0.5, 1.0);
-    for (int i = 0; i < 2; ++i) {
-      const double tt = (i == 0) ? t : t2;
-      const int r = kAvatarR + 5 + static_cast<int>(12 * tt);
-      call_vis::FillDiscAlpha(*s.gfx, kAvatarCx, kAvatarCy, r,
-                              RGB(0xBE, 0xBE, 0xC4),
-                              static_cast<BYTE>(call_vis::kHaloBaseA *
-                                                (1 - tt)));
-    }
-  }
-  const wchar_t* initial =
-      !caller_initial_.empty()
-          ? caller_initial_.c_str()
-          : (!caller_name_.empty() ? caller_name_.c_str() : nullptr);
-  call_vis::PaintAvatarDisc(s, kAvatarCx, kAvatarCy, kAvatarR,
-                            initial ? std::wstring(initial) : std::wstring());
-
-  // ── 名称（18px 白 Semibold） ──
-  RECT name_rc = {20, kNameTop, kWindowWidth - 20, kNameTop + 26};
-  call_vis::DrawCenteredText(s, name_rc, caller_name_, call_vis::kNameColor,
-                             18, FW_SEMIBOLD, L"Microsoft YaHei UI");
+  // ── 标题栏仅保留最小化/关闭两钮（—=收起 ×=挂断），不画信号条与标题文字 ──
+  const call_vis::TitleRects tr = call_vis::TitleRectsFor(kWindowWidth);
+  call_vis::DrawGlyph(s, tr.minimize, call_vis::kGlyphMinimize,
+                      title_min_hover_ ? call_vis::kNameColor
+                                       : call_vis::kSubColor,
+                      10, L"Segoe MDL2 Assets");
+  call_vis::DrawGlyph(s, tr.close, call_vis::kGlyphClose,
+                      title_close_hover_ ? call_vis::kNameColor
+                                         : call_vis::kSubColor,
+                      10, L"Segoe MDL2 Assets");
 
   // ── 状态行：小波形 + 计时（12px 中灰，居中成组） ──
   std::wstring status_text =
@@ -298,7 +276,7 @@ void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
 
   constexpr int kBarsW = 30;
   const int total_w = kBarsW + 10 + text_w;
-  const int group_left = kAvatarCx - total_w / 2;
+  const int group_left = kWindowWidth / 2 - total_w / 2;
   const int status_cy = kStatusTop + kStatusH / 2;
   call_vis::DrawWaveBars(*s.gfx, group_left + kBarsW / 2, status_cy, 12,
                          call_vis::kSubColor, talking_ ? pulse_phase_ : -1);

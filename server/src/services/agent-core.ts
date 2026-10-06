@@ -216,6 +216,7 @@ import {
   trimMediaCardsByTopic,
   type MediaCardItem,
 } from "./tool-result-processor.js";
+import { captionMediaCards, isImageCaptionEnabled } from "./image-caption-service.js";
 import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
 import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
@@ -1063,21 +1064,22 @@ export class AgentCore {
     // 仅抑制长期记忆（narrativeRecall），当前会话的【最近对话回顾】/STM 上下文仍正常注入。
     //
     // v3 记忆架构读路径（三重闸退役）：长期记忆进上下文只剩三条有意的路——
-    //   1. 画像层常驻（memory_facts/preferences 无条件注入，prompt-context-builder）；
+    //   1. 画像层速览常驻（结构化事实块无条件注入，prompt-context-builder）；
     //   2. brain.recall 工具按需检索（chat 车道常驻，模型自主决定何时查记忆）；
-    //   3. 本处窄线索兜底：用户显式提及记忆（记得/上次/之前/昨天）或新会话开场时
-    //      系统代查情节记忆注入。
+    //   3. 本处窄线索兜底：用户显式提及记忆（记得/上次/之前/昨天）时系统代查情节记忆注入。
     // v2 的向量预筛（semanticRecallPreScreen）与 isTopicSwitchTurn 话题抑制退役——
     // 情节记忆不再无邀请推送，「系统擅自塞旧记忆」这个串台通道从结构上删除。
+    // 2026-10-06 治啰嗦 P1：「新会话开场必触发」一并删除——新会话首轮不再自动注入
+    // session_recap/narrativeRecall 等跨会话情节块（主流 agent 均无此机制；
+    // 跨会话衔接交给恒驻速览与 brain.recall 按需检索）。
     const narrowMemoryCue =
       MEMORY_EXPLICIT_RE.test(text) ||
       MEMORY_RECALL_HINT_RE.test(text) ||
       META_CONVERSATION_RECALL_RE.test(text) ||
       DATE_DEIXIS_RE.test(text);
-    const isNewSessionOpen = threadMessageCount >= 0 && threadMessageCount <= 1;
     const recallGate = {
-      trigger: narrowMemoryCue || isNewSessionOpen,
-      reason: narrowMemoryCue ? ("memory_cue" as const) : ("new_session" as const),
+      trigger: narrowMemoryCue,
+      reason: ("memory_cue" as const),
     };
     const gateTriggered = recallGate.trigger;
     const suppressNarrativeRecall = !gateTriggered;
@@ -3227,6 +3229,21 @@ if (route.plane === "task") {
           maxPerGroup: 4,
           maxPerSide: 2,
         });
+        // 真实图片描述（Coze 式「一图一句」，2026-10-06 补接）：任务面照片轮此前
+        // 只在 WS 对话面路径（chat-user-message）生成 caption，任务面收尾漏接
+        // ——用户要的「每张照片一句解读」在照片任务上永远缺席（真链取证）。
+        // 失败/超时静默跳过，卡片保持无 caption 走旧渲染，与对话面降级策略一致。
+        if (mediaCards.length > 0 && isImageCaptionEnabled()) {
+          try {
+            await captionMediaCards(mediaCards);
+          } catch (err) {
+            console.info(
+              `[AgentCore] 任务面图片描述生成异常（忽略，回退旧渲染）: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
         // 结果不带「[后台任务·目标]」标识头（2026-09-09 产品决策）：对话面已有
         // 任务回执交代来龙去脉，结果气泡只呈现结果本体。归属仍由对话 thread 的
         // 单条「任务记录」承接（LLM 上下文可见，用户不可见）。

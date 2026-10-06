@@ -131,12 +131,15 @@ function loadPlanExecuteConfig(): PlanExecuteConfig {
 function loadMemoryPromptConfig(): MemoryPromptConfig {
   const promptMemoryKeys = resolvePromptMemoryKeys();
 
+  // 能力自述默认开启：人格层能力总览由 FeatureCatalog 从真实注册表自动生成
+  // （新能力注册即上 prompt）。AGENT_PROMPT_AGENT_CAPS=0/off/false/no 显式关闭。
   const agentCapsRaw = process.env.AGENT_PROMPT_AGENT_CAPS?.trim().toLowerCase();
-  const agentCapsInPrompt =
-    agentCapsRaw === "1" ||
-    agentCapsRaw === "on" ||
-    agentCapsRaw === "true" ||
-    agentCapsRaw === "yes";
+  const agentCapsInPrompt = !(
+    agentCapsRaw === "0" ||
+    agentCapsRaw === "off" ||
+    agentCapsRaw === "false" ||
+    agentCapsRaw === "no"
+  );
 
   const capsRaw = process.env.AGENT_PROMPT_WORLD_CAPS?.trim().toLowerCase();
   const worldCapsInPrompt =

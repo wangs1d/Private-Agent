@@ -116,7 +116,6 @@ Widget _harness() {
                 },
                 onOpenUserMenuFeedback: () {},
                 onOpenDevices: () {},
-                onEnterPureVoiceMode: () {},
                 onLogout: () {},
               ),
               const Expanded(child: SizedBox.shrink()),

@@ -29,6 +29,7 @@
  *   MAIL_WATCH_ACTOR_ID    消息归属用户；默认沿用消息桥的既有约定
  *                          MESSAGE_BRIDGE_DEFAULT_ACTOR_ID，再兜底 "default_user"
  *   MAIL_WATCH_VIP_SENDERS 逗号分隔的发件人白名单（命中即 critical），支持 @domain 整域
+ *   MAIL_WATCH_FILTER_PROMO 默认 1：营销/广告邮件自动过滤（不推送、不进消息中心）；置 0 关闭
  */
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -42,8 +43,8 @@ import type { MessageHubService } from "./message-hub-service.js";
 // 类型
 // ---------------------------------------------------------------------- //
 
-/** 邮件重要性：critical（VIP 直接置顶提醒）/ high（命中确定性重要场景）/ normal。 */
-export type MailImportance = "critical" | "high" | "normal";
+/** 邮件重要性：critical（VIP 直接置顶提醒）/ high（命中确定性重要场景）/ normal / promotional（营销邮件，过滤不推送）。 */
+export type MailImportance = "critical" | "high" | "normal" | "promotional";
 
 export interface MailWatchClassification {
   importance: MailImportance;
@@ -131,6 +132,8 @@ export interface MailWatchConfig {
   markSeen: boolean;
   actorId: string;
   vipSenders: string[];
+  /** 营销邮件过滤开关（默认开；MAIL_WATCH_FILTER_PROMO=0 显式关闭） */
+  filterPromotional: boolean;
 }
 
 export interface MailWatchStatus {
@@ -149,6 +152,10 @@ export interface MailWatchStatus {
   markSeen: boolean;
   actorId: string;
   vipSenderCount: number;
+  /** 营销邮件过滤开关状态（与 cfg.filterPromotional 一致，供设置页展示） */
+  filterPromotional: boolean;
+  /** 已累计过滤的营销邮件数（观测过滤是否生效） */
+  promotionalFiltered: number;
   windowSize: number;
   lastPollAt: string | null;
   lastSuccessAt: string | null;
@@ -198,6 +205,8 @@ export function readMailWatchConfig(env: NodeJS.ProcessEnv = process.env): MailW
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    // 营销过滤默认开启；仅显式 MAIL_WATCH_FILTER_PROMO=0/false 才关闭（误杀兜底阀门）
+    filterPromotional: !["0", "false", "off", "no"].includes(env.MAIL_WATCH_FILTER_PROMO?.trim().toLowerCase() ?? ""),
   };
 }
 
@@ -260,20 +269,99 @@ function matchesVipSender(from: string, vipSenders: readonly string[]): string |
   return null;
 }
 
+// ---------------------------------------------------------------------- //
+// 营销/广告邮件识别（零 LLM 确定性规则；命中即过滤：不推送、不进消息中心）
+// ---------------------------------------------------------------------- //
+
+/**
+ * 主题级营销关键词：命中即判营销。只看主题不看正文——验证码/账单这类
+ * 事务性邮件正文里也可能带营销尾巴，主题误杀率最低。
+ * 中英文都收；英文用词边界防 "wholesale" 这类子串误伤。
+ */
+const PROMO_SUBJECT_PATTERN =
+  /(促销|优惠|折扣|特惠|秒杀|满减|满赠|立减|返现|返券|红包|优惠券|代金券|大促|清仓|闪购|拼团|免单|0元购|0元领|免费领|扫码领|立省|抽奖|专享|会员日|双十一|双11|黑五|年货节|购物节|退订|取消订阅|\b(?:sale|promos?|promotions?|discount|discounts|coupon|coupons|deals?|cashback|clearance|newsletter|unsubscribe|exclusive\s+offer|limited[-\s]?time\s+offer)\b)/i;
+
+/** 发件人地址营销位特征（local part）：promo@/marketing@/newsletter@ 这类明显营销身份。 */
+const PROMO_FROM_LOCAL_PATTERN = /(?:^|[._-])(?:promo|promotion|marketing|newsletter|edm|deals|offers|sales|advertising)(?:[._-]|$)/i;
+
+/** 正文退订尾巴：营销邮件的行业标配信号（RFC 合规要求带退订入口）。 */
+const PROMO_UNSUBSCRIBE_TEXT_PATTERN = /(退订|取消订阅|不再接收|停止接收|拒收此类邮件|unsubscribe|opt[-\s]?out\s+of\s+(?:these\s+)?emails)/i;
+
+/** 正文营销关键词（与退订尾巴组合使用才判营销，单独出现不判）。 */
+const PROMO_TEXT_KEYWORD_PATTERN = /(促销|优惠|折扣|特惠|秒杀|满减|立减|返现|红包|优惠券|大促|清仓|闪购|拼团|抽奖|\b(?:sale|promos?|promotions?|discount|coupon|deals?|cashback|clearance)\b)/i;
+
+/**
+ * List-Unsubscribe 头探测（RFC 2369/8058）：合规营销邮件的最强信号，
+ * 误杀率极低（事务性邮件不带此头）。只扫顶部头区（首个空行之前），
+ * 防止正文里恰好出现同样字样造成误判。
+ */
+function hasListUnsubscribeHeader(source: Buffer | null | undefined): boolean {
+  if (!source || source.length === 0) return false;
+  try {
+    const head = source.subarray(0, 32768).toString("latin1");
+    const sep = head.indexOf("\r\n\r\n") >= 0 ? head.indexOf("\r\n\r\n") : head.indexOf("\n\n");
+    const headerBlock = sep >= 0 ? head.slice(0, sep) : head;
+    return /^list-unsubscribe(?:-post)?:/im.test(headerBlock);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 营销/广告邮件识别（确定性规则，数据驱动便于扩充）：
+ *   a) List-Unsubscribe 头（最强信号，直接命中）；
+ *   b) 主题命中营销关键词（营销邮件的主题必带钩子词）；
+ *   c) 发件人是营销位地址（promo@/newsletter@）且正文带退订尾巴；
+ *   d) 正文同时带退订尾巴与营销关键词（有退订入口兜底的优惠内容）。
+ * 保守策略：纯正文关键词不判营销（事务邮件也会提"优惠"），必须主题/头/发件人佐证。
+ */
+export function detectPromotionalMail(
+  mail: Pick<IncomingMail, "from" | "subject" | "textSnippet" | "source">,
+): { promotional: boolean; reason: string } {
+  if (hasListUnsubscribeHeader(mail.source)) {
+    return { promotional: true, reason: "promo:list_unsubscribe_header" };
+  }
+  const subject = mail.subject ?? "";
+  if (PROMO_SUBJECT_PATTERN.test(subject)) {
+    return { promotional: true, reason: "promo:subject_keyword" };
+  }
+  const text = mail.textSnippet ?? "";
+  const addr = extractEmailAddress(mail.from);
+  const local = addr.split("@")[0] ?? "";
+  const fromPromo = PROMO_FROM_LOCAL_PATTERN.test(local);
+  const unsubTail = PROMO_UNSUBSCRIBE_TEXT_PATTERN.test(text);
+  if (fromPromo && unsubTail) {
+    return { promotional: true, reason: "promo:from_role+unsub_footer" };
+  }
+  if (unsubTail && PROMO_TEXT_KEYWORD_PATTERN.test(text)) {
+    return { promotional: true, reason: "promo:unsub_footer+promo_keyword" };
+  }
+  return { promotional: false, reason: "" };
+}
+
 /**
  * 邮件重要性分级：
- *   a) VIP 白名单命中 → "critical"（用户钦点的发件人，永远最高优先级）；
- *   b) 确定性关键词规则命中 → "high"（按 IMPORTANCE_RULES 顺序，命中第一条即返回）；
- *   c) 其余 → "normal"。
+ *   a) VIP 白名单命中 → "critical"（用户钦点的发件人，永远最高优先级，
+ *      即便发的是营销邮件也照常提醒——白名单是用户的显式意志）；
+ *   b) 营销/广告邮件识别命中且过滤开关开启 → "promotional"（不推送不落库）；
+ *   c) 确定性关键词规则命中 → "high"（按 IMPORTANCE_RULES 顺序，命中第一条即返回）；
+ *   d) 其余 → "normal"。
  * 返回 { importance, reasons[] }，reasons 记录命中来源便于解释与排障。
  */
 export function classifyMailImportance(
-  mail: Pick<IncomingMail, "from" | "subject" | "textSnippet">,
+  mail: Pick<IncomingMail, "from" | "subject" | "textSnippet" | "source">,
   vipSenders: readonly string[] = [],
+  opts: { filterPromotional?: boolean } = {},
 ): MailWatchClassification {
   const vipHit = matchesVipSender(mail.from ?? "", vipSenders);
   if (vipHit) {
     return { importance: "critical", reasons: [`vip_sender:${vipHit}`] };
+  }
+  if (opts.filterPromotional !== false) {
+    const promo = detectPromotionalMail(mail);
+    if (promo.promotional) {
+      return { importance: "promotional", reasons: [promo.reason] };
+    }
   }
   const subject = mail.subject ?? "";
   const text = mail.textSnippet ?? "";
@@ -439,19 +527,75 @@ function decodeCharset(buf: Buffer, charset?: string): string {
   }
 }
 
+/**
+ * 常用命名 HTML 实体表（营销邮件正文的最低频集合；数字实体由通用规则兜底全量解码）。
+ * shy 映射空串：soft hyphen 是隐形断字提示，解码后直接删除而非保留。
+ */
+const NAMED_HTML_ENTITIES: Readonly<Record<string, string>> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", shy: "",
+  copy: "©", reg: "®", trade: "™", hellip: "…", mdash: "—", ndash: "–",
+  lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”", sbquo: "‚", bdquo: "„",
+  laquo: "«", raquo: "»", deg: "°", plusmn: "±", middot: "·", bull: "•",
+  cent: "¢", pound: "£", yen: "¥", euro: "€", sect: "§", para: "¶",
+  times: "×", divide: "÷", frac12: "½", frac14: "¼", frac34: "¾",
+  larr: "←", uarr: "↑", rarr: "→", darr: "↓", infin: "∞",
+  iexcl: "¡", iquest: "¿", szlig: "ß", micro: "µ", dagger: "†", Dagger: "‡",
+  permil: "‰", prime: "′", Prime: "″", oline: "‾", frasl: "⁄",
+  agrave: "à", aacute: "á", acirc: "â", atilde: "ã", auml: "ä", aring: "å", ccedil: "ç",
+  egrave: "è", eacute: "é", ecirc: "ê", euml: "ë", igrave: "ì", iacute: "í", icirc: "î", iuml: "ï",
+  ntilde: "ñ", ograve: "ò", oacute: "ó", ocirc: "ô", otilde: "õ", ouml: "ö", oslash: "ø",
+  ugrave: "ù", uacute: "ú", ucirc: "û", uuml: "ü", yacute: "ý",
+};
+
+/**
+ * 解码 HTML 实体（数字十进制/十六进制全量 + 上表命名实体）。
+ * 邮件 HTML 正文里 &#847;（组合字形连接符）、&shy;（软连字符）等隐形字符是
+ * 营销邮件对抗过滤器的常见伎俩，必须解码后清除（见 stripInvisibleMailChars）。
+ */
+export function decodeHtmlEntities(text: string): string {
+  if (!text) return text;
+  return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (whole, body: string) => {
+    if (body.startsWith("#")) {
+      const hex = body[1] === "x" || body[1] === "X";
+      const code = hex ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return whole;
+      try {
+        return String.fromCodePoint(code);
+      } catch {
+        return whole;
+      }
+    }
+    const mapped = NAMED_HTML_ENTITIES[body] ?? NAMED_HTML_ENTITIES[body.toLowerCase()];
+    return mapped ?? whole;
+  });
+}
+
+/**
+ * 清除邮件文本中的隐形/零宽字符：软连字符、组合字形连接符（&#847;）、
+ * 零宽空格系列、双向文本控制符、BOM、替换符。这些字符肉眼不可见但会污染
+ * 展示文本（截图里整屏 &#847; &shy; 的乱码来源），也干扰关键词匹配。
+ */
+export function stripInvisibleMailChars(text: string): string {
+  return text.replace(/[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u206A-\u206F\uFEFF\uFFF9-\uFFFB\uFFFD]/g, "");
+}
+
+/** 邮件短文本（主题/显示名）净化：解码实体 + 清除隐形字符 + 折叠空白。 */
+export function sanitizeMailText(text: string): string {
+  return stripInvisibleMailChars(decodeHtmlEntities(text ?? "")).replace(/\s+/g, " ").trim();
+}
+
 function htmlToText(html: string): string {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'");
+  return stripInvisibleMailChars(
+    decodeHtmlEntities(
+      html
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/gi, " "),
+    ),
+  );
 }
 
 /**
@@ -514,7 +658,7 @@ export interface ImapflowClientConfig {
 function formatAddressList(list?: Array<{ name?: string; address?: string }>): string {
   if (!list?.length) return "";
   return list
-    .map((a) => (a.name ? `${a.name} <${a.address ?? ""}>` : a.address ?? ""))
+    .map((a) => (a.name ? `${sanitizeMailText(a.name)} <${a.address ?? ""}>` : a.address ?? ""))
     .filter(Boolean)
     .join(", ");
 }
@@ -579,7 +723,8 @@ export async function createImapflowClient(cfg: ImapflowClientConfig): Promise<M
           uid: msg.uid,
           from: formatAddressList(env?.from),
           to: formatAddressList(env?.to),
-          subject: env?.subject ?? "",
+          // 主题/显示名同样可能带 HTML 实体与隐形字符（营销邮件干扰手段），统一净化
+          subject: sanitizeMailText(env?.subject ?? ""),
           date,
           textSnippet: extractMailTextSnippet(msg.source),
           source: msg.source ?? undefined,
@@ -632,6 +777,7 @@ export class MailWatchService {
   private lastError: string | null = null;
   private retryDelaySec: number | null = null;
   private newMessagesHandled = 0;
+  private promotionalFiltered = 0;
 
   constructor(deps: MailWatchDeps = {}) {
     this.deps = deps;
@@ -737,6 +883,8 @@ export class MailWatchService {
       markSeen: this.cfg.markSeen,
       actorId: this.cfg.actorId,
       vipSenderCount: this.cfg.vipSenders.length,
+      filterPromotional: this.cfg.filterPromotional,
+      promotionalFiltered: this.promotionalFiltered,
       windowSize: this.windowSize,
       lastPollAt: this.lastPollAt,
       lastSuccessAt: this.lastSuccessAt,
@@ -815,6 +963,9 @@ export class MailWatchService {
           subject: mail.subject,
           date: mail.date,
           textSnippet: mail.textSnippet,
+          // 原文透传：票务桥解 MIME/ICS、营销过滤探 List-Unsubscribe 头都靠它
+          // （此前漏传导致生产上票务桥永远拿不到 source、直接空返回）
+          source: mail.source,
           uid: mail.uid,
           messageId: `mailwatch:${this.cfg.user}:${mail.uid}`,
         });
@@ -857,10 +1008,25 @@ export class MailWatchService {
    * 单封新邮件处理：分级 → onNewMessage 抛给装配层（ProactivityHub 接线点）→
    * 可选 ingest 进 message-hub。回调/落库异常均吞掉记日志（监控链路故障不能
    * 反过来打断轮询主循环）；返回分级结果供调用方与测试断言。
+   *
+   * 营销邮件（promotional）在此短路：不回调、不进消息中心——广告与用户无关，
+   * 自动过滤不推送（UID 照常记入已处理集合，不会反复重判）。VIP 白名单发的
+   * 营销邮件不受影响（classify 里 VIP 先于营销判定）。
    */
   async handleIncoming(mail: IncomingMail): Promise<MailWatchClassification> {
-    const classification = classifyMailImportance(mail, this.cfg.vipSenders);
+    const classification = classifyMailImportance(mail, this.cfg.vipSenders, {
+      filterPromotional: this.cfg.filterPromotional,
+    });
     this.newMessagesHandled += 1;
+
+    if (classification.importance === "promotional") {
+      this.promotionalFiltered += 1;
+      this.log(
+        "info",
+        `营销邮件已过滤（${classification.reasons[0] ?? "promo"}，不推送不落库）：${extractEmailAddress(mail.from)}「${mail.subject}」`,
+      );
+      return classification;
+    }
 
     if (this.deps.onNewMessage) {
       try {

@@ -52,7 +52,56 @@ export type SynthesisStrategy =
   | "layered_progressive"   // 中等数据：先事实后推断，分层递进
   | "honest_sparse"          // 低质量数据：坦诚说明已知+未知
   | "multi_perspective"      // 矛盾数据：多视角对比
-  | "direct_answer";         // 无工具数据：直接回答（纯知识）
+  | "direct_answer"         // 无工具数据：直接回答（纯知识）
+  | "photo_delivery";        // 纯图轮：交图即交付，正文一两句话收束
+
+/**
+ * 照片轮专用指令（2026-10-06）：用户搜照片要的是图本身，每张照片下方已由
+ * image-caption-service 自动附一句画面解读（Coze 式一图一句），正文再按
+ * 「已确认的/能说的/没查到的」分节盘点就是废话。此前 medium/high 档的
+ * 「信息用足、按主题分节」指令会把纯图轮教唆成三段式盘点（真机取证）。
+ */
+export const PHOTO_DELIVERY_INSTRUCTION =
+  `照片轮：图片本身就是交付，每张照片下方会自动附一句画面解读（场景、氛围、观感），正文不要重复。` +
+  `直接交图，正文最多一两句话自然引入（如来源或场合），然后收束。` +
+  `严禁按主题分节盘点，严禁写「已确认的/能说的/没查到的」式小节，不要逐张复述照片内容；没找到的图用一句话带过即可，不要单列缺口清单。`;
+
+/** 有文字检索/抓取结果的工具：出现它们说明本轮是图文混合研究，不按纯图轮处理 */
+const TEXT_SEARCH_TOOL_NAMES = new Set([
+  "search_web",
+  "deep_search",
+  "hot_rankings",
+  "search_videos",
+  "fetch_web",
+  "info.inspect_webpage",
+  "info.navigate_site",
+]);
+
+/**
+ * 记账型工具（2026-10-06 治啰嗦 P0-2）：结果是「已写入/已清除」类状态回执，
+ * 不是可供组织成回复的外部信息。它们不得参与数据质量评估——否则一句
+ * 「以后叫我王哥」（调 profile.update）会被评成 medium/high 数据档，
+ * 叠上「信息用足、按主题分节」的展开策略，把称呼确认写成研究报告。
+ */
+export const BOOKKEEPING_TOOL_NAMES = new Set<string>([
+  "profile.update",
+  "memory.forget",
+  "memory.invalidate",
+  "interest.manage",
+]);
+
+/**
+ * 是否是「纯图轮」：本轮至少一次 search_images 成功，且没有任何成功的
+ * 文字检索/抓取结果（图文混合时仍走常规合成策略）。search_images_batch
+ * 是对比出图流，前端按「一段介绍 + 一组对比图」交错渲染，不在此列。
+ */
+export function isPhotoDeliveryRound(
+  results: Array<{ toolName: string; ok: boolean }>,
+): boolean {
+  const okResults = results.filter((r) => r.ok);
+  if (!okResults.some((r) => r.toolName === "search_images")) return false;
+  return !okResults.some((r) => TEXT_SEARCH_TOOL_NAMES.has(r.toolName));
+}
 
 /** 策略指令（注入 LLM 的动态指令） */
 export interface StrategyDirective {
@@ -322,7 +371,47 @@ export function evaluateAndSelectStrategy(
   toolResults: Array<{ toolName: string; ok: boolean; result: Record<string, unknown> }>,
   userMessage: string,
 ): StrategyDirective {
-  const toolData = collectToolDataFromResults(toolResults);
+  // 记账轮短路（2026-10-06）：本轮只有档案/记忆写入类回执、没有真实检索内容时，
+  // 不做数据质量分档、不注入任何展开策略——回复形态交给车道人格（闲聊轮两三句）。
+  const substantiveResults = toolResults.filter((r) => !BOOKKEEPING_TOOL_NAMES.has(r.toolName));
+  if (toolResults.length > 0 && substantiveResults.length === 0) {
+    return {
+      strategy: "direct_answer",
+      instruction: "",
+      quality: {
+        sourceCount: toolResults.length,
+        searchCount: 0,
+        fetchCount: 0,
+        successCount: toolResults.filter((r) => r.ok).length,
+        failureCount: toolResults.filter((r) => !r.ok).length,
+        totalContentLength: 0,
+        toolDiversity: toolResults.length,
+        level: "empty",
+        reason: "纯记账轮：仅档案/记忆写入类回执，不施加展开策略",
+      },
+    };
+  }
+  // 纯图轮短路（2026-10-06）：搜照片轮的交付是图本身，不走数据质量分档——
+  // 否则 medium 档的「先已确认事实/再合理推断/最后待验证点」三段式会教出
+  // 「已确认的/能说的/没查到的」盘点正文（真机取证的事故形态）。
+  if (isPhotoDeliveryRound(substantiveResults)) {
+    return {
+      strategy: "photo_delivery",
+      instruction: PHOTO_DELIVERY_INSTRUCTION,
+      quality: {
+        sourceCount: substantiveResults.length,
+        searchCount: substantiveResults.length,
+        fetchCount: 0,
+        successCount: substantiveResults.filter((r) => r.ok).length,
+        failureCount: substantiveResults.filter((r) => !r.ok).length,
+        totalContentLength: 0,
+        toolDiversity: 1,
+        level: "high",
+        reason: "纯图轮：search_images 成功且无文字检索结果，交图为主",
+      },
+    };
+  }
+  const toolData = collectToolDataFromResults(substantiveResults);
   const quality = assessDataQuality(toolData);
   return selectStrategy(quality, userMessage);
 }

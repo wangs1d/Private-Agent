@@ -409,3 +409,127 @@ test("habitHintsFromSleepSamples：跨午夜样本取中位，样本不足返回
   assert.equal(hints.wakeHour, 9.65);
   assert.equal(habitHintsFromSleepSamples([{ startHour: 1, endHour: 9 }, { startHour: 2, endHour: 9 }]), null);
 });
+
+// ── 真实路程因子（travelMinutesOverride，2026-10-05）──
+
+test("travelMinutesOverride 有效值替代 venue 静态表，policyName 带 route 来源", () => {
+  const plan = buildReminderPolicy({
+    runAt: DENTIST_RUN_AT,
+    timezone: "Asia/Shanghai",
+    description: "周六上午十点去看牙医，带就诊卡",
+    location: "协和医院",
+    travelMinutesOverride: 90,
+    routeSource: "amap",
+    now: new Date(CREATED_DAYS_AHEAD),
+  });
+  assert.ok(plan);
+  assert.equal(plan.policyName, "high/mid/route:amap");
+  // 闹钟 = 真实路程90+准备60 = 150；出发 = 真实路程 90（静态表 mid/high=60 被替代）
+  assert.deepEqual(plan.remindBeforeMinutes, [780, 150, 90]);
+  const depart = plan.preReminders.find((p) => p.stage === "depart");
+  assert.ok(depart);
+  assert.match(depart.message, /90分钟/);
+});
+
+test("travelMinutesOverride 无效（0/负数/超 8h 上限）→ 回退 venue 静态表", () => {
+  const base = {
+    runAt: DENTIST_RUN_AT,
+    timezone: "Asia/Shanghai",
+    description: "周六上午十点去看牙医，带就诊卡",
+    now: new Date(CREATED_DAYS_AHEAD),
+  };
+  const without = buildReminderPolicy(base);
+  for (const override of [0, -5, 601, Number.NaN]) {
+    const plan = buildReminderPolicy({ ...base, travelMinutesOverride: override });
+    assert.deepEqual(plan?.remindBeforeMinutes, without?.remindBeforeMinutes);
+    assert.equal(plan?.policyName, without?.policyName);
+  }
+});
+
+test("createTask 注入路程估算器 → 策略按真实路程生成出发段", async () => {
+  await withTempScheduleFile(async (service) => {
+    service.setRouteEstimator(async () => ({ durationMin: 70, distanceKm: 42.5, source: "amap" }));
+    const task = await service.createTask({
+      sessionId: "route-session",
+      kind: "reminder",
+      recurrence: "none",
+      timezone: "Asia/Shanghai",
+      description: "周六上午十点去看牙医",
+      reminderMessage: "该去看牙医啦",
+      location: "协和医院",
+      runAt: DENTIST_RUN_AT,
+    });
+    // 闹钟 = 70+60 = 130；出发 = 70（静态表 mid/high=60 被真实路程替代）
+    assert.deepEqual(task.remindBeforeMinutes, [780, 130, 70]);
+    assert.equal(task.reminderPolicy, "high/mid/route:amap");
+  });
+});
+
+test("出发段触达实时富化：文案带当前车程（准点触发不升档）", async () => {
+  await withTempScheduleFile(async (service) => {
+    const delivered: Array<{ message: string; pre: boolean }> = [];
+    service.setReminderHandler(async (_task, message, options) => {
+      delivered.push({ message, pre: options?.preReminder === true });
+    });
+    service.setRouteEstimator(async () => ({ durationMin: 70, distanceKm: 42.5, source: "amap" }));
+    const task = await service.createTask({
+      sessionId: "depart-enrich",
+      kind: "reminder",
+      recurrence: "none",
+      timezone: "Asia/Shanghai",
+      description: "周六上午十点去看牙医",
+      reminderMessage: "该去看牙医啦",
+      location: "协和医院",
+      runAt: DENTIST_RUN_AT,
+    });
+    const store = (service as unknown as { byTaskId: Map<string, ScheduleTaskRecord> }).byTaskId;
+    const stored = store.get(task.taskId);
+    assert.ok(stored);
+    // 回拨到只剩 69 分钟：出发段（70）到期且实时路程 70 ≤ 69+5 容忍带 → 正常富化
+    stored.nextRunAt = new Date(Date.now() + 69 * 60_000).toISOString();
+    await service.runSchedulerTick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const depart = delivered.find((d) => /该出门了/.test(d.message));
+    assert.ok(depart);
+    assert.equal(depart.pre, true);
+    assert.match(depart.message, /当前车程约 70 分钟（含实时路况）/);
+  });
+});
+
+test("出发段实时恶化：实时路程超过剩余+容忍带 → 升档到点出口（无 preReminder）", async () => {
+  await withTempScheduleFile(async (service) => {
+    const delivered: Array<{ message: string; pre: boolean }> = [];
+    service.setReminderHandler(async (_task, message, options) => {
+      delivered.push({ message, pre: options?.preReminder === true });
+    });
+    // 创建时估 70 分钟；触发时实时恶化到 120 分钟
+    let calls = 0;
+    service.setRouteEstimator(async () => {
+      calls += 1;
+      return calls === 1
+        ? { durationMin: 70, distanceKm: 42.5, source: "amap" }
+        : { durationMin: 120, distanceKm: 60, source: "amap" };
+    });
+    const task = await service.createTask({
+      sessionId: "depart-escalate",
+      kind: "reminder",
+      recurrence: "none",
+      timezone: "Asia/Shanghai",
+      description: "周六上午十点去看牙医",
+      reminderMessage: "该去看牙医啦",
+      location: "协和医院",
+      runAt: DENTIST_RUN_AT,
+    });
+    const store = (service as unknown as { byTaskId: Map<string, ScheduleTaskRecord> }).byTaskId;
+    const stored = store.get(task.taskId);
+    assert.ok(stored);
+    stored.nextRunAt = new Date(Date.now() + 69 * 60_000).toISOString();
+    await service.runSchedulerTick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const escalate = delivered.find((d) => /现在就出发/.test(d.message));
+    assert.ok(escalate);
+    assert.equal(escalate.pre, false);
+    assert.match(escalate.message, /车程约 120 分钟/);
+    assert.match(escalate.message, /只剩 69 分钟/);
+  });
+});

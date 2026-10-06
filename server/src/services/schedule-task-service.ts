@@ -5,6 +5,7 @@ import { isIP } from "net";
 import { dirname, join } from "path";
 
 import { buildReminderPolicy, type ScheduleHabitHints, type SchedulePreReminder } from "./schedule-reminder-policy.js";
+import type { RouteEstimate } from "./route-duration-service.js";
 import { taskHasOccurrenceInRange } from "./schedule-recurrence-expand.js";
 
 export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly" | "cron";
@@ -259,6 +260,14 @@ function normalizeScheduleContent(value: string | undefined): string {
   return (value ?? "").trim().toLowerCase().replace(/\s+/g, "");
 }
 
+/**
+ * 出发段升档容忍带（分钟）：出发段本就设计在「剩余时间≈路程」的时刻触发，
+ * 升档只针对「实时路程显著恶化或触发已迟到」——实时路程超过 剩余时间+容忍带
+ * 才升档到点弹窗，准点触发（剩余≈路程）永远走轻触达。容忍带吸收 tick 间隔
+ * 与路况小幅波动。
+ */
+const DEPART_ESCALATE_SLACK_MIN = 5;
+
 export class ScheduleTaskService {
   private readonly byTaskId = new Map<string, ScheduleTaskRecord>();
   private readonly runsByTaskId = new Map<string, ScheduleTaskRun[]>();
@@ -277,6 +286,23 @@ export class ScheduleTaskService {
    * 分级提醒策略据此个性化睡前备忘与起床闹钟；返回 null/样本不足时策略层走默认值。
    */
   private reminderHabitProvider?: (sessionId: string) => ScheduleHabitHints | null | undefined;
+  /**
+   * 真实路程估算器（bootstrap 接 route-duration-service + 位置信源）：
+   * 分级提醒策略的出发预留据此按「用户当前位置 × 目的地」的真实路程算，
+   * 失败/无注入回退 venue 静态表。实现方自行兜时限，不阻塞创建主链路。
+   */
+  private routeEstimator?: (input: {
+    sessionId: string;
+    location: string;
+  }) => Promise<RouteEstimate | null>;
+
+  setRouteEstimator(
+    estimator:
+      | ((input: { sessionId: string; location: string }) => Promise<RouteEstimate | null>)
+      | undefined,
+  ): void {
+    this.routeEstimator = estimator;
+  }
 
   setReminderHabitProvider(
     provider: ((sessionId: string) => ScheduleHabitHints | null | undefined) | undefined,
@@ -527,11 +553,28 @@ export class ScheduleTaskService {
       createdAt: now,
       updatedAt: now,
     };
-    this.applyReminderPolicyOnCreate(task, input);
+    await this.applyReminderPolicyOnCreate(task, input);
     this.byTaskId.set(task.taskId, task);
     await this.persist();
     await this.emitTaskChange("created", task);
     return task;
+  }
+
+  /**
+   * 真实路程因子解析：任务带地点线索且注入了估算器时，取「用户当前位置 ×
+   * 目的地」的驾车估时；失败/无注入返回 null，策略层回退 venue 静态表。
+   * 估算器实现方自带时限，这里再兜一层异常——路程估时永远不挡创建主链路。
+   */
+  private async routeFactorFor(sessionId: string, location: string | undefined): Promise<RouteEstimate | null> {
+    const dest = location?.trim();
+    if (!dest || !this.routeEstimator) return null;
+    try {
+      const estimate = await this.routeEstimator({ sessionId, location: dest });
+      if (estimate && estimate.durationMin > 0) return estimate;
+    } catch {
+      // 路程估时失败不挡创建
+    }
+    return null;
   }
 
   /**
@@ -540,9 +583,10 @@ export class ScheduleTaskService {
    * 显式 remindBeforeMinutes 优先（用户自己说了提前量），ics/commitment 上游
    * 各有提醒分工不进策略层，trivia/周期任务不做分级。
    */
-  private applyReminderPolicyOnCreate(task: ScheduleTaskRecord, input: CreateScheduleTaskInput): void {
+  private async applyReminderPolicyOnCreate(task: ScheduleTaskRecord, input: CreateScheduleTaskInput): Promise<void> {
     if (input.remindBeforeMinutes != null) return;
     if (!isReminderPolicyEligible(task)) return;
+    const route = await this.routeFactorFor(task.sessionId, task.location);
     const plan = buildReminderPolicy({
       runAt: task.runAt,
       timezone: task.timezone,
@@ -551,6 +595,9 @@ export class ScheduleTaskService {
       location: task.location,
       source: task.source,
       habits: this.habitHintsFor(task.sessionId),
+      ...(route
+        ? { travelMinutesOverride: route.durationMin, routeSource: route.source }
+        : {}),
     });
     if (!plan) return;
     task.remindBeforeMinutes = plan.remindBeforeMinutes;
@@ -620,7 +667,7 @@ export class ScheduleTaskService {
         next.nextRunAt = null;
       }
     }
-    this.reconcileReminderPolicy(task, next, input);
+    await this.reconcileReminderPolicy(task, next, input);
     this.validateKindPayload(next.kind, next.reminderMessage, next.action, next.agentTask);
     this.byTaskId.set(taskId, next);
     await this.persist();
@@ -668,11 +715,11 @@ export class ScheduleTaskService {
    *  - 时间/内容/地点变了且任务原本是策略生成的（或本来就没有提前量）→ 按新值重算；
    *  - 不再符合策略条件（改周期/改 trivia 等）→ 清掉整份计划。
    */
-  private reconcileReminderPolicy(
+  private async reconcileReminderPolicy(
     previous: ScheduleTaskRecord,
     next: ScheduleTaskRecord,
     input: UpdateScheduleTaskInput,
-  ): void {
+  ): Promise<void> {
     if (input.remindBeforeMinutes !== undefined) {
       next.preReminders = undefined;
       next.reminderPolicy = undefined;
@@ -698,6 +745,7 @@ export class ScheduleTaskService {
       next.remindBeforeMinutes = undefined;
       return;
     }
+    const route = await this.routeFactorFor(next.sessionId, next.location);
     const plan = buildReminderPolicy({
       runAt: next.runAt,
       timezone: next.timezone,
@@ -706,6 +754,9 @@ export class ScheduleTaskService {
       location: next.location,
       source: next.source,
       habits: this.habitHintsFor(next.sessionId),
+      ...(route
+        ? { travelMinutesOverride: route.durationMin, routeSource: route.source }
+        : {}),
     });
     if (plan) {
       next.remindBeforeMinutes = plan.remindBeforeMinutes;
@@ -745,7 +796,35 @@ export class ScheduleTaskService {
       for (const dueOffset of dueOffsets.sort((a, b) => b - a)) {
         // 策略段有专属脚本（睡前备忘/起床闹钟/该出门了…），无脚本段保持历史模板
         const script = task.preReminders?.find((p) => p.offsetMinutes === dueOffset);
-        const message = script?.message ?? `【提前${dueOffset}分钟】${base}`;
+        let message = script?.message ?? `【提前${dueOffset}分钟】${base}`;
+        // 出发段实时富化（2026-10-05）：触发瞬间重算一次「当前位置 × 目的地」
+        // 的实时路程，文案带真实车程；实时路程+到场缓冲已超过剩余时间 → 升档
+        // 走到点弹窗决策出口（轻触达拦不住迟到的出发）。
+        if (script?.stage === "depart" && task.location?.trim()) {
+          const estimate = await this.routeFactorFor(task.sessionId, task.location);
+          const remainingMin = (runMs - now) / 60_000;
+          if (estimate) {
+            const routeNote = `${task.location} 当前车程约 ${estimate.durationMin} 分钟${
+              estimate.source === "amap" ? "（含实时路况）" : ""
+            }`;
+            if (
+              remainingMin > 0 &&
+              estimate.durationMin > remainingMin + DEPART_ESCALATE_SLACK_MIN
+            ) {
+              message =
+                `现在就出发：${routeNote}，距开始只剩 ${Math.max(1, Math.round(remainingMin))} 分钟，` +
+                `再不走就要迟到了。`;
+              try {
+                await this.reminderHandler(updated, message);
+                continue;
+              } catch {
+                // 升档推送失败 → 退回轻触达，不吞掉提醒
+              }
+            } else {
+              message = `${message}（${routeNote}）`;
+            }
+          }
+        }
         try {
           await this.reminderHandler(updated, message, { preReminder: true });
         } catch {

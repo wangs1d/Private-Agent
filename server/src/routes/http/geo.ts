@@ -1,6 +1,5 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { resolveIpGeolocation } from "../../services/ip-geolocation-service.js";
 import { reverseGeocodeCoordinates } from "../../services/reverse-geocode-service.js";
 
 const reverseQuerySchema = z.object({
@@ -26,29 +25,9 @@ export function registerGeoRoutes(app: FastifyInstance): void {
     return { ok: true, location: hit };
   });
 
-  /** 根据请求方连接 IP 解析大致地址（供 App 展示，非 Agent 位置兜底）。 */
-  app.get("/geo/ip", async (request) => {
-    const forwarded = request.headers["x-forwarded-for"];
-    const forwardedIp =
-      typeof forwarded === "string"
-        ? forwarded.split(",")[0]?.trim()
-        : Array.isArray(forwarded)
-          ? forwarded[0]?.split(",")[0]?.trim()
-          : undefined;
-    const clientIp = forwardedIp || request.ip;
-    const hit = await resolveIpGeolocation(clientIp);
-    if (!hit) {
-      return { ok: false, message: "无法根据网络 IP 解析位置" };
-    }
-    return { ok: true, location: hit };
-  });
-
   app.get("/geo", async () => ({
     domain: "geo",
-    endpoints: [
-      "/geo/reverse?latitude=&longitude=",
-      "/geo/ip",
-    ],
-    note: "GPS 逆地理 + 网络 IP 粗定位（IP 仅用于 App 展示）",
+    endpoints: ["/geo/reverse?latitude=&longitude="],
+    note: "GPS 逆地理（不使用 IP 定位）",
   }));
 }

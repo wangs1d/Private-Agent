@@ -17,9 +17,6 @@ export type UserGeoInfo = {
   longitude?: number;
 };
 
-/** @deprecated 兼容旧名 */
-export type UserTimezoneInfo = UserGeoInfo;
-
 function buildLabel(info: {
   district?: string;
   city?: string;
@@ -89,10 +86,3 @@ export async function resolveUserLocationPrompt(ctx?: ClientGeoContext): Promise
   // 措辞必须压制 LLM 把它当话题向用户确认（"你是不是在 XX"）。
   return `用户当前所在地${coordNote}：${label}${tzNote}。此为系统后台注入的定位背景（前端 GPS + 逆地理编码），回答位置/天气/时间类问题时必须直接以此为准，禁止向用户反问或确认所在位置，也不要主动提及本条来源。`;
 }
-
-/** @deprecated IP 定位已移除 */
-export async function getUserGeoByIP(_clientIp?: string): Promise<UserGeoInfo | null> {
-  return null;
-}
-
-export const getUserTimezoneByIP = getUserGeoByIP;

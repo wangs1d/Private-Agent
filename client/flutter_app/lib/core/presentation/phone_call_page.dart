@@ -3,6 +3,7 @@ import "dart:async";
 import "package:flutter/material.dart";
 
 import "../services/phone_call_session.dart";
+import "../services/voice_duplex_service.dart";
 
 /// 手机端全屏虚拟电话页（桌面端走 Win32 原生悬浮窗，不使用本页面）。
 ///
@@ -195,6 +196,47 @@ class _PhoneCallPageState extends State<PhoneCallPage>
                   ? "聆听中，直接说话"
                   : _session.voiceState),
           style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 13),
+        ),
+        const SizedBox(height: 14),
+        // 麦克风电平 + 采集诊断：把「说了没反应」当场自证成因——是麦克风没采到
+        // 声音（电平起不来/VAD 阈值不到），还是服务端没应答。此前只能靠猜。
+        ValueListenableBuilder<double>(
+          valueListenable: VoiceDuplexService.instance.micLevel,
+          builder: (BuildContext context, double level, Widget? _) {
+            final bool hasSignal = VoiceDuplexService.instance.micHasSignal;
+            final DateTime? at = _session.connectedAt;
+            final bool settled =
+                at != null && DateTime.now().difference(at) > const Duration(seconds: 6);
+            final bool warn = settled && _session.voiceReady && !hasSignal;
+            return Column(
+              children: <Widget>[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List<Widget>.generate(14, (int i) {
+                    final bool on = level * 14 > i;
+                    return Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 2),
+                      width: 3,
+                      height: on ? 8.0 + i * 1.5 : 8.0,
+                      decoration: BoxDecoration(
+                        color: on
+                            ? (hasSignal
+                                ? Colors.white
+                                : const Color(0xFFF59E0B))
+                            : Colors.white.withValues(alpha: 0.16),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    );
+                  }),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  warn ? "听不到麦克风输入 · 提高音量或检查麦克风权限" : "",
+                  style: const TextStyle(color: Color(0xFFF59E0B), fontSize: 12),
+                ),
+              ],
+            );
+          },
         ),
         const SizedBox(height: 16),
         Expanded(child: _buildTranscriptList()),

@@ -22,21 +22,44 @@ import type { ToolRegistry } from "./tool-registry.js";
 
 
 
-export type { UserGeoInfo as UserTimezoneInfo } from "../services/user-location-service.js";
-
-export { resolveUserGeo as getUserTimezoneByIP } from "../services/user-location-service.js";
 
 
+async function geoCtx(context: {
+  clientIp?: string;
+  clientLocation?: import("../types/client-location.js").ClientLocationWire;
+  requestLocation?: () => Promise<import("../types/client-location.js").ClientLocationWire | null>;
+}) {
 
-function geoCtx(context: { clientIp?: string; clientLocation?: import("../types/client-location.js").ClientLocationWire }) {
+  // 客户端已不随聊天消息携带 GPS（省电设计）：没有自带位置时改走按需实时定位
+  // （LocationCoordinator 60s 新鲜缓存优先，否则向客户端下发 agent.location_request），
+  // 否则本工具对 clientLocation 的依赖在真实链路里永远落空。
+  if (context.clientLocation) {
 
-  return {
+    return {
 
-    clientIp: context.clientIp,
+      clientIp: context.clientIp,
 
-    clientLocation: context.clientLocation,
+      clientLocation: context.clientLocation,
 
-  };
+    };
+
+  }
+
+  const live = await context.requestLocation?.();
+
+  if (live) {
+
+    return {
+
+      clientIp: context.clientIp,
+
+      clientLocation: live,
+
+    };
+
+  }
+
+  return { clientIp: context.clientIp };
 
 }
 
@@ -166,7 +189,7 @@ export function registerClockTools(toolRegistry: ToolRegistry): void {
 
   toolRegistry.register("clock.get_user_location", async (_input, context) => {
 
-    const userInfo = await resolveUserGeo(geoCtx(context));
+    const userInfo = await resolveUserGeo(await geoCtx(context));
 
     if (!userInfo || (!userInfo.city && !userInfo.region)) {
 
@@ -188,7 +211,7 @@ export function registerClockTools(toolRegistry: ToolRegistry): void {
 
 
 
-    const userInfo = await resolveUserGeo(geoCtx(context));
+    const userInfo = await resolveUserGeo(await geoCtx(context));
 
     const timezone = userInfo?.timezone?.trim() || "Asia/Shanghai";
 
@@ -240,7 +263,7 @@ export function registerClockTools(toolRegistry: ToolRegistry): void {
 
 
 
-    const userInfo = await resolveUserGeo(geoCtx(context));
+    const userInfo = await resolveUserGeo(await geoCtx(context));
 
     const timezone = userInfo?.timezone?.trim() || "Asia/Shanghai";
 
@@ -308,7 +331,7 @@ export function registerClockTools(toolRegistry: ToolRegistry): void {
 
 
 
-    const userInfo = await resolveUserGeo(geoCtx(context));
+    const userInfo = await resolveUserGeo(await geoCtx(context));
 
     const timezone = userInfo?.timezone?.trim() || "Asia/Shanghai";
 

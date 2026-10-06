@@ -21,9 +21,9 @@ class OutgoingCallWindow {
   void Hide();
   bool IsVisible() const;
 
-  // 窗口尺寸（.cpp 布局常量引用；对齐微信语音通话弹窗）
+  // 窗口尺寸（.cpp 布局常量引用；紧凑版：去头像/名称/标题文字后压低）
   static constexpr int kWindowWidth = 300;
-  static constexpr int kWindowHeight = 316;
+  static constexpr int kWindowHeight = 178;
 
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,

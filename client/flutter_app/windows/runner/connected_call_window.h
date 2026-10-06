@@ -13,17 +13,16 @@ class Bitmap;
 // 独立的"通话中"悬浮窗 —— 脱离主 Flutter 窗口存在。
 //
 // 黑白极简玻璃深卡（视觉原语见 call_visuals.h）：
-//   - 标题栏：信号条 + 「Nextbot 通话」+ 最小化/关闭（×=挂断，—=收起）
-//   - 金属球头像（首字符），TTS 播放中双层光环呼吸
+//   - 标题区：仅最小化/关闭两钮（×=挂断，—=收起），无信号条/标题文字/头像/名称
 //   - 状态行：小波形（播报时跳动）+ 计时 mm:ss（静音时前缀「已静音」）
 //   - 分隔线下：静音 / 免提两颗切换圆钮（激活=瓷白球）+ 挂断胶囊
-//   - 标题区可拖动
+//   - 除按钮外整卡可拖动
 //
 // 生命周期：
 //   - Show(payload)        创建或更新窗口，开始计时
 //   - SetMute()/SetSpeaker() 由 Dart 端 push 状态变化（用于 server 端同步后回写）
-//   - SetTalking(bool)    控制头像光晕是否呼吸（true = 正在播放音频）
-//   - Hide()              停计时 + 销毁窗口
+  // SetTalking(bool)    保留接口（无头像光环后暂无视觉消费方）
+  //   - Hide()              停计时 + 销毁窗口
 //
 // 事件回传（MethodChannel pai/connected_call）：
 //   - onHangUp     : 用户点挂断（挂断胶囊或标题栏 ×）
@@ -64,9 +63,9 @@ class ConnectedCallWindow {
   // 由 GetTickCount64 等推过来的 server 端时间戳校准（可选）
   void SetElapsedSeconds(int seconds);
 
-  // 窗口尺寸（.cpp 布局常量引用；对齐微信语音通话弹窗）
+  // 窗口尺寸（.cpp 布局常量引用；紧凑版：去头像/名称/标题文字后压低）
   static constexpr int kWindowWidth = 300;
-  static constexpr int kWindowHeight = 368;
+  static constexpr int kWindowHeight = 218;
 
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,

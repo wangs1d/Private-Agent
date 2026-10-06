@@ -1,5 +1,7 @@
 import "dart:async";
 import "dart:convert";
+import "dart:math" as math;
+import "dart:typed_data";
 
 import "package:flutter/foundation.dart";
 import "package:record/record.dart";
@@ -37,9 +39,36 @@ class VoiceDuplexService {
   StreamSubscription<Uint8List>? _micSub;
   bool _micGated = false;
   VoidCallback? _gatingCompletionListener;
+  /// 门控起始时刻（毫秒）；与 [_micGateStuckMs] 配合做失准自愈
+  int? _gatedSinceMs;
+
+  /// 门控卡死阈值：播报超过这么久仍未恢复即判定为状态失准，强制放行上行。
+  static const int _micGateStuckMs = 15000;
 
   String? engine;
   String? lastState;
+
+  /// 服务端 VAD 能量阈值下限（与 endpoint-detector 的 DEFAULT_SPEECH_THRESHOLD
+  /// 同口径，都是 16bit RMS 原值）。服务端实际生效值是
+  /// max(本值, 背景噪声×3)，所以这是"最好情况"的门槛：低于它说话肯定不会被
+  /// 识别，永远断不了句，表现就是「通话接通了但说了没反应」。
+  static const double vadThreshold = 200;
+
+  /// 麦克风实时电平（0-1，对数映射），通话 UI 画电平条/做诊断提示用。
+  final ValueNotifier<double> micLevel = ValueNotifier<double>(0);
+
+  /// 上一个完整诊断窗口（2s）的峰值 RMS（16bit 原值口径）；0 表示窗口内没数据
+  double lastMicPeakRms = 0;
+
+  /// 上一个诊断窗口内是否出现过足以触发 VAD 的声音
+  bool get micHasSignal => lastMicPeakRms >= vadThreshold;
+
+  /// 麦克风诊断/电平刷新回调（通话 UI 据此重绘）
+  VoidCallback? onMicProbe;
+
+  double _uplinkPeakRms = 0;
+  int _uplinkChunks = 0;
+  Timer? _micProbeTimer;
 
   bool get isReady =>
       _channel != null &&
@@ -131,10 +160,20 @@ class VoiceDuplexService {
   Future<bool> startMic() async {
     final WebSocketChannel? channel = _channel;
     if (channel == null || !isReady) return false;
-    if (_micSub != null) return true;
+    if (_micSub != null) {
+      // 已在采集：兜底补齐诊断探针（二者本应成对，异常错位时自愈）
+      if (_micProbeTimer == null) _startMicProbe();
+      return true;
+    }
     try {
-      if (!await _recorder.hasPermission()) {
-        debugPrint("[VoiceDuplex] mic permission denied");
+      try {
+        if (!await _recorder.hasPermission()) {
+          debugPrint("[VoiceDuplex] mic permission denied：系统未授予麦克风权限，"
+              "通话将无法上行（Windows 需检查「设置 → 隐私 → 麦克风」）");
+          return false;
+        }
+      } catch (e) {
+        debugPrint("[VoiceDuplex] mic permission probe failed: $e");
         return false;
       }
       final Stream<Uint8List> stream = await _recorder.startStream(
@@ -145,8 +184,14 @@ class VoiceDuplexService {
         ),
       );
       _micSub = stream.listen((Uint8List data) {
-        // 门控：播报期间 / 上一轮未收尾时不送（回声防护第一层）
-        if (_micGated || TtsPlayer.instance.isPlaying) return;
+        // 电平统计刻意放在门控之前：被半双工门控丢弃的那部分也要能被看见，
+        // 否则用户会误判成「麦克风坏了」，实际只是 Agent 正在播报。
+        _updateMicLevel(data);
+        // 门控：播报期间 / 上一轮未收尾时不送（回声防护第一层）。
+        // 叠了超时自愈：一旦 PS 播放器状态失准（历史 bug：播完没归位导致
+        // isPlaying 恒 true），门控会永久关死上行，表现为「说了完全没反应」。
+        // 正常播报都远短于 15s，超时即判定为失准并强行放行。
+        if (_isMicGatedEffective()) return;
         final WebSocketChannel? ch = _channel;
         if (ch == null || !isReady) return;
         ch.sink.add(jsonEncode(<String, dynamic>{
@@ -154,10 +199,16 @@ class VoiceDuplexService {
           "pcm": base64Encode(data),
         }));
       });
+      _startMicProbe();
       // 若此刻恰有 TTS 在播（通话接通问候语等），门控到播完
       if (TtsPlayer.instance.isPlaying) {
         _setMicGated(true);
       }
+      // 订阅播放器开播/播完：把所有播报路径（含不经 duplex 的
+      // agent.phone.voice_reply 问候语）统一纳入半双工门控，防回采自激
+      TtsPlayer.instance
+        ..addOnPlaybackStarted(_onPlaybackStarted)
+        ..addOnCompleted(_onPlaybackCompleted);
       return true;
     } catch (e) {
       debugPrint("[VoiceDuplex] startMic failed: $e");
@@ -165,11 +216,23 @@ class VoiceDuplexService {
     }
   }
 
+  void _onPlaybackStarted() {
+    if (micActive) _setMicGated(true);
+  }
+
+  void _onPlaybackCompleted() {
+    if (micActive) _setMicGated(false);
+  }
+
   /// 停麦克风上行。
   Future<void> stopMic() async {
+    _stopMicProbe();
     await _micSub?.cancel();
     _micSub = null;
     _setMicGated(false);
+    TtsPlayer.instance
+      ..removeOnPlaybackStarted(_onPlaybackStarted)
+      ..removeOnCompleted(_onPlaybackCompleted);
     try {
       if (await _recorder.isRecording()) await _recorder.stop();
     } catch (_) {}
@@ -204,9 +267,90 @@ class VoiceDuplexService {
 
   // ── 内部 ──
 
+  /// 累计一块上行音频的 RMS（每 8 个样本抽 1 个，够诊断用）。
+  void _updateMicLevel(Uint8List chunk) {
+    if (chunk.length < 2) return;
+    final ByteData view = ByteData.sublistView(chunk);
+    final int sampleCount = chunk.length ~/ 2;
+    double sum = 0;
+    int n = 0;
+    for (int i = 0; i < sampleCount; i += 8) {
+      final double v = view.getInt16(i * 2, Endian.little).toDouble();
+      sum += v * v;
+      n++;
+    }
+    if (n == 0) return;
+    final double rms = math.sqrt(sum / n);
+    if (rms > _uplinkPeakRms) _uplinkPeakRms = rms;
+    _uplinkChunks++;
+    micLevel.value = (rms / 32768 * 8).clamp(0.0, 1.0).toDouble();
+  }
+
+  /// 启动麦克风诊断采样：每 2s 汇总一次峰值电平并打日志。
+  ///
+  /// 这是「通话接通了但说了没反应」最主要的排查依据——日志里能直接看出麦克风
+  /// 到底有没有吐数据、电平够不够触发服务端 VAD（阈值见 [vadThreshold]），
+  /// 不必再靠猜。
+  void _startMicProbe() {
+    _stopMicProbe();
+    _uplinkPeakRms = 0;
+    _uplinkChunks = 0;
+    lastMicPeakRms = 0;
+    _micProbeTimer = Timer.periodic(const Duration(seconds: 2), (Timer _) {
+      final double peak = _uplinkPeakRms;
+      final int chunks = _uplinkChunks;
+      _uplinkPeakRms = 0;
+      _uplinkChunks = 0;
+      lastMicPeakRms = peak;
+      final String verdict;
+      if (chunks == 0) {
+        verdict = "麦克风未吐出任何数据（被其他录音占用/权限未生效/设备异常）";
+      } else if (peak < vadThreshold) {
+        verdict = "电平低于 VAD 阈值 $vadThreshold，说话不会被识别";
+      } else {
+        verdict = "电平可触发 VAD";
+      }
+      debugPrint(
+        "[VoiceDuplex] mic probe blocks=$chunks peakRMS=${peak.toStringAsFixed(0)} "
+        "gated=$_micGated playing=${TtsPlayer.instance.isPlaying} engine=$engine → $verdict",
+      );
+      onMicProbe?.call();
+    });
+  }
+
+  void _stopMicProbe() {
+    _micProbeTimer?.cancel();
+    _micProbeTimer = null;
+    _uplinkPeakRms = 0;
+    _uplinkChunks = 0;
+    lastMicPeakRms = 0;
+    micLevel.value = 0;
+    _gatedSinceMs = null;
+  }
+
+  /// 门控是否真的生效（含失准超时判定）。
+  bool _isMicGatedEffective() {
+    final bool busy = _micGated || TtsPlayer.instance.isPlaying;
+    if (!busy) {
+      _gatedSinceMs = null;
+      return false;
+    }
+    final int now = DateTime.now().millisecondsSinceEpoch;
+    _gatedSinceMs ??= now;
+    if (now - _gatedSinceMs! <= _micGateStuckMs) return true;
+    debugPrint(
+      "[VoiceDuplex] mic gate stuck >${_micGateStuckMs}ms (gated=$_micGated "
+      "playing=${TtsPlayer.instance.isPlaying}) → force release，防止上行被永久关闭",
+    );
+    _micGated = false;
+    _gatedSinceMs = null;
+    return false;
+  }
+
   void _setMicGated(bool gated) {
     if (_micGated == gated) return;
     _micGated = gated;
+    _gatedSinceMs = gated ? DateTime.now().millisecondsSinceEpoch : null;
     if (gated) {
       // 播完自动解除门控（一次性）
       void onDone() {

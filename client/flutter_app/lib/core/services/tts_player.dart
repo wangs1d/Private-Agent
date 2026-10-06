@@ -39,8 +39,19 @@ class TtsPlayer {
   AudioPlayer? _player;
   File? _tempFile;
   Completer<void>? _completionCompleter;
+  /// 是否已在本次播放的收尾流程中（阻断 onPlayerComplete / stopped 重入）
+  bool _ending = false;
+  /// 播放代次：每次开播自增，用于保证一次播放的完成回调只下达一次
+  int _playSeq = 0;
+  /// 已完成回调下发的最高代次（-1 = 还没下发过）
+  int _firedSeq = -1;
 
-  /// 当前是否有 TTS 正在播放
+  /// 当前是否有 TTS 正在播放。
+  ///
+  /// 注：播完（onPlayerComplete）会先释放播放器再触发完成回调，因此本值
+  /// 在 playFromBase64 返回到回调触发之间为 true，回调之后即归 false。
+  /// 全双工语音用它做半双工门控，务必保证它不会卡在 true，否则麦克风上行
+  /// 会被永久丢弃（表现为「通话接通了但说话没反应」）。
   bool get isPlaying => _player != null;
 
   /// 播放进度广播（今日简报悬浮窗波形进度等消费方）。
@@ -55,9 +66,34 @@ class TtsPlayer {
   /// TTS 播放完成回调（正常播完 / 被 stop 都触发）
   final List<VoidCallback> _completionListeners = <VoidCallback>[];
 
-  /// 注册播放完成监听
+  /// 开始播放回调（任何入口开播都会触发）。
+  ///
+  /// 全双工语音据此做半双工门控：agent.phone.voice_reply 这类不走 duplex
+  /// 的播报路径也能被感知，避免扬声器声音被麦克风回采形成自激。
+  final List<VoidCallback> _startListeners = <VoidCallback>[];
+
+  /// 注册播放开始监听
+  void addOnPlaybackStarted(VoidCallback listener) {
+    if (!_startListeners.contains(listener)) _startListeners.add(listener);
+  }
+
+  /// 取消播放开始监听
+  void removeOnPlaybackStarted(VoidCallback listener) {
+    _startListeners.remove(listener);
+  }
+
+  void _fireStart() {
+    for (final VoidCallback l in List<VoidCallback>.of(_startListeners)) {
+      try {
+        l();
+      } catch (_) {}
+    }
+  }
+
+  /// 注册播放完成监听（同一 listener 重复注册只会保留一份：main.dart 多个
+  /// 通话入口都会注册同一个回调，不去重会累积导致重复触发）
   void addOnCompleted(VoidCallback listener) {
-    _completionListeners.add(listener);
+    if (!_completionListeners.contains(listener)) _completionListeners.add(listener);
   }
 
   /// 取消播放完成监听
@@ -93,13 +129,14 @@ class TtsPlayer {
     final AudioPlayer player = AudioPlayer();
     _player = player;
     _completionCompleter = Completer<void>();
+    final int seq = ++_playSeq;
 
     player.onPlayerComplete.listen((_) {
-      _fireCompletion();
+      unawaited(_handlePlaybackEnd(seq));
     });
     player.onPlayerStateChanged.listen((state) {
-      if (state == PlayerState.stopped && !(_completionCompleter?.isCompleted ?? true)) {
-        _fireCompletion();
+      if (state == PlayerState.stopped) {
+        unawaited(_handlePlaybackEnd(seq));
       }
     });
     _attachProgressListeners(player);
@@ -115,6 +152,7 @@ class TtsPlayer {
         await f.writeAsBytes(bytes, flush: true);
         _tempFile = f;
         await player.play(DeviceFileSource(f.path));
+        _fireStart();
         return true;
       } catch (e) {
         debugPrint("[TtsPlayer] play failed: $e");
@@ -126,6 +164,7 @@ class TtsPlayer {
     try {
       // 非 Windows 平台优先 BytesSource
       await player.play(BytesSource(bytes, mimeType: "audio/mpeg"));
+      _fireStart();
       return true;
     } catch (e) {
       try {
@@ -136,6 +175,7 @@ class TtsPlayer {
         await f.writeAsBytes(bytes, flush: true);
         _tempFile = f;
         await player.play(DeviceFileSource(f.path));
+        _fireStart();
         return true;
       } catch (e2) {
         debugPrint("[TtsPlayer] play failed: $e2");
@@ -166,19 +206,21 @@ class TtsPlayer {
     final AudioPlayer player = AudioPlayer();
     _player = player;
     _completionCompleter = Completer<void>();
+    final int seq = ++_playSeq;
 
     player.onPlayerComplete.listen((_) {
-      _fireCompletion();
+      unawaited(_handlePlaybackEnd(seq));
     });
     player.onPlayerStateChanged.listen((state) {
-      if (state == PlayerState.stopped && !(_completionCompleter?.isCompleted ?? true)) {
-        _fireCompletion();
+      if (state == PlayerState.stopped) {
+        unawaited(_handlePlaybackEnd(seq));
       }
     });
     _attachProgressListeners(player);
 
     try {
       await player.play(UrlSource(fullUrl));
+      _fireStart();
       return true;
     } catch (e) {
       debugPrint("[TtsPlayer] playFromUrl failed: $e");
@@ -212,15 +254,36 @@ class TtsPlayer {
     });
   }
 
+  /// 播放自然结束（播完到底 / 播放器进入 stopped）。
+  ///
+  /// 必须先释放播放器再通知完成回调：consumers（尤其全双工语音的半双工门控）
+  /// 在回调里依赖 [isPlaying] 归位，顺序反了会导致麦克风上行永久关闭。
+  Future<void> _handlePlaybackEnd(int seq) async {
+    if (_ending || seq != _playSeq || seq == _firedSeq) return;
+    _ending = true;
+    try {
+      await _disposeCurrent(silent: true);
+      _fireCompletion(seq);
+    } finally {
+      _ending = false;
+    }
+  }
+
   Future<void> _disposeCurrent({required bool silent}) async {
     await _positionSub?.cancel();
     await _durationSub?.cancel();
     _positionSub = null;
     _durationSub = null;
     if (_player != null) {
-      try { await _player!.stop(); } catch (_) {}
-      try { await _player!.dispose(); } catch (_) {}
+      // 先摘引用再释放：并发收尾时第二次调用看到的是 null，不会误伤新播放
+      final AudioPlayer? p = _player;
       _player = null;
+      try {
+        await p!.stop();
+      } catch (_) {}
+      try {
+        await p!.dispose();
+      } catch (_) {}
     }
     final File? f = _tempFile;
     _tempFile = null;
@@ -234,11 +297,18 @@ class TtsPlayer {
         _completionCompleter = null;
       }
     } else {
-      _fireCompletion();
+      // 主动 stop：按代次通知，避免与 stopped 事件双通道重复下发
+      _fireCompletion(_playSeq);
     }
   }
 
-  void _fireCompletion() {
+  /// [seq] 非空时按播放代次去重：同一代次的完成回调只下达一次（避免
+  /// onPlayerComplete 与 stopped 双通道、以及 stop() 抢占时重复通知）。
+  void _fireCompletion([int? seq]) {
+    if (seq != null) {
+      if (seq == _firedSeq) return; // 本代已下发过
+      _firedSeq = seq;
+    }
     if (!(_completionCompleter?.isCompleted ?? true)) {
       _completionCompleter?.complete();
       _completionCompleter = null;

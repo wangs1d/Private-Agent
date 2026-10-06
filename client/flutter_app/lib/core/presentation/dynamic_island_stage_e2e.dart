@@ -29,11 +29,13 @@ Future<void> runIslandStageE2EBootstrap() async {
 
   // main.dart 的 initDynamicIsland 与此幂等；attach 若已在途（_controller
   // 已置位但 create 尚未应答），轮询等待通道就绪，避免读早期 _nativeReady。
+  // 冷启动首启（构建后首跑）通道就绪可远超 10s，预算给足 60s（2026-10-05
+  // 实测：10s 预算下 bootstrap 静默退出，data_ready 永不写、三路 PS 全空等）。
   await initDynamicIsland();
   for (int i = 0;
-      i < 40 && !DynamicIslandLauncher.instance.isNativeReady;
+      i < 120 && !DynamicIslandLauncher.instance.isNativeReady;
       i++) {
-    await Future<void>.delayed(const Duration(milliseconds: 250));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
   }
   if (!DynamicIslandLauncher.instance.isNativeReady) {
     return; // 非桌面平台/通道不可用：静默退出。
@@ -107,5 +109,18 @@ Future<void> runIslandStageE2EBootstrap() async {
   // 撤下注入的环境数据（hover 行回真实数据源）。
   IslandRealFeeds.setTaskActivity(activeCount: 0);
   await Future<void>.delayed(const Duration(seconds: 1));
+
+  // ── 提醒 attention 小形态走查（2026-10-05 提醒改小胶囊档）：供第三路 PS 连拍 ──
+  // 走生产喂点 IslandReminderScheduler.fireNow（WS reminder_fired 同一条链）。
+  // 帧序：待机原态 → 提醒小胶囊（脉冲环+文字）→ 缩回待机。
+  File("${_stageDir.path}${Platform.pathSeparator}attention_ready.flag")
+      .writeAsStringSync(DateTime.now().toIso8601String());
+  await hold(2000); // 待机原态帧
+  IslandReminderScheduler.instance
+      .fireNow(title: "14:00 高铁 G1234 出发", holdSeconds: 6);
+  await hold(9000); // 入场 + 保持 + 缩回全程
+  File("${_stageDir.path}${Platform.pathSeparator}attention_done.flag")
+      .writeAsStringSync(DateTime.now().toIso8601String());
+  await hold(800);
   exit(0);
 }

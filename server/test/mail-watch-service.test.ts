@@ -19,7 +19,10 @@ import iconv from "iconv-lite";
 
 import {
   classifyMailImportance,
+  decodeHtmlEntities,
   extractMailTextSnippet,
+  sanitizeMailText,
+  stripInvisibleMailChars,
   MailWatchService,
   type IncomingMail,
   type MailWatchClassification,
@@ -55,8 +58,8 @@ class FakeMailbox {
     };
   }
 
-  add(uid: number, from: string, subject: string, textSnippet?: string): void {
-    this.mails.push({ uid, from, to: "me@example.com", subject, textSnippet });
+  add(uid: number, from: string, subject: string, textSnippet?: string, source?: Buffer): void {
+    this.mails.push({ uid, from, to: "me@example.com", subject, textSnippet, source });
   }
 }
 
@@ -194,14 +197,14 @@ test("VIP 白名单命中 → critical（精确地址大小写不敏感 + @domai
 
   mailbox.add(301, '老板 <BOSS@family.com>', "晚饭吃什么");
   mailbox.add(302, "同事 <someone@corp.example.com>", "周报请查收");
-  mailbox.add(303, "陌生 <stranger@other.com>", "促销邮件");
+  mailbox.add(303, "陌生 <stranger@other.com>", "普通通知");
   const result = await service.pollOnce();
   assert.ok(result.ok && result.handled === 3);
 
   assert.equal(received.get(301)!.importance, "critical", "精确地址（大小写不敏感）命中 VIP");
   assert.equal(received.get(301)!.reasons[0], "vip_sender:boss@family.com");
   assert.equal(received.get(302)!.importance, "critical", "@domain 整域命中 VIP");
-  assert.equal(received.get(303)!.importance, "normal", "非 VIP 即便含营销词也不升级为 critical");
+  assert.equal(received.get(303)!.importance, "normal", "非 VIP 无规则命中即为 normal");
 });
 
 test("确定性关键词 → high：主题命中验证码、正文命中取件码、英文航班", () => {
@@ -252,6 +255,166 @@ test("VIP 优先级高于关键词：VIP 发来的普通邮件也是 critical", 
   mailbox.add(401, "boss@family.com", "周末聚餐呀"); // 无关键词，但 VIP
   await service.pollOnce();
   assert.equal(received[0]!.classification.importance, "critical");
+});
+
+// ---------------------------------------------------------------------- //
+// 乱码修复：HTML 实体解码 + 隐形字符清除
+// ---------------------------------------------------------------------- //
+
+test("extractMailTextSnippet：HTML 实体解码（数字十进制/十六进制/命名）", () => {
+  const raw = [
+    "From: a@example.com",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    "<p>价格 &#165;99 与 &amp; 合作 &#x798F; 字 &quot;引号&quot; &eacute;l&egrave;ve</p>",
+  ].join("\r\n");
+  const text = extractMailTextSnippet(Buffer.from(raw, "utf8"));
+  assert.match(text, /价格 ¥99 与 & 合作 福 字 "引号" élève/);
+});
+
+test("extractMailTextSnippet：&#847; &shy; 等营销干扰字符解码后被清除，不再出现实体乱码", () => {
+  const raw = [
+    "From: uber@uber.com",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    "<p>&#847;&shy;&#847;&shy;&#847;&shy;即刻领取：您的前 2 笔订单可享受高达 60% 的优惠</p>",
+  ].join("\r\n");
+  const text = extractMailTextSnippet(Buffer.from(raw, "utf8"));
+  assert.equal(text, "即刻领取：您的前 2 笔订单可享受高达 60% 的优惠");
+  assert.equal(text, stripInvisibleMailChars(decodeHtmlEntities(text)), "解码后不含残留隐形字符");
+});
+
+test("sanitizeMailText：主题里的实体与零宽字符被净化", () => {
+  assert.equal(sanitizeMailText("Save &#36;10&nbsp;now\u200B"), "Save $10 now");
+  assert.equal(sanitizeMailText("Uber\u00ADEats"), "UberEats");
+});
+
+// ---------------------------------------------------------------------- //
+// 营销/广告邮件过滤
+// ---------------------------------------------------------------------- //
+
+test("营销识别：List-Unsubscribe 头 / 营销主题词 / 退订尾巴组合 均判 promotional", () => {
+  // a) 合规营销邮件最强信号：List-Unsubscribe 头（正文不带营销词也判）
+  const headerHit = classifyMailImportance({
+    from: "news@shop.com",
+    subject: "您 10 月的会员权益已更新",
+    textSnippet: "会员中心内容有更新，点击查看。",
+    source: Buffer.from(
+      "From: news@shop.com\r\nList-Unsubscribe: <mailto:un@shop.com>\r\n\r\nbody",
+      "latin1",
+    ),
+  });
+  assert.equal(headerHit.importance, "promotional");
+  assert.match(headerHit.reasons[0]!, /list_unsubscribe_header/);
+
+  // b) 主题命中营销关键词（Uber Eats 广告场景）
+  const subjectHit = classifyMailImportance({
+    from: "uber@uber.com",
+    subject: "即刻领取：您的前 2 笔订单可享受高达 60% 的优惠",
+    textSnippet: "浏览当地餐厅，使用 Uber Eats 优惠好处多多。",
+  });
+  assert.equal(subjectHit.importance, "promotional");
+  assert.match(subjectHit.reasons[0]!, /subject_keyword/);
+
+  // d) 正文退订尾巴 + 营销关键词组合
+  const footerHit = classifyMailImportance({
+    from: "notice@mall.com",
+    subject: "来自商城的消息",
+    textSnippet: "秋冬新品上架，全场折扣进行中。如不想继续接收，可随时退订。",
+  });
+  assert.equal(footerHit.importance, "promotional");
+
+  // 事务性邮件不受影响：正文有"优惠"但无退订尾巴、主题无营销词 → 不判营销
+  const transactional = classifyMailImportance({
+    from: "notice@cainiao.com",
+    subject: "您有新的包裹通知",
+    textSnippet: "您的包裹已到丰巢驿站，取件码 8-2-3010，请及时领取。",
+  });
+  assert.equal(transactional.importance, "high");
+});
+
+test("营销识别开关：VIP 白名单优先于营销判定；MAIL_WATCH_FILTER_PROMO=0 可关闭", () => {
+  // VIP 发的营销邮件仍是 critical（白名单是用户显式意志）
+  const vipPromo = classifyMailImportance(
+    { from: "boss@family.com", subject: "会员日专享：全场 8 折优惠", textSnippet: "" },
+    ["boss@family.com"],
+  );
+  assert.equal(vipPromo.importance, "critical");
+
+  // 关闭过滤开关后营销检测跳过（回退旧行为：normal 或按关键词规则）
+  const disabled = classifyMailImportance(
+    { from: "uber@uber.com", subject: "即刻领取：前 2 笔订单享 60% 优惠", textSnippet: "" },
+    [],
+    { filterPromotional: false },
+  );
+  assert.equal(disabled.importance, "normal");
+});
+
+test("服务级过滤：promotional 邮件不回调 onNewMessage、不进 message-hub，UID 照常记录", async () => {
+  const persistPath = await tmpStatePath();
+  const mailbox = new FakeMailbox();
+  const received: Received[] = [];
+  const ingested: string[] = [];
+  const service = new MailWatchService({
+    clientFactory: () => mailbox.client,
+    onNewMessage: async (mail, c) => { received.push({ mail, classification: c }); },
+    messageHub: {
+      ingestInbound: async (input) => { ingested.push(input.externalMessageId ?? ""); },
+    },
+    env: {
+      MAIL_WATCH_ENABLED: "1",
+      MAIL_WATCH_HOST: "imap.example.com",
+      MAIL_WATCH_USER: "me@example.com",
+      MAIL_WATCH_PASS: "secret",
+    },
+    persistPath,
+  });
+  await service.pollOnce(); // 基线
+
+  mailbox.add(601, "uber@uber.com", "即刻领取：您的前 2 笔订单可享受高达 60% 的优惠", "浏览当地餐厅，使用 Uber Eats。");
+  mailbox.add(602, "friend@example.com", "周末聚餐呀", "周六晚上老地方见？");
+  const result = await service.pollOnce();
+  assert.ok(result.ok && result.handled === 2, "营销邮件也计入 handled（UID 消费掉不重判）");
+
+  assert.equal(received.length, 1, "只有普通邮件触发 onNewMessage");
+  assert.equal(received[0]!.mail.uid, 602);
+  assert.equal(ingested.length, 1, "营销邮件不进消息中心");
+  assert.equal(service.status().promotionalFiltered, 1);
+
+  // 下一轮不再重判（UID 已记入已处理集合）
+  const again = await service.pollOnce();
+  assert.ok(again.ok && again.handled === 0);
+  assert.equal(service.status().promotionalFiltered, 1);
+});
+
+test("MAIL_WATCH_FILTER_PROMO=0 关闭过滤：营销邮件恢复落库与回调", async () => {
+  const persistPath = await tmpStatePath();
+  const mailbox = new FakeMailbox();
+  const received: Received[] = [];
+  const ingested: string[] = [];
+  const service = new MailWatchService({
+    clientFactory: () => mailbox.client,
+    onNewMessage: async (mail, c) => { received.push({ mail, classification: c }); },
+    messageHub: {
+      ingestInbound: async (input) => { ingested.push(input.externalMessageId ?? ""); },
+    },
+    env: {
+      MAIL_WATCH_ENABLED: "1",
+      MAIL_WATCH_HOST: "imap.example.com",
+      MAIL_WATCH_USER: "me@example.com",
+      MAIL_WATCH_PASS: "secret",
+      MAIL_WATCH_FILTER_PROMO: "0",
+    },
+    persistPath,
+  });
+  await service.pollOnce(); // 基线
+  mailbox.add(701, "uber@uber.com", "即刻领取：您的前 2 笔订单可享受高达 60% 的优惠", "");
+  const result = await service.pollOnce();
+  assert.ok(result.ok && result.handled === 1);
+  assert.equal(received.length, 1);
+  assert.equal(received[0]!.classification.importance, "normal", "关闭过滤后回退为 normal（无关键词命中）");
+  assert.equal(ingested.length, 1);
+  assert.equal(service.status().promotionalFiltered, 0);
 });
 
 // ---------------------------------------------------------------------- //

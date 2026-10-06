@@ -26,24 +26,18 @@ constexpr LPCWSTR kRingAliasIncoming = L"IncomingCall";
 constexpr UINT kFlashCount = 6;
 constexpr DWORD kFlashTimeoutMs = 0;
 
-// ── 窗口尺寸（真玻璃深卡，尺寸对齐微信语音通话弹窗） ──
+// ── 窗口尺寸（真玻璃深卡；紧凑版：无标题文字/头像/名称/副标题） ──
 constexpr int kWindowWidth = 300;
-constexpr int kWindowHeight = 376;
+constexpr int kWindowHeight = 176;
 constexpr int kMargin = 20;  // 距屏幕边缘距离
 
-// ── 内部布局 ──
-constexpr int kAvatarCx = kWindowWidth / 2;  // 头像盘圆心 x
-constexpr int kAvatarCy = 122;               // 头像盘圆心 y
-constexpr int kAvatarR = 38;                 // 头像盘半径
-constexpr int kNameTop = 172;                // 名称 top
-constexpr int kSubTop = 202;                 // 副标题 top
-constexpr int kStatusTop = 226;              // 状态行 top
-constexpr int kDividerY = 256;               // 分隔线 y
+// ── 内部布局（标题区只留最小化/关闭两钮，下面直接是钮组） ──
+constexpr int kDividerY = 52;                // 分隔线 y
 constexpr int kBtnSize = 54;                 // 圆形按钮直径
-constexpr int kBtnCy = 306;                  // 按钮圆心 y
+constexpr int kBtnCy = 104;                  // 按钮圆心 y
 constexpr int kDeclineCx = 92;               // 拒接圆心 x
 constexpr int kAcceptCx = 208;               // 接听圆心 x
-constexpr int kLabelTop = 340;               // 按钮标签 top
+constexpr int kLabelTop = 138;               // 按钮标签 top
 
 RECT DeclineRect() {
   return {kDeclineCx - kBtnSize / 2, kBtnCy - kBtnSize / 2,
@@ -249,35 +243,16 @@ void IncomingCallWindow::Paint(HWND hwnd, HDC hdc) {
   // ── 半透明玻璃底：逐像素 alpha 深卡 + 高光描边（DWM 系统圆角） ──
   call_vis::DrawGlassBase(s);
 
-  // ── 标题栏：信号条 + Nextbot 通话 + 最小化/关闭 ──
-  call_vis::PaintTitleBar(s, kWindowWidth, title_min_hover_,
-                          title_close_hover_);
-
-  // ── 金属盘头像 + 振铃呼吸扩散外环 ──
-  if (ringing_) {
-    const double t = (pulse_phase_ % 30) / 30.0;
-    const int r = kAvatarR + 5 + static_cast<int>(10 * t);
-    call_vis::FillDiscAlpha(*s.gfx, kAvatarCx, kAvatarCy, r, RGB(0xBE, 0xBE, 0xC4),
-                            static_cast<BYTE>(call_vis::kHaloBaseA * (1 - t)));
-  }
-  const wchar_t* initial = AvatarInitial();
-  call_vis::PaintAvatarDisc(s, kAvatarCx, kAvatarCy, kAvatarR,
-                            initial ? std::wstring(initial) : std::wstring());
-
-  // ── 名称（18px 白 Semibold） ──
-  RECT name_rc = {20, kNameTop, kWindowWidth - 20, kNameTop + 26};
-  call_vis::DrawCenteredText(s, name_rc, caller_name_, call_vis::kNameColor,
-                             18, FW_SEMIBOLD, L"Microsoft YaHei UI");
-
-  // ── 副标题（12px 中灰） ──
-  RECT sub_rc = {20, kSubTop, kWindowWidth - 20, kSubTop + 18};
-  call_vis::DrawCenteredText(s, sub_rc, subtitle_, call_vis::kSubColor, 12,
-                             FW_NORMAL, L"Microsoft YaHei UI");
-
-  // ── 状态行（12px 暗灰）：来电 ──
-  RECT status_rc = {20, kStatusTop, kWindowWidth - 20, kStatusTop + 18};
-  call_vis::DrawCenteredText(s, status_rc, L"来电", call_vis::kStatusColor,
-                             12, FW_NORMAL, L"Microsoft YaHei UI");
+  // ── 标题栏仅保留最小化/关闭两钮（—=收起 ×=拒接），不画信号条与标题文字 ──
+  const call_vis::TitleRects tr = call_vis::TitleRectsFor(kWindowWidth);
+  call_vis::DrawGlyph(s, tr.minimize, call_vis::kGlyphMinimize,
+                      title_min_hover_ ? call_vis::kNameColor
+                                       : call_vis::kSubColor,
+                      10, L"Segoe MDL2 Assets");
+  call_vis::DrawGlyph(s, tr.close, call_vis::kGlyphClose,
+                      title_close_hover_ ? call_vis::kNameColor
+                                         : call_vis::kSubColor,
+                      10, L"Segoe MDL2 Assets");
 
   // ── 分隔线 ──
   call_vis::DrawDivider(*s.gfx, kWindowWidth, kDividerY);

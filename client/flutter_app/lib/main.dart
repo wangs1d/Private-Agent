@@ -151,7 +151,9 @@ void main() async {
       return;
     }
     // 预加载本机访问凭据（token），确保首次 session.init 就能带上
+    _writeCrashLog("[BOOT]", "stage 1: before AccessCredentialStore.load", StackTrace.current);
     await AccessCredentialStore.instance.load();
+    _writeCrashLog("[BOOT]", "stage 2: after cred load, before webview bootstrap", StackTrace.current);
     // WebView2 环境进程内只初始化一次：若用户开启了共用浏览器 CDP 调试端口
     // （SharedBrowserHost.remoteDebugPort），必须在这里一并传入，晚于首次
     // 环境初始化则不再生效。默认 null（CDP 桥关闭）。
@@ -161,7 +163,9 @@ void main() async {
           sbDebugPort == null ? null : "--remote-debugging-port=$sbDebugPort",
     ));
     if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      _writeCrashLog("[BOOT]", "stage 3: before windowManager.ensureInitialized", StackTrace.current);
       await windowManager.ensureInitialized();
+      _writeCrashLog("[BOOT]", "stage 4: before loadRestorableWindowBounds", StackTrace.current);
       // 「固定打开时的大小 + 每次打开都在桌面正中间」：首次启动（无历史）
       // 在默认 1280x800 基础上向外扩展 0.1 倍（→1408x880，屏幕放不下则
       // 钳到工作区内）；之后沿用上次关闭前的窗口大小与最大化状态，但
@@ -173,6 +177,7 @@ void main() async {
           : Size(savedBounds.width, savedBounds.height);
       final Offset? centeredPosition =
           await desktopCenteredPosition(initialSize);
+      _writeCrashLog("[BOOT]", "stage 5: before waitUntilReadyToShow", StackTrace.current);
       final WindowOptions options = WindowOptions(
         size: initialSize,
         backgroundColor: Colors.transparent,
@@ -197,7 +202,9 @@ void main() async {
         await windowManager.focus();
         windowManager.addListener(WindowBoundsSaver.instance);
       });
+      _writeCrashLog("[BOOT]", "stage 6: after waitUntilReadyToShow, before runApp", StackTrace.current);
     }
+    _writeCrashLog("[BOOT]", "stage 7: calling runApp", StackTrace.current);
     runApp(const PrivateAiApp());
   }, (error, stack) {
     // 兜底所有未捕获的异步异常，防止 Flutter engine 断连崩溃
@@ -239,10 +246,10 @@ File _crashLogTarget() {
   return file;
 }
 
-void _writeCrashLog(String tag, Object error, StackTrace stack) {
+void _writeCrashLog(String tag, Object error, [StackTrace? stack]) {
   try {
     final String line = "${DateTime.now().toIso8601String()} $tag $error\n"
-        "$stack\n"
+        "${stack == null ? "" : "$stack\n"}"
         "----------------------------------------\n";
     _crashLogTarget()
         .writeAsStringSync(line, mode: FileMode.append, flush: true);
@@ -725,11 +732,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     super.didChangeAppLifecycleState(state);
     // 在场跟踪：手机后台时主动消息走系统通知（类微信），前台走应用内弹窗
     _lifecycleState = state;
-    // 记录生命周期切换：若随后进程退出，可据此区分「用户关了窗口/系统杀进程」与「崩溃」
-    _writeCrashLog("[LIFECYCLE]", "state=$state", StackTrace.current);
+    // 记录生命周期切换：若随后进程退出，可据此区分「用户关了窗口/系统杀进程」与「崩溃」。
+    // 只写单行状态、不带堆栈——生命周期事件高频触发，带堆栈曾把日志刷到 189MB。
+    _writeCrashLog("[LIFECYCLE]", "state=$state");
     if (state == AppLifecycleState.detached) {
-      _writeCrashLog(
-          "[EXIT]", "app detached (window closed)", StackTrace.current);
+      _writeCrashLog("[EXIT]", "app detached (window closed)");
     }
   }
 
@@ -2390,11 +2397,29 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               callId: statusCallId,
               transcriptText: payload["transcript"]?.toString() ?? "",
             );
-            if (_isMobile && PhoneCallSession.instance.consumeOpenedFromIdle()) {
-              final BuildContext? pageCtx = _rootNavigatorKey.currentContext;
-              if (pageCtx != null && pageCtx.mounted) {
-                unawaited(showPhoneCallPage(pageCtx));
+            if (_isMobile) {
+              if (PhoneCallSession.instance.consumeOpenedFromIdle()) {
+                final BuildContext? pageCtx = _rootNavigatorKey.currentContext;
+                if (pageCtx != null && pageCtx.mounted) {
+                  unawaited(showPhoneCallPage(pageCtx));
+                }
               }
+            } else {
+              // 桌面端：关掉「正在呼叫/正在接通」外呼过渡窗，弹独立「通话中」窗
+              // （与 agent→user 的 call_connecting 分支对称；此前缺失导致外呼窗
+              // 永远停在「正在接通」，用户既看不到接通也无法挂断）
+              unawaited(OutgoingCallLauncher.hide());
+              unawaited(IncomingCallLauncher.hide());
+              unawaited(
+                ConnectedCallLauncher.show(
+                  callerName: (_agentName?.trim().isNotEmpty ?? false)
+                      ? _agentName!.trim()
+                      : "Agent",
+                  callerInitial: (_agentName?.trim().isNotEmpty ?? false)
+                      ? _agentName!.trim().characters.first
+                      : "A",
+                ),
+              );
             }
             final Object? csTts = payload["tts"];
             if (csTts is Map) {
@@ -2428,9 +2453,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           }
         }
         // 呼叫失败必须可见：服务端对呼出拒绝统一回 error.event（号码申领失败/
-        // 忙线等），并同时以对话方式落一条 agent 气泡进聊天流（服务端推
-        // chat.assistant_done task_plane 帧）。客户端职责=关掉外呼窗清状态，
-        // 不再弹一次性 SnackBar——气泡是对话式提醒的唯一出口。
+        // 忙线等），客户端职责=关掉外呼窗清状态 + toast 提示原因；语音电话的
+        // 内容不以文字气泡进聊天流。
         // 注意须同时看外呼窗可见性：点呼叫后 _phoneCallStatus 要等服务端
         // ringing 事件才置位，即时拒绝发生时它还是 null。
         if (type == "error.event" &&
@@ -2446,6 +2470,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             PhoneCallSession.instance.end();
             unawaited(OutgoingCallLauncher.hide());
             unawaited(IncomingCallLauncher.hide());
+            _showToast(
+              payload["message"]?.toString() ?? "呼叫失败，请稍后重试",
+            );
           }
         }
         if (type == "desktop.bridge.sync") {
@@ -2463,7 +2490,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           if (nextSummary != null &&
               nextSummary.trim().isNotEmpty &&
               nextSummary != previousSummary) {
-            _showDesktopBridgeToast(
+            _showToast(
               on == false ? "桌面同步: $nextSummary" : "桌面同步: $nextSummary",
             );
           }
@@ -4067,18 +4094,21 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         _messages.indexWhere((ChatMessage m) => m.messageId == messageId);
     if (anchor < 0) return;
 
-    // 点在 Agent 气泡上 → 回溯到本轮的 user 消息（轮次锚点）
+    // 点在 Agent 气泡上 → 回溯到本轮的 user 消息（轮次锚点）；回溯不到时
+    // （呼叫失败通知等孤儿 assistant 气泡，前面没有 user 消息）以该气泡自身
+    // 为轮次起点，只删它到下一条 user 消息之间的内容。
     int start = anchor;
-    if (_messages[anchor].role != "user") {
+    bool anchoredToUser = _messages[anchor].role == "user";
+    if (!anchoredToUser) {
       start = -1;
       for (int i = anchor - 1; i >= 0; i--) {
         if (_messages[i].role == "user") {
           start = i;
+          anchoredToUser = true;
           break;
         }
       }
-      // 没有归属的 user 消息（异常历史数据）→ 不动，避免误删
-      if (start < 0) return;
+      if (start < 0) start = anchor;
     }
 
     // 轮次右边界：下一条 user 消息（不含）
@@ -4091,7 +4121,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         .sublist(start, end)
         .map((ChatMessage m) => m.messageId)
         .toList();
-    final String userMessageId = _messages[start].messageId;
 
     // 删的是正在进行的这一轮 → 先掐断，否则迟到的 chunk / done 会把刚删掉的
     // 气泡重新插回列表（按 messageId 找不到就当新消息重建）。
@@ -4104,8 +4133,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       await _store.deleteMessage(id);
     }
 
-    // 服务端精准删除这一轮（不清空整个会话上下文 / Agent 记忆）
-    unawaited(_notifyServerDeleteTurn(userMessageId, _messages[start].text));
+    // 服务端精准删除这一轮（不清空整个会话上下文 / Agent 记忆）。
+    // 孤儿 assistant 气泡没有 user 锚点，服务端线程里本来就没有这一轮，
+    // 只删本地即可。
+    if (anchoredToUser) {
+      unawaited(_notifyServerDeleteTurn(
+        _messages[start].messageId,
+        _messages[start].text,
+      ));
+    }
 
     if (!mounted) return;
     setState(() {
@@ -4810,11 +4846,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   void _callMyAgentViaPhone(String? message) {
-    if (!_ws.isConnected) {
-      _ws.retryConnect();
+    // 不再用 isConnected 做前置拦截：WsChatService.sendEvent 已内置离线排队
+    // （断线时入 _pendingOutbound，自动触发重连，连上后 flush 补发）。此前在这里
+    // 直接 return，等于把排队机制旁路掉——重连窗口内点击呼叫请求被静默丢弃，
+    // 用户看到的就是「点了没反应」，而服务端通话记录里连一条记录都没有。
+    if (!_ws.isConnected && _ws.hasPendingEvent("phone.call_my_agent")) {
+      // 已在等待补发的队列里：别再排队了，重连后连拨好几通，除第一通外全撞忙线
       if (mounted) {
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text("正在连接服务器，请稍后再试")),
+          const SnackBar(content: Text("呼叫已在排队，连接恢复后自动拨出")),
         );
       }
       return;
@@ -4824,12 +4864,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (message != null && message.isNotEmpty) {
       callPayload["userMessage"] = message;
     }
-    _ws.sendEvent("phone.call_my_agent", callPayload);
+    final bool sent = _ws.sendEvent("phone.call_my_agent", callPayload);
+    if (!sent && mounted) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("正在重连服务器，恢复后自动呼叫")),
+      );
+    }
     unawaited(
       OutgoingCallLauncher.show(
         callerName: _phoneCallToActorId ?? "Agent",
-        subtitle:
-            message?.trim().isNotEmpty == true ? message!.trim() : "正在接通",
+        subtitle: sent
+            ? (message?.trim().isNotEmpty == true ? message!.trim() : "正在接通")
+            : "等待重连…",
         callerInitial: (_phoneCallToActorId?.isNotEmpty ?? false)
             ? _phoneCallToActorId!.characters.first
             : "A",
@@ -4956,7 +5002,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  void _showDesktopBridgeToast(String message) {
+  void _showToast(String message) {
     if (!mounted) return;
     final ScaffoldMessengerState? messenger =
         ScaffoldMessenger.maybeOf(context);
@@ -5984,10 +6030,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         onGallery: _openGalleryPanel,
         onBrowser: _openBrowserPanel,
         messagesUnread: _unreadByPlatform.values.fold(0, (int a, int b) => a + b),
-        // 天气面板实时位置 → 上报服务端缓存，供 Agent 按需复用（无 jobId 纯上报）
-        onReportLocation: (location) {
-          _ws.sendEvent("client.location_report", location);
-        },
       ),
     );
   }
@@ -6249,3 +6291,4 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 }
+

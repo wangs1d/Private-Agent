@@ -58,12 +58,14 @@ class ConnectedCallLauncher {
         "accentColor": accentColor,
       }) ??
           false;
+      debugPrint("[ConnectedCall] show ok=$ok name=$callerName");
       if (ok) isVisible.value = true;
       return ok;
     } on PlatformException catch (e) {
       debugPrint("[ConnectedCall] show failed: ${e.message}");
       return false;
     } on MissingPluginException {
+      debugPrint("[ConnectedCall] show MissingPluginException（原生处理器未注册）");
       return false;
     }
   }

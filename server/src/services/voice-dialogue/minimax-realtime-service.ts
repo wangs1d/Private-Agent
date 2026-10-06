@@ -15,6 +15,27 @@ import WebSocket from "ws";
 export const MINIMAX_REALTIME_OUTPUT_SAMPLE_RATE = 24000;
 export const MINIMAX_REALTIME_INPUT_SAMPLE_RATE = 16000;
 
+/**
+ * 输入音频的推送块大小（3200B = 16kHz × 2B × 100ms）。
+ */
+export const REALTIME_INPUT_CHUNK_BYTES = 3200;
+
+/**
+ * 块间推送间隔（毫秒）。
+ *
+ * 原实现固定 sleep 20ms 来"模拟实时速率"，但音频是 VAD 断句后一次性送来的
+ * 整句，这段等待会随句长线性叠加到用户感知的响应延迟上——3 秒的话白等
+ * 600ms，10 秒白等 2s，纯粹是自己为难自己。
+ *
+ * 这里只保留"别瞬时灌爆上游"的最小节流。可用
+ * MINIMAX_REALTIME_INPUT_PACE_MS 覆盖（设 0 = 尽快推完）。
+ */
+export const REALTIME_INPUT_CHUNK_DELAY_MS = (() => {
+  const raw = process.env.MINIMAX_REALTIME_INPUT_PACE_MS?.trim();
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 4;
+})();
+
 export interface RealtimeSocketLike {
   send(data: string): void;
   close(): void;
@@ -520,9 +541,11 @@ export class PersistentRealtimeClient {
   private async dispatch(session: MiniMaxRealtimeSession, input: RealtimeTurnInput): Promise<void> {
     if (input.pcm16k && input.pcm16k.length > 0) {
       const pcm = input.pcm16k;
-      for (let i = 0; i < pcm.length; i += 3200) {
-        session.appendAudio(pcm.subarray(i, i + 3200));
-        await new Promise((r) => setTimeout(r, 20));
+      for (let i = 0; i < pcm.length; i += REALTIME_INPUT_CHUNK_BYTES) {
+        session.appendAudio(pcm.subarray(i, i + REALTIME_INPUT_CHUNK_BYTES));
+        if (REALTIME_INPUT_CHUNK_DELAY_MS > 0) {
+          await new Promise((r) => setTimeout(r, REALTIME_INPUT_CHUNK_DELAY_MS));
+        }
       }
       session.commit();
     } else if (input.text?.trim()) {

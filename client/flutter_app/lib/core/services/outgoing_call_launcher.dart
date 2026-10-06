@@ -36,6 +36,7 @@ class OutgoingCallLauncher {
             "accentColor": accentColor,
           }) ??
           false;
+      debugPrint("[OutgoingCall] show ok=$ok name=$callerName");
       if (ok) {
         isVisible.value = true;
       }
@@ -44,6 +45,7 @@ class OutgoingCallLauncher {
       debugPrint("[OutgoingCall] show failed: ${e.message}");
       return false;
     } on MissingPluginException {
+      debugPrint("[OutgoingCall] show MissingPluginException（原生处理器未注册）");
       return false;
     }
   }

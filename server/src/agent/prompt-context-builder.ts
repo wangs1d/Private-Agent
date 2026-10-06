@@ -11,6 +11,7 @@ import {
   sliceMemoryEntriesToPromptContext,
 } from "./prompt-builder.js";
 import { buildTaskContextPrompt } from "./task-context.js";
+import { resolveTimeContextAccess } from "./time-context-gate.js";
 import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
 import { SKILL_MANAGE_CHAT_TOOLS } from "../tools/skill-manage-tools.js";
 import type { SkillManager } from "../skills/index.js";
@@ -49,6 +50,7 @@ import type { PersonalizationPromptSlice } from "../services/user-personalizatio
 import { dedupeMemoryLines, semanticFingerprint, contentTokenSet, tokenOverlapRatio } from "../services/memory-record-utils.js";
 import { markInjectedMemory } from "../services/memory-echo-guard.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
+import type { FeatureCatalog } from "../catalog/index.js";
 import { redactSensitiveText } from "../utils/redact.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
@@ -94,14 +96,28 @@ function extractUserTimezoneFromLocation(userLocation?: string): string | undefi
   return m?.[1]?.trim() || undefined;
 }
 
-function buildCompactAgentCapsPrompt(): string {
-  const lines = [
-    "【能力概览】你是主 Agent，可直接处理日常对话，并按需调用时间、天气、搜索、日程、钱包、社交与 Agent World 相关工具。",
+/**
+ * 人格层能力自述块。
+ *
+ * 能力总览不再手写枚举（手写必然过时——agent 会照着旧清单否认自己其实有的能力，
+ * 如「邮箱接不进来」事故），而是从 FeatureCatalog（启动时汇聚真实工具注册表/skill/
+ * MCP 自动生成）派生：项目新增能力注册即自动出现在这里，无需改任何 prompt。
+ */
+function buildCompactAgentCapsPrompt(featureCatalog?: FeatureCatalog | null): string {
+  const lines: string[] = [];
+  if (featureCatalog) {
+    lines.push(...featureCatalog.toPromptLines());
+  } else {
+    lines.push(
+      "【能力概览】你是主 Agent，可直接处理日常对话，并按需调用时间、天气、搜索、日程、钱包、社交与 Agent World 相关工具。",
+    );
+  }
+  lines.push(
     "【调度原则】简单问题直接回答；需要实时信息时先查再答；复杂或多步骤任务交给后台任务执行流程处理。",
     "【执行约束】涉及消费、转账、桌面高权限操作或状态敏感任务时，必须先读取对应工具返回的实时状态，不凭记忆假设。",
-    "【真人感·行动宣告】凡是要调工具时，先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」），然后在同一回合紧接着真正调用对应工具并基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用「我去查/稍后告诉你」这类空口承诺替代真实结果。",
-  ];
-  lines.push("需要完整能力明细时调用 agent.query_capabilities。");
+    "【真人感·行动宣告】本轮要调信息型/动作型工具（搜索、查日程、查余额、下单、派后台任务等）时，先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」），然后在同一回合紧接着真正调用对应工具并基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用「我去查/稍后告诉你」这类空口承诺替代真实结果。档案/记忆类写入（profile.update、interest.manage 等）静默执行，不需要宣告，也不需要向用户交代写入过程。",
+    "以上能力总览来自真实装配的工具注册表——没列出的能力可先用 agent.query_capabilities 查询确认，不要凭印象断言自己没有某能力。",
+  );
   return lines.join("\n");
 }
 
@@ -251,7 +267,7 @@ export function formatTurnAddressingBlock(
   if (topics.length === 0 && fields.length === 0) return undefined;
   const lines: string[] = [
     "【本轮寻址】",
-    "（用户最新消息命中了以下档案条目；回答对应问题时直接引用【我对用户的理解】/【用户档案·结构化事实】中的当前值作答）",
+    "（本轮用户消息涉及以下档案条目，回答对应问题时直接引用其当前值）",
   ];
   if (topics.length > 0) lines.push(`- 理解话题：${topics.join("、")}`);
   if (fields.length > 0) lines.push(`- 事实字段：${fields.join("、")}`);
@@ -484,6 +500,7 @@ export class PromptContextBuilder {
       virtualPhoneService: VirtualPhoneService | null;
       scheduleTaskService?: ScheduleTaskService | null;
       shortTermMemoryGateway?: ShortTermMemoryGatewayService | null;
+      featureCatalog?: FeatureCatalog | null;
     },
   ) {}
 
@@ -600,9 +617,10 @@ export class PromptContextBuilder {
       memoryKeys.length > 0
     ) {
       // 拆人设/动态记忆：persona/values/abilities 属稳定人设 L3 人格层，始终注入；
-      // v3 记忆架构：memory_facts/preferences 是「画像层」（关于用户是谁的当前事实，
-      // 与话题无关、不会串台）→ 常驻注入；memory_summary/commitments/open_loops/
-      // session_recap 是「情节/待办层」→ 仅召回线索命中（新会话/显式记忆 cue）时注入。
+      // 2026-10-06 治啰嗦 P1：v3 的「画像层常驻」收窄——memory_facts/preferences 与
+      // 情节层同走召回门控（它们与结构化事实块/长期画像高度重叠，常驻注入就是
+      // 「上下文里到处是可提及素材」的啰嗦来源）。恒驻速览由【用户档案·结构化事实】
+      // 块承担（确定性字段：称呼/身份/稳定偏好）。
       const STABLE_MEMORY_KEYS = new Set(["persona", "values", "abilities"]);
       const PROFILE_MEMORY_KEYS = new Set(["memory_facts", "memory_preferences"]);
       const EPISODIC_MEMORY_KEYS = new Set([
@@ -615,8 +633,7 @@ export class PromptContextBuilder {
       const snapshotKeys = memoryKeys.filter(
         (key) =>
           STABLE_MEMORY_KEYS.has(key) ||
-          PROFILE_MEMORY_KEYS.has(key) ||
-          (longTermEnabled && EPISODIC_MEMORY_KEYS.has(key)),
+          (longTermEnabled && (PROFILE_MEMORY_KEYS.has(key) || EPISODIC_MEMORY_KEYS.has(key))),
       );
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, snapshotKeys);
       fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined);
@@ -642,8 +659,8 @@ export class PromptContextBuilder {
 
     const agentCaps =
       config.memoryPrompt.agentCapsInPrompt &&
-      this.deps.skillManager
-        ? buildCompactAgentCapsPrompt()
+      (this.deps.featureCatalog || this.deps.skillManager)
+        ? buildCompactAgentCapsPrompt(this.deps.featureCatalog)
         : undefined;
 
     const relevantDomains = detectRelevantCapabilityDomains(userText);
@@ -857,12 +874,15 @@ export class PromptContextBuilder {
       ...(dedupedMemorySummary ? { memorySummary: dedupedMemorySummary } : { memorySummary: undefined }),
     };
 
-    // 用户理解档案块：无条件注入（当前理解档案，非历史召回，不受 longTermEnabled
-    // 门控）；P0-1 后字节稳定渲染，命中话题进 turnAddressing 动态块。
-    const understanding = this.buildUserUnderstandingBlock(input.actorId, userText);
+    // 用户理解档案块（2026-10-06 治啰嗦 P1）：改走召回门控——它是「agent 对用户的
+    // 理解记录」，属情节性素材，常驻注入会推高闲聊轮的「什么都想提」压力。
+    // 恒驻速览由【用户档案·结构化事实】承担（确定字段+称呼礼仪单一权威）。
+    const understanding = longTermEnabled
+      ? this.buildUserUnderstandingBlock(input.actorId, userText)
+      : { stableBlock: undefined, matchedTopics: [] as string[] };
     const userUnderstandingBlock = understanding.stableBlock;
 
-    // 结构化事实块：用户档案字段的确定性记录（KV 式精确寻址，无条件注入）；
+    // 结构化事实块：用户档案字段的确定性记录（KV 式精确寻址，无条件注入=用户速览）；
     // P0-1 后字节稳定渲染，命中字段进 turnAddressing 动态块。
     const facts = this.buildUserFactsBlock(input.actorId, userText);
     const userFactsBlock = facts.stableBlock;
@@ -907,7 +927,12 @@ export class PromptContextBuilder {
 
     const promptMemory: AgentPromptMemoryContext = {
       ...fromKv,
-      currentTime: buildCurrentTimePrompt(new Date(), extractUserTimezoneFromLocation(input.userLocation)),
+      // 按需时间上下文闸（2026-10-06）：【当前时间】块不再每轮注入，仅当本轮用户
+      // 消息显式涉及时刻/日期/时长/定时动作（或会话保持期内）才放行；与 provider 的
+      // 【对话时间轴】块同一判定源（time-context-gate），key 必须同为 actorId。
+      ...(resolveTimeContextAccess(input.actorId, input.userText)
+        ? { currentTime: buildCurrentTimePrompt(new Date(), extractUserTimezoneFromLocation(input.userLocation)) }
+        : {}),
       ...(personalityCore ? { personalityCore } : {}),
       ...(currentUserState ? { currentUserState } : {}),
       ...(turnAside ? { turnAside } : {}),

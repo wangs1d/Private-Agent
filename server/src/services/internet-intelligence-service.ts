@@ -661,10 +661,16 @@ async function resolveWeatherLocation(
       };
     }
   }
-  const userGeo = await resolveUserGeo({
-    clientIp: ctx?.clientIp,
-    clientLocation: ctx?.clientLocation,
-  });
+  // 消息自带位置基本断供（客户端不随聊天消息带 GPS）：先走按需实时定位
+  // （LocationCoordinator 60s 新鲜缓存优先，否则下发 agent.location_request），
+  // 再兜底 resolveUserGeo 原路径，否则联网情报的地理上下文在真实链路里常为空。
+  const live = await ctx?.requestLocation?.();
+  const userGeo = live
+    ? await resolveUserGeo({ clientLocation: live })
+    : await resolveUserGeo({
+        clientIp: ctx?.clientIp,
+        clientLocation: ctx?.clientLocation,
+      });
   if (userGeo?.latitude != null && userGeo.longitude != null) {
     return {
       latitude: userGeo.latitude,

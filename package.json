@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "dev:all": "node scripts/dev-all.mjs",
+    "dev:client:watch": "node scripts/dev-client-watch.mjs",
     "dev:all:server": "npm run dev:server --workspace=server",
     "dev:ports:free": "powershell -ExecutionPolicy Bypass -File scripts/free-dev-ports.ps1",
     "autostart:install": "node scripts/autostart/install-autostart.mjs",

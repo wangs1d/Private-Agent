@@ -623,6 +623,8 @@ int DynamicIslandWindow::CompactWidthFor(Kind kind) const {
 
 int DynamicIslandWindow::CompactWidth() const {
   if (!has_entry_) return kRestCapsuleW;
+  // attention 提醒走独立小胶囊档（用户拍板：提醒=小形态，不用 kSchedule 的 230 档）
+  if (entry_.id == "attention") return kAttentionCapsuleW;
   return CompactWidthFor(entry_.kind);
 }
 
@@ -813,12 +815,16 @@ void DynamicIslandWindow::Render() {
     const float cur_h = static_cast<float>(lh) * s;
     const float radius = static_cast<float>(lr) * s;
     // attention 缩放：提醒时刻整体放大（几何 + 内容统一经变换缩放）。
+    // 2026-10-05 起 kAttentionScale=1.0（提醒=小胶囊形态），脉冲环闸门
+    // 不能再看 att 数值——改按 attention 是否激活判定。
     double att = AttentionScale();
+    bool attention_active = attention_start_s_ >= 0;
     if (attention_start_s_ >= 0 &&
         now_s_ - attention_start_s_ >
             kAttnInS + attention_hold_s_ + kAttnOutS) {
       attention_start_s_ = -1;  // 动画播完自动复位
       att = 1.0;
+      attention_active = false;
       if (entry_.id == "attention") {
         // 临时条目随提醒结束退场（就地清，勿调 ClearEntry——本帧正在 Render，
         // 递归重入；且此处 attention 已复位，ClearEntry 的进行中守卫也不适用）。
@@ -879,7 +885,7 @@ void DynamicIslandWindow::Render() {
       }
     };
 
-    if (att > 1.5) {
+    if (attention_active) {
       // attention：强脉冲 rim（0.9s 周期）。
       const double pulse = 0.5 + 0.5 * std::sin(now_s_ * 6.2832 / 0.9);
       drawRimRings(static_cast<BYTE>(110 + 110 * pulse));

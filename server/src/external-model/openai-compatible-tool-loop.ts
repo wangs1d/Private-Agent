@@ -110,7 +110,11 @@ import {
   classifyToolFailure,
   UnifiedErrorCode,
 } from "@private-ai-agent/agent-protocol";
-import { evaluateAndSelectStrategy } from "../agent/synthesis-strategy.js";
+import {
+  BOOKKEEPING_TOOL_NAMES,
+  evaluateAndSelectStrategy,
+  isPhotoDeliveryRound,
+} from "../agent/synthesis-strategy.js";
 import { isDirectFactQuery } from "../agent/direct-fact-query.js";
 import { isStaticToolArchEnabled, ROUTER_FIRST_LANE_MAX_VISIBLE } from "./lane-tool-sets.js";
 import { buildDomainCards } from "../tools/tool-search/domain-cards.js";
@@ -257,37 +261,9 @@ function getToolResultStripKeys(toolName: string): string[] | undefined {
   return TOOL_RESULT_STRIP_KEYS[toolName];
 }
 
-/**
- * 行动宣告正则：识别「我这就去查…」/「稍后告诉你」/「别急」这类面向未来动作的
- * 承诺性表述（真人感·行动宣告提示词的产物），但此时 LLM 未必真正调用工具。
- *
- * 覆盖模式：
- *  - 主体身份 + 动作动词：我这就去/我来/我去/让我 + 查/看/找/搜/瞅/问/读/取/确认
- *  - 未来承诺收尾：稍后/回头/待会/等一下 + 告诉/发/回/结果
- *  - 安抚等待：别急/别着急/稍等/马上 + 告诉/结果/回复/联系/就去
- *  - 完成通知：查到/找到/弄到/搞定 + 告诉你/发给你/再说
- *  - 假装在办（2026-08-29 补漏，真实案例「规划呢→我在帮你琢磨呢…等我理好了一股脑给你」
- *    从旧正则漏网，垫话被当正式回复放行）：
- *    「我在/正在帮你 + 琢磨/想/研究/盘算/整理/捋/规划/排/弄/办/处理/准备」
- *    「等…理好/想好/弄好/排好/安排好…给你/告诉你」
- */
-const ACTION_ANNOUNCE_RE =
-  /(?:我这就|我来|我去|让我|我先).{0,14}(?:查|看|找|搜|瞅|问|读|取|打听|确认|翻一下|点点|设个|安排|处理|说一声)|(?:稍后|回头|待会|等一下).{0,8}(?:告诉|发|回|结果|更(?:新|我))|(?:别急|别着急|稍等(?:一下)?).{0,6}(?:告诉|结果|回复|联系|就好|就去)|(?:查到|找到|弄到|搞定|问到|看到)?(?:就|便|再).{0,4}(?:告诉|发你|发给你|再说|通知|更新你)|(?:我在|正在|这就)帮你?(?:琢磨|想|研究|盘算|整理|捋|规划|排|弄|办|处理|准备)|等.{0,8}(?:理好|想好|弄好|搞好|准备好|琢磨好|研究好|排好|整理好|安排好|规划好).{0,10}(?:给你|发你|告诉你|发给你|再说|通知你)|帮你琢磨/i;
-
-/** 是否「只有行动宣告、未兑现任何真实结果」：命中宣告模式 且 不含数据锚点。 */
-function isActionAnnouncementOnly(text: string): boolean {
-  const t = text.trim();
-  if (!t) return false;
-  if (!ACTION_ANNOUNCE_RE.test(t)) return false;
-  // 含具体结果锚点（数字/链接/引述的具体内容/冒号引导数据）→ 视为已兑现，不拦截。
-  // 注意：不把「是/为」等高频口语字当锚点，避免把「其实我这就去…」这类纯宣告漏拦。
-  const hasConcrete =
-    /\d/.test(t) ||
-    /https?:\/\//.test(t) ||
-    /[「"“]/.test(t) ||
-    /[：:]\s*\S/.test(t);
-  return !hasConcrete;
-}
+// 行动宣告兜底（「只宣告未兑现→文字判定强制续波」）已于 2026-10-06 整体下线：
+// 文本正则判语义误伤两次（高危闸 substring、宣告闸「别让我看」），且工具调用
+// 质量已由语义路由+出口自检（服务端事实判定）承担，不再用措辞猜承诺。
 
 function isApologyStyleFallback(text: string): boolean {
   const t = text.trim();
@@ -1652,6 +1628,16 @@ function buildToolSufficiencyHint(toolName: string, content: string | undefined)
 }
 
 /**
+ * 照片轮回复方式提示（2026-10-06）：挂在 search_images 成功结果上，在模型读
+ * 结果的当下就定住回复形态——轮内直答路径也会被对话面的「搜到结果可充分展开」
+ * 许可教成「已确认的/能说的/没查到的」分节盘点（真机事故形态）。每张照片下方
+ * 由 image-caption-service 自动附一句画面解读，正文无需逐张复述。
+ */
+const PHOTO_REPLY_HINT =
+  "[系统提示] 回复方式：本轮交付是图片本身，每张照片下方会自动附一句画面解读。" +
+  "正文一两句话自然引入即可，不要按主题分节盘点，不要写「已确认的/能说的/没查到的」式小节，也不要逐张复述照片内容。";
+
+/**
  * 剥除正文中的请求卡标记（<tool_request>…</tool_request>）。
  * 静态架构下请求卡已在收尾分支被拦截续波，不会走到这里；legacy 回退模式下
  * 卡片无处理通道，标记会滞留在正文——统一剥除，防止协议标记透出到用户。
@@ -1795,9 +1781,6 @@ export async function streamCompletionWithTools(
   // 值为共享 Promise：同一波内并发出现的相同调用 await 同一个执行（含确定性重试），
   // 消除并行重复执行；失败结果落定后立即摘除，后续 replan 波次仍可重新执行。
   const turnDedupeCache = new Map<string, Promise<ToolExecOutcome>>();
-  // 强制联网兜底（模型未调搜索工具就收尾时注入提示重规划）只授予一次
-  // 行动宣告未兑现兜底（模型只承诺要查/去办、却一个工具都没调就收尾）只授予一次。
-  let announcementEnforced = false;
   // 空正文整合兜底（2026-08-29）：模型调完工具只发 tool_calls 就收尾、零正文时，
   // 强制它基于工具结果说人话（而非把工具 JSON 原文糊给用户），只授予一次。
   let narrationEnforced = false;
@@ -1863,17 +1846,24 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       )
     : "";
   if (stableApiTools.length > 0) {
+    // 任务面用全量 Plan-and-Execute 研究纪律；对话面瘦身（2026-10-06 治啰嗦 P2-7）：
+    // 闲聊/轻查询轮用不到「一次性并行规划/换角度补搜/code.run 分段读」三条例，
+    // 常驻注入对短回复是纯下行压力——只保留与对话面工具真正相关的守则。
+    const taskStage = (options?.audit?.stage ?? "").startsWith("task_plane");
+    const planAndExecuteRules = taskStage
+      ? "1. 一次性规划：把本轮需要的所有工具调用放在同一次回复里并行发出（独立的信息需求拆成多个并行调用），不要拆成多轮串行。\n" +
+        "2. 不要用完全相同的 query 重复搜索；但对比/多主题/盘点类需求，或首轮结果覆盖不全时，应换角度拆多个 query 补搜，或用 fetch_web / deep_search 深读，把信息收齐再回答，不要急着收尾。\n" +
+        "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n"
+      : "";
     messages.push({
       role: "system",
       content:
         (domainCards ? domainCards + "\n\n" : "") +
-        "工具调用原则（Plan-and-Execute）：\n" +
+        "工具调用原则：\n" +
         (routerFirstLane
           ? "0. 本轮业务工具都在延迟目录中（可见的只有 tool_discover/tool_call）：优先按上方【能力域目录】按名直呼 tool_call 或 tool_discover({domain:\"域名\"}) 拉取该域参数 schema；需要语义检索时再用 tool_discover({query})。发现和执行加起来也在总波次预算内，别一次 discover 完就收尾。\n"
           : "") +
-        "1. 一次性规划：把本轮需要的所有工具调用放在同一次回复里并行发出（独立的信息需求拆成多个并行调用），不要拆成多轮串行。\n" +
-        "2. 不要用完全相同的 query 重复搜索；但对比/多主题/盘点类需求，或首轮结果覆盖不全时，应换角度拆多个 query 补搜，或用 fetch_web / deep_search 深读，把信息收齐再回答，不要急着收尾。\n" +
-        "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
+        planAndExecuteRules +
         "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
         "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。搜到的每张照片会由视觉模型自动生成真实画面描述并展示在照片下方，正文**不要**逐张介绍照片、不要用「第一张图/第二张图」这类指代（你看不见图片内容，写了必然对不上），也不要把图片链接复述进正文；正文只写整体性的结论、建议或补充信息。\n" +
         "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。" +
@@ -2142,8 +2132,8 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
 
     // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为思考前导话，
     // 不进入最终回复，也不推送给前端。
-    // 注意：下方三个收尾闸门（宣告补打/出口自检/空正文兜底）命中 continue 重试前
-    // 会清空本累积——重试轮「替换」上一轮文本而非拼接，否则上一轮的宣告/自语会
+    // 注意：下方收尾闸门（出口检查/出口自检/空正文兜底）命中 continue 重试前
+    // 会清空本累积——重试轮「替换」上一轮文本而非拼接，否则上一轮的自语会
     // 和重试后的新答案拼成一条两句同义的回复（2026-09-09 实测事故）。
     if (finishReason !== "tool_calls" || normalizedToolCalls.length === 0) {
       lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
@@ -2271,10 +2261,12 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         }
       }
 
-      // ── 单一出口检查（2026-09-19 静态架构，取代宣告闸/出口自检/空正文闸三闸）──
-      // 一轮最多续波一次，判定只看服务端事实（工具执行结果 + 宣告模式），不再做
+      // ── 单一出口检查（2026-09-19 静态架构，取代出口自检/空正文闸多闸）──
+      // 一轮最多续波一次，判定只看服务端事实（工具执行结果），不再做
       // 道歉文本风格判定（"零尝试+道歉"直接如实收尾，不再赌文本措辞）。
-      // 优先级：宣告未兑现 > 尝试全败 > 调了工具没正文。预算耗尽 → 如实收尾。
+      // 行动宣告兜底已下线（2026-10-06，见文件头部注释）。
+      // 优先级：写意图未尝试 > 实时/媒体意图未尝试 > 尝试全败 > 调了工具没正文。
+      // 预算耗尽 → 如实收尾。
       if (staticToolArch && !exitGateEnforced && stableApiTools.length > 0) {
         let gateReason: string | null = null;
         let gateInstruction = "";
@@ -2313,12 +2305,6 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
             : "这条消息需要现实世界的当前信息，路由系统已把它判定为实时查询意图，但本轮既没有注入检索证据块、" +
               "你也没有调用任何搜索工具就直接回答了。请先调用 search_web 真实检索，拿到结果后再回答用户；" +
               "若确实查不到，如实说明，不要凭记忆硬答或编造。";
-        } else if (allToolExecResults.length === 0 && isActionAnnouncementOnly(finalText)) {
-          gateReason = "announcement_unfulfilled";
-          gateInstruction =
-            "你刚才只向用户宣告了要做某件事（查/搜/看/办…）但还没有真正调用任何工具、也没有给出任何结果。" +
-            "请立即调用相应工具真正完成这件事并基于真实结果回答用户；若工具不可用或确实办不到，请如实向用户说明。" +
-            "严禁只重复「我去查/稍后告诉你」这类承诺而不兑现。";
         } else if (
           finalText.trim() &&
           hasSubstantiveAttempt &&
@@ -2354,35 +2340,8 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       // 旧链中的「强制联网重试」依赖 FRESH_WEB_LOOKUP_RE 等话题词表判定"需要联网"，
       // 属于关键词打地鼠，已删除——"需不需要外部信息"由路由层语义分类承担，
       // "有没有真的查"由下方出口自检（风格判定）承担，不再需要话题词预判。
-      // 现顺序：
-      //   1) 行动宣告未兑现补打（零工具 + 纯宣告，风格判定，一次）；
-      //   2) 统一出口自检 TurnOutcomeGate（无实质成功结果 + 道歉式收场，一次）。
-      // 行动宣告未兑现兜底（根治「回复了却没结果」）：文本命中行动宣告模式 且
-      // 本轮从未执行过任何工具 且 未强制过 → 注入指令强制补打一波真实工具调用。
-      // 全程最多授予一次。
-      if (
-        !staticToolArch &&
-        isActionAnnouncementOnly(finalText) &&
-        allToolExecResults.length === 0 &&
-        !announcementEnforced
-      ) {
-        announcementEnforced = true;
-        messages.push({
-          role: "assistant",
-          content: finalText || fullText || "",
-        });
-        messages.push({
-          role: "system",
-          content:
-            "你刚才只向用户宣告了要做某件事（查/搜/看/办…）但还没有真正调用任何工具、也没有给出任何结果。" +
-            "请立即调用相应工具真正完成这件事并基于真实结果回答用户；若工具不可用或确实办不到，请如实向用户说明。" +
-            "严禁只重复「我去查/稍后告诉你」这类承诺而不兑现。",
-        });
-        // 重试轮替换而非拼接：上一轮宣告文本已 push 进 messages 供模型参考，
-        // 不再计入最终回复（否则两句同义回复拼进同一气泡）。
-        lastAssistantText = "";
-        continue;
-      }
+      // 行动宣告未兑现兜底（文本正则判承诺）已于 2026-10-06 整体下线（误伤两次，
+      // 工具调用质量由语义路由+出口自检承担），不再有该分支。
       // 统一出口自检（2026-09-05 TurnOutcomeGate，不分车道）：「诉求未满足」且预算
       // 还有余量 → 注入一次换路续波指令（换关键词/换工具/换数据源），在原轨迹内纠错。
       // 预算耗尽 → 如实收尾（honest 策略），不再有升级哨兵/整轮重放。
@@ -2999,7 +2958,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       // 关键洞察：LLM 重复调用工具的根因是不确定结果是否足够回答。
       // 明确告诉 LLM「结果已完整」，让它直接回答而非重复调用。
       const sufficiencyHint =
-        exec.ok && i === lastOkToolIndex
+        exec.ok && i === lastOkToolIndex && !BOOKKEEPING_TOOL_NAMES.has(wireToolName)
           ? buildToolSufficiencyHint(wireToolName, fullToolContent)
           : "";
       // 对失败的工具结果追加强约束 reminder，防止 LLM 忽略 error 字段后对用户撒谎。
@@ -3007,9 +2966,12 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       const failureReminder = !exec.ok
         ? buildToolFailureReminder(wireToolName, fullToolContent)
         : "";
+      // 照片轮回复方式提示：search_images 成功即挂，定住「交图为主、正文一两句」的形态。
+      const photoReplyHint =
+        exec.ok && wireToolName === "search_images" ? PHOTO_REPLY_HINT : "";
       // ObservationPack：压缩点归档成功时附读回提示（排在最前，紧贴被压缩的结果原文）。
       const obsHint = settled.status === "fulfilled" ? settled.value.obsHint : "";
-      const appendedHints = [obsHint, sufficiencyHint, failureReminder]
+      const appendedHints = [obsHint, sufficiencyHint, failureReminder, photoReplyHint]
         .filter(Boolean)
         .join("\n");
       messages.push({
@@ -3186,7 +3148,6 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           `来源=${strategyDirective.quality.sourceCount} 成功=${strategyDirective.quality.successCount} ` +
           `内容=${strategyDirective.quality.totalContentLength}字符 理由=${strategyDirective.quality.reason}`,
       );
-
       // 零工具结果守卫（2026-08-28）：本轮没有任何工具执行（含搜索）时，
       // 明确告知 LLM 禁止虚构"已查询/已翻阅/公开渠道没查到"——假搜索回复的
       // 最后防线。正则门控（forced-tool）+ 强制联网兜底已在前置层拦住绝大多数，
@@ -3196,7 +3157,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       // 若仍按"基于这些结果回答"引导，会产出"工具没返回内容，都是些功能说明"这种
       // 把机制话透给用户的回复（fast maxRounds=1 下是高发路径：发现→执行需两轮，单波必断头）。
       const substantiveToolResults = allToolExecResults.filter(
-        (r) => !META_TOOL_NAMES.has(r.toolName) && r.ok,
+        (r) => !META_TOOL_NAMES.has(r.toolName) && !BOOKKEEPING_TOOL_NAMES.has(r.toolName) && r.ok,
       );
       const metaOnlyGuard =
         allToolExecResults.length > 0 && substantiveToolResults.length === 0
@@ -3213,11 +3174,17 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           : "";
       // 求简指令只对真正的单一事实求证生效；其余一律要求把信息组织充分（2026-09-03：
       // 检索/任务型回复不再受「口语求简」约束，需按主题分节、可用 Markdown 排版）
+      // 纯图轮例外（2026-10-06）：search_images 拿到照片且无文字检索结果时，
+      // 交付就是图本身，「按主题分节、信息用足」会教出「已确认的/能说的/没查到的」
+      // 盘点正文（真机事故形态）；展开要求由 strategyBlock 的照片轮指令承担。
+      const photoDeliveryRound = isPhotoDeliveryRound(allToolExecResults);
       const singleFactClause = isDirectFactQuery(userText)
         ? `这是单一事实求证（是/否、一个数据点）：给「结论 + 1 句依据」即可，最多保留一个简短追问。`
         : `把检索到的信息组织充分：按主题分节，用 Markdown 小标题/加粗/表格排版，保留日期、数字、来源等细节，不要为了简短丢掉用户想看的内容。`;
       const baseDirective =
-        (substantiveToolResults.length > 0
+        (photoDeliveryRound
+          ? `刚才的照片搜索已完成，请把图片直接交给用户，回复方式按【回复策略】执行。`
+          : substantiveToolResults.length > 0
           ? `刚才调用工具拿到了以下结果，请基于这些结果回答用户的问题：语气自然像朋友，但内容要充分、结构清晰。` +
             `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
             `同一事实不要换个说法再总结第二遍；${singleFactClause}`

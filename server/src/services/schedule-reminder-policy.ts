@@ -32,6 +32,7 @@
  */
 
 import type { ScheduleTaskRecord } from "./schedule-task-service.js";
+import { MAX_ROUTE_MINUTES } from "./route-duration-service.js";
 
 export type ReminderStage = "night_before" | "wake_alarm" | "depart";
 export type ScheduleEventImportance = "high" | "normal";
@@ -74,6 +75,14 @@ export type ReminderPolicyInput = {
   reminderMessage?: string;
   /** 地点线索（用户原话或模型抽取，如「协和医院」「首都机场T3」） */
   location?: string;
+  /**
+   * 真实路程估时（分钟，来自 route-duration-service：用户当前位置 × 目的地
+   * 高德驾车实时路程）。有效值（>0）替代 venue 静态查找表——2026-10-05 起
+   * 出发预留按真实路程算，只换因子来源不改决策结构；无值/无效回退静态表。
+   */
+  travelMinutesOverride?: number;
+  /** 路程来源（amap=含实时路况 / osrm=兜底），进 policyName 指纹便于观测 */
+  routeSource?: string;
   /** 创建来源：booking/email 按 high 处理；ics/commitment 不进策略层（上游各有提醒分工） */
   source?: string;
   /** 用户作息画像（agent 对用户习惯的了解）：样本足够时个性化睡前/闹钟时刻，不足时回退默认 */
@@ -180,6 +189,7 @@ export function assessScheduleEventFactors(input: {
   description: string;
   location?: string;
   source?: string;
+  travelMinutesOverride?: number;
 }): ScheduleEventFactors {
   const text = `${input.location ?? ""} ${input.description ?? ""}`;
   const importance: ScheduleEventImportance =
@@ -194,8 +204,14 @@ export function assessScheduleEventFactors(input: {
   // 高代价事项（牙医/面试/值机…）几乎都是要出门办的正事：文本没给出地点信号时
   // 按市内场所估算路程，而不是按「未知=楼下随手事」的 15 分钟保底
   if (importance === "high" && venue === "unknown") venue = "mid";
+  // 真实路程优先（route-duration-service 估出）：只换因子来源，其余决策不变
+  const override = input.travelMinutesOverride;
   const travelMinutes =
-    venue === "online" ? 0 : TRAVEL_MINUTES[venue][importance];
+    venue === "online"
+      ? 0
+      : override != null && Number.isFinite(override) && override > 0 && override <= MAX_ROUTE_MINUTES
+        ? Math.round(override)
+        : TRAVEL_MINUTES[venue][importance];
   const prepMinutes = importance === "high" ? 60 : 40;
   return { importance, venue, travelMinutes, prepMinutes };
 }
@@ -383,7 +399,9 @@ export function buildReminderPolicy(input: ReminderPolicyInput): ReminderPolicyP
   for (const s of stages) byOffset.set(s.offsetMinutes, s);
   const merged = [...byOffset.values()].sort((a, b) => b.offsetMinutes - a.offsetMinutes);
   return {
-    policyName: `${factors.importance}/${factors.venue}`,
+    policyName: `${factors.importance}/${factors.venue}${
+      input.routeSource ? `/route:${input.routeSource}` : ""
+    }`,
     factors,
     remindBeforeMinutes: merged.map((s) => s.offsetMinutes),
     preReminders: merged.map(({ offsetMinutes, stage, label, message }) => ({
