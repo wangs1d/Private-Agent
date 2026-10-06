@@ -61,10 +61,10 @@ test("runtime-kernel minimal 模式保留 currentUserState/turnAside", () => {
   assert.ok(sanitized?.turnAside, "minimal 模式不剥顺嘴机会");
 });
 
-test("persona 静态块含顺嘴有据纪律（P0.5：只凭旧记忆不发作息建议/不编细节）", () => {
+test("persona 静态块：顺嘴有据 + 诚实底线（2026-10-06 活人感治理 B 正向重写后锚点）", () => {
   const block = buildPersonaStaticBlock({ tier: 2 });
-  assert.ok(block.includes("顺嘴有据"), "应包含顺嘴有据纪律行");
-  assert.ok(block.includes("不发作息"), "旧记忆不发作息建议");
-  assert.ok(block.includes("绝不编"), "禁止编造记忆里没有的细节");
-  assert.ok(block.includes("拿不准"), "拿不准就收着说");
+  assert.ok(block.includes("顺嘴关心贴此刻"), "顺嘴关心正向声部（原「顺嘴有据」纪律行）");
+  assert.ok(block.includes("【当下状态】"), "关心依据锚定真实信号");
+  assert.ok(block.includes("作息类建议憋回去"), "只凭旧记忆不发作息建议");
+  assert.ok(block.includes("拿不准"), "拿不准就直说/收着说");
 });

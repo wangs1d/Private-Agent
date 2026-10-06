@@ -155,6 +155,21 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
     if (effectiveStreamOpts.toolExposureProfile === "contextual" || effectiveStreamOpts.toolExposureProfile === "light") {
       out.fastProfile = true;
     }
+    // 2026-10-06 语感治理 A：对话面主生成放开采样——主模型训练分布偏中性助手腔，
+    // 靠温度+频罚对冲（示例与人格块教「怎么说」，采样让它「敢说」）。
+    // 门控 = agent-core chat 车道显式置位的 chatLaneSampling 且非 ephemeral 内部调用；
+    // 任务面/内部识情/路由/收尾汇总不置位，保持默认采样。CHAT_TEMPERATURE /
+    // CHAT_FREQUENCY_PENALTY 可覆盖。
+    const chatMainTurn =
+      effectiveStreamOpts.chatLaneSampling === true && effectiveStreamOpts.ephemeralTurn !== true;
+    if (chatMainTurn) {
+      const temperature = Number.parseFloat(process.env.CHAT_TEMPERATURE ?? "0.85");
+      if (Number.isFinite(temperature) && temperature > 0) out.temperature = temperature;
+      const frequencyPenalty = Number.parseFloat(process.env.CHAT_FREQUENCY_PENALTY ?? "0.4");
+      if (Number.isFinite(frequencyPenalty) && frequencyPenalty > 0) {
+        out.frequency_penalty = frequencyPenalty;
+      }
+    }
     return Object.keys(out).length > 0 ? out : undefined;
   }
 

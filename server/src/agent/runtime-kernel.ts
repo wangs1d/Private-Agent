@@ -125,6 +125,9 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   // 人格·终极版：静态人格块常驻稳定层；动态 mood 块每轮单一状态
   "personaStatic",
   "personaMood",
+  // 【语感基准】few-shot（2026-10-06 活人感治理 C）：缺此行会被本函数剥离，
+  // 示例层整层失效（规则层教不会的语气全靠它）
+  "voiceBaseline",
 ];
 
 const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
@@ -154,6 +157,8 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
   "modeRoleGuidance",
   "replyStyleMode",
+  // 【语感基准】few-shot（2026-10-06）：同 minimal，缺此行会被剥离
+  "voiceBaseline",
 ];
 
 const KEYWORDS = {
@@ -564,25 +569,19 @@ export class RuntimeKernel {
     const style = identity.style.join(", ");
     const values = identity.values.slice(0, 3).join(", ");
 
-    // 只给方向，不堆 prompt——让模型基于方向自己发挥"活人感"
-    // 始终保留"a close friend"基调，style 仅作为补充——
-    // 防止 style 数组覆盖掉"熟人"定位导致活人感漂移
-    // 2026-09-05 去重：英文【事实可靠性】与中文后缀（finalizeChatSystemPrompt 恒追加）
-    // 重复，删除英文版。
-    // 2026-09-06 去重：原「Reply style follows the 【回复指南】…」指针行删除——
-    // 其内嵌的"调了搜索工具才展开"例外是前台还携带搜索工具时代的规则，前后台
-    // 架构后前台零工具、任务结果以独立消息回流，该例外已失效；风格本身由
-    // 【回复指南】单点承担，不需要在这里再指一遍。
+    // 只给方向，不堆 prompt——让模型基于方向自己发挥"活人感"。
+    // 2026-10-06 活人感治理 B：整块从 ~450tok 压到 ~150tok——
+    // - 删 "Memory:" 段（块名清单已过时：KV 档案块改门控后多数轮不注入；语义与
+    //   GLOBAL_MEMORY_RULE 重复，以中文规则为唯一权威）；
+    // - 删工具宣告行（中文【真人感·行动宣告】为唯一权威，且此处旧口径缺信息型豁免）；
+    // - Time/TopicSwitch 两段压缩成单行，防编造关系/身份的 grounding 保留一行。
+    // 语感的具体示范由【语感基准】承担，此处不再定义 tone 细节（声部合一）。
     const styleExtra = style ? ` (${style})` : "";
     return [
-      `You are ${persona}.`,
+      `You are ${persona}${styleExtra} — the user's personal butler and close friend, not a customer-service bot. Reply in the user's language (usually Chinese).`,
       values ? `Care about: ${values}.` : "",
-      `Tone: a close friend${styleExtra} — short, casual, alive. Not a customer service bot, not an "AI assistant".`,
-      "Close-friend tone is style, not evidence. Do not invent familiarity, relationships, pronoun referents, or who the user follows; if a person/pronoun is not grounded in the current turn or explicit injected memory, ask or stay neutral.",
-      "Call tools when needed; before each call, say one short line about what you're doing — but never repeat that line as the final reply.",
-      "Time context is injected on demand: some turns carry `[ts:YYYY-MM-DD HH:MM:SS|weekday]` metadata prefixes, a 【对话时间轴】 timeline block, or a 【当前时间】 block. When present, reason about time strictly from them. When none appears, do NOT guess concrete clock times or dates — use vague phrasing (\"刚才\", \"晚点\") or ask the clock tool. The prefix is NOT part of the message content, and you must NEVER include, echo, or paraphrase it in your reply (the runtime strips it from your output anyway, so writing it just wastes tokens and looks broken).",
-      "Topic switching: when the user's new message is about a different topic than the previous turn, respond ONLY to the new message. Do NOT continue the previous topic, do NOT reference prior tool results or unfinished searches from the previous turn, and do NOT open with phrases like 'haha you caught me' or 'I just checked X'. A question about something already discussed in this conversation, or already in your injected memory, is a follow-up — answer it from that context instead of saying you forgot.",
-      "Memory: the system may inject blocks like 【记忆图联想检索】【用户档案】【待办与承诺】【短期上下文】 — these are facts you already know about this user, NOT prior-conversation context. If the user explicitly asks about them (\"你还记得…\", \"我之前说过…\", \"你存了什么\"), answer directly from those blocks; never claim you don't remember or never stored something when it is present there. Otherwise mention them only when relevant or imminent (≤24h).",
+      "Close-friend tone is style, not evidence: never invent familiarity, relationships, or who the user knows; stay grounded in this turn and injected memory.",
+      "Time context is on-demand: reason from `[ts:...]` prefixes / time blocks when present; when absent, don't invent clock times — use the clock tool; never echo metadata prefixes in your reply. Topic switch: respond to the newest message only; don't continue the previous topic or echo prior tool results.",
     ]
       .filter(Boolean)
       .join("\n");

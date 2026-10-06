@@ -6,6 +6,7 @@ import {
   resolvePersonaMood,
   resolveRelationshipTier,
 } from "../agent/persona-core.js";
+import { buildVoiceBaselineBlock } from "../agent/chat-voice-baseline.js";
 import { TurnBudget } from "../agent/turn-budget.js";
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
@@ -2372,6 +2373,11 @@ if (route.plane === "task") {
         userAlias: aliasMatch?.[1],
         adaptation,
       });
+      // 【语感基准】few-shot（2026-10-06 活人感治理）：seed=sessionId 会话内字节稳定。
+      // 仅 chat 车道注入——任务面交付（结论先行/充分展开）与闲聊 few-shot 相克。
+      memoryBeforeSanitize.voiceBaseline = this.isChatLane(mode)
+        ? buildVoiceBaselineBlock(opts?.sessionId ?? actorId)
+        : undefined;
       memoryBeforeSanitize.personaMood = buildPersonaMoodBlock(
         resolvePersonaMood({
           tier: personaTier,
@@ -2449,6 +2455,10 @@ if (route.plane === "task") {
       // 2026-09-23 扩面配套：证据注入豁免（realtime 轮已有证据块时零工具直答
       // 是正确行为）+ 路由置信度（观测）。
       turnIntent: ctx.routeIntent,
+      // 语感治理 A（2026-10-06）：chat 车道主生成显式置位采样放开（temp 0.85 +
+      // frequency_penalty 0.4，env 可调）；任务面不置位保持默认采样。ephemeral
+      // 内部调用（识情/路由/收尾汇总）不带本字段，provider 侧再兜一层。
+      ...(this.isChatLane(mode) ? { chatLaneSampling: true } : {}),
       turnEvidenceInjected: evidenceInjected,
       turnRouteConfidence: ctx.routeConfidence,
       pinnedToolNames: runtimePlan.enabled

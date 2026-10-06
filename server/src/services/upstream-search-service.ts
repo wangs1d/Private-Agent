@@ -963,8 +963,8 @@ export class UpstreamSearchService {
     };
   }
 
-  /** 抖音官方热榜公开接口（实测 word_list 可拿，无登录态） */
-  private async fetchDouyinHotSearch(limit: number): Promise<UnifiedSearchItem[]> {
+  /** 抖音官方热榜公开接口（实测 word_list 可拿，无登录态）；公开给语料管线脚本复用 */
+  async fetchDouyinHotSearch(limit: number): Promise<UnifiedSearchItem[]> {
     const text = await this.fetchText(
       "https://www.douyin.com/aweme/v1/web/hot/search/list/?device_platform=webapp",
       6000,

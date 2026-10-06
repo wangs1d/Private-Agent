@@ -36,7 +36,9 @@ test("chat 模式注入【人格·静态】稳定层（2026-09-22 人格·终极
   const persona = stablePrefix.find((b) => b.startsWith("【人格·静态】"));
   assert.ok(persona, "人格静态块必须注入稳定层");
   assert.equal(persona.includes("私人管家兼搭档"), true);
-  assert.equal(persona.includes("办成事 > 说话有人味儿 > 一切"), true);
+  // 2026-10-06 活人感治理 B：正向重写后的声部锚点 + 网络梗用量铁律
+  assert.equal(persona.includes("说话像处了几年的朋友"), true);
+  assert.equal(persona.includes("一轮最多一个"), true);
   assert.equal(persona.includes("R1（熟悉）"), true);
   // 旧【说话方式】两块（管家底色/伙伴面）整体废弃
   assert.equal(stablePrefix.some((b) => b.startsWith("【说话方式")) , false);
@@ -100,8 +102,17 @@ test("minimal 模式保留 replyStyleMode，buildSessionSystem 不再携带风�
   assert.equal(sanitized?.modeRoleGuidance, memory.modeRoleGuidance);
 
   const sessionSystem = kernel.buildSessionSystem() ?? "";
-  assert.equal(sessionSystem.includes("a close friend"), true);
+  // 2026-10-06 活人感治理 B：身份块压缩后的英文锚点（~150tok / 4 行）
+  assert.equal(sessionSystem.includes("personal butler and close friend"), true);
   assert.equal(sessionSystem.includes("Reply style follows"), false);
+
+  // 语感治理 C 防回退：minimal 模式不得剥离【语感基准】few-shot（剥离=示例层失效）
+  const voiceMemory = chatMemory({ voiceBaseline: "【语感基准】\n用户：在吗\n你：来了" });
+  const voiceSanitized = kernel.sanitizePromptMemory(
+    voiceMemory,
+    kernel.planTurn("在吗", voiceMemory),
+  );
+  assert.equal(voiceSanitized?.voiceBaseline, voiceMemory.voiceBaseline);
 });
 
 assert.ok(GLOBAL_MEMORY_RULE.length > 0);

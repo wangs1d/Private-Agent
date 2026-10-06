@@ -223,6 +223,12 @@ export type AgentPromptMemoryContext = {
    * （base/casual_wit/roasting/playful/empathy/serious）。沉到动态层。
    */
   personaMood?: string;
+  /**
+   * 【语感基准】few-shot 块（2026-10-06 活人感治理）：真实口吻对话对照 +
+   * 助手腔反例，对抗主模型的中性助手腔训练分布。按 sessionId 轮换、
+   * 会话内字节稳定（稳定层 MEMORY 带注入，见 chat-voice-baseline.ts）。
+   */
+  voiceBaseline?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */
@@ -298,6 +304,13 @@ export type AgentStreamOptions = {
    * "路由声明需要动手、模型却零工具尝试"的续波——不用文本风格正则。
    */
   turnIntent?: string;
+  /**
+   * chat 车道主生成采样放开（2026-10-06 语感治理 A）：true 时 provider 对该轮
+   * 主生成下发 temperature/frequency_penalty（CHAT_TEMPERATURE / CHAT_FREQUENCY_PENALTY
+   * 可覆盖）。仅 agent-core 的 chat 车道主链路置位；任务面、ephemeral 内部调用
+   * （识情/路由/收尾汇总）一律不置位，保持默认采样。
+   */
+  chatLaneSampling?: boolean;
   /**
    * 本轮是否已注入前置检索证据块（2026-09-23）：工具循环出口检查用于豁免
    * "realtime 意图 + 证据已在 prompt 里 + 模型零工具直答"的正确行为轮。

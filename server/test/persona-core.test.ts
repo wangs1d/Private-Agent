@@ -35,16 +35,18 @@ test("mood 解析互斥：任务面 > 情绪低落 > R0 > 被打趣 > R2 起劲 
   assert.equal(resolvePersonaMood({ tier: 1 }), "casual_wit");
 });
 
-test("静态块：身份/优先级/关系档/反谄媚/情绪诚实/硬边界/简短，无禁句表", () => {
+test("静态块：身份/正向声部/关系档/立场/硬边界/梗铁律/简短，无禁句表", () => {
   const block = buildPersonaStaticBlock({ tier: 1, userAlias: "王哥" });
   assert.ok(block.startsWith("【人格·静态】"));
   assert.ok(block.includes("王哥的私人管家兼搭档"));
-  assert.ok(block.includes("办成事 > 说话有人味儿 > 一切"));
+  // 2026-10-06 活人感治理：正向声部描述 + 梗铁律（一轮最多一个）
+  assert.ok(block.includes("说话像处了几年的朋友"));
+  assert.ok(block.includes("网络梗当盐用"));
+  assert.ok(block.includes("一轮最多一个"));
   assert.ok(block.includes("R1（熟悉）"));
-  assert.ok(block.includes("反谄媚"));
-  assert.ok(block.includes("情绪诚实"));
+  assert.ok(block.includes("有立场就亮立场"));
   assert.ok(block.includes("硬边界"));
-  assert.ok(block.includes("简短：像发微信"));
+  assert.ok(block.includes("简短基准"));
   // 禁句表已废
   assert.equal(block.includes("禁句"), false);
 });
@@ -122,16 +124,16 @@ test("每用户适配：学到的信号进静态块适配行，零信号不占 t
   assert.equal(buildUserAdaptationLine({}), "");
 });
 
-test("每用户适配：静态块含适配行（在简短行之前），无适配时不产空行", () => {
+test("每用户适配：静态块含适配行（块尾），无适配时不产空行", () => {
   const adapted = buildPersonaStaticBlock({
     tier: 2,
     adaptation: { humorTolerance: 0.3, preferredTone: "formal" },
   });
   const lines = adapted.split("\n");
   const adaptIdx = lines.findIndex((l) => l.includes("对TA适配"));
-  const shortIdx = lines.findIndex((l) => l.startsWith("简短"));
+  const shortIdx = lines.findIndex((l) => l.startsWith("简短基准"));
   assert.ok(adaptIdx > 0, "适配行应存在");
-  assert.ok(adaptIdx < shortIdx, "适配行应在简短行之前");
+  assert.ok(adaptIdx > shortIdx, "适配行应在简短基准之后（块尾）");
   assert.ok(adapted.includes("调侃收着点"));
   assert.ok(adapted.includes("表达偏正式"));
 

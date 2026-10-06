@@ -82,6 +82,7 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "conversationTimeline",
   "skillIndex",
   "interestList",
+  "voiceBaseline",
   "modeRoleGuidance",
   "toneGuidance",
   "emotionState",
@@ -174,6 +175,9 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 旧【说话方式·管家底色/伙伴面】两块（含调子菜单 few-shot 与破功禁句表）
   // 已整体废弃，由 agent/persona-core 承担。
   if (m.personaStatic) stableCore.push(m.personaStatic);
+  // 【语感基准】few-shot（2026-10-06 活人感治理）：示例按 sessionId 轮换、
+  // 会话内字节稳定——放 MEMORY 带（稳定层沉底），跨 session 才变字节。
+  if (m.voiceBaseline) stableMemory.push(m.voiceBaseline);
 
   // SLOW：夜间级
   if (m.memoryInventory) stableSlow.push(`【记忆目录】\n${m.memoryInventory}`);
