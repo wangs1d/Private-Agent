@@ -1,35 +1,53 @@
 import "dart:async";
 
 import "package:file_picker/file_picker.dart";
-import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 
 import "../core/config/api_config.dart";
 import "../core/presentation/user_avatar.dart";
 import "../core/services/user_avatar_api.dart";
+import "../core/services/world_api_client.dart";
+import "../features/approvals/approvals_panel.dart";
+import "../features/catalog/catalog_page.dart";
+import "../features/devices/devices_page.dart";
+import "../features/help/feedback_dialog.dart";
+import "../features/mailbox/mailbox_page.dart";
+import "../features/mailbox/message_hub_page.dart";
+import "mobile_briefing_page.dart";
+import "mobile_chat_controller.dart";
+import "mobile_model_catalog_page.dart";
 import "mobile_theme.dart";
 
-/// 手机端「我的」页。
+/// 手机端「我的」页:全功能二级菜单聚合。
 ///
-/// - 顶部账号卡片：头像（点击可设置，未设置时首字母）+ 当前账号 id + 服务器地址
-/// - 设置：主题(亮 / 暗 / 跟随系统)、每日简报入口
+/// - 顶部账号卡片：头像(点击可设置) + 名称(与桌面端同源：邮箱前缀) + 实时连接状态
+/// - 功能：每日简报 / 邮箱 / 消息中心 / 设备 / 审批 / 模型服务(与桌面端同源同数据)
+/// - 设置：主题(亮 / 暗 / 跟随系统)、帮助与反馈
 /// - 账号：退出登录
 class MobileProfilePage extends StatefulWidget {
   const MobileProfilePage({
     super.key,
-    required this.themeMode,
-    required this.onThemeModeChanged,
-    required this.onLogout,
+    required this.chatController,
+    required this.worldApi,
+    this.themeMode,
+    this.onThemeModeChanged,
+    this.onLogout,
   });
 
-  /// 当前主题模式(亮 / 暗 / 跟随系统)。
-  final ThemeMode themeMode;
+  /// 共享对话控制器(连接状态展示 + WS 服务复用)。
+  final MobileChatController chatController;
+
+  /// 世界 API(邮箱/消息中心与桌面端同源)。
+  final WorldApiClient worldApi;
+
+  /// 当前主题模式(null 时隐藏主题设置行,如嵌入测试)。
+  final ThemeMode? themeMode;
 
   /// 切换主题模式。
-  final ValueChanged<ThemeMode> onThemeModeChanged;
+  final ValueChanged<ThemeMode>? onThemeModeChanged;
 
   /// 退出登录。
-  final VoidCallback onLogout;
+  final VoidCallback? onLogout;
 
   @override
   State<MobileProfilePage> createState() => _MobileProfilePageState();
@@ -45,6 +63,26 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
   void initState() {
     super.initState();
     unawaited(_loadAvatar());
+    widget.chatController.addListener(_onChatChanged);
+  }
+
+  @override
+  void didUpdateWidget(MobileProfilePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.chatController != oldWidget.chatController) {
+      oldWidget.chatController.removeListener(_onChatChanged);
+      widget.chatController.addListener(_onChatChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.chatController.removeListener(_onChatChanged);
+    super.dispose();
+  }
+
+  void _onChatChanged() {
+    if (mounted) setState(() {});
   }
 
   /// 拉取当前账号头像（非关键链路：失败静默，账号卡回退首字母球）。
@@ -82,9 +120,27 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// 二级页统一包装:顶栏带返回键(被复用的桌面面板页自身无返回出口,
+  /// 手机端依赖系统返回手势不够直观)。自带 AppBar 的页面(简报/模型目录/
+  /// 设备/购物目录)直接 push,避免出现双层顶栏+双返回按钮。
+  Future<void> _push(Widget page, String title, {bool wrapped = true}) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext ctx) => wrapped
+            ? Scaffold(
+                backgroundColor: MobileTheme.of(ctx).background,
+                appBar: AppBar(title: Text(title)),
+                body: page,
+              )
+            : page,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
+    final bool connected = widget.chatController.isConnected;
     return Scaffold(
       backgroundColor: p.background,
       appBar: AppBar(
@@ -96,24 +152,82 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
         children: [
           _AccountCard(
             actorId: ApiConfig.effectiveActorId,
-            httpBase: ApiConfig.httpBase,
+            connected: connected,
             avatarUrl: UserAvatarApi.resolveUrl(_userAvatarPath),
             onChangeAvatar: _setAvatar,
+          ),
+          const SizedBox(height: 16),
+          _GroupLabel(label: "功能"),
+          _SectionCard(
+            children: [
+              _ListRow(
+                leading: Icon(Icons.wb_sunny_outlined, color: p.textSecondary, size: 22),
+                title: "每日简报",
+                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () => _push(const MobileBriefingPage(), "每日简报", wrapped: false),
+              ),
+              _divider(context),
+              _ListRow(
+                leading: Icon(Icons.mail_outline, color: p.textSecondary, size: 22),
+                title: "邮箱",
+                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () => _push(
+                    MailboxPage(api: widget.worldApi, ws: widget.chatController.service), "邮箱"),
+              ),
+              _divider(context),
+              _ListRow(
+                leading: Icon(Icons.forum_outlined, color: p.textSecondary, size: 22),
+                title: "消息中心",
+                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () => _push(MessageHubPage(api: widget.worldApi), "消息中心"),
+              ),
+              _divider(context),
+              _ListRow(
+                leading: Icon(Icons.devices_other_outlined, color: p.textSecondary, size: 22),
+                title: "设备",
+                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () =>
+                    _push(const DevicesPage(), "设备", wrapped: false),
+              ),
+              _divider(context),
+              _ListRow(
+                leading: Icon(Icons.fact_check_outlined, color: p.textSecondary, size: 22),
+                title: "审批",
+                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () => _push(const ApprovalsPanel(), "审批"),
+              ),
+              _divider(context),
+              _ListRow(
+                leading: Icon(Icons.shopping_bag_outlined, color: p.textSecondary, size: 22),
+                title: "购物目录",
+                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () => _push(const CatalogPage(), "购物目录", wrapped: false),
+              ),
+              _divider(context),
+              _ListRow(
+                leading: Icon(Icons.memory_outlined, color: p.textSecondary, size: 22),
+                title: "模型服务",
+                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () => _push(const MobileModelCatalogPage(), "模型服务", wrapped: false),
+              ),
+            ],
           ),
           const SizedBox(height: 16),
           _GroupLabel(label: "设置"),
           _SectionCard(
             children: [
-              _ThemeModeRow(
-                themeMode: widget.themeMode,
-                onChanged: widget.onThemeModeChanged,
-              ),
-              _divider(context),
+              if (widget.themeMode != null && widget.onThemeModeChanged != null) ...<Widget>[
+                _ThemeModeRow(
+                  themeMode: widget.themeMode!,
+                  onChanged: widget.onThemeModeChanged!,
+                ),
+                _divider(context),
+              ],
               _ListRow(
-                leading: Icon(Icons.notifications_outlined, color: p.textSecondary, size: 22),
-                title: "每日简报",
+                leading: Icon(Icons.help_outline, color: p.textSecondary, size: 22),
+                title: "帮助与反馈",
                 trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _showBriefingInfo(context),
+                onTap: _showFeedback,
               ),
             ],
           ),
@@ -130,13 +244,15 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                 ),
                 onTap: () {},
               ),
-              _divider(context),
-              _ListRow(
-                leading: Icon(Icons.logout, color: Theme.of(context).colorScheme.error, size: 22),
-                title: "退出登录",
-                titleColor: Theme.of(context).colorScheme.error,
-                onTap: () => _confirmLogout(context),
-              ),
+              if (widget.onLogout != null) ...<Widget>[
+                _divider(context),
+                _ListRow(
+                  leading: Icon(Icons.logout, color: Theme.of(context).colorScheme.error, size: 22),
+                  title: "退出登录",
+                  titleColor: Theme.of(context).colorScheme.error,
+                  onTap: () => _confirmLogout(context),
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 24),
@@ -155,24 +271,10 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
     return Divider(height: 1, indent: 52, color: MobileTheme.of(context).divider);
   }
 
-  void _showBriefingInfo(BuildContext context) {
+  void _showFeedback() {
     showDialog<void>(
       context: context,
-      builder: (BuildContext ctx) {
-        return AlertDialog(
-          title: const Text("每日简报"),
-          content: const Text(
-            "每日简报由服务端在早上定时推送，手机端收到后会弹出系统通知，点击通知即可查看。\n\n"
-            "简报内容与推送时间可在桌面端「每日简报」设置页配置，或直接在对话中让助手调整。",
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text("知道了"),
-            ),
-          ],
-        );
-      },
+      builder: (BuildContext ctx) => const FeedbackDialog(),
     );
   }
 
@@ -183,8 +285,8 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
         return AlertDialog(
           title: const Text("退出登录"),
           content: const Text(
-            "退出后会断开连接并清空当前会话。\n\n"
-            "当前账号由构建参数 --dart-define=USER_ID 指定，如需切换账号请重新构建安装。",
+            "退出后会断开连接并返回登录页。\n\n"
+            "同一邮箱重新登录即可同步该账号的全部数据。",
           ),
           actions: [
             TextButton(
@@ -194,7 +296,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
             TextButton(
               onPressed: () {
                 Navigator.of(ctx).pop();
-                widget.onLogout();
+                widget.onLogout!();
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text("已退出登录,会话已清空")),
                 );
@@ -208,17 +310,17 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
   }
 }
 
-/// 顶部账号卡片。
+/// 顶部账号卡片。名称与桌面端侧栏同源：登录邮箱取 `@` 前缀。
 class _AccountCard extends StatelessWidget {
   const _AccountCard({
     required this.actorId,
-    required this.httpBase,
+    required this.connected,
     this.avatarUrl,
     this.onChangeAvatar,
   });
 
   final String actorId;
-  final String httpBase;
+  final bool connected;
 
   /// 用户头像绝对 URL（null=未设置，渲染首字母球）。
   final String? avatarUrl;
@@ -229,8 +331,11 @@ class _AccountCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
+    // 与桌面端侧栏同名规则：邮箱取 @ 前缀（桌面 main.dart userName 同源）。
+    final String displayName =
+        actorId.contains("@") ? actorId.split("@").first : actorId;
     final String initial =
-        actorId.isEmpty ? "U" : actorId.characters.first.toUpperCase();
+        displayName.isEmpty ? "U" : displayName.characters.first.toUpperCase();
     final Widget avatarFallback = Container(
       width: 52,
       height: 52,
@@ -257,6 +362,7 @@ class _AccountCard extends StatelessWidget {
               child: UserAvatar(url: avatarUrl, size: 52, fallback: avatarFallback),
             ),
           );
+    final Color statusColor = connected ? const Color(0xFF34C759) : p.textMuted;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       padding: const EdgeInsets.all(18),
@@ -273,7 +379,7 @@ class _AccountCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  actorId,
+                  displayName,
                   style: TextStyle(
                     color: p.textPrimary,
                     fontSize: 16,
@@ -282,12 +388,20 @@ class _AccountCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  "服务器 · $httpBase",
-                  style: TextStyle(color: p.textSecondary, fontSize: 12),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      connected ? "已连接" : "未连接",
+                      style: TextStyle(color: p.textSecondary, fontSize: 12),
+                    ),
+                  ],
                 ),
               ],
             ),

@@ -148,6 +148,11 @@ export type AgentPromptMemoryContext = {
    */
   currentTime?: string;
   /**
+   * 运行环境块（2026-10-07）：用户此刻从手机 App 还是电脑桌面端发消息。
+   * WS 连接自报 platform → agent-core → prompt-context-builder；缺省不注入。
+   */
+  deviceEnvironment?: string;
+  /**
    * 当前情绪状态摘要：LimbicCortex/EmotionModulator 的 VAD 值可读化输出。
    * 让 LLM 知道自己当前的情绪（如低落、兴奋、关注），影响回复语气。
    * 由 agent-core 从 brainCenter.limbicCortex.getEmotion() 拉取并格式化注入。
@@ -312,6 +317,17 @@ export type AgentStreamOptions = {
    */
   chatLaneSampling?: boolean;
   /**
+   * 纯闲聊轮硬隔离（2026-10-06 语感治理追加）：agent-core chat 车道且路由判定
+   * 本轮为纯闲聊（routeIntent==="chat"）时置位。置位后 agent-core 不向本轮注入
+   * 任何工具（toolExposureProfile "none"），provider 同时裁掉展示形式协议
+   * （RENDER_HINT/卡片/NEXT_UP 接续建议）——闲聊轮模型看不见工具就不会推销
+   * "要不要我帮你查/设/记"，看不见 NEXT_UP 协议就不会在聊天末尾挂任务胶囊。
+   * 误判兜底：用户闲聊里冒出正事，下一轮路由重分类即恢复工具；2026-10-07 追加
+   * 程序层安全网——消息带动作/查数据信号（turnNeedsToolFloor）时不置位本字段、
+   * 不做零工具隔离，两处消费口径恒一致。
+   */
+  chatLanePureChat?: boolean;
+  /**
    * 本轮是否已注入前置检索证据块（2026-09-23）：工具循环出口检查用于豁免
    * "realtime 意图 + 证据已在 prompt 里 + 模型零工具直答"的正确行为轮。
    */
@@ -352,6 +368,15 @@ export type AgentStreamOptions = {
    * - 不传则不限制（默认行为，对齐 reasoner/工具链复杂输出）
    */
   maxOutputTokens?: number;
+  /**
+   * 结构化输出模式（2026-10-07 对齐主流网关）：透传为 OpenAI 兼容的
+   * `response_format`。`json_object` 时厂商在解码层保证输出为合法 JSON——
+   * 思考模型照常思考，最终 content 不再可能被思考挤占/污染（协议层契约，
+   * 取代 prompt 祈祷式约定）。仅在对端点能力有把握的调用点置位
+   * （provider-profiles.supportsJsonMode）；端点不支持时报错，调用方需有
+   * 去掉该参数的重试通道。
+   */
+  responseFormat?: "json_object";
 };
 
 /** 工具开始执行前（用于 UI 展示模型填写的 userStatusLine 等） */

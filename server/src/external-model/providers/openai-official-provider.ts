@@ -155,22 +155,9 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
     if (effectiveStreamOpts.toolExposureProfile === "contextual" || effectiveStreamOpts.toolExposureProfile === "light") {
       out.fastProfile = true;
     }
-    // 2026-10-06 语感治理 A：对话面主生成放开采样——主模型训练分布偏中性助手腔，
-    // 靠温度+频罚对冲（示例与人格块教「怎么说」，采样让它「敢说」）。
-    // 门控 = agent-core chat 车道显式置位的 chatLaneSampling 且非 ephemeral 内部调用；
-    // 任务面/内部识情/路由/收尾汇总不置位，保持默认采样。CHAT_TEMPERATURE /
-    // CHAT_FREQUENCY_PENALTY 可覆盖。
-    const chatMainTurn =
-      effectiveStreamOpts.chatLaneSampling === true && effectiveStreamOpts.ephemeralTurn !== true;
-    if (chatMainTurn) {
-      const temperature = Number.parseFloat(process.env.CHAT_TEMPERATURE ?? "0.85");
-      if (Number.isFinite(temperature) && temperature > 0) out.temperature = temperature;
-      const frequencyPenalty = Number.parseFloat(process.env.CHAT_FREQUENCY_PENALTY ?? "0.4");
-      if (Number.isFinite(frequencyPenalty) && frequencyPenalty > 0) {
-        out.frequency_penalty = frequencyPenalty;
-      }
-    }
-    return Object.keys(out).length > 0 ? out : undefined;
+    // chat 车道采样放开（2026-10-06 语感治理 A，实现提升至基类 chatLaneSamplingExtraBody 共享）
+    const merged = { ...this.chatLaneSamplingExtraBody(effectiveStreamOpts), ...out };
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
   /**
@@ -215,7 +202,10 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
       variant: ctx.tools ? "chat-tools" : "chat",
       // 展示形式协议只属于聊天面：ephemeral 工具调用（简报润色/摘要/改写等）
       // 不注入，否则模型声明的 [RENDER_HINT:xxx] 在无剥除层的下游直透用户屏幕。
-      includeRenderProtocol: ctx.streamOpts?.ephemeralTurn !== true,
+      // 纯闲聊轮（chatLanePureChat）同样不注入——闲聊轮不需要 hint/卡片，
+      // 更不该在聊天末尾挂 NEXT_UP 任务胶囊（协议禁令压不住，直接裁源头）。
+      includeRenderProtocol:
+        ctx.streamOpts?.ephemeralTurn !== true && ctx.streamOpts?.chatLanePureChat !== true,
       sessionId: ctx.sessionId,
     });
 

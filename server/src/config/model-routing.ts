@@ -31,10 +31,15 @@ export enum TaskTier {
 
 /** 默认模型映射 */
 const DEFAULT_MODELS: Record<TaskTier, string> = {
-  [TaskTier.FLASH]: "deepseek-flash",      // DeepSeek V4.1-Flash 快模型（支持图像理解）
-  [TaskTier.PRO]: "deepseek-flash",   // 与 FLASH 同模型；PRO 档由 agent-core 显式 disableThinking:false 开思考
+  // 2026-10-07：FLASH/PRO 不再硬编码 deepseek-flash——主模型已换 MiniMax-M3，
+  // 硬编码模型名打到 MiniMax 端点必 400（unknown model），且炸的是**每一次
+  // 工具循环调用**（真机实证：天气/提醒轮全跌 emergency 无工具兜底 → 模型嘴硬
+  // "没有天气接口/没法定时"）。缺省跟随主模型（与 NANO/MINI/FULL 同策略）；
+  // 确需分档用 MODEL_FAST / MODEL_COMPLEX 或 MODEL_ROUTING_OVERRIDE 显式配置。
+  [TaskTier.FLASH]: "",
+  [TaskTier.PRO]: "",
   [TaskTier.NANO]: "",                // 空 = 跟随 provider 主模型（gpt-4.1-nano 在 DeepSeek 端点已无效）
-  [TaskTier.MINI]: "gpt-4.1-mini",
+  [TaskTier.MINI]: "",                // 空 = 跟随 provider 主模型（gpt-4.1-mini 同款问题，2026-09 已改）
   [TaskTier.FULL]: "", // 空字符串表示使用主模型（OPENAI_MODEL / MOONSHOT_MODEL）
 };
 
@@ -107,8 +112,9 @@ export function getModelForTask(tier: TaskTier): string {
   const envValue = process.env[envVar]?.trim();
   if (envValue) return envValue;
 
-  // 3. 默认值
-  if (tier === TaskTier.MINI) {
+  // 3. 默认值：空 = 跟随当前生效 provider 的主模型（各家模型名不互通，硬编码
+  //    会在该家端点上 400；MINI 2026-09 先改，FLASH/PRO 2026-10-07 跟进）。
+  if (tier === TaskTier.MINI || tier === TaskTier.FLASH || tier === TaskTier.PRO) {
     return resolvePrimaryLlmClientConfig()?.model?.trim() || DEFAULT_MODELS[tier];
   }
   return DEFAULT_MODELS[tier];

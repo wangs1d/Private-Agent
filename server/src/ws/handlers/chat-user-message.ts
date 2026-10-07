@@ -325,6 +325,12 @@ export type ChatUserMessageContext = {
   sessionId: string;
   initAsDesktopBridge: boolean;
   clientIp?: string;
+  /**
+   * 发送本条消息的连接自报设备类别（2026-10-07）：session.init 的 platform 归一，
+   * 注入【运行环境】块让 agent 知道用户此刻在手机上还是电脑上。
+   * 缺省（连接未登记/旧客户端）按 undefined 传递，prompt 侧不注入该块。
+   */
+  deviceClass?: "desktop" | "mobile";
   sendUnifiedError: (code: string, message: string, traceId?: string) => void;
 };
 
@@ -510,6 +516,7 @@ export async function handleChatUserMessageEvent(
     agentAccessMode,
     clientIp: data.clientIp || ctx.clientIp,
     clientLocation: data.clientLocation,
+    deviceClass: ctx.deviceClass,
     interruptedContext: (data as { interruptedContext?: string }).interruptedContext,
     originalMessageId: data.messageId,
     userId: data.userId ?? msgActor,
@@ -970,6 +977,7 @@ async function processBatchedMessage(
       agentAccessMode: parseAgentAccessMode(batched.agentAccessMode),
       clientIp: batched.clientIp,
       clientLocation: batched.clientLocation,
+      deviceClass: batched.deviceClass,
       ...(batched.visionFrames?.length ? { visionFrames: batched.visionFrames } : {}),
       interruptedContext: batched.interruptedContext,
       sessionId: typeof batched.sessionId === "string" ? batched.sessionId : undefined,

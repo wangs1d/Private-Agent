@@ -11,7 +11,6 @@ import {
   sliceMemoryEntriesToPromptContext,
 } from "./prompt-builder.js";
 import { buildTaskContextPrompt } from "./task-context.js";
-import { resolveTimeContextAccess } from "./time-context-gate.js";
 import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
 import { SKILL_MANAGE_CHAT_TOOLS } from "../tools/skill-manage-tools.js";
 import type { SkillManager } from "../skills/index.js";
@@ -94,6 +93,24 @@ function extractUserTimezoneFromLocation(userLocation?: string): string | undefi
   if (!userLocation) return undefined;
   const m = userLocation.match(/时区\s+([A-Za-z]+(?:\/[A-Za-z0-9_+.-]+)*)/);
   return m?.[1]?.trim() || undefined;
+}
+
+/**
+ * 【运行环境】块（2026-10-07）：用户此刻从哪类设备发消息（WS 连接自报 platform）。
+ * 手机端=小屏移动场景：回复短、别发大段排版/表格，别引导用户做桌面端操作；
+ * 电脑端=桌面场景：可正常交付卡片/多段内容。缺省（未登记/旧客户端/程序化调用）
+ * 不注入——模型按对话语境自行判断，避免错误标注。
+ */
+export function buildDeviceEnvironmentBlock(
+  deviceClass?: "desktop" | "mobile",
+): string | undefined {
+  if (deviceClass === "mobile") {
+    return "【运行环境】用户此刻在手机 App 上和你对话（小屏、可能在外出）。回复保持口语短句，不写长文/表格/多级列表；不要引导用户去电脑上做操作，涉及电脑端才能做的事就直说稍后在电脑上办。";
+  }
+  if (deviceClass === "desktop") {
+    return "【运行环境】用户此刻在电脑桌面端和你对话，可以正常交付结构化内容与卡片。";
+  }
+  return undefined;
 }
 
 /**
@@ -348,6 +365,12 @@ export type BuildPromptContextInput = {
   userLocation?: string;
   /** 常去地点背景块（DBSCAN 纯算法挖掘，agent-core 传入，零 LLM） */
   frequentPlaces?: string;
+  /**
+   * 发送消息的设备类别（2026-10-07）：desktop | mobile。WS 连接自报，
+   * 注入【运行环境】块让模型感知手机/电脑（手机端短回复、不引导桌面操作）。
+   * 缺省（程序化调用方/旧客户端）不注入。
+   */
+  deviceClass?: "desktop" | "mobile";
   personalization?: PersonalizationPromptSlice;
   /**
    * 当前 thread 非 system 消息数。用于长期快照注入门控（recall-gate）：
@@ -927,11 +950,13 @@ export class PromptContextBuilder {
 
     const promptMemory: AgentPromptMemoryContext = {
       ...fromKv,
-      // 按需时间上下文闸（2026-10-06）：【当前时间】块不再每轮注入，仅当本轮用户
-      // 消息显式涉及时刻/日期/时长/定时动作（或会话保持期内）才放行；与 provider 的
-      // 【对话时间轴】块同一判定源（time-context-gate），key 必须同为 actorId。
-      ...(resolveTimeContextAccess(input.actorId, input.userText)
-        ? { currentTime: buildCurrentTimePrompt(new Date(), extractUserTimezoneFromLocation(input.userLocation)) }
+      // 【当前时间】每轮注入（2026-10-07 用户拍板，撤 10-06 按需闸对本块的控制）：
+      // 一行动态文本，走动态层不伤 prefix cache；缺它模型会拿「没有注入时间」当
+      // 借口拒绝办事（真机实证：「明天天气」轮自称无时间无天气权限）。【对话时间轴】
+      // 块仍按需放行（abstract-chat-provider 侧 time-context-gate 判定不变）。
+      currentTime: buildCurrentTimePrompt(new Date(), extractUserTimezoneFromLocation(input.userLocation)),
+      ...(buildDeviceEnvironmentBlock(input.deviceClass)
+        ? { deviceEnvironment: buildDeviceEnvironmentBlock(input.deviceClass) }
         : {}),
       ...(personalityCore ? { personalityCore } : {}),
       ...(currentUserState ? { currentUserState } : {}),
@@ -1196,6 +1221,7 @@ export class PromptContextBuilder {
       Boolean(memory.toolPlan) ||
       Boolean(memory.skillIndex) ||
       Boolean(memory.currentTime) ||
+      Boolean(memory.deviceEnvironment) ||
       Boolean(memory.workingMemorySummary) ||
       Boolean(memory.recentConversationHistory) ||
       Boolean(memory.semanticIntent)

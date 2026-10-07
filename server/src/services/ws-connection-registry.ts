@@ -93,6 +93,17 @@ export class WsConnectionRegistry {
     return false;
   }
 
+  /**
+   * 查指定连接自报的设备类别（2026-10-07）：chat 轮注入【运行环境】块用——
+   * agent 需要知道「用户此刻在手机上还是电脑上」（手机端回复要短、别引导桌面操作）。
+   * 找不到（连接未登记/已断开）返回 undefined，调用方按缺省桌面处理或不注入。
+   */
+  deviceClassOf(sessionId: string, socket: WsLike): DeviceClass | undefined {
+    const set = this.connections.get(sessionId);
+    if (!set) return undefined;
+    return [...set].find((e) => e.socket === socket)?.deviceClass;
+  }
+
   /** 在线设备类别清单（诊断/状态接口用） */
   getOnlineDeviceClasses(sessionId: string): DeviceClass[] {
     const set = this.connections.get(sessionId);

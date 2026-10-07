@@ -4,6 +4,7 @@ import { OpenAiOfficialProvider } from "./providers/openai-official-provider.js"
 import { MiniMaxProvider } from "./providers/minimax-provider.js";
 import { FailoverChatProvider } from "./failover-chat-provider.js";
 import { instantiateKnownProvider } from "./instantiate-provider.js";
+import { resolveProviderProfile } from "./provider-profiles.js";
 import { resolveRegion } from "../config/load-server-env.js";
 
 /** 与 `EXTERNAL_MODEL_PROVIDER` 对齐 */
@@ -156,14 +157,15 @@ function defaultFailoverChainLegacy(): string {
 /**
  * 旁路直答 LLM（滚动摘要 / 记忆决策 / 画像聚合等走裸 OpenAI SDK 的调用）的请求附加参数。
  *
- * 两类默认开思考的模型需要显式关闭（裸 SDK 无 reasoning_split 分流，思考会拖慢/
- * 顶掉小 max_tokens 的结构化输出）：
+ * 2026-10-07 起委托 {@link resolveProviderProfile} 能力档案表统一判定（根修：
+ * 模型思考特性声明收敛到一张表，换模型只改档案，所有旁路调用点自适应）：
  * - MiniMax M 系默认强制思考，且思考计入 max_tokens 预算：旁路调用多为小 max_tokens
  *   的结构化输出，不关思考会导致 `<think>` 混入 content 或正文被思考饿死。M3 支持
  *   `thinking: {"type": "disabled"}`（实测 reasoning_tokens=0）；M2.x 会 accept 但仍思考。
- * - DeepSeek deepseek-flash（V4.1-Flash）2026-09 起为主模型且默认带思考链（实测
- *   简单任务多 200+ reasoning_tokens）：deepseek-chat 无思考语义时代旁路调用从不需要
- *   表态，迁移后必须显式关闭，否则记忆精排等 800ms 级超时热路径全部拖爆。
+ * - openai 槽位托管 DeepSeek deepseek-flash 时默认带思考链（实测简单任务多
+ *   200+ reasoning_tokens），必须显式关闭，否则记忆精排等 800ms 级超时热路径全部拖爆。
+ * - moonshot-kimi k2.5+ 默认开思考——与 MoonshotKimiProvider 对每次调用的默认
+ *   （thinking:disabled）对齐，旁路直连不再漏声明。
  * 其余 provider 返回空对象，保持零侵入。
  */
 export function bypassChatRequestExtras(
@@ -171,9 +173,9 @@ export function bypassChatRequestExtras(
 ): Record<string, unknown> {
   const binding = resolvePrimaryExternalModelBinding(env);
   const model = (binding?.model ?? env.OPENAI_MODEL ?? "").toLowerCase();
-  return binding?.providerId === "minimax" || model.includes("deepseek-flash")
-    ? { thinking: { type: "disabled" } as const }
-    : {};
+  // 无 binding（未配任何密钥）时按 openai 槽位解释 OPENAI_MODEL，保留旧判定语义。
+  const profile = resolveProviderProfile(binding?.providerId ?? "openai");
+  return profile.bypassRequestExtras(model);
 }
 
 /**

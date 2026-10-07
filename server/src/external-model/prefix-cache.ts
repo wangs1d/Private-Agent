@@ -14,7 +14,7 @@ export type PrefixCacheRequest = {
   prompt_cache_retention?: "24h";
 };
 
-export type PromptCacheMode = "none" | "explicit-key" | "implicit-prefix";
+export type PromptCacheMode = "none" | "explicit-key" | "explicit-breakpoint" | "implicit-prefix";
 
 export type PromptCacheProfile = {
   mode: PromptCacheMode;
@@ -114,10 +114,43 @@ function resolvePromptCacheProfile(providerId: string, model: string): PromptCac
     };
   }
 
+  if (normalized === "minimax") {
+    // MiniMax 实测（2026-10-07 受控探针）：服务端多副本缓存不一致，被动缓存对
+    // 字节级相同请求也会随机 128↔全量命中。显式断点（anthropic 风格块状
+    // system + cache_control）经 OpenAI 兼容端点实测被接受（200 正常返回），
+    // 5 分钟滚动 TTL + 命中续期 + 断点计费口径是白捡的；MINIMAX_EXPLICIT_CACHE_ENABLED=0
+    // 回退隐式前缀模式。
+    return {
+      mode: envEnabled("MINIMAX_EXPLICIT_CACHE_ENABLED", true)
+        ? "explicit-breakpoint"
+        : "implicit-prefix",
+      namespace: process.env.MINIMAX_PROMPT_CACHE_NAMESPACE?.trim() || DEFAULT_NAMESPACE,
+    };
+  }
+
   return {
     mode: envEnabled("EXTERNAL_MODEL_PREFIX_CACHE_ENABLED", true) ? "implicit-prefix" : "none",
     namespace: process.env.EXTERNAL_MODEL_PROMPT_CACHE_NAMESPACE?.trim() || DEFAULT_NAMESPACE,
   };
+}
+
+/**
+ * 显式缓存断点（anthropic 风格）：把 system 消息转为块状 content 并在块尾打
+ * `cache_control: {type:"ephemeral"}`，断点覆盖其前全部前缀（tools → system →
+ * messages 顺序中的 system 段）。OpenAI Node SDK 类型不含 cache_control 字段，
+ * 运行时按 JSON 原样透传，端点不识别该字段时也只是多余 key（实测 MiniMax、
+ * Anthropic 兼容端点均接受）。
+ */
+function markCacheBreakpoint(msg: ChatCompletionMessageParam): ChatCompletionMessageParam {
+  if (typeof msg.content !== "string" || !msg.content) return msg;
+  const block = {
+    role: msg.role,
+    content: [
+      { type: "text", text: msg.content, cache_control: { type: "ephemeral" } },
+    ],
+  };
+  // OpenAI SDK 类型不含 cache_control 字段；运行时 JSON 原样透传（MiniMax/Anthropic 兼容端点实测均接受）
+  return block as unknown as ChatCompletionMessageParam;
 }
 
 function resolvePromptCacheRetention(profile: PromptCacheProfile): "24h" | undefined {
@@ -192,8 +225,12 @@ export function preparePromptCachePlan(
   // 放在请求头部（任何记忆变化都会使整段前缀缓存失效），改经 tailDynamicContext
   // 沉底注入到「最新 user 消息尾部」。DeepSeek 等 provider 的自动 prefix cache
   // 因此能命中稳定的 system+历史对话前缀，只有尾部动态增量产生新的缓存放量。
+  // explicit-breakpoint：在 stable system 尾打显式缓存断点（工具循环与纯文本
+  // 分支都经 applyPromptCacheMessages 以此替换头部 system，单一出口两路生效）。
   const requestSystemMessages: ChatCompletionMessageParam[] = [
-    { role: "system", content: stableToUse },
+    profile.mode === "explicit-breakpoint"
+      ? markCacheBreakpoint({ role: "system", content: stableToUse })
+      : { role: "system", content: stableToUse },
   ];
 
   const promptCache =

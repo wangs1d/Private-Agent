@@ -182,3 +182,102 @@ test("路由效率：同文本命中 5 分钟缓存，不重复调用 LLM", asyn
   await routeTurnByLlm(provider, "sess-cache", "今天黄金价格多少");
   assert.equal(calls.count, 1);
 });
+
+/* ---------------- 网关式重试（2026-10-07 对齐主流）---------------- */
+
+/** 可编排的假分类器：按脚本依次返回（值/抛错/挂起），记录调用参数。 */
+function scriptedProvider(
+  script: Array<
+    | { kind: "return"; value: string }
+    | { kind: "throw"; error: Error }
+    | { kind: "hang"; ms: number }
+  >,
+  providerId?: string,
+) {
+  const calls = { count: 0, opts: [] as Array<Record<string, unknown>> };
+  const step = (i: number) => script[Math.min(i, script.length - 1)]!;
+  const provider = {
+    id: providerId,
+    isEnabled: () => true,
+    streamCompletion: async (
+      _sid: string,
+      _turn: { text: string },
+      _onDelta: unknown,
+      _x: unknown,
+      opts?: Record<string, unknown>,
+    ) => {
+      const s = step(calls.count);
+      calls.count += 1;
+      calls.opts.push(opts ?? {});
+      if (s.kind === "throw") throw s.error;
+      if (s.kind === "hang") await new Promise((r) => setTimeout(r, s.ms));
+      return s.kind === "return" ? s.value : "";
+    },
+  };
+  return { provider: provider as never, calls };
+}
+
+const INTENT_JSON = JSON.stringify({ intent: "chat", confidence: 0.9 });
+
+test("网关式重试：超时一次自动重试，第二次成功则正常出语义决策", async () => {
+  process.env.LLM_ROUTE_TIMEOUT_MS = "30";
+  try {
+    const { provider, calls } = scriptedProvider([
+      { kind: "hang", ms: 200 },
+      { kind: "return", value: INTENT_JSON },
+    ]);
+    const decision = await routeTurnByLlm(provider, "sess-retry-1", "黄金重试用例一");
+    assert.equal(decision.plane, "chat");
+    assert.equal(calls.count, 2, "超时后应原参重试一次");
+  } finally {
+    delete process.env.LLM_ROUTE_TIMEOUT_MS;
+  }
+});
+
+test("网关式重试：坏输出一次自动重试，第二次可解析则正常决策", async () => {
+  const { provider, calls } = scriptedProvider([
+    { kind: "return", value: "完全不是JSON" },
+    { kind: "return", value: INTENT_JSON },
+  ]);
+  const decision = await routeTurnByLlm(provider, "sess-retry-2", "黄金重试用例二");
+  assert.equal(decision.plane, "chat");
+  assert.equal(calls.count, 2);
+});
+
+test("jsonMode 自适应：带 response_format 抛错 → 去参重试；正常端点透传 json_object", async () => {
+  // 已登记 provider（openai）→ 档案 jsonMode=true：首试应携带 responseFormat
+  const ok = scriptedProvider([{ kind: "return", value: INTENT_JSON }], "openai");
+  await routeTurnByLlm(ok.provider, "sess-json-1", "黄金json透传用例");
+  assert.equal(ok.calls.opts[0]?.responseFormat, "json_object", "已登记端点应透传 response_format");
+  assert.equal(ok.calls.opts[0]?.maxOutputTokens, 192, "预算应来自档案");
+
+  // 端点拒绝 response_format → 自适应去参重试成功
+  const adaptive = scriptedProvider(
+    [
+      { kind: "throw", error: new Error("response_format not supported") },
+      { kind: "return", value: INTENT_JSON },
+    ],
+    "openai",
+  );
+  const decision = await routeTurnByLlm(adaptive.provider, "sess-json-2", "黄金json自适应用例");
+  assert.equal(decision.plane, "chat");
+  assert.equal(adaptive.calls.count, 2);
+  assert.equal(adaptive.calls.opts[0]?.responseFormat, "json_object");
+  assert.equal(
+    adaptive.calls.opts[1]?.responseFormat,
+    undefined,
+    "异常重试应去掉 response_format（防端点不支持死循环）",
+  );
+});
+
+test("jsonMode 缺省安全：未登记 provider 不传 response_format，两次异常即降级", async () => {
+  const { provider, calls } = scriptedProvider([
+    { kind: "throw", error: new Error("down") },
+    { kind: "throw", error: new Error("down again") },
+  ]);
+  const decision = await routeTurnByLlm(provider, "sess-retry-3", "黄金重试用例三");
+  assert.equal(calls.count, 2, "两次尝试机会");
+  assert.equal(calls.opts[0]?.responseFormat, undefined, "未登记端点不冒险传 response_format");
+  assert.equal(decision.plane, "task", "两试皆败才保守降级");
+  assert.ok(decision.reasons.some((r) => r.includes("call_failed")));
+});

@@ -5,8 +5,9 @@ import "package:flutter/foundation.dart";
 import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
-import "../core/services/ws_chat_service.dart";
 import "../core/models/chat_models.dart";
+import "../core/services/ws_chat_service.dart";
+import "../core/vision/vision_wire_frame.dart";
 
 // ===== 真·分绿泡（2026-09-28）：气泡拆分消息 id 工具（与桌面端 main.dart 同构）=====
 final RegExp _bubbleIdPattern = RegExp(r"^assistant-(.+)-b(\d+)$");
@@ -45,6 +46,12 @@ class MobileChatController extends ChangeNotifier {
 
   /// 连接状态文案(用于顶栏状态点)。
   bool isConnected = false;
+
+  /// 连接状态通知器(「我的」页账号卡监听展示在线/离线)。
+  final ValueNotifier<bool> connection = ValueNotifier<bool>(false);
+
+  /// 底层 WS 服务(邮箱页等同源复用,避免双连接)。
+  WsChatService get service => _service;
 
   /// 错误提示(轻提示用)。
   String? errorMessage;
@@ -108,22 +115,27 @@ class MobileChatController extends ChangeNotifier {
     _service.sendEvent("session.init", init);
   }
 
-  /// 发送一条用户消息(空/纯空白忽略)。
-  Future<void> send(String raw) async {
+  /// 发送一条用户消息(空文本+无图忽略)。携带 [visionFrames] 时与桌面端
+  /// 同协议走 `chat.user_message.visionFrames`(base64,服务端视觉管线)。
+  /// 返回落库的用户消息 id(未发送返回 null),供调用方挂气泡缩略图。
+  Future<String?> send(String raw, {List<VisionWireFrame>? visionFrames}) async {
     final String text = raw.trim();
-    if (text.isEmpty) return;
+    final bool hasFrames = visionFrames != null && visionFrames.isNotEmpty;
+    if (text.isEmpty && !hasFrames) return null;
     if (!_service.isConnected) {
       _service.retryConnect();
       errorMessage = "正在连接服务器,请稍后再发";
       notifyListeners();
-      return;
+      return null;
     }
     final ChatMessage userMsg = ChatMessage(
       messageId: "msg-${DateTime.now().microsecondsSinceEpoch}",
       sessionId: ApiConfig.effectiveActorId,
       role: "user",
-      text: text,
+      // 纯图无文字时气泡显示「（见图）」,与桌面端一致
+      text: text.isEmpty && hasFrames ? "（见图）" : text,
       timestamp: DateTime.now(),
+      attachmentImageCount: hasFrames ? visionFrames.length : 0,
     );
     messages.add(userMsg);
     isProcessing = true;
@@ -133,13 +145,19 @@ class MobileChatController extends ChangeNotifier {
     final Map<String, dynamic> payload = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
       "messageId": userMsg.messageId,
+      // 纯图轮 text 置空(服务端按 visionFrames 走视觉分档),与桌面端一致
       "text": text,
       "timestamp": DateTime.now().toIso8601String(),
       "agentAccessMode": "full",
       // 与 session.init 同源：登录邮箱优先，保证消息落在本账号车道
       "userId": ApiConfig.effectiveActorId,
     };
+    if (hasFrames) {
+      payload["visionFrames"] =
+          visionFrames.map((VisionWireFrame f) => f.toJson()).toList();
+    }
     _service.sendEvent("chat.user_message", payload);
+    return userMsg.messageId;
   }
 
   /// 测试入口：直接驱动 WS 事件（生产路径走 [_subscription] → 本方法）。
@@ -153,10 +171,12 @@ class MobileChatController extends ChangeNotifier {
     switch (type) {
       case "ws_connected":
         isConnected = true;
+        connection.value = true;
         notifyListeners();
       case "ws_disconnected":
       case "connection_error":
         isConnected = false;
+        connection.value = false;
         notifyListeners();
       case "chat.turn_started":
       case "chat.assistant_interim":
@@ -527,6 +547,7 @@ class MobileChatController extends ChangeNotifier {
   void dispose() {
     unawaited(_subscription?.cancel());
     _service.close();
+    connection.dispose();
     super.dispose();
   }
 }

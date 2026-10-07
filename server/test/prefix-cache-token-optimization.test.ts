@@ -162,3 +162,72 @@ describe("P1-2 搜索族 LLM 视图裁剪", () => {
     assert.equal(original.items.length, 12, "归档原文应保真 12 条");
   });
 });
+
+describe("explicit-breakpoint 显式缓存断点（2026-10-07）", () => {
+  const ENV_KEY = "MINIMAX_EXPLICIT_CACHE_ENABLED";
+  let saved: string | undefined;
+  const withEnv = (value: string | undefined, fn: () => void) => {
+    saved = process.env[ENV_KEY];
+    if (value === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = value;
+    try {
+      fn();
+    } finally {
+      if (saved === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = saved;
+    }
+  };
+
+  it("minimax：stable system 转块状 content 并带 cache_control 断点", () => {
+    withEnv(undefined, () => {
+      const plan = preparePromptCachePlan({
+        providerId: "minimax",
+        model: "MiniMax-M3",
+        baseSystemPrompt: "你是私人管家。",
+        memory: buildMemory(1),
+        variant: "chat-tools",
+        sessionId: "sess-bp-a",
+      });
+      const head = plan.requestSystemMessages[0]!;
+      const parts = head.content as Array<{ type: string; text: string; cache_control?: { type: string } }>;
+      assert.ok(Array.isArray(head.content), "minimax 的 system content 应为块状数组");
+      assert.equal(parts.length, 1);
+      assert.equal(parts[0]!.type, "text");
+      assert.ok(parts[0]!.text.length > 0, "stable 层文本应在块内");
+      assert.deepEqual(parts[0]!.cache_control, { type: "ephemeral" }, "块尾应打显式缓存断点");
+      // 同会话冻结语义保持：第二轮（记忆变化）断点块字节一致
+      const plan2 = preparePromptCachePlan({
+        providerId: "minimax",
+        model: "MiniMax-M3",
+        baseSystemPrompt: "你是私人管家。",
+        memory: buildMemory(2),
+        variant: "chat-tools",
+        sessionId: "sess-bp-a",
+      });
+      assert.equal(
+        JSON.stringify(plan2.requestSystemMessages),
+        JSON.stringify(plan.requestSystemMessages),
+        "同会话断点块应字节一致（前缀缓存前提）",
+      );
+    });
+  });
+
+  it("minimax 开关关闭 / 其他 provider：system 保持字符串（不受断点影响）", () => {
+    withEnv("0", () => {
+      const plan = preparePromptCachePlan({
+        providerId: "minimax",
+        model: "MiniMax-M3",
+        baseSystemPrompt: "你是私人管家。",
+        variant: "chat",
+      });
+      assert.equal(typeof plan.requestSystemMessages[0]!.content, "string", "开关关闭应回退隐式模式");
+    });
+    const planDeepseek = preparePromptCachePlan({
+      providerId: "deepseek",
+      model: "deepseek-flash",
+      baseSystemPrompt: "你是私人管家。",
+      variant: "chat",
+    });
+    assert.equal(typeof planDeepseek.requestSystemMessages[0]!.content, "string", "deepseek 不应被打断点");
+  });
+});

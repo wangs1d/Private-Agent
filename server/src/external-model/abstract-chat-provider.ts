@@ -9,6 +9,7 @@ import {
 } from "./chat-thread-store.js";
 import type { ChatThreadStore } from "./chat-thread-store.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
+import { isUnknownModelError } from "./chat-thread-sanitize.js";
 import { resolveTimeContextAccess } from "../agent/time-context-gate.js";
 import { modelSupportsVision } from "./vision-support.js";
 import {
@@ -187,6 +188,31 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     return undefined;
   }
 
+  /**
+   * chat 车道采样放开（2026-10-06 语感治理 A，2026-10-07 提升为基类共享）：
+   * 主模型训练分布偏中性助手腔，靠温度+频罚对冲（示例与人格块教「怎么说」，
+   * 采样让它「敢说」）。门控 = agent-core chat 车道显式置位的 chatLaneSampling
+   * 且非 ephemeral 内部调用；任务面/内部识情/路由/收尾汇总不置位，保持默认采样。
+   * CHAT_TEMPERATURE / CHAT_FREQUENCY_PENALTY 可覆盖。各 provider 在自己的
+   * buildExtraBody 里 merge 本 helper 返回值（此前仅 openai-official 内联实现，
+   * MiniMax/Kimi 换模型后采样治理静默失效）。
+   */
+  protected chatLaneSamplingExtraBody(
+    effectiveStreamOpts: AgentStreamOptions,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const chatMainTurn =
+      effectiveStreamOpts.chatLaneSampling === true && effectiveStreamOpts.ephemeralTurn !== true;
+    if (!chatMainTurn) return out;
+    const temperature = Number.parseFloat(process.env.CHAT_TEMPERATURE ?? "0.85");
+    if (Number.isFinite(temperature) && temperature > 0) out.temperature = temperature;
+    const frequencyPenalty = Number.parseFloat(process.env.CHAT_FREQUENCY_PENALTY ?? "0.4");
+    if (Number.isFinite(frequencyPenalty) && frequencyPenalty > 0) {
+      out.frequency_penalty = frequencyPenalty;
+    }
+    return out;
+  }
+
   /** 派生 effectiveStreamOpts。默认原样返回；子类可覆写（如 Kimi 强制 disableThinking）。 */
   protected resolveEffectiveStreamOpts(streamOpts: AgentStreamOptions | undefined): AgentStreamOptions {
     return streamOpts ?? {};
@@ -211,6 +237,52 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
   // ── 模板方法（固化防串台逻辑的唯一入口） ──────────────────────────
 
   async streamCompletion(
+    sessionId: string,
+    userTurn: ChatUserTurn,
+    onDelta: StreamDeltaHandler,
+    tools?: ChatToolExecutionContext,
+    streamOpts?: AgentStreamOptions,
+  ): Promise<string> {
+    // 模型名自愈（2026-10-07 事故根治配套）：tier 分档的 modelOverride 模型名与
+    // 当前端点不匹配（换主模型后遗留的硬编码，如 deepseek-flash → MiniMax 端点）
+    // 时，请求在发出前就 400，整轮工具循环报废、跌 emergency 无工具兜底——
+    // 用户看到的是"agent 不调工具"，实际是模型根本没收到工具清单。
+    // 此处剥掉 override 回落 provider 主模型重试一次：坏配置自动降级为可用请求，
+    // 同类事故不再有全轮报废形态。仅当首试尚未流式输出任何内容时重试
+    // （400 unknown model 必然发生在请求创建期，此时零 delta，重试不会重复推送）；
+    // 线程防重由 clientMessageId 的 removeUserMessageAndAfter 幂等承接。
+    if (streamOpts?.modelOverride?.trim()) {
+      // 流式已推送检测：一旦有任何 delta 出去就不再自愈重试（400 unknown model
+      // 必然发生在请求创建期、零 delta 阶段，此守卫只为防御误匹配误重试）。
+      let streamedAny = false;
+      const guardedDelta: StreamDeltaHandler = (delta) => {
+        if (delta) streamedAny = true;
+        onDelta(delta);
+      };
+      try {
+        return await this.streamCompletionTurn(sessionId, userTurn, guardedDelta, tools, streamOpts);
+      } catch (e) {
+        // 线程防重：非 ephemeral 且无 clientMessageId 时，重试会在线程里重复 push
+        // user 消息（removeUserMessageAndAfter 无幂等键）——此类调用方不重试。
+        const threadSafeRetry =
+          streamOpts?.ephemeralTurn === true || !!userTurn.clientMessageId;
+        if (isUnknownModelError(e) && !streamedAny && threadSafeRetry) {
+          console.warn(
+            `[abstract-chat-provider] modelOverride "${streamOpts.modelOverride}" 被端点拒绝（unknown model），` +
+              `剥 override 回落主模型重试一次`,
+          );
+          return this.streamCompletionTurn(sessionId, userTurn, onDelta, tools, {
+            ...streamOpts,
+            modelOverride: undefined,
+          });
+        }
+        throw e;
+      }
+    }
+    return this.streamCompletionTurn(sessionId, userTurn, onDelta, tools, streamOpts);
+  }
+
+  private async streamCompletionTurn(
     sessionId: string,
     userTurn: ChatUserTurn,
     onDelta: StreamDeltaHandler,
@@ -437,6 +509,9 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         messages: finalMessages,
         stream: true,
         ...(streamOpts?.maxOutputTokens ? { max_tokens: streamOpts.maxOutputTokens } : {}),
+        // 结构化输出契约（2026-10-07）：OpenAI 兼容 response_format 透传，
+        // JSON 合法性由厂商解码层保证（对齐主流网关的结构化输出语义）。
+        ...(streamOpts?.responseFormat ? { response_format: { type: streamOpts.responseFormat } } : {}),
         ...(promptPlan.promptCache ?? {}),
         ...(this.applyExtraBodyToPlainRequest() ? (extraBody ?? {}) : {}),
       };

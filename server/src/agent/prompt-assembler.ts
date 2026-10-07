@@ -279,6 +279,8 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   if (m.onboardingHint) dynamicContext.push(m.onboardingHint);
   if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
+  // 运行环境（手机/电脑）：紧贴时间块，同属「此刻事实」动态层
+  if (m.deviceEnvironment) dynamicContext.push(m.deviceEnvironment);
   if (m.conversationTimeline) dynamicContext.push(m.conversationTimeline);
   const replyStyleGuide = buildReplyStyleGuide(m);
   if (replyStyleGuide) dynamicContext.push(replyStyleGuide);

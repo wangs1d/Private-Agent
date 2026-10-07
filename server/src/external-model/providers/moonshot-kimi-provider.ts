@@ -83,7 +83,8 @@ export class MoonshotKimiProvider extends AbstractChatProvider {
       variant: ctx.tools ? "chat-tools" : "chat",
       // 展示形式协议只属于聊天面（与 openai-official 同规则）：ephemeral
       // 工具调用不注入，防止 [RENDER_HINT:xxx] 透进无剥除层的下游。
-      includeRenderProtocol: ctx.streamOpts?.ephemeralTurn !== true,
+      includeRenderProtocol:
+        ctx.streamOpts?.ephemeralTurn !== true && ctx.streamOpts?.chatLanePureChat !== true,
       sessionId: ctx.sessionId,
     });
     return { sysContent: promptPlan.fullSystemPrompt, promptPlan };
@@ -94,7 +95,9 @@ export class MoonshotKimiProvider extends AbstractChatProvider {
   }
 
   protected buildExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> | undefined {
-    return kimiExtraBody(effectiveStreamOpts);
+    // chat 车道采样放开（基类共享；2026-10-07 前未接，换 Kimi 时语感治理采样同样静默失效）
+    const merged = { ...kimiExtraBody(effectiveStreamOpts), ...this.chatLaneSamplingExtraBody(effectiveStreamOpts) };
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
   protected applyExtraBodyToPlainRequest(): boolean {

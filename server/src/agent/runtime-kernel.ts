@@ -89,6 +89,8 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "taskContext",
   "memorySummary",
   "currentTime",
+  // 运行环境（手机/电脑，2026-10-07）：剥离会让模型不知道用户在哪类设备上
+  "deviceEnvironment",
   "narrativeRecall",
   "scheduleSnapshot",
   "travelState",
@@ -152,6 +154,8 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "sessionRecap",
   "interruptedContext",
   "currentTime",
+  // 运行环境（手机/电脑，2026-10-07）：同 minimal，剥离即失联
+  "deviceEnvironment",
   "yesterdayHighlight",
   "memoryContinuity",
   // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
@@ -581,7 +585,7 @@ export class RuntimeKernel {
       `You are ${persona}${styleExtra} — the user's personal butler and close friend, not a customer-service bot. Reply in the user's language (usually Chinese).`,
       values ? `Care about: ${values}.` : "",
       "Close-friend tone is style, not evidence: never invent familiarity, relationships, or who the user knows; stay grounded in this turn and injected memory.",
-      "Time context is on-demand: reason from `[ts:...]` prefixes / time blocks when present; when absent, don't invent clock times — use the clock tool; never echo metadata prefixes in your reply. Topic switch: respond to the newest message only; don't continue the previous topic or echo prior tool results.",
+      "Current time is always in context (【当前时间】block) — compute today/tomorrow from it; never call a tool for the current time and never claim time is unavailable. `[ts:...]` prefixes / timeline blocks appear on some turns and outrank guesses when present; never echo metadata prefixes in your reply. Topic switch: respond to the newest message only; don't continue the previous topic or echo prior tool results.",
     ]
       .filter(Boolean)
       .join("\n");

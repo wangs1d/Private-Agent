@@ -1,9 +1,13 @@
+import "dart:async";
+
 import "package:flutter/material.dart";
 
+import "core/config/api_config.dart";
+import "core/services/account_session_store.dart";
+import "core/services/access_auth_api.dart";
+import "mobile_ui/mobile_home.dart";
+import "mobile_ui/mobile_login_page.dart";
 import "mobile_ui/mobile_theme.dart";
-import "mobile_ui/mobile_chat_page.dart";
-import "mobile_ui/mobile_chat_controller.dart";
-import "mobile_ui/mobile_profile_page.dart";
 
 /// 手机端应用入口(Android / iOS)。
 ///
@@ -16,16 +20,20 @@ import "mobile_ui/mobile_profile_page.dart";
 ///   `flutter run -t lib/main_mobile.dart --dart-define=HTTP_BASE=http://10.0.2.2:3000`
 /// - 真机(手机与后端在同一局域网)：
 ///   改用手机连的局域网 IP,如 `--dart-define=HTTP_BASE=http://192.168.1.100:3000`
-/// - 指定登录账号(与桌面端同一账号以同步数据)：
-///   `--dart-define=USER_ID=your-login-id`
 ///
-/// 底部导航：「对话」 / 「我的」(账号、主题、每日简报、退出登录)。
+/// 登录门禁：仅提供邮箱登录（与桌面端 /accounts/web 两步式同协议）。
+/// 登录邮箱写入 [ApiConfig.runtimeUserId]——WS `session.init`/HTTP/本地存储
+/// 全链按该 userId 落库，与桌面端登录同一账号即共享全部数据。已登录会话
+/// 读盘恢复（account_session.json），退出登录回到登录页。
+///
+/// 底部导航：「对话」 / 「日程」 / 「我的」(简报、邮箱、设备、审批、
+/// 模型服务、帮助反馈、主题、退出登录)。功能与桌面端同源同数据,详见 mobile_home.dart。
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MobileApp());
 }
 
-/// 手机端根组件：白黑极简主题 + 底部导航(对话 / 我的)。
+/// 手机端根组件：登录门禁 + 白黑极简主题 + 全功能主壳。
 class MobileApp extends StatefulWidget {
   const MobileApp({super.key});
 
@@ -37,27 +45,57 @@ class _MobileAppState extends State<MobileApp> {
   /// 主题模式(亮 / 暗 / 跟随系统)。
   final ValueNotifier<ThemeMode> _themeMode = ValueNotifier(ThemeMode.system);
 
-  /// 当前底部导航页。
-  int _tabIndex = 0;
+  /// 登录态恢复中（读盘未出前沿用空白页，防闪登录页）。
+  bool _booting = true;
 
-  /// 全局共享的对话控制器(供「我的」页退出登录时清空会话)。
-  late final MobileChatController _chatController;
+  /// 已登录（本机有会话或本次登录成功）。
+  bool _loggedIn = false;
 
   @override
   void initState() {
     super.initState();
-    _chatController = MobileChatController();
+    _restoreSession();
+  }
+
+  /// 启动恢复本机登录态：有会话先把邮箱写进运行时身份覆盖，
+  /// 再进主壳——保证主壳里所有请求第一时间就带本账号身份。
+  Future<void> _restoreSession() async {
+    await AccountSessionStore.instance.load();
+    // 设备凭据顺手加载（服务端开访问鉴权时 HTTP/WS 自动附带 Bearer token）
+    await AccessCredentialStore.instance.load();
+    final String? email = AccountSessionStore.instance.email;
+    if (!mounted) return;
+    setState(() {
+      if (email != null && email.isNotEmpty) {
+        ApiConfig.runtimeUserId = email;
+        _loggedIn = true;
+      }
+      _booting = false;
+    });
+  }
+
+  /// 登录页回调：落盘会话 → 写运行时身份覆盖 → 切入主壳。
+  /// 身份覆盖必须先于主壳构建，首个 `session.init`/HTTP 才带登录邮箱。
+  Future<void> _onLoggedIn(String email) async {
+    await AccountSessionStore.instance.save(email);
+    ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
+    if (!mounted) return;
+    setState(() => _loggedIn = true);
+  }
+
+  /// 退出登录：清本机会话与运行时身份覆盖，回登录页。
+  /// 主壳被换下时其聊天控制器随 dispose 断开 WS。
+  Future<void> _onLogout() async {
+    await AccountSessionStore.instance.clear();
+    ApiConfig.runtimeUserId = null;
+    if (!mounted) return;
+    setState(() => _loggedIn = false);
   }
 
   @override
   void dispose() {
     _themeMode.dispose();
-    _chatController.dispose();
     super.dispose();
-  }
-
-  void _logout() {
-    _chatController.reset();
   }
 
   @override
@@ -71,52 +109,27 @@ class _MobileAppState extends State<MobileApp> {
           theme: MobileTheme.light,
           darkTheme: MobileTheme.dark,
           themeMode: mode,
-          home: Scaffold(
-            body: IndexedStack(
-              index: _tabIndex,
-              children: <Widget>[
-                MobileChatPage(controller: _chatController),
-                MobileProfilePage(
-                  themeMode: mode,
-                  onThemeModeChanged: (ThemeMode m) {
-                    _themeMode.value = m;
-                  },
-                  onLogout: _logout,
-                ),
-              ],
-            ),
-            bottomNavigationBar: _buildBottomBar(context),
-          ),
+          home: _buildHome(mode),
         );
       },
     );
   }
 
-  Widget _buildBottomBar(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return BottomNavigationBar(
-      currentIndex: _tabIndex,
-      onTap: (int i) => setState(() => _tabIndex = i),
-      type: BottomNavigationBarType.fixed,
-      backgroundColor: cs.surface,
-      selectedItemColor: cs.primary,
-      unselectedItemColor: Theme.of(context).brightness == Brightness.dark
-          ? const Color(0xFF6C6C75)
-          : const Color(0xFFA6A6AF),
-      selectedFontSize: 11,
-      unselectedFontSize: 11,
-      items: const <BottomNavigationBarItem>[
-        BottomNavigationBarItem(
-          icon: Icon(Icons.chat_bubble_outline_rounded),
-          activeIcon: Icon(Icons.chat_bubble_rounded),
-          label: "对话",
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.person_outline_rounded),
-          activeIcon: Icon(Icons.person_rounded),
-          label: "我的",
-        ),
-      ],
+  Widget _buildHome(ThemeMode mode) {
+    if (_booting) {
+      // 读盘未出前给一帧纯背景，避免登录页闪现
+      final MobilePalette p = MobileTheme.of(context);
+      return Scaffold(backgroundColor: p.background, body: const SizedBox.shrink());
+    }
+    if (!_loggedIn) {
+      return MobileLoginPage(
+        onLoggedIn: (String email) => unawaited(_onLoggedIn(email)),
+      );
+    }
+    return MobileHomePage(
+      themeMode: mode,
+      onThemeModeChanged: (ThemeMode m) => _themeMode.value = m,
+      onLogout: _onLogout,
     );
   }
 }

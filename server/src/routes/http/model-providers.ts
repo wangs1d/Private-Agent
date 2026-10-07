@@ -14,6 +14,16 @@ export type ModelProviderChoiceDto = {
   recommended?: boolean;
 };
 
+/**
+ * 前缀缓存行为能力位（2026-10-07）：声明该 provider 服务端缓存的路由形态，
+ * 供选型/成本侧参考。实测依据见 scripts/report-cache-hit.ts 的命中率报表。
+ */
+export type ModelProviderPromptCacheDto = {
+  /** shared=集群共享隐式缓存（DeepSeek）；per-node=副本各自缓存（MiniMax，命中随机）；explicit=支持显式断点标记 */
+  mode: "shared" | "per-node" | "explicit" | "none";
+  note?: string;
+};
+
 export type ModelProviderDto = {
   id: string;
   name: string;
@@ -24,6 +34,7 @@ export type ModelProviderDto = {
   consoleUrl?: string;
   guide?: string[];
   note?: string;
+  promptCache?: ModelProviderPromptCacheDto;
 };
 
 export type ModelProviderCatalog = {

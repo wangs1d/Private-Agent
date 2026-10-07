@@ -10,11 +10,12 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
-    // CameraX 的 ProcessCameraProvider 暴露 ListenableFuture 类型，但生态里有依赖把
-    // listenablefuture 替换成 9999.0-empty 空包，必须强制回真包（仅含接口，无冲突）
+    // CameraX 的 ProcessCameraProvider 暴露 ListenableFuture 类型。占位包
+    // listenablefuture:1.0 与 guava 33+（自带 ListenableFuture）重复类冲突
+    // （checkDebugDuplicateClasses 炸），全局排除占位包，类型统一由 guava 提供。
     configurations.all {
         resolutionStrategy {
-            force("com.google.guava:listenablefuture:1.0")
+            exclude(mapOf("group" to "com.google.guava", "module" to "listenablefuture"))
         }
     }
 
@@ -61,8 +62,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-service:2.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    // CameraX ProcessCameraProvider.getInstance 返回 ListenableFuture
-    implementation("com.google.guava:listenablefuture:1.0")
+    // CameraX ProcessCameraProvider.getInstance 返回 ListenableFuture（由 guava 提供）
+    implementation("com.google.guava:guava:33.5.0-android")
 }
 
 flutter {

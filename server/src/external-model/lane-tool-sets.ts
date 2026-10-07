@@ -36,9 +36,13 @@ export function isStaticToolArchEnabled(): boolean {
  * brain.recall 由 setMemoryChatTools 在 bootstrap 注入，测试环境缺省属正常。
  */
 export const CHAT_LANE_CORE_NAMES: readonly string[] = [
-  // 时间/位置（感知）
+  // 时间/位置/天气（感知）
   "clock.get_current_time",
   "clock.get_user_location",
+  // 2026-10-07：此前只在 task 车道，chat 车道模型看不到天气工具，
+  // 实证会嘴硬「没有联网天气接口的访问权限」而非 discover——天气是对话高频
+  // 动作，提为 chat 常驻（profile.update 同款教训）。
+  "weather.get_local",
   // 联网信息（只读）
   "search_web",
   "fetch_web",
@@ -143,6 +147,7 @@ const CHAT_FULL_SCHEMA_NAMES: ReadonlySet<string> = new Set([
   "reminder.plan",
   "calendar.create_from_text",
   "clock.get_current_time",
+  "weather.get_local",
   "messages.reply",
 ]);
 

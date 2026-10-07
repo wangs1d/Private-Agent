@@ -131,6 +131,23 @@ export function isToolChoiceRejectedError(err: unknown): boolean {
   return /tool_choice|tool choice/i.test(msg) && /not support|does not support|invalid/i.test(msg);
 }
 
+/**
+ * 端点不认识请求里的模型名（2026-10-07 事故根治配套）：
+ * MiniMax 端点收到 deepseek-flash → 400 "invalid params, unknown model 'deepseek-flash' (2013)"。
+ * 此前这类 400 直接炸穿工具循环 → 整轮跌 emergency 无工具兜底 → 模型嘴硬
+ * "没有天气接口/没法定时"（真机实证）。命中后由调用方剥掉 modelOverride
+ * 回落 provider 主模型重试一次（模型名不跨厂商通用，任何写死的 tier 模型名
+ * 在换主模型后都会踩中本类错误）。
+ */
+export function isUnknownModelError(err: unknown): boolean {
+  const status = (err as { status?: number }).status;
+  if (status !== 400 && status !== 404) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /unknown model|invalid model|model[_ ]not[_ ]found|not a valid model|model does not exist|不存在或未开通的模型/i.test(
+    msg,
+  );
+}
+
 export function sanitizeChatMessagesForApi(
   messages: ChatCompletionMessageParam[],
   opts?: { stripReasoning?: boolean; logPrefix?: string },

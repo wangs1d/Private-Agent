@@ -38,7 +38,8 @@ import { isActorDisabled } from "./user-disable-gate.js";
 // 2026-09-23：三个车道指导语迁至 agent/lane-role-guidance.ts（内容在该模块演进），
 // 此处保留引用；迁出原因见该模块头注（评测台架需与生产共享同一份源字符串）。
 export { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUIDANCE } from "../agent/lane-role-guidance.js";
-import { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUIDANCE } from "../agent/lane-role-guidance.js";
+import { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUIDANCE, CHAT_LEISURE_ROLE_GUIDANCE } from "../agent/lane-role-guidance.js";
+import { turnNeedsToolFloor } from "../agent/task-intent.js";
 
 /**
  * 前台小工具集白名单（2026-09-06 P0 修复，原生 function calling）。
@@ -157,6 +158,7 @@ import {
   FALLBACK_TEXT_BACKGROUND_FAILED,
   buildTaskFailureNotice,
 } from "../external-model/fallback-texts.js";
+import { resolveRouteChatProvider } from "../external-model/route-chat-provider.js";
 import {
   buildLaneCoreTools,
   isStaticToolArchEnabled,
@@ -193,6 +195,7 @@ import { type LlmExecutionMode, type RouteDecision } from "../agent/task-router.
 import {
   isForegroundDispatchMode,
   isForegroundTagProtocolEnabled,
+  isHighPrecisionChatText,
 } from "../agent/task-router.js";
 import { TASK_DISPATCH_TOOL_DEFINITION } from "../tools/task-dispatch-tool.js";
 import {
@@ -304,6 +307,12 @@ export type HandleUserMessageOptions = {
   userId?: string;
   clientIp?: string;
   clientLocation?: ClientLocationWire;
+  /**
+   * 发送消息的设备类别（2026-10-07）：desktop | mobile。WS 层从连接注册表取
+   * （session.init 自报 platform），注入【运行环境】块让模型感知手机/电脑——
+   * 手机端回复要短、不引导桌面操作；缺省不注入（程序化调用方/旧客户端）。
+   */
+  deviceClass?: "desktop" | "mobile";
   visionFrames?: VisionFrame[];
   onAgentPhaseStatus?: (line: string) => void;
   /** plan_execute 计划生成后回调（v2 分阶段对话交互） */
@@ -363,6 +372,12 @@ export class AgentCore {
   private brainCenter: BrainCenter | null = null;
   /** 主动性模块（ProactivityHub）：对话轮观察等主动触发的统一入口 */
   private proactivityHub: import("../proactivity/proactivity-hub.js").ProactivityHub | null = null;
+  /**
+   * 路由专用模型（2026-10-07 解耦）：意图路由不跟随主模型切换——主模型换成
+   * MiniMax M 系等思考型 provider 时，路由调用被思考链拖慢/饿死/判偏，
+   * 闲聊整轮被保守降级吸进任务面（实测：「你知道我的老婆是谁吧」→ 任务失败回执）。
+   */
+  private readonly routeChat: ExternalChatProvider | null;
 
   constructor(
     private readonly toolRegistry: ToolRegistry,
@@ -381,6 +396,7 @@ export class AgentCore {
     moodInferenceService: MoodInferenceService | null = null,
     lifeSignalHubService: LifeSignalHubService | null = null,
   ) {
+    this.routeChat = resolveRouteChatProvider(externalChat);
     this.moodInferenceService = moodInferenceService;
     this.lifeSignalHubService = lifeSignalHubService;
     this.promptContextBuilder = new PromptContextBuilder({
@@ -631,7 +647,7 @@ export class AgentCore {
     entityContextLines: string[] = [],
   ): Promise<import("../agent/task-router.js").RouteDecision> {
     return routeTurnByLlm(
-      this.externalChat,
+      this.routeChat,
       sessionId,
       text,
       recentUserTurns,
@@ -827,7 +843,7 @@ export class AgentCore {
       const routePromise = opts?.routeDecision
         ? Promise.resolve(opts.routeDecision)
         : routeTurnByLlm(
-            this.externalChat,
+            this.routeChat,
             sessionId,
             text,
             recentUserTurns ?? [],
@@ -978,7 +994,7 @@ export class AgentCore {
       }
       // 前置路由门：降级路径同样必跑语义分类（plane=task → 任务执行器）
       route = await routeTurnByLlm(
-        this.externalChat,
+        this.routeChat,
         sessionId,
         text,
         this.getRecentUserTurnsForRouting(actorId, sessionId, text) ?? [],
@@ -1211,7 +1227,12 @@ if (route.plane === "task") {
         // 仅 WS 对话路径开启（opts.taskPlaneAsync）；agent 中继/HTTP/link 等程序化
         // 调用方保持旧行为（本轮等待任务完成并交付结果文本）。派发通道未就绪时
         // 回退原地执行，任务不被静默丢弃。
-        const heavyTaskPlane = route.tier === "pro" || route.budget >= 3;
+        // 重活阈值（2026-10-07 修正）：2026-09-23 预算整体 +1（realtime/media
+        // 2→3、multi-step 3→4）后本闸未跟调，`budget >= 3` 恒真导致轻任务也
+        // 全量进后台出回执——「简单任务当轮直接完成返回」失效。现对齐路由表：
+        // 只有 pro 档（multi_step_task，budget=4）才算重活派后台；flash 档
+        //（realtime_lookup/media_retrieval，budget=3）一律原地同步执行当轮回复。
+        const heavyTaskPlane = route.tier === "pro" || route.budget >= 4;
         if (opts?.taskPlaneAsync && heavyTaskPlane) {
           const dispatchedTaskId = this.dispatchBackgroundTask(actorId, {
             sessionId,
@@ -2205,6 +2226,7 @@ if (route.plane === "task") {
             interruptedContext: opts?.interruptedContext,
             userLocation: ctx.userLocation,
             frequentPlaces: ctx.frequentPlaces,
+            deviceClass: opts?.deviceClass,
             personalization: ctx.personalization ?? {},
             userPattern: ctx.cognitiveUserPattern,
             toolPlan: ctx.cognitiveToolPlan,
@@ -2223,9 +2245,18 @@ if (route.plane === "task") {
           //   同一车道恒同一可见集，行为可复现、schema 前缀缓存稳定。
           // - legacy 回退（AGENT_TOOL_ARCH=legacy）：旧 4 工具白名单 + 零目录。
           // - tagProtocol 灰度回退时保持零工具。
+          // 纯闲聊轮硬隔离（2026-10-06 语感治理）：routeIntent==="chat" 时本轮
+          // 零工具（含延迟目录入口 tool_discover）——prompt 反例压不住"看得见工具
+          // 就推销"（真链实证：连跪轮推销查活动/设提醒三连），结构上看不见才是硬的。
+          // 误判兜底（两层）：下一轮路由重分类自动恢复工具；以及 2026-10-07 程序层
+          // 安全网——消息带明确动作/查数据信号（天气/提醒/几点/帮我查…）时**禁止**
+          // 零工具隔离（task-intent.turnNeedsToolFloor）。真机实证误判代价不可接受：
+          // 「帮我看看明天的天气」被判闲聊，模型零工具只能嘴硬"没有天气接口"。
           ...(foregroundTagMode
             ? { toolExposureProfile: "none" as const }
-            : isStaticToolArchEnabled()
+            : isStaticToolArchEnabled() && ctx.routeIntent === "chat" && !turnNeedsToolFloor(text)
+              ? { toolExposureProfile: "none" as const }
+              : isStaticToolArchEnabled()
               ? {
                   toolExposureProfile: "explicit" as const,
                   // 显式禁网轮（2026-09-23）：联网检索族从 chat Core 剥离——
@@ -2272,6 +2303,7 @@ if (route.plane === "task") {
             interruptedContext: opts?.interruptedContext,
             userLocation: ctx.userLocation,
             frequentPlaces: ctx.frequentPlaces,
+            deviceClass: opts?.deviceClass,
             personalization: ctx.personalization ?? {},
             onToolLoopAfterBatch: onBatchWithEvolution,
             userPattern: ctx.cognitiveUserPattern,
@@ -2335,10 +2367,17 @@ if (route.plane === "task") {
     if ((baseStreamOpts.promptContext ??= {}).memory) {
       const mem = baseStreamOpts.promptContext.memory;
       if (!mem.modeRoleGuidance) {
+        // 纯闲聊轮（2026-10-06 活人感治理）：routeIntent==="chat" 时用闲聊职责版
+        // 整体替换 FOREGROUND 版——「工具是你的手脚」的办事导向在零工具闲聊轮
+        // 是揽活激励（真链实证：第一句像人、第二段必发服务菜单）。
+        // 安全网（2026-10-07）：带动作/查数据信号的消息不进闲聊职责版——
+        // 零工具隔离已解除，职责块必须同步回到工具纪律版，两处口径恒一致。
         mem.modeRoleGuidance = this.isChatLane(mode)
-          ? isForegroundDispatchMode()
-            ? FOREGROUND_ROLE_GUIDANCE
-            : CHAT_PLANE_ROLE_GUIDANCE
+          ? ctx.routeIntent === "chat" && !turnNeedsToolFloor(text)
+            ? CHAT_LEISURE_ROLE_GUIDANCE
+            : isForegroundDispatchMode()
+              ? FOREGROUND_ROLE_GUIDANCE
+              : CHAT_PLANE_ROLE_GUIDANCE
           : TASK_PLANE_ROLE_GUIDANCE;
       }
       // 风格豁免开关（2026-09-06，2026-09-11 分层化后仍沿用）：
@@ -2459,6 +2498,13 @@ if (route.plane === "task") {
       // frequency_penalty 0.4，env 可调）；任务面不置位保持默认采样。ephemeral
       // 内部调用（识情/路由/收尾汇总）不带本字段，provider 侧再兜一层。
       ...(this.isChatLane(mode) ? { chatLaneSampling: true } : {}),
+      // 语感治理（2026-10-06 追加）：chat 车道纯闲聊轮置位，provider 据此裁掉
+      // 展示形式协议（闲聊轮不需要 RENDER_HINT/卡片，更不该有 NEXT_UP 任务胶囊）。
+      // 安全网同口径（2026-10-07）：动作/查数据信号轮不置位——那轮工具已恢复可见，
+      // 天气卡等结构化交付也要跟着恢复。
+      ...(this.isChatLane(mode) && ctx.routeIntent === "chat" && !turnNeedsToolFloor(text)
+        ? { chatLanePureChat: true }
+        : {}),
       turnEvidenceInjected: evidenceInjected,
       turnRouteConfidence: ctx.routeConfidence,
       pinnedToolNames: runtimePlan.enabled
@@ -2936,7 +2982,7 @@ if (route.plane === "task") {
       source?: string;
       /**
        * 路由层 TurnPlan（2026-09-09）：route_task_plane 派发传入，取代默认快车道
-       * 预算，让后台执行按意图档位（realtime/media=2 fast、multi-step=3 complex）运行。
+       * 预算，让后台执行按意图档位（realtime/media=3 flash、multi-step=4 pro）运行。
        */
       turnPlan?: { budget: number; capabilities: string[]; tier: string };
       /**
@@ -3122,6 +3168,85 @@ if (route.plane === "task") {
       const capturedMedia: Array<{ toolName: string; result: Record<string, unknown> }> = [];
       /** 行程回执捕获：travel.plan-itinerary 执行回执，收尾时确定性附行程卡（与 WS 对话路径同构）。 */
       const capturedTravel: Array<{ toolName: string; result: Record<string, unknown> }> = [];
+      /**
+       * 闲聊误吸出口兜底（2026-10-07 P4 防御纵深）：路由降级（reasons 带
+       * conservative_task_plane，即语义路由没跑成、任务面进入是兜底产物）或
+       * 高精度寒暄词表命中的 goal，一旦任务执行失败/空结果，不再吐「这件事
+       * 没办成」机械回执——转对话面直答一次（零工具 + 纯闲聊隔离 + 复用派发
+       * 时透传的记忆上下文，ephemeral 不写线程，答完以单条任务记录并入）。
+       * 文本分级：词表寒暄 → 裸 goal 直答（活人感优先，寒暄直答零风险）；
+       * 仅降级信号（goal 可能是真任务，如降级轮「比特币现在什么价」）→ 带
+       * 处境说明让模型自决回应方式，明确禁编造，防止零工具瞎编事实。
+       * 返回 null = 非误吸场景或重答失败，调用方回落原回执流程，保底不变。
+       */
+      const rescueMisroutedChat = async (goal: string): Promise<string | null> => {
+        const reasons = input.route?.reasons ?? [];
+        const conservativeEntry = reasons.some((r) => r.includes("conservative_task_plane"));
+        const smalltalk = isHighPrecisionChatText(goal);
+        if (!conservativeEntry && !smalltalk) return null;
+        console.info(
+          `[AgentCore] 任务失败出口闲聊误吸命中（conservative=${conservativeEntry} smalltalk=${smalltalk}），转对话面重答 (goal=${goal.slice(0, 60)})`,
+        );
+        const turnText = smalltalk
+          ? goal
+          : [
+              "（系统内部说明，非用户可见：你上一轮收到的消息被误当作后台任务执行且没有产出结果。）",
+              "若它本来只是聊天/问候/情绪表达，请像平时聊天一样自然回应；",
+              "若它确实需要动手办事或查实时信息，请简短说明刚才没办成、不要编造任何结果或数据。",
+              "只输出回复给用户的正文本身。",
+              "",
+              `用户原话：${goal}`,
+            ].join("\n");
+        try {
+          const reply = await provider.streamCompletion(
+            sessionId,
+            { text: turnText },
+            () => {},
+            undefined,
+            {
+              ephemeralTurn: true,
+              toolExposureProfile: "none",
+              chatLanePureChat: true,
+              chatLaneSampling: true,
+              maxOutputTokens: 800,
+              auditStage: "task_plane_chat_rescue",
+              promptContext: {
+                memory: {
+                  ...(input.narrativeRecall ? { narrativeRecall: input.narrativeRecall } : {}),
+                  ...(input.workingMemorySummary
+                    ? { workingMemorySummary: input.workingMemorySummary }
+                    : {}),
+                  ...(input.recentConversationHistory
+                    ? { recentConversationHistory: input.recentConversationHistory }
+                    : {}),
+                  ...(input.userLocation ? { userLocation: input.userLocation } : {}),
+                  ...(input.frequentPlaces ? { frequentPlaces: input.frequentPlaces } : {}),
+                },
+              },
+            },
+          );
+          const text = stripResidualRenderDeclarations((reply ?? "").trim()).trim();
+          if (!text) return null;
+          try {
+            provider.appendTaskRecord?.(
+              resolvePrimaryChatSessionId(
+                actorId,
+                getAgentRuntimeConfig().masterDelegation.enabled,
+              ),
+              goal,
+              text,
+            );
+          } catch {
+            /* thread 并入失败不影响结果投递 */
+          }
+          return text;
+        } catch (err) {
+          console.warn(
+            `[AgentCore] 闲聊误吸重答失败，回落任务回执: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return null;
+        }
+      };
       try {
         // 快速通道（默认起步，2026-09-05 先轻后重）：tool router 召回执行
         //（可见集=桥工具，零业务 schema）+ Flash 档；段1 即流式（A4，2026-09-08）：
@@ -3325,6 +3450,14 @@ if (route.plane === "task") {
           }
           pushDone(finalText, mediaCards, nextUp.followups);
         } else {
+          // 闲聊误吸出口兜底（2026-10-07 P4）：疑似闲聊被路由降级吸进任务面且
+          // 执行失败/空结果 → 转对话面重答，不吐机械回执。重答成功按完成收尾。
+          const rescued = await rescueMisroutedChat(input.goal);
+          if (rescued !== null) {
+            taskHub.setState(taskId, "done");
+            pushDone(rescued);
+            return;
+          }
           // 结构化失败回执（2026-09-19 P0-2）：执行跑完但没产出有效结果——
           // 带目标回显 + 下一步指引，且与成功路径同样并入对话 thread，
           // 否则对话面对「没办成」失忆，用户追问时模型只能靠回执猜。
@@ -3349,6 +3482,14 @@ if (route.plane === "task") {
           taskHub.setState(taskId, "failed");
           getTaskHub().setProgressThrottled(taskId, "执行失败");
           console.error("[AgentCore] 后台任务执行失败:", err);
+          // 闲聊误吸出口兜底（2026-10-07 P4）：异常路径同样先试对话面重答——
+          // 误吸轮常死在工具链（空计划/桥超时），对话面直答即可救回。
+          const rescued = await rescueMisroutedChat(input.goal).catch(() => null);
+          if (rescued !== null) {
+            taskHub.setState(taskId, "done");
+            pushDone(rescued);
+            return;
+          }
           const notice = buildTaskFailureNotice(input.goal, err);
           try {
             provider.appendTaskRecord?.(

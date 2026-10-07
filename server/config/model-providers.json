@@ -8,8 +8,15 @@
       "baseUrl": "https://api.deepseek.com",
       "defaultModel": "deepseek-flash",
       "models": [
-        { "id": "deepseek-flash", "label": "deepseek-flash · V4.1-Flash（推荐）", "recommended": true },
-        { "id": "deepseek-v4-pro", "label": "deepseek-v4-pro · 旗舰" }
+        {
+          "id": "deepseek-flash",
+          "label": "deepseek-flash · V4.1-Flash（推荐）",
+          "recommended": true
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "label": "deepseek-v4-pro · 旗舰"
+        }
       ],
       "consoleUrl": "https://platform.deepseek.com/api_keys",
       "guide": [
@@ -17,7 +24,11 @@
         "左侧「API Keys」→ 创建新 key，复制",
         "把 key 粘贴到下方，点「测试连接」"
       ],
-      "note": "新用户通常有免费额度，用完后需充值。"
+      "note": "新用户通常有免费额度，用完后需充值。",
+      "promptCache": {
+        "mode": "shared",
+        "note": "隐式前缀缓存集群共享，实测命中率稳定（~78%）"
+      }
     },
     {
       "id": "moonshot",
@@ -26,9 +37,19 @@
       "baseUrl": "https://api.moonshot.cn/v1",
       "defaultModel": "kimi-k3",
       "models": [
-        { "id": "kimi-k3", "label": "kimi-k3 · 旗舰（推荐）", "recommended": true },
-        { "id": "kimi-k2.6", "label": "kimi-k2.6 · 支持视觉" },
-        { "id": "kimi-k2.7-code", "label": "kimi-k2.7-code · 编程向" }
+        {
+          "id": "kimi-k3",
+          "label": "kimi-k3 · 旗舰（推荐）",
+          "recommended": true
+        },
+        {
+          "id": "kimi-k2.6",
+          "label": "kimi-k2.6 · 支持视觉"
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "label": "kimi-k2.7-code · 编程向"
+        }
       ],
       "consoleUrl": "https://platform.kimi.com/console/api-keys",
       "guide": [
@@ -36,7 +57,11 @@
         "控制台「API Key 管理」→ 新建 key，复制",
         "把 key 粘贴到下方，点「测试连接」"
       ],
-      "note": "国内用 api.moonshot.cn；海外账号请选「自定义」并填 https://api.moonshot.ai/v1。"
+      "note": "国内用 api.moonshot.cn；海外账号请选「自定义」并填 https://api.moonshot.ai/v1。",
+      "promptCache": {
+        "mode": "explicit",
+        "note": "支持显式上下文缓存 API；OpenAI 端点为隐式前缀缓存"
+      }
     },
     {
       "id": "zhipu",
@@ -45,9 +70,19 @@
       "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
       "defaultModel": "glm-5.3",
       "models": [
-        { "id": "glm-5.3", "label": "glm-5.3 · 旗舰（推荐）", "recommended": true },
-        { "id": "glm-5.2", "label": "glm-5.2" },
-        { "id": "glm-4.7-flash", "label": "glm-4.7-flash · 免费" }
+        {
+          "id": "glm-5.3",
+          "label": "glm-5.3 · 旗舰（推荐）",
+          "recommended": true
+        },
+        {
+          "id": "glm-5.2",
+          "label": "glm-5.2"
+        },
+        {
+          "id": "glm-4.7-flash",
+          "label": "glm-4.7-flash · 免费"
+        }
       ],
       "consoleUrl": "https://open.bigmodel.cn/usercenter/apikeys",
       "guide": [
@@ -55,7 +90,11 @@
         "「API 密钥」页 → 新建密钥，复制（形如 xxxx.yyyy）",
         "把 key 粘贴到下方，点「测试连接」"
       ],
-      "note": "glm-4.7-flash 免费，零成本先跑起来。"
+      "note": "glm-4.7-flash 免费，零成本先跑起来。",
+      "promptCache": {
+        "mode": "per-node",
+        "note": "未实测，按默认隐式缓存对待"
+      }
     },
     {
       "id": "dashscope",
@@ -64,9 +103,19 @@
       "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "defaultModel": "qwen3.8-max",
       "models": [
-        { "id": "qwen3.8-max", "label": "qwen3.8-max · 旗舰（推荐）", "recommended": true },
-        { "id": "qwen3.7-plus", "label": "qwen3.7-plus · 均衡" },
-        { "id": "qwen3.8-flash", "label": "qwen3.8-flash · 快速便宜" }
+        {
+          "id": "qwen3.8-max",
+          "label": "qwen3.8-max · 旗舰（推荐）",
+          "recommended": true
+        },
+        {
+          "id": "qwen3.7-plus",
+          "label": "qwen3.7-plus · 均衡"
+        },
+        {
+          "id": "qwen3.8-flash",
+          "label": "qwen3.8-flash · 快速便宜"
+        }
       ],
       "consoleUrl": "https://bailian.console.aliyun.com/?apiKey=1",
       "guide": [
@@ -74,7 +123,11 @@
         "「API-KEY 管理」→ 创建 API Key，复制",
         "把 key 粘贴到下方，点「测试连接」"
       ],
-      "note": "新账号开通百炼后通常有免费额度。"
+      "note": "新账号开通百炼后通常有免费额度。",
+      "promptCache": {
+        "mode": "explicit",
+        "note": "百炼支持显式 context cache；兼容端点为隐式"
+      }
     },
     {
       "id": "minimax",
@@ -83,7 +136,11 @@
       "baseUrl": "https://api.minimaxi.com/v1",
       "defaultModel": "MiniMax-M3",
       "models": [
-        { "id": "MiniMax-M3", "label": "MiniMax-M3（推荐）", "recommended": true }
+        {
+          "id": "MiniMax-M3",
+          "label": "MiniMax-M3（推荐）",
+          "recommended": true
+        }
       ],
       "consoleUrl": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
       "guide": [
@@ -91,7 +148,11 @@
         "「接口密钥」→ 创建新密钥，复制",
         "把 key 粘贴到下方，点「测试连接」"
       ],
-      "note": "之后若要使用语音通话，同一家的 key 可复用在语音设置里。"
+      "note": "之后若要使用语音通话，同一家的 key 可复用在语音设置里。",
+      "promptCache": {
+        "mode": "per-node",
+        "note": "2026-10-07 受控探针实测：多副本缓存不一致，字节相同请求命中 128↔全量随机；system 已打显式断点（5min TTL）"
+      }
     },
     {
       "id": "siliconflow",
@@ -100,10 +161,23 @@
       "baseUrl": "https://api.siliconflow.cn/v1",
       "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
       "models": [
-        { "id": "deepseek-ai/DeepSeek-V4-Flash", "label": "DeepSeek-V4-Flash（推荐）", "recommended": true },
-        { "id": "Pro/deepseek-ai/DeepSeek-V4", "label": "Pro/DeepSeek-V4 · 加速版" },
-        { "id": "Pro/zai-org/GLM-5.2", "label": "Pro/GLM-5.2" },
-        { "id": "moonshotai/Kimi-K2.7-Code", "label": "Kimi-K2.7-Code" }
+        {
+          "id": "deepseek-ai/DeepSeek-V4-Flash",
+          "label": "DeepSeek-V4-Flash（推荐）",
+          "recommended": true
+        },
+        {
+          "id": "Pro/deepseek-ai/DeepSeek-V4",
+          "label": "Pro/DeepSeek-V4 · 加速版"
+        },
+        {
+          "id": "Pro/zai-org/GLM-5.2",
+          "label": "Pro/GLM-5.2"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.7-Code",
+          "label": "Kimi-K2.7-Code"
+        }
       ],
       "consoleUrl": "https://cloud.siliconflow.cn/account/ak",
       "guide": [
@@ -111,7 +185,11 @@
         "「API 密钥」→ 新建 API 密钥，复制",
         "把 key 粘贴到下方，点「测试连接」"
       ],
-      "note": "注册送额度，部分小模型免费。模型名格式为「厂商/模型」。"
+      "note": "注册送额度，部分小模型免费。模型名格式为「厂商/模型」。",
+      "promptCache": {
+        "mode": "per-node",
+        "note": "未实测，按默认隐式缓存对待"
+      }
     },
     {
       "id": "openai",
@@ -120,8 +198,15 @@
       "baseUrl": "https://api.openai.com/v1",
       "defaultModel": "gpt-5.1",
       "models": [
-        { "id": "gpt-5.1", "label": "gpt-5.1（推荐）", "recommended": true },
-        { "id": "gpt-5.1-mini", "label": "gpt-5.1-mini · 便宜" }
+        {
+          "id": "gpt-5.1",
+          "label": "gpt-5.1（推荐）",
+          "recommended": true
+        },
+        {
+          "id": "gpt-5.1-mini",
+          "label": "gpt-5.1-mini · 便宜"
+        }
       ],
       "consoleUrl": "https://platform.openai.com/api-keys",
       "guide": [
@@ -129,7 +214,11 @@
         "「API keys」→ Create new secret key，复制",
         "把 key 粘贴到下方，点「测试连接」"
       ],
-      "note": "国内网络通常无法直连，需自行解决网络环境与支付方式。"
+      "note": "国内网络通常无法直连，需自行解决网络环境与支付方式。",
+      "promptCache": {
+        "mode": "explicit",
+        "note": "prompt_cache_key 显式分片 + 隐式前缀缓存"
+      }
     },
     {
       "id": "openrouter",
@@ -138,7 +227,11 @@
       "baseUrl": "https://openrouter.ai/api/v1",
       "defaultModel": "openrouter/auto",
       "models": [
-        { "id": "openrouter/auto", "label": "openrouter/auto · 自动路由（推荐）", "recommended": true }
+        {
+          "id": "openrouter/auto",
+          "label": "openrouter/auto · 自动路由（推荐）",
+          "recommended": true
+        }
       ],
       "consoleUrl": "https://openrouter.ai/settings/keys",
       "guide": [
@@ -146,7 +239,11 @@
         "「Keys」→ Create key，复制",
         "把 key 粘贴到下方，点「测试连接」"
       ],
-      "note": "模型名格式为「厂商/模型」，完整清单见其控制台；auto 会自动选型。"
+      "note": "模型名格式为「厂商/模型」，完整清单见其控制台；auto 会自动选型。",
+      "promptCache": {
+        "mode": "per-node",
+        "note": "聚合网关，缓存行为随上游厂商"
+      }
     }
   ]
 }

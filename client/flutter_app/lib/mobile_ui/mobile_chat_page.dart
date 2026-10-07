@@ -1,7 +1,11 @@
+import "dart:typed_data";
+
 import "package:flutter/material.dart";
 
 import "../core/models/chat_models.dart";
 import "../core/theme/app_typography.dart";
+import "../core/vision/pick_gallery_vision.dart";
+import "../core/vision/vision_wire_frame.dart";
 import "../features/chat/message_body_renderer.dart";
 import "../features/chat/typewriter_reveal.dart";
 import "mobile_chat_controller.dart";
@@ -9,9 +13,9 @@ import "mobile_theme.dart";
 
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
-/// - 顶栏：居中标题 + 在线状态点 + 新会话按钮
+/// - 顶栏：居中标题 + 在线状态点 + 删除全部聊天记录按钮
 /// - 消息区：用户黑底白字右对齐、助手浅灰底黑字左对齐
-/// - 底部输入栏：圆角输入框 + 纯黑发送按钮
+/// - 底部输入栏：圆角输入框(右侧「+」选照片) + 纯黑发送按钮
 ///
 /// [controller] 可选：由外部(根组件)注入以共享连接；不传时自建。
 class MobileChatPage extends StatefulWidget {
@@ -30,17 +34,27 @@ class _MobileChatPageState extends State<MobileChatPage> {
   bool _canSend = false;
   int _lastMessageCount = 0;
 
+  /// 待发送的相册图帧（「+」选入，随下一条消息一起发出）。
+  final List<VisionWireFrame> _pendingFrames = <VisionWireFrame>[];
+
+  /// 已发消息的气泡缩略图字节（messageId → 原图字节，仅内存态供展示）。
+  final Map<String, List<Uint8List>> _sentImageBytes =
+      <String, List<Uint8List>>{};
+
   @override
   void initState() {
     super.initState();
     _controller = widget.controller ?? MobileChatController();
     _input.addListener(() {
-      final bool now = _input.text.trim().isNotEmpty;
+      final bool now = _canSendNow();
       if (now != _canSend) {
         setState(() => _canSend = now);
       }
     });
   }
+
+  bool _canSendNow() =>
+      _input.text.trim().isNotEmpty || _pendingFrames.isNotEmpty;
 
   @override
   void didUpdateWidget(MobileChatPage oldWidget) {
@@ -77,12 +91,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
             icon: const Icon(Icons.delete_sweep_outlined, size: 22),
             color: p.textPrimary,
             onPressed: _confirmClearAllChat,
-          ),
-          IconButton(
-            tooltip: "新会话",
-            icon: const Icon(Icons.add_rounded, size: 24),
-            color: p.textPrimary,
-            onPressed: () => _controller.reset(),
           ),
         ],
       ),
@@ -123,10 +131,48 @@ class _MobileChatPageState extends State<MobileChatPage> {
     });
   }
 
-  void _send() {
+  /// 「+」选照片：多选(上限与桌面端一致 4 张)进待发送区。
+  Future<void> _pickImages() async {
+    final List<VisionWireFrame> frames = await pickGalleryVisionWireFrames();
+    if (frames.isEmpty) return;
+    setState(() {
+      _pendingFrames.addAll(frames);
+      _canSend = _canSendNow();
+    });
+  }
+
+  void _removePendingFrame(int index) {
+    setState(() {
+      _pendingFrames.removeAt(index);
+      _canSend = _canSendNow();
+    });
+  }
+
+  Future<void> _send() async {
     final String text = _input.text;
-    _controller.send(text);
+    final List<VisionWireFrame>? frames = _pendingFrames.isEmpty
+        ? null
+        : List<VisionWireFrame>.of(_pendingFrames);
+    if (text.trim().isEmpty && frames == null) return;
+    final String? messageId =
+        await _controller.send(text, visionFrames: frames);
     _input.clear();
+    if (messageId == null) {
+      // 未发出(未连接)：文字输入保留清空行为与旧版一致，图帧留在待发送区
+      if (frames != null && mounted) {
+        setState(() => _canSend = _canSendNow());
+      }
+      return;
+    }
+    if (frames != null && mounted) {
+      setState(() {
+        _sentImageBytes[messageId] = <Uint8List>[
+          for (final VisionWireFrame f in frames) Uint8List.fromList(f.bytes),
+        ];
+        _pendingFrames.clear();
+        _canSend = _canSendNow();
+      });
+    }
     _maybeScrollToBottom();
   }
 
@@ -304,12 +350,46 @@ class _MobileChatPageState extends State<MobileChatPage> {
           ),
         ),
         child: isUser
-            ? Text(
-                m.text,
-                style: const TextStyle(
-                  fontSize: AppTypography.bodyLarge,
-                  height: AppTypography.bodyLineHeight,
-                ).copyWith(color: text),
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 随消息发出的照片缩略图（发送时记下的内存字节）
+                  Builder(builder: (BuildContext ctx) {
+                    final List<Uint8List>? images = _sentImageBytes[m.messageId];
+                    if (images == null || images.isEmpty) {
+                      return const SizedBox.shrink();
+                    }
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        alignment: WrapAlignment.end,
+                        children: <Widget>[
+                          for (final Uint8List bytes in images)
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.memory(
+                                bytes,
+                                width: 76,
+                                height: 76,
+                                fit: BoxFit.cover,
+                                gaplessPlayback: true,
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  }),
+                  Text(
+                    m.text,
+                    style: const TextStyle(
+                      fontSize: AppTypography.bodyLarge,
+                      height: AppTypography.bodyLineHeight,
+                    ).copyWith(color: text),
+                  ),
+                ],
               )
             // 助手消息：复用桌面端同一共享渲染器，保证卡片 / 图文交错 /
             // [RENDER_AS] 标记等结构化内容与桌面端渲染效果完全一致；
@@ -329,35 +409,44 @@ class _MobileChatPageState extends State<MobileChatPage> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
+          if (_pendingFrames.isNotEmpty) _buildPendingStrip(p),
           Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
+              padding: const EdgeInsets.fromLTRB(14, 0, 4, 0),
               clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
                 color: p.innerFieldBackground,
                 borderRadius: BorderRadius.circular(MobileTheme.inputRadius),
               ),
-              child: TextField(
-                controller: _input,
-                textInputAction: TextInputAction.send,
-                minLines: 1,
-                maxLines: 5,
-                onSubmitted: (_) => _send(),
-                style: TextStyle(
-                  color: p.textPrimary,
-                  fontSize: AppTypography.bodyLarge,
-                  height: AppTypography.uiLineHeight,
-                ),
-                decoration: InputDecoration(
-                  hintText: "输入消息…",
-                  hintStyle: TextStyle(color: p.textMuted, fontSize: 16),
-                  border: InputBorder.none,
-                  isCollapsed: true,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _input,
+                      textInputAction: TextInputAction.send,
+                      minLines: 1,
+                      maxLines: 5,
+                      onSubmitted: (_) => _send(),
+                      style: TextStyle(
+                        color: p.textPrimary,
+                        fontSize: AppTypography.bodyLarge,
+                        height: AppTypography.uiLineHeight,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: "输入消息…",
+                        hintStyle: TextStyle(color: p.textMuted, fontSize: 16),
+                        border: InputBorder.none,
+                        isCollapsed: true,
+                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                  ),
+                  _buildAttachButton(p),
+                ],
               ),
             ),
           ),
@@ -367,6 +456,65 @@ class _MobileChatPageState extends State<MobileChatPage> {
       ),
       ],
     ),
+    );
+  }
+
+  /// 输入框右侧「+」按钮：选相册照片随消息发出(与桌面端同 visionFrames 协议)。
+  Widget _buildAttachButton(MobilePalette p) {
+    return IconButton(
+      tooltip: "发送照片",
+      onPressed: _pickImages,
+      icon: Icon(Icons.add, size: 26, color: p.textSecondary),
+      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+      padding: EdgeInsets.zero,
+      splashRadius: 20,
+    );
+  }
+
+  /// 待发送照片条：输入框上方横滑缩略图，右上角 × 移除。
+  Widget _buildPendingStrip(MobilePalette p) {
+    return SizedBox(
+      height: 68,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.only(bottom: 8),
+        itemCount: _pendingFrames.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (BuildContext context, int index) {
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.memory(
+                  Uint8List.fromList(_pendingFrames[index].bytes),
+                  width: 60,
+                  height: 60,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                ),
+              ),
+              Positioned(
+                top: -6,
+                right: -6,
+                child: GestureDetector(
+                  onTap: () => _removePendingFrame(index),
+                  child: Container(
+                    width: 20,
+                    height: 20,
+                    decoration: BoxDecoration(
+                      color: p.textPrimary,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: p.surface, width: 2),
+                    ),
+                    child: Icon(Icons.close, size: 12, color: p.background),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 

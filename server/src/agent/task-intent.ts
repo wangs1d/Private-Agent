@@ -69,3 +69,17 @@ export function isActionableTaskRequest(message: string): boolean {
 
   return false;
 }
+
+// 零工具隔离安全网（2026-10-07）：纯闲聊轮硬隔离（routeIntent==="chat" → 零工具）
+// 的误判代价被真机实证为不可接受——「帮我看看明天的天气」「一分钟后提醒我去吃饭」
+// 被路由小模型判进闲聊，模型一个工具都看不见，只能嘴硬"没有天气接口/没法定时"。
+// 本词表只干一件事：命中即**禁止**本轮零工具隔离（工具恢复可见），不改变路由平面、
+// 不强制派发；误命中代价仅是闲聊轮看得见工具（隔离前的常态）。宁窄勿滥。
+const ZERO_TOOL_UNSAFE_RE =
+  /天气|气温|降雨|下雪|提醒|闹钟|几点|现在时间|今天几号|明天几号|日期|星期几|日程|快递|账单|余额|帮我查|帮我看看|帮我搜|帮我找|查一下|查查|搜一下|搜索|打电话|发消息|发条消息|下单|点外卖|叫车/i;
+
+/** 命中即禁止本轮「纯闲聊零工具隔离」（见 ZERO_TOOL_UNSAFE_RE 注释）。 */
+export function turnNeedsToolFloor(message: string): boolean {
+  const t = (message ?? "").trim();
+  return t.length > 0 && ZERO_TOOL_UNSAFE_RE.test(t);
+}

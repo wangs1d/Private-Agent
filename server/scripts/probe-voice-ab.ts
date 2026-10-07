@@ -29,10 +29,13 @@ const tagsArg = process.argv.find((a) => a.startsWith("--tags="))?.slice(7) ?? "
 const tagFilter = new Set(tagsArg.split(",").map((t) => t.trim()).filter(Boolean));
 const seedArg = process.argv.find((a) => a.startsWith("--seed="))?.slice(7) ?? "";
 const customArg = process.argv.find((a) => a.startsWith("--custom="))?.slice(9) ?? "";
+// --provider=minimax|openai|moonshot-kimi：临时切外部模型（必须在 resolve-provider
+// import 之前赋值，dotenv 加载完后的最终值）
+const providerArg = process.argv.find((a) => a.startsWith("--provider="))?.slice(11) ?? "";
 
 const { createExternalChatProviderFromEnv } = await import("../src/external-model/resolve-provider.js");
 const { getRuntimeKernel } = await import("../src/agent/runtime-kernel.js");
-const { FOREGROUND_ROLE_GUIDANCE } = await import("../src/agent/lane-role-guidance.js");
+const { FOREGROUND_ROLE_GUIDANCE, CHAT_LEISURE_ROLE_GUIDANCE } = await import("../src/agent/lane-role-guidance.js");
 const { buildPersonaStaticBlock, buildPersonaMoodBlock, resolvePersonaMood } = await import("../src/agent/persona-core.js");
 const { buildVoiceBaselineBlock } = await import("../src/agent/chat-voice-baseline.js");
 const { finalizeChatSystemPrompt } = await import("../src/agent/prompt-builder.js");
@@ -112,8 +115,13 @@ async function runArm(
   const mood = buildPersonaMoodBlock(
     resolvePersonaMood({ tier: 2, isTaskPlane: false }),
   );
-  const baseSystem = finalizeChatSystemPrompt(identity, { tools: true });
+  // before 臂带工具说明（生产 tools:true 路径）；after 臂纯闲聊零工具（tools:false，
+  // 与生产 chatLanePureChat 轮 provider 侧 finalizeOptions.tools=false 同源）。
+  const baseSystem = finalizeChatSystemPrompt(identity, { tools: arm !== "after" });
   const parts = [baseSystem, personaStatic];
+  // 职责块（2026-10-06 补注入，此前探针漏带导致职责治理测不出）：
+  // before 臂 = 生产 FOREGROUND 版（办事导向）；after 臂纯闲聊 = CHAT_LEISURE 版。
+  parts.push(arm === "after" ? CHAT_LEISURE_ROLE_GUIDANCE : FOREGROUND_ROLE_GUIDANCE);
   // after 臂才注入【语感基准】（含 slang 语气词行，读 data/slang-lexicon.json）
   if (arm === "after") {
     const voice = buildVoiceBaselineBlock(seed);
@@ -144,21 +152,31 @@ async function runArm(
       const userText = `${isTaskish ? "【人格·状态：严肃】\n零调侃，直接办，先结果后过程。" : mood}\n\n${c.text}`;
       let reply = "";
       try {
-        reply = await provider.streamCompletion(
-          sessionId,
-          { text: userText },
-          () => {},
-          toolCtx as never,
-          {
-            toolExposureProfile: "explicit",
-            chatToolsBuiltin: tools,
-            chatToolsExtra: getBuiltinAgentChatTools() as any,
-            toolLoop: { maxRounds: 2 },
-            turnIntent: "chat",
-            // after 臂才带 chat 车道采样放开（与生产 agent-core 同源置位）
-            ...(arm === "after" ? { chatLaneSampling: true } : {}),
-          } as never,
-        );
+        // after 臂模拟 agent-core 纯闲聊轮硬隔离（2026-10-06 生产置位同源）：
+      // 零工具（toolExposureProfile "none"）+ chatLanePureChat（裁展示协议）。
+      // before 臂保持工具+协议全量，对比"推销助手腔"的消失。
+      const pureChat = arm === "after";
+      reply = await provider.streamCompletion(
+        sessionId,
+        { text: userText },
+        () => {},
+        toolCtx as never,
+        {
+          turnIntent: "chat",
+          ...(pureChat
+            ? {
+                toolExposureProfile: "none",
+                chatLanePureChat: true,
+                chatLaneSampling: true,
+              }
+            : {
+                toolExposureProfile: "explicit",
+                chatToolsBuiltin: tools,
+                chatToolsExtra: getBuiltinAgentChatTools() as any,
+                toolLoop: { maxRounds: 2 },
+              }),
+        } as never,
+      );
       } catch (err) {
         console.error(`[voice-probe] ${arm} ${c.tag}#${i} 失败：${err instanceof Error ? err.message : err}`);
       }
@@ -174,6 +192,9 @@ async function runArm(
 }
 
 async function main(): Promise<void> {
+  // provider 切换必须在所有动态 import（含 dotenv 副作用）之后、创建之前赋值，
+  // 否则 loadServerEnv(override:true) 会用 .env.local 的值覆盖回来。
+  if (providerArg) process.env.EXTERNAL_MODEL_PROVIDER = providerArg;
   const provider = createExternalChatProviderFromEnv();
   if (!provider?.isEnabled()) {
     console.error("[voice-probe] 外部模型 provider 未启用，无法探针");

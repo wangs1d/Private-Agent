@@ -4,6 +4,8 @@ export type BatchedMessage = {
   agentAccessMode?: string;
   clientIp?: string;
   clientLocation?: import("../types/client-location.js").ClientLocationWire;
+  /** 发送连接自报设备类别（desktop|mobile）：注入【运行环境】块，agent 感知手机/电脑 */
+  deviceClass?: "desktop" | "mobile";
   interruptedContext?: string;
   originalMessageId: string;
   userId: string;
@@ -278,6 +280,7 @@ export class MessageBatchProcessor {
       agentAccessMode: last.agentAccessMode,
       clientIp: last.clientIp,
       clientLocation: last.clientLocation,
+      deviceClass: last.deviceClass,
       interruptedContext: last.interruptedContext,
       // 沿用最后一条用户消息的 messageId 作为 traceId：客户端 _pendingAgentUserMessageId
       // 始终是最后发出那条的 id（_armAgentReplyWatchdog 每次覆盖），用合成 batch- id 会让
