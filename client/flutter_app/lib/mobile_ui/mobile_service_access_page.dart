@@ -1,0 +1,753 @@
+import "dart:async";
+import "dart:convert";
+
+import "package:flutter/material.dart";
+import "package:http/http.dart" as http;
+import "package:url_launcher/url_launcher.dart";
+
+import "../core/config/api_config.dart";
+import "../core/services/access_auth_api.dart";
+import "mobile_theme.dart";
+
+/// 手机端「服务接入」页（内测 byok）。
+///
+/// 服务端不代充模型/语音额度：用户在此自行填 API Key，经
+/// PUT /api/service-config 持久化到服务端 data/service-config.json 并
+/// 即时热生效（主对话 provider 热替换、TTS 客户端按密钥重建，无需重启）。
+/// 密钥绝不下发明文——状态回显只带尾号（如 ****ab12）。
+///
+/// - 模型服务：从 /api/model-providers 目录选服务商（自动带出网关/默认模型），
+///   或选「自定义」手填 OpenAI 兼容网关地址 + 模型名 + API Key
+/// - 语音合成（TTS）：MiniMax（独立 Key）或 OpenAI（复用模型服务 Key），
+///   保存后可点「试听测试」真实合成一小段语音验证连通性
+class MobileServiceAccessPage extends StatefulWidget {
+  const MobileServiceAccessPage({super.key});
+
+  @override
+  State<MobileServiceAccessPage> createState() =>
+      _MobileServiceAccessPageState();
+}
+
+class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
+  final TextEditingController _baseUrl = TextEditingController();
+  final TextEditingController _model = TextEditingController();
+  final TextEditingController _apiKey = TextEditingController();
+  final TextEditingController _ttsApiKey = TextEditingController();
+
+  bool _loading = true;
+  String? _error;
+
+  /// 服务商目录（GET /api/model-providers；加载失败时仍可手填自定义）。
+  List<Map<String, dynamic>> _providers = const <Map<String, dynamic>>[];
+
+  /// 当前选中的服务商 id（目录 id 或 "custom"）。
+  String _providerId = "custom";
+
+  /// TTS 提供商（minimax=独立 Key / openai=复用模型服务 Key）。
+  String _ttsProvider = "minimax";
+
+  /// 已配置状态（GET /api/service-config 回显；密钥只含尾号）。
+  bool _modelConfigured = false;
+  String? _modelKeyTail;
+  String? _ttsKeyTail;
+  bool _ttsConfigured = false;
+
+  bool _savingModel = false;
+  bool _savingTts = false;
+  bool _testingTts = false;
+  String? _modelMessage;
+  bool _modelMessageError = false;
+  String? _ttsMessage;
+  bool _ttsMessageError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _baseUrl.dispose();
+    _model.dispose();
+    _apiKey.dispose();
+    _ttsApiKey.dispose();
+    super.dispose();
+  }
+
+  Map<String, String> get _headers => <String, String>{
+        "Content-Type": "application/json",
+        ...AccessCredentialStore.instance.authHeaders,
+      };
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final http.Client client = http.Client();
+      final List<http.Response> responses = await Future.wait(<Future<http.Response>>[
+        client
+            .get(Uri.parse("${ApiConfig.httpBase}/api/service-config"),
+                headers: AccessCredentialStore.instance.authHeaders)
+            .timeout(const Duration(seconds: 15)),
+        client
+            .get(Uri.parse("${ApiConfig.httpBase}/api/model-providers"),
+                headers: AccessCredentialStore.instance.authHeaders)
+            .timeout(const Duration(seconds: 15)),
+      ]);
+      client.close();
+
+      final Map<String, dynamic> cfg =
+          jsonDecode(responses[0].body) as Map<String, dynamic>;
+      if (cfg["ok"] != true) {
+        throw Exception(cfg["error"]?.toString() ?? "读取服务配置失败");
+      }
+      final Map<String, dynamic> modelBlock =
+          (cfg["model"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+      final Map<String, dynamic> ttsBlock =
+          (cfg["tts"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+
+      List<Map<String, dynamic>> providers = const <Map<String, dynamic>>[];
+      if (responses[1].statusCode == 200) {
+        final Map<String, dynamic> catalog =
+            jsonDecode(responses[1].body) as Map<String, dynamic>;
+        providers = ((catalog["providers"] as List<dynamic>?) ?? const <dynamic>[])
+            .whereType<Map<String, dynamic>>()
+            .toList();
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _providers = providers;
+        _modelConfigured = modelBlock["configured"] == true;
+        _modelKeyTail = modelBlock["keyTail"]?.toString();
+        _ttsConfigured = ttsBlock["configured"] == true;
+        _ttsKeyTail = ttsBlock["keyTail"]?.toString();
+        // 预填：服务端已配置 → 带出网关/模型；否则带目录首项（DeepSeek 兜底）
+        if ((modelBlock["baseUrl"]?.toString() ?? "").isNotEmpty) {
+          _baseUrl.text = modelBlock["baseUrl"].toString();
+          _model.text = modelBlock["model"]?.toString() ?? "";
+          _providerId = modelBlock["providerId"]?.toString() ?? "custom";
+        } else {
+          _applyProvider(providers.isNotEmpty ? providers.first["id"].toString() : "custom");
+        }
+        if ((ttsBlock["provider"]?.toString() ?? "").isNotEmpty) {
+          _ttsProvider = ttsBlock["provider"].toString();
+        }
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  /// 选中目录服务商：带出网关地址与默认模型（custom 不动用户手填内容）。
+  void _applyProvider(String id) {
+    _providerId = id;
+    if (id == "custom") return;
+    final Map<String, dynamic>? p = _providers
+        .where((Map<String, dynamic> e) => e["id"]?.toString() == id)
+        .firstOrNull;
+    if (p == null) return;
+    _baseUrl.text = p["baseUrl"]?.toString() ?? "";
+    _model.text = p["defaultModel"]?.toString() ?? "";
+  }
+
+  Map<String, dynamic>? get _selectedProvider => _providers
+      .where((Map<String, dynamic> e) => e["id"]?.toString() == _providerId)
+      .firstOrNull;
+
+  /// 保存模型服务：PUT /api/service-config（apiKey 留空 = 沿用已存密钥）。
+  Future<void> _saveModel() async {
+    final String baseUrl = _baseUrl.text.trim();
+    final String model = _model.text.trim();
+    if (!baseUrl.startsWith("http")) {
+      _setModelMessage("网关地址必须是 http(s) 地址", error: true);
+      return;
+    }
+    if (model.isEmpty) {
+      _setModelMessage("请填写模型名（如 deepseek-flash）", error: true);
+      return;
+    }
+    if (_apiKey.text.trim().isEmpty && !_modelConfigured) {
+      _setModelMessage("首次接入请填写 API Key（服务商控制台可申请）", error: true);
+      return;
+    }
+    setState(() {
+      _savingModel = true;
+      _modelMessage = null;
+    });
+    final String? err = await _putServiceConfig(<String, dynamic>{
+      "model": <String, dynamic>{
+        "providerId": _providerId,
+        "baseUrl": baseUrl,
+        "model": model,
+        "apiKey": _apiKey.text.trim(),
+      },
+    });
+    if (!mounted) return;
+    setState(() {
+      _savingModel = false;
+      if (err == null) {
+        _modelConfigured = true;
+        _apiKey.clear();
+        _modelMessage = "已保存并即时生效，直接开聊即可";
+        _modelMessageError = false;
+      } else {
+        _modelMessage = err;
+        _modelMessageError = true;
+      }
+    });
+  }
+
+  /// 保存 TTS：PUT /api/service-config（minimax 留空 = 沿用已存密钥）。
+  Future<void> _saveTts() async {
+    if (_ttsProvider == "minimax" &&
+        _ttsApiKey.text.trim().isEmpty &&
+        !_ttsConfigured) {
+      _setTtsMessage("首次接入请填写 MiniMax API Key", error: true);
+      return;
+    }
+    setState(() {
+      _savingTts = true;
+      _ttsMessage = null;
+    });
+    final String? err = await _putServiceConfig(<String, dynamic>{
+      "tts": <String, dynamic>{
+        "provider": _ttsProvider,
+        "apiKey": _ttsApiKey.text.trim(),
+      },
+    });
+    if (!mounted) return;
+    setState(() {
+      _savingTts = false;
+      if (err == null) {
+        _ttsConfigured = true;
+        _ttsApiKey.clear();
+        _ttsMessage = "已保存，语音回复即刻生效";
+        _ttsMessageError = false;
+      } else {
+        _ttsMessage = err;
+        _ttsMessageError = true;
+      }
+    });
+  }
+
+  /// TTS 连通性测试：真实合成一小段语音（不落盘，仅验证密钥可用）。
+  Future<void> _testTts() async {
+    setState(() {
+      _testingTts = true;
+      _ttsMessage = null;
+    });
+    String? err;
+    String okMsg = "测试通过：服务端已能合成语音";
+    try {
+      final http.Client client = http.Client();
+      final http.Response res = await client
+          .post(
+            Uri.parse("${ApiConfig.httpBase}/api/service-config/tts-test"),
+            headers: _headers,
+            body: jsonEncode(<String, dynamic>{"text": "NEXTBOT 语音服务连接测试"}),
+          )
+          .timeout(const Duration(seconds: 30));
+      client.close();
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode == 200 && body["ok"] == true) {
+        okMsg = "测试通过（${body["provider"]}，${body["bytes"]} 字节音频）";
+      } else {
+        err = body["error"]?.toString() ?? "测试失败（HTTP ${res.statusCode}）";
+      }
+    } catch (e) {
+      err = "测试请求失败：$e";
+    }
+    if (!mounted) return;
+    setState(() {
+      _testingTts = false;
+      _ttsMessage = err ?? okMsg;
+      _ttsMessageError = err != null;
+    });
+  }
+
+  /// PUT /api/service-config；返回 null=成功，否则为错误信息。
+  Future<String?> _putServiceConfig(Map<String, dynamic> payload) async {
+    try {
+      final http.Client client = http.Client();
+      final http.Response res = await client
+          .put(
+            Uri.parse("${ApiConfig.httpBase}/api/service-config"),
+            headers: _headers,
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(seconds: 15));
+      client.close();
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode == 200 && body["ok"] == true) return null;
+      return body["error"]?.toString() ?? "保存失败（HTTP ${res.statusCode}）";
+    } catch (e) {
+      return "保存请求失败：$e";
+    }
+  }
+
+  void _setModelMessage(String text, {required bool error}) {
+    setState(() {
+      _modelMessage = text;
+      _modelMessageError = error;
+    });
+  }
+
+  void _setTtsMessage(String text, {required bool error}) {
+    setState(() {
+      _ttsMessage = text;
+      _ttsMessageError = error;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    return Scaffold(
+      backgroundColor: p.background,
+      appBar: AppBar(title: const Text("服务接入")),
+      body: _buildBody(context, p),
+    );
+  }
+
+  Widget _buildBody(BuildContext context, MobilePalette p) {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+    }
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.cloud_off_outlined, size: 40, color: p.textMuted),
+              const SizedBox(height: 12),
+              Text(
+                "服务状态获取失败\n请确认已连接服务器(${ApiConfig.httpBase})",
+                textAlign: TextAlign.center,
+                style: TextStyle(color: p.textSecondary, fontSize: 14),
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                  onPressed: () => unawaited(_load()), child: const Text("重试")),
+            ],
+          ),
+        ),
+      );
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+          child: Text(
+            "内测期服务端不代充额度：模型与语音的 API Key 需自行填写。"
+            "密钥只保存在服务器本机并按尾号回显，保存后即刻生效，无需重启。",
+            style: TextStyle(color: p.textSecondary, fontSize: 13, height: 1.5),
+          ),
+        ),
+        _buildModelCard(p),
+        const SizedBox(height: 16),
+        _buildTtsCard(p),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════
+  // 模型服务卡
+  // ═══════════════════════════════════════════════
+
+  Widget _buildModelCard(MobilePalette p) {
+    final Map<String, dynamic>? provider = _selectedProvider;
+    final String? consoleUrl = provider?["consoleUrl"]?.toString();
+    return _card(
+      p,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Icon(Icons.memory_outlined, color: p.textSecondary, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text("模型服务",
+                  style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+            ),
+            _statusChip(p, _modelConfigured, _modelKeyTail),
+          ],
+        ),
+        const SizedBox(height: 14),
+        // 服务商快选（目录 + 自定义）
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            for (final Map<String, dynamic> item in _providers)
+              _providerChip(p, item["id"].toString(), item["name"].toString()),
+            _providerChip(p, "custom", "自定义"),
+          ],
+        ),
+        if (provider != null &&
+            (provider["tagline"]?.toString() ?? "").isNotEmpty) ...<Widget>[
+          const SizedBox(height: 10),
+          Text(provider["tagline"].toString(),
+              style: TextStyle(color: p.textMuted, fontSize: 12)),
+        ],
+        const SizedBox(height: 14),
+        _fieldLabel(p, "网关地址（OpenAI 兼容）"),
+        _buildField(p, controller: _baseUrl, hint: "https://api.deepseek.com"),
+        const SizedBox(height: 12),
+        _fieldLabel(p, "模型名"),
+        _buildField(p, controller: _model, hint: "deepseek-flash"),
+        // 目录模型的快捷选择
+        if (provider != null && (provider["models"] as List<dynamic>? ?? const <dynamic>[]).isNotEmpty) ...<Widget>[
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              for (final dynamic m in provider["models"] as List<dynamic>)
+                _modelSuggestionChip(p, (m as Map<String, dynamic>)["id"].toString()),
+            ],
+          ),
+        ],
+        const SizedBox(height: 12),
+        _fieldLabel(p, "API Key${_modelConfigured ? "（留空则沿用已存密钥）" : ""}"),
+        _buildField(
+          p,
+          controller: _apiKey,
+          hint: _modelConfigured ? "已配置 ${_modelKeyTail ?? ""}，留空不改" : "sk-...",
+          obscure: true,
+        ),
+        if (consoleUrl != null && consoleUrl.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 8),
+          GestureDetector(
+            onTap: () => unawaited(launchUrl(Uri.parse(consoleUrl),
+                mode: LaunchMode.externalApplication)),
+            child: Text(
+              "没有 Key？前往 ${provider?["name"] ?? "服务商"} 控制台申请 ↗",
+              style: TextStyle(
+                  color: Theme.of(context).colorScheme.primary, fontSize: 13),
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
+        _actionButton(
+          p,
+          label: "保存模型接入",
+          busy: _savingModel,
+          onPressed: _saveModel,
+        ),
+        if (_modelMessage != null) ...<Widget>[
+          const SizedBox(height: 10),
+          Text(
+            _modelMessage!,
+            style: TextStyle(
+              color: _modelMessageError
+                  ? Theme.of(context).colorScheme.error
+                  : p.textSecondary,
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════
+  // 语音合成（TTS）卡
+  // ═══════════════════════════════════════════════
+
+  Widget _buildTtsCard(MobilePalette p) {
+    return _card(
+      p,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Icon(Icons.graphic_eq_outlined, color: p.textSecondary, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text("语音合成（TTS）",
+                  style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+            ),
+            _statusChip(p, _ttsConfigured, _ttsKeyTail),
+          ],
+        ),
+        const SizedBox(height: 14),
+        Wrap(
+          spacing: 8,
+          children: <Widget>[
+            _ttsProviderChip(p, "minimax", "MiniMax"),
+            _ttsProviderChip(p, "openai", "OpenAI（复用模型 Key）"),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          _ttsProvider == "minimax"
+              ? "中文拟真度最佳（speech-2.5，按字符计费），需要独立的 MiniMax API Key。"
+              : "复用模型服务的 API Key 与网关（OpenAI 兼容），无需单独密钥。",
+          style: TextStyle(color: p.textMuted, fontSize: 12, height: 1.5),
+        ),
+        if (_ttsProvider == "minimax") ...<Widget>[
+          const SizedBox(height: 12),
+          _fieldLabel(p, "MiniMax API Key${_ttsConfigured ? "（留空则沿用已存密钥）" : ""}"),
+          _buildField(
+            p,
+            controller: _ttsApiKey,
+            hint: _ttsConfigured ? "已配置 ${_ttsKeyTail ?? ""}，留空不改" : "eyJ...",
+            obscure: true,
+          ),
+        ],
+        const SizedBox(height: 16),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: _actionButton(
+                p,
+                label: "保存",
+                busy: _savingTts,
+                onPressed: _saveTts,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _actionButton(
+                p,
+                label: "试听测试",
+                busy: _testingTts,
+                onPressed: _ttsConfigured ? _testTts : null,
+                secondary: true,
+              ),
+            ),
+          ],
+        ),
+        if (_ttsMessage != null) ...<Widget>[
+          const SizedBox(height: 10),
+          Text(
+            _ttsMessage!,
+            style: TextStyle(
+              color: _ttsMessageError
+                  ? Theme.of(context).colorScheme.error
+                  : p.textSecondary,
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════
+  // 通用小组件
+  // ═══════════════════════════════════════════════
+
+  Widget _card(MobilePalette p, {required List<Widget> children}) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      ),
+    );
+  }
+
+  /// 已配置状态角标：绿点 + 密钥尾号；未配置为灰「未配置」。
+  Widget _statusChip(MobilePalette p, bool configured, String? keyTail) {
+    final Color dot = configured ? const Color(0xFF34C759) : p.textMuted;
+    final String label = configured ? "已配置 ${keyTail ?? ""}" : "未配置";
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(label, style: TextStyle(color: p.textSecondary, fontSize: 12)),
+      ],
+    );
+  }
+
+  Widget _providerChip(MobilePalette p, String id, String label) {
+    final bool selected = _providerId == id;
+    return GestureDetector(
+      onTap: () => setState(() => _applyProvider(id)),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? p.accent : p.background,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+              color: selected ? p.accent : p.divider),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? p.onAccent : p.textSecondary,
+            fontSize: 13,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _ttsProviderChip(MobilePalette p, String id, String label) {
+    final bool selected = _ttsProvider == id;
+    return GestureDetector(
+      onTap: () => setState(() => _ttsProvider = id),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? p.accent : p.background,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: selected ? p.accent : p.divider),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? p.onAccent : p.textSecondary,
+            fontSize: 13,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _modelSuggestionChip(MobilePalette p, String modelId) {
+    final bool selected = _model.text.trim() == modelId;
+    return GestureDetector(
+      onTap: () => setState(() => _model.text = modelId),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? p.accent : p.background,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: selected ? p.accent : p.divider),
+        ),
+        child: Text(
+          modelId,
+          style: TextStyle(
+            color: selected ? p.onAccent : p.textSecondary,
+            fontSize: 12,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _fieldLabel(MobilePalette p, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text(text,
+          style: TextStyle(
+              color: p.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+    );
+  }
+
+  Widget _buildField(
+    MobilePalette p, {
+    required TextEditingController controller,
+    required String hint,
+    bool obscure = false,
+  }) {
+    return TextField(
+      controller: controller,
+      obscureText: obscure,
+      autocorrect: false,
+      enableSuggestions: false,
+      style: TextStyle(color: p.textPrimary, fontSize: 14),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: TextStyle(color: p.textMuted, fontSize: 14),
+        filled: true,
+        fillColor: p.background,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide(color: p.divider),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide(color: p.divider),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide(color: p.textSecondary),
+        ),
+      ),
+    );
+  }
+
+  Widget _actionButton(
+    MobilePalette p, {
+    required String label,
+    required bool busy,
+    required VoidCallback? onPressed,
+    bool secondary = false,
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      height: 44,
+      child: secondary
+          ? OutlinedButton(
+              onPressed: busy ? null : onPressed,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: p.textPrimary,
+                side: BorderSide(color: p.divider),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(22)),
+              ),
+              child: _buttonChild(label, busy, p.textSecondary),
+            )
+          : FilledButton(
+              onPressed: busy ? null : onPressed,
+              style: FilledButton.styleFrom(
+                backgroundColor: p.accent,
+                foregroundColor: p.onAccent,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(22)),
+              ),
+              child: _buttonChild(label, busy, p.onAccent),
+            ),
+    );
+  }
+
+  Widget _buttonChild(String label, bool busy, Color spinnerColor) {
+    return busy
+        ? SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: spinnerColor),
+          )
+        : Text(label,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600));
+  }
+}

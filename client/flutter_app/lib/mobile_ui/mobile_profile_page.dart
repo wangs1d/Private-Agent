@@ -1,29 +1,28 @@
 import "dart:async";
+import "dart:typed_data";
 
-import "package:file_picker/file_picker.dart";
 import "package:flutter/material.dart";
+import "package:image_picker/image_picker.dart";
 
 import "../core/config/api_config.dart";
 import "../core/presentation/user_avatar.dart";
 import "../core/services/user_avatar_api.dart";
 import "../core/services/world_api_client.dart";
-import "../features/approvals/approvals_panel.dart";
-import "../features/catalog/catalog_page.dart";
-import "../features/devices/devices_page.dart";
 import "../features/help/feedback_dialog.dart";
 import "../features/mailbox/mailbox_page.dart";
 import "../features/mailbox/message_hub_page.dart";
-import "mobile_briefing_page.dart";
 import "mobile_chat_controller.dart";
 import "mobile_model_catalog_page.dart";
+import "mobile_service_access_page.dart";
 import "mobile_theme.dart";
 
 /// 手机端「我的」页:全功能二级菜单聚合。
 ///
 /// - 顶部账号卡片：头像(点击可设置) + 名称(与桌面端同源：邮箱前缀) + 实时连接状态
-/// - 功能：每日简报 / 邮箱 / 消息中心 / 设备 / 审批 / 模型服务(与桌面端同源同数据)
+/// - 功能：邮箱 / 消息中心 / 模型目录(只读) / 服务接入(内测 byok:模型+TTS 密钥)
 /// - 设置：主题(亮 / 暗 / 跟随系统)、帮助与反馈
 /// - 账号：退出登录
+/// （每日简报/设备/审批/购物目录已按内测范围裁撤，功能面保留在桌面端）
 class MobileProfilePage extends StatefulWidget {
   const MobileProfilePage({
     super.key,
@@ -55,6 +54,7 @@ class MobileProfilePage extends StatefulWidget {
 
 class _MobileProfilePageState extends State<MobileProfilePage> {
   final UserAvatarApi _avatarApi = UserAvatarApi();
+  final ImagePicker _imagePicker = ImagePicker();
 
   /// 用户头像相对路径（服务端 /agent/avatars/...；null=未设置）。
   String? _userAvatarPath;
@@ -92,21 +92,33 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
     setState(() => _userAvatarPath = path);
   }
 
-  /// 点击账号卡头像：选图 → 上传 → 即时刷新。
+  /// 点击账号卡头像：拉起系统相册选择器选图 → 上传 → 即时刷新。
+  ///
+  /// 必须走系统相册（Photo Picker）而非 SAF 文件选择器：后者按文件树浏览，
+  /// 相册里大部分照片（云端、第三方应用目录等）找不到。
   Future<void> _setAvatar() async {
-    final FilePickerResult? picked = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      withData: true,
-    );
-    final PlatformFile? file = picked?.files.single;
-    if (file == null) return;
-    if (file.bytes == null || file.bytes!.isEmpty) {
-      // 选图期间页面可能已被销毁（返回/退出登录），此时 context 不可用
+    final XFile? picked;
+    try {
+      picked = await _imagePicker.pickImage(source: ImageSource.gallery);
+    } on Exception {
+      // 极少数机型选择器拉起失败（如后台被杀），不影响页面其余功能。
+      if (!mounted) return;
+      _toast("无法打开相册，请稍后再试");
+      return;
+    }
+    if (picked == null) return;
+    Uint8List? bytes;
+    try {
+      bytes = await picked.readAsBytes();
+    } on Exception {
+      // 系统缓存文件被清理等小概率场景。
+    }
+    if (bytes == null || bytes.isEmpty) {
       if (!mounted) return;
       _toast("读取图片失败，请换一张试试");
       return;
     }
-    final String? path = await _avatarApi.uploadAvatar(file.bytes!, file.name);
+    final String? path = await _avatarApi.uploadAvatar(bytes, picked.name);
     if (!mounted) return;
     if (path == null) {
       _toast("头像上传失败，请稍后再试");
@@ -121,8 +133,8 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
   }
 
   /// 二级页统一包装:顶栏带返回键(被复用的桌面面板页自身无返回出口,
-  /// 手机端依赖系统返回手势不够直观)。自带 AppBar 的页面(简报/模型目录/
-  /// 设备/购物目录)直接 push,避免出现双层顶栏+双返回按钮。
+  /// 手机端依赖系统返回手势不够直观)。自带 AppBar 的页面(模型目录/
+  /// 服务接入)直接 push,避免出现双层顶栏+双返回按钮。
   Future<void> _push(Widget page, String title, {bool wrapped = true}) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -161,13 +173,6 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
           _SectionCard(
             children: [
               _ListRow(
-                leading: Icon(Icons.wb_sunny_outlined, color: p.textSecondary, size: 22),
-                title: "每日简报",
-                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _push(const MobileBriefingPage(), "每日简报", wrapped: false),
-              ),
-              _divider(context),
-              _ListRow(
                 leading: Icon(Icons.mail_outline, color: p.textSecondary, size: 22),
                 title: "邮箱",
                 trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
@@ -183,32 +188,18 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
               ),
               _divider(context),
               _ListRow(
-                leading: Icon(Icons.devices_other_outlined, color: p.textSecondary, size: 22),
-                title: "设备",
+                leading: Icon(Icons.tune_outlined, color: p.textSecondary, size: 22),
+                title: "服务接入",
                 trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () =>
-                    _push(const DevicesPage(), "设备", wrapped: false),
-              ),
-              _divider(context),
-              _ListRow(
-                leading: Icon(Icons.fact_check_outlined, color: p.textSecondary, size: 22),
-                title: "审批",
-                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _push(const ApprovalsPanel(), "审批"),
-              ),
-              _divider(context),
-              _ListRow(
-                leading: Icon(Icons.shopping_bag_outlined, color: p.textSecondary, size: 22),
-                title: "购物目录",
-                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _push(const CatalogPage(), "购物目录", wrapped: false),
+                onTap: () => _push(
+                    const MobileServiceAccessPage(), "服务接入", wrapped: false),
               ),
               _divider(context),
               _ListRow(
                 leading: Icon(Icons.memory_outlined, color: p.textSecondary, size: 22),
-                title: "模型服务",
+                title: "模型目录",
                 trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _push(const MobileModelCatalogPage(), "模型服务", wrapped: false),
+                onTap: () => _push(const MobileModelCatalogPage(), "模型目录", wrapped: false),
               ),
             ],
           ),
@@ -258,7 +249,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
           const SizedBox(height: 24),
           Center(
             child: Text(
-              "智能助手 · 手机端",
+              "NEXTBOT · 手机端",
               style: TextStyle(color: p.textMuted, fontSize: 12),
             ),
           ),

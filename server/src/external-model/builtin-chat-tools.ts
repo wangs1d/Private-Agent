@@ -224,7 +224,11 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
         "获取当地天气与穿衣建议（Open-Meteo）。\n" +
         "⚠️ 不要猜测用户所在城市——如果用户未明确说城市名，不要传 city/latitude/longitude，工具会自动获取用户真实位置。\n" +
         "用户明确说了城市名时才传 city（如「上海天气」→ city:'上海'）。\n" +
-        "可选 timezone（IANA，默认 Asia/Shanghai）。",
+        "可选 timezone（IANA，默认 Asia/Shanghai）。\n" +
+        "⚠️ 回执里的天气数值（天气/气温/湿度/风速/降水概率）系统会自动渲染成结构化卡片，" +
+        "你的文字回复里禁止再用 markdown 标题、表格或引用块复述这些数据（同屏会出现两份）；" +
+        "正文只写口语化的结论与建议（穿搭/出行提醒等）。\n" +
+        "示例（卡片已展示数值时）：「明天有小雨，早晚偏凉，长袖加薄外套足够，出门顺手带把伞。」",
       parameters: {
         type: "object",
         properties: {

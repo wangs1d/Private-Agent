@@ -212,7 +212,9 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
       latitude,
       longitude,
       timezone,
-      locationLabel: locationLabel ?? `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
+      // 逆地理失败时不放坐标兜底（2026-10-08 用户要求）：坐标对用户无意义还暴露隐私，
+      // 没有城市名就让 summary/卡片标题直接以天气开头，不带位置前缀。
+      locationLabel: locationLabel ?? "",
       currentTempC,
       apparentTempC: Number(cur.apparent_temperature ?? currentTempC),
       humidityPct: Number(cur.relative_humidity_2m ?? 0),
@@ -257,7 +259,7 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
       };
     }
 
-    brief.summaryLine = `${brief.locationLabel} 当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C。${tomorrowSummary}`.trim();
+    brief.summaryLine = `${brief.locationLabel ? `${brief.locationLabel} ` : ""}当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C。${tomorrowSummary}`.trim();
     return brief;
   }
 }

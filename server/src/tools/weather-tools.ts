@@ -1,14 +1,29 @@
 import type { ToolRegistry } from "./tool-registry.js";
 import { geocodeCity, WeatherService } from "../services/weather-service.js";
 import { resolveUserGeo } from "../services/user-location-service.js";
+import { reverseGeocodeCoordinates } from "../services/reverse-geocode-service.js";
+
+/**
+ * label 相邻去重（2026-10-08）：逆地理返回的 district/city/region 经常重复
+ * （如「東城區 · 北京市 · 北京市 · 中华人民共和国」），观感差。
+ */
+function dedupLabel(parts: Array<string | undefined | null>): string {
+  return parts
+    .map((p) => (p ?? "").trim())
+    .filter((p, i, arr) => p && p !== arr[i - 1])
+    .join(" · ");
+}
 
 export function registerWeatherTools(registry: ToolRegistry, weather: WeatherService): void {
   registry.register("weather.get_local", async (input, context) => {
-    const timezone = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
+    let timezone = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
     let city = input.city != null ? String(input.city).trim() : "";
     let lat = input.latitude != null ? Number(input.latitude) : NaN;
     let lon = input.longitude != null ? Number(input.longitude) : NaN;
     let label = input.locationLabel != null ? String(input.locationLabel).trim() : "";
+    // 位置来源可观测（2026-10-08）：定位答错的排查日志——真机测试时看这行
+    // 就知道 agent 为什么答这个城市（实时GPS/兜底解析/用户显式城市）。
+    let locSource = city ? "explicit-city" : "unresolved";
 
     if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && !city) {
       // 用户未明确城市名：天气必须取「用户真实所在地」，禁止用训练数据臆测城市。
@@ -18,12 +33,20 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
       // 2) 兜底消息自带 GPS（经逆地理得到干净 label + 时区）。
       const live = await context.requestLocation?.("weather.get_local");
       if (live && Number.isFinite(live.latitude) && Number.isFinite(live.longitude)) {
+        locSource = "live-gps";
         lat = live.latitude;
         lon = live.longitude;
         if (!label) {
-          label = [live.district, live.city, live.region, live.country]
-            .filter(Boolean)
-            .join(" · ");
+          label = dedupLabel([live.district, live.city, live.region, live.country]);
+        }
+        // 客户端按需回包是纯坐标（省一次手机↔服务端逆地理往返，GPS 秒回）：
+        // label 缺失时在服务端逆地理补齐城市名，否则卡片标题会退化成「31.23, 121.47」。
+        if (!label) {
+          const rev = await reverseGeocodeCoordinates(lat, lon);
+          if (rev) {
+            label = rev.label;
+            if (rev.timezone) timezone = rev.timezone;
+          }
         }
       }
 
@@ -33,12 +56,14 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
           clientLocation: context.clientLocation,
         });
         if (geo?.latitude != null && geo?.longitude != null) {
+          locSource = "resolved-geo";
           lat = geo.latitude;
           lon = geo.longitude;
-          if (!label) label = [geo.district, geo.city, geo.region, geo.country].filter(Boolean).join(" · ");
+          if (!label) label = dedupLabel([geo.district, geo.city, geo.region, geo.country]);
         } else if (geo?.city) {
+          locSource = "resolved-geo-city";
           city = geo.city;
-          if (!label) label = [geo.city, geo.region, geo.country].filter(Boolean).join(" · ");
+          if (!label) label = dedupLabel([geo.city, geo.region, geo.country]);
         }
       }
     }
@@ -61,6 +86,9 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
       };
     }
 
+    console.log(
+      `[weather.get_local] 位置来源=${locSource} 坐标=${lat.toFixed(4)},${lon.toFixed(4)} label=${label || "-"} city=${city || "-"}`,
+    );
     const brief = await weather.getBrief(lat, lon, timezone, label || undefined);
     return {
       ok: true,

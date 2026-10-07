@@ -20,6 +20,10 @@ export const CORE_TOOL_LIBRARY = {
       "clock.get_user_location",
       "clock.get_date",
       "clock.format_timestamp",
+      // 天气常驻核心（2026-10-08 真机实证）：天气与时间/定位同为环境基础设施。
+      // 留在延迟目录时轻任务面（realtime_lookup）分类召回不稳定——LLM 拿到
+      // 位置后搜不到天气工具，直接幻觉编造「晴朗17°C风速2.6m/s」（真机事故）。
+      "weather.get_local",
       "agent.query_capabilities",
       "internet.research",
       "internet.live_check",

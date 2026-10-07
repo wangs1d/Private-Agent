@@ -3,10 +3,10 @@
     "actor-zombie": {
       "revision": 2,
       "entries": {
-        "memory_commitments": "[2026-10-06T09:16:34.456Z] [topic:general] I will send the morning briefing at 8am",
-        "memory_summary": "[2026-10-06T09:16:34.456Z] [topic:general] I will send the morning briefing at 8am",
+        "memory_commitments": "[2026-10-07T16:47:45.975Z] [topic:general] I will send the morning briefing at 8am",
+        "memory_summary": "[2026-10-07T16:47:45.975Z] [topic:general] I will send the morning briefing at 8am",
         "memory_summary_forgotten": "",
-        "session_recap": "[2026-10-06T09:16:34.456Z] [topic:general] I will send the morning briefing at 8am"
+        "session_recap": "[2026-10-07T16:47:45.975Z] [topic:general] I will send the morning briefing at 8am"
       }
     }
   }

@@ -137,6 +137,21 @@ class ClientLocationService {
     return _fetchFresh(disk);
   }
 
+  /// 服务端 agent.location_request 专用（2026-10-08 定位修复）：
+  /// 纯坐标秒回——不做客户端逆地理（服务端拿到坐标后自己反查城市），
+  /// 把「GPS fix + 逆地理 HTTP」两段串行延迟压缩成只剩 GPS fix 一段，
+  /// 避免超过服务端 requestLocation 等待窗口导致按需定位恒超时。
+  static Future<ClientLocationPayload?> getCurrentLocationForAgentReply() async {
+    if (_locationConsent != true) {
+      final bool? consent = await getLocationConsent();
+      if (consent != true) {
+        return _cached ?? await _loadFromDisk();
+      }
+    }
+    final ClientLocationPayload? disk = await _loadFromDisk();
+    return _fetchFresh(disk, coordsOnly: true);
+  }
+
   /// 读取设备真实 IANA 时区（如 America/New_York）；失败返回 null（不上报，交服务端判定）。
   static Future<String?> _deviceTimezone() async {
     try {
@@ -150,9 +165,15 @@ class ClientLocationService {
   }
 
   /// 实际执行一次 GPS 抓取 + 逆地理；任何异常都返回磁盘/内存兜底。
+  ///
+  /// 两级精度兜底（2026-10-08 定位修复）：high 冷启动在室内/搜星慢时容易
+  /// 一直拿不到 fix 直到 timeLimit 抛错 → 退 medium（WiFi/基站定位，秒级出 fix），
+  /// 城市级场景（天气/定位问答）精度足够，避免「永远拿不到真实定位只能吃旧缓存」。
+  /// [coordsOnly] 为 true 时跳过服务端逆地理（agent.location_request 秒回路径）。
   static Future<ClientLocationPayload?> _fetchFresh(
-    ClientLocationPayload? disk,
-  ) async {
+    ClientLocationPayload? disk, {
+    bool coordsOnly = false,
+  }) async {
     try {
       final LocationPermission permission = await _ensurePermission();
       if (permission == LocationPermission.denied ||
@@ -161,12 +182,34 @@ class ClientLocationService {
         return disk ?? _cached;
       }
 
-      final Position position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 20),
-        ),
-      );
+      Position? position;
+      try {
+        position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 8),
+          ),
+        );
+      } catch (e) {
+        debugPrint("[ClientLocationService] high 精度定位失败，退 medium 重试: $e");
+        position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium,
+            timeLimit: Duration(seconds: 8),
+          ),
+        );
+      }
+
+      if (coordsOnly) {
+        final ClientLocationPayload coords = ClientLocationPayload(
+          latitude: position.latitude,
+          longitude: position.longitude,
+          timezone: await _deviceTimezone(),
+          label: "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
+        );
+        await _remember(coords);
+        return coords;
+      }
 
       final ClientLocationPayload? resolved = await _reverseGeocodeViaServer(
         position.latitude,
@@ -180,14 +223,14 @@ class ClientLocationService {
 
       // 服务端逆地理失败兜底：上报设备真实时区（不再硬编码 Asia/Shanghai），
       // 让服务端拿到正确用户时区，避免「在美国却报北京时间」。
-      final ClientLocationPayload coordsOnly = ClientLocationPayload(
+      final ClientLocationPayload coordsOnlyPayload = ClientLocationPayload(
         latitude: position.latitude,
         longitude: position.longitude,
         timezone: await _deviceTimezone(),
         label: "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
       );
-      await _remember(coordsOnly);
-      return coordsOnly;
+      await _remember(coordsOnlyPayload);
+      return coordsOnlyPayload;
     } catch (e) {
       debugPrint("[ClientLocationService] 获取定位失败: $e");
       return _cached ?? disk;

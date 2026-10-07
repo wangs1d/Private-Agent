@@ -330,8 +330,10 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   if (registryToolName.startsWith("phone_call.")) return 20_000;
   // 按工具类别分级超时：快工具给短超时，防止上游慢响应把整个 turn 卡到 30s
   const classTimeouts: Record<string, number> = {
-    "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
-    "weather.get_local": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
+    // 天气 15s（2026-10-08 定位修复）：按需定位改为真等客户端 GPS（协调器 12s 超时），
+    // 8s 预算会在 GPS fix 前把工具击杀，agent 只能拿旧缓存/记忆城市答天气
+    "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "15000", 10),
+    "weather.get_local": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "15000", 10),
     "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
     // 图片搜索独立 12s 档：内部链路是「结果页抓取 ≤5s + 图片转存硬预算 6.5s ≈ 11.5s」，
     // 按外圈 12s 设计。曾共享 search_web 的 6.5s 档，慢源查询（如「科莫多」这类图片

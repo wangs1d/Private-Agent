@@ -1181,10 +1181,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         // （session.init 已声明 mediaPlayback 能力；未命中类型内部直接忽略）
         unawaited(MediaPlaybackService.instance.handleMediaEvent(type, payload));
         // 服务端按需请求实时位置：Agent 需要位置时（如天气工具）才拉一次 GPS。
+        // 纯坐标秒回（不做客户端逆地理）：服务端拿到坐标后自行反查城市，
+        // 避免客户端逆地理 HTTP 把回包拖超时（服务端 requestLocation 只等 12s）。
         if (type == "agent.location_request") {
           final String jobId = payload["jobId"]?.toString() ?? "";
           final ClientLocationPayload? loc =
-              await ClientLocationService.getCurrentLocationForChat();
+              await ClientLocationService.getCurrentLocationForAgentReply();
           if (loc != null) {
             _ws.sendEvent("client.location_report", <String, dynamic>{
               if (jobId.isNotEmpty) "jobId": jobId,

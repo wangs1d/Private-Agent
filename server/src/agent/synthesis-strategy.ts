@@ -53,7 +53,8 @@ export type SynthesisStrategy =
   | "honest_sparse"          // 低质量数据：坦诚说明已知+未知
   | "multi_perspective"      // 矛盾数据：多视角对比
   | "direct_answer"         // 无工具数据：直接回答（纯知识）
-  | "photo_delivery";        // 纯图轮：交图即交付，正文一两句话收束
+  | "photo_delivery"        // 纯图轮：交图即交付，正文一两句话收束
+  | "weather_card";          // 天气卡轮：数值由系统卡片展示，正文只给口语建议
 
 /**
  * 照片轮专用指令（2026-10-06）：用户搜照片要的是图本身，每张照片下方已由
@@ -65,6 +66,20 @@ export const PHOTO_DELIVERY_INSTRUCTION =
   `照片轮：图片本身就是交付，每张照片下方会自动附一句画面解读（场景、氛围、观感），正文不要重复。` +
   `直接交图，正文最多一两句话自然引入（如来源或场合），然后收束。` +
   `严禁按主题分节盘点，严禁写「已确认的/能说的/没查到的」式小节，不要逐张复述照片内容；没找到的图用一句话带过即可，不要单列缺口清单。`;
+
+/**
+ * 天气卡轮专用指令（2026-10-08）：天气数值已由 tool-card-registry 从工具回执
+ * 确定性构建成结构化天气卡（城市·日期 / 天气 / 气温 / 降水 / 着装），同屏正文
+ * 再复述数据就是双份。真机事故形态：medium 档 layered_progressive 的
+ * 「先给出已确认的事实（有数据支撑的部分）」把模型教成
+ * 「## 标题 + > 引用 + |项目|数值| 表格」（复述数据当事实层）+ 穿搭建议（推断层）。
+ * 与纯图轮同理短路：天气轮不走数据质量分档，正文只保留口语建议。
+ */
+export const WEATHER_CARD_INSTRUCTION =
+  `天气轮：天气/气温/湿度/风速/降水概率这些数值已由系统专用天气卡片展示给用户，正文里不要再出现。` +
+  `严禁用 markdown 标题、表格或引用块罗列天气数据，严禁把工具回执的数值抄写成清单。` +
+  `严禁向用户展示经纬度坐标数字（如 35.68, 139.77）——坐标仅供工具入参，位置只说城市/区域名，解析不出就不提位置。` +
+  `直接用两三句口语给结论和建议（穿什么/要不要带伞/出行提醒），像朋友聊天一样自然收束。`;
 
 /** 有文字检索/抓取结果的工具：出现它们说明本轮是图文混合研究，不按纯图轮处理 */
 const TEXT_SEARCH_TOOL_NAMES = new Set([
@@ -100,6 +115,19 @@ export function isPhotoDeliveryRound(
 ): boolean {
   const okResults = results.filter((r) => r.ok);
   if (!okResults.some((r) => r.toolName === "search_images")) return false;
+  return !okResults.some((r) => TEXT_SEARCH_TOOL_NAMES.has(r.toolName));
+}
+
+/**
+ * 是否是「天气卡轮」：本轮至少一次 weather.* 工具成功，且没有任何成功的
+ * 文字检索/抓取结果。天气+搜索混合轮（如「查天气顺便查攻略」）仍走常规
+ * 合成策略，天气数值此时只是回复的一小部分。
+ */
+export function isWeatherCardRound(
+  results: Array<{ toolName: string; ok: boolean }>,
+): boolean {
+  const okResults = results.filter((r) => r.ok);
+  if (!okResults.some((r) => r.toolName.startsWith("weather."))) return false;
   return !okResults.some((r) => TEXT_SEARCH_TOOL_NAMES.has(r.toolName));
 }
 
@@ -408,6 +436,26 @@ export function evaluateAndSelectStrategy(
         toolDiversity: 1,
         level: "high",
         reason: "纯图轮：search_images 成功且无文字检索结果，交图为主",
+      },
+    };
+  }
+  // 天气卡轮短路（2026-10-08）：天气数值已由系统专用卡片展示，不走数据质量分档——
+  // 否则 medium 档「先给出已确认的事实（有数据支撑的部分）」会把模型教成
+  // 「## 标题 + > 引用 + 表格」复述数据当事实层（真机事故形态，同纯图轮教训）。
+  if (isWeatherCardRound(substantiveResults)) {
+    return {
+      strategy: "weather_card",
+      instruction: WEATHER_CARD_INSTRUCTION,
+      quality: {
+        sourceCount: substantiveResults.length,
+        searchCount: 0,
+        fetchCount: 0,
+        successCount: substantiveResults.filter((r) => r.ok).length,
+        failureCount: substantiveResults.filter((r) => !r.ok).length,
+        totalContentLength: 0,
+        toolDiversity: 1,
+        level: "high",
+        reason: "天气卡轮：weather.* 成功且无文字检索结果，数值走卡片、正文只写建议",
       },
     };
   }

@@ -1,5 +1,6 @@
 import "dart:async";
 
+import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 
 import "core/config/api_config.dart";
@@ -14,8 +15,6 @@ import "mobile_ui/mobile_theme.dart";
 /// 运行：
 /// - Linux/macOS/Windows 桌面调试手机 UI：
 ///   `flutter run -d windows -t lib/main_mobile.dart`
-/// - Web 预览：
-///   `flutter run -d chrome -t lib/main_mobile.dart`
 /// - Android 模拟器连接本机后端：
 ///   `flutter run -t lib/main_mobile.dart --dart-define=HTTP_BASE=http://10.0.2.2:3000`
 /// - 真机(手机与后端在同一局域网)：
@@ -26,8 +25,8 @@ import "mobile_ui/mobile_theme.dart";
 /// 全链按该 userId 落库，与桌面端登录同一账号即共享全部数据。已登录会话
 /// 读盘恢复（account_session.json），退出登录回到登录页。
 ///
-/// 底部导航：「对话」 / 「日程」 / 「我的」(简报、邮箱、设备、审批、
-/// 模型服务、帮助反馈、主题、退出登录)。功能与桌面端同源同数据,详见 mobile_home.dart。
+/// 底部导航：「对话」 / 「日程」 / 「我的」(邮箱、消息中心、服务接入、
+/// 模型目录、帮助反馈、主题、退出登录)。功能与桌面端同源同数据,详见 mobile_home.dart。
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MobileApp());
@@ -92,6 +91,14 @@ class _MobileAppState extends State<MobileApp> {
     setState(() => _loggedIn = false);
   }
 
+  /// 调试跳过登录（仅 debug 构建注入登录页）：临时身份直进主壳看 UI，
+  /// 不落盘会话——重启仍回登录页，正式登录不受影响。
+  void _onDebugSkipLogin() {
+    ApiConfig.runtimeUserId = "debug@preview.local";
+    if (!mounted) return;
+    setState(() => _loggedIn = true);
+  }
+
   @override
   void dispose() {
     _themeMode.dispose();
@@ -105,7 +112,7 @@ class _MobileAppState extends State<MobileApp> {
       builder: (BuildContext context, ThemeMode mode, _) {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
-          title: "智能助手",
+          title: "NEXTBOT",
           theme: MobileTheme.light,
           darkTheme: MobileTheme.dark,
           themeMode: mode,
@@ -124,6 +131,8 @@ class _MobileAppState extends State<MobileApp> {
     if (!_loggedIn) {
       return MobileLoginPage(
         onLoggedIn: (String email) => unawaited(_onLoggedIn(email)),
+        // 调试构建给「跳过登录」入口；release 不注入，按钮自动隐藏
+        onDebugSkip: kDebugMode ? _onDebugSkipLogin : null,
       );
     }
     return MobileHomePage(

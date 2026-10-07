@@ -8,23 +8,35 @@ import { MiniMaxTTSAdapter } from "./voice-dialogue/adapters/minimax-tts-adapter
  * - 均未配置时仅返回文本供前端本地播报
  */
 export class TtsService {
-  private readonly openai: OpenAI | null;
-  private readonly minimax: MiniMaxTTSAdapter | null;
+  private openai: OpenAI | null = null;
+  private minimax: MiniMaxTTSAdapter | null = null;
+  private openaiFingerprint = "";
+  private minimaxFingerprint = "";
 
-  constructor() {
+  /**
+   * 按 env 指纹惰性解析客户端：密钥/网关变化时重建（服务接入页保存密钥后
+   * PUT /api/service-config 写 env 即热生效，无需重启——与 mutable-chat-provider
+   * 的主对话热替换同一时序语义）。
+   */
+  private resolveClients(): void {
     // OpenAI TTS
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
+    const apiKey = process.env.OPENAI_API_KEY?.trim() ?? "";
     const baseURL = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").trim();
-    this.openai = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
-
+    const openaiFp = `${apiKey}@${baseURL}`;
+    if (openaiFp !== this.openaiFingerprint) {
+      this.openaiFingerprint = openaiFp;
+      this.openai = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
+    }
     // MiniMax TTS（speech-2.5）
-    this.minimax = new MiniMaxTTSAdapter();
-    if (!this.minimax.isEnabled()) {
-      // 无 API Key 时静默，回退到 OpenAI
+    const minimaxKey = process.env.MINIMAX_API_KEY?.trim() ?? "";
+    if (minimaxKey !== this.minimaxFingerprint) {
+      this.minimaxFingerprint = minimaxKey;
+      this.minimax = new MiniMaxTTSAdapter();
     }
   }
 
   isEnabled(): boolean {
+    this.resolveClients();
     return this.minimax?.isEnabled() || this.openai !== null;
   }
 
@@ -32,6 +44,7 @@ export class TtsService {
    * 获取当前使用的 TTS 提供商名称
    */
   getProvider(): string {
+    this.resolveClients();
     if (this.minimax?.isEnabled()) return "minimax";
     if (this.openai) return "openai";
     return "none";
@@ -61,6 +74,7 @@ export class TtsService {
     const trimmed = text.trim();
     if (!trimmed) return { ok: false, reason: "empty text" };
     const clipped = trimmed.length > 450 ? `${trimmed.slice(0, 447)}…` : trimmed;
+    this.resolveClients();
 
     // 1. 尝试 MiniMax TTS（speech-2.5，中文拟真度最佳）
     if (this.minimax?.isEnabled()) {

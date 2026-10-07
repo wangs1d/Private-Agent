@@ -11,7 +11,7 @@ import "mobile_theme.dart";
 
 /// 手机端主壳：底部导航 3 tab —— 对话 / 日程 / 我的。
 ///
-/// - 日程为手机专属「行程表」[MobileSchedulePage]：只读展示接下来的事项，当天优先
+/// - 日程为手机专属「行程表」[MobileSchedulePage]：一天一页 + 顶部日期条跳转，只读展示未来 30 天
 /// - 「我的」为二级菜单聚合页(简报/邮箱/设备/审批/模型服务等)
 /// - 各 tab 惰性构建 + IndexedStack 保活:未访问过的 tab 不发任何网络请求
 class MobileHomePage extends StatefulWidget {

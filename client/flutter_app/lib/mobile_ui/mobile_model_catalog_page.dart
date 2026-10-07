@@ -8,11 +8,11 @@ import "package:url_launcher/url_launcher.dart";
 import "../core/config/api_config.dart";
 import "mobile_theme.dart";
 
-/// 手机端「模型服务」页(只读目录)。
+/// 手机端「模型目录」页(只读目录)。
 ///
 /// GET /api/model-providers 实时读取服务端 config/model-providers.json,
-/// 展示已接入的服务商与默认模型。局域网/云端形态下 API Key 在服务端
-/// config.env 配置,手机端不存密钥,故只读。
+/// 展示已接入的服务商与默认模型。填写 API Key 请走「服务接入」页
+/// (PUT /api/service-config,内测 byok),本页只读展示供选型参考。
 class MobileModelCatalogPage extends StatefulWidget {
   const MobileModelCatalogPage({super.key});
 
@@ -107,7 +107,8 @@ class _MobileModelCatalogPageState extends State<MobileModelCatalogPage> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
           child: Text(
-            "已接入 ${_providers.length} 家模型服务商。切换模型或填写 API Key 在服务器端完成(局域网形态为部署机的 config.env),手机端只读展示。",
+            "已接入 ${_providers.length} 家模型服务商，供选型参考。"
+            "填写 API Key 启用模型请在「我的 → 服务接入」完成，保存后即刻生效。",
             style: TextStyle(color: p.textSecondary, fontSize: 13, height: 1.5),
           ),
         ),

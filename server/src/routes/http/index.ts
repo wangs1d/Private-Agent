@@ -11,6 +11,7 @@ import { registerCatalogRoutes } from "./catalog.js";
 import { registerChatRoutes } from "./chat.js";
 import { registerClientManifestRoutes } from "./client-manifest.js";
 import { registerModelProviderRoutes } from "./model-providers.js";
+import { registerServiceConfigRoutes } from "./service-config.js";
 import { registerFriendRoutes } from "./friends.js";
 import { registerInfoRoutes } from "./info.js";
 import { registerUnifiedProtocolRoutes } from "./protocol-unified.js";
@@ -103,6 +104,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerClientManifestRoutes(app);
   // 模型接入目录（自包含，无 deps）：向导/设置页目录式选模型，base URL 服务端统一下发
   registerModelProviderRoutes(app);
+  // 服务接入（内测 byok）：用户自配模型/TTS 密钥（GET/PUT /api/service-config + tts-test）
+  registerServiceConfigRoutes(app, {
+    ttsService: deps.ttsService,
+    externalChatSwapper: deps.externalChatSwapper,
+  });
   registerUnifiedProtocolRoutes(app, deps);
   registerInfoRoutes(app, deps);
   registerScheduleRoutes(app, deps);

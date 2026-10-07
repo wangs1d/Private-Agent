@@ -157,6 +157,8 @@ export type HttpRouteDeps = {
   webhookService?: WebhookService;
   notesService?: NotesService;
   externalChat?: ExternalChatProvider | null;
+  /** 服务接入热替换：PUT /api/service-config 保存后装入新主对话 provider（未注入时保存仅落盘+写 env） */
+  externalChatSwapper?: (next: ExternalChatProvider | null) => void;
   moodInferenceService?: MoodInferenceService;
   /** 终端互连平台：设备配对服务 */
   devicePairingService?: DevicePairingService;

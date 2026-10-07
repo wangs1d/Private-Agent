@@ -61,7 +61,10 @@ export class LocationCoordinator {
 
   constructor(opts?: { cacheTtlMs?: number; requestTimeoutMs?: number }) {
     this.cacheTtlMs = opts?.cacheTtlMs ?? 60_000;
-    this.requestTimeoutMs = opts?.requestTimeoutMs ?? 6_000;
+    // 2026-10-08 定位修复：6s 等不到手机冷启动 GPS（geolocator timeLimit 20s），
+    // 天气/时钟工具按需定位恒超时 → agent 退回旧缓存或记忆城市（「得不到真实定位」）。
+    // 12s 覆盖绝大多数 GPS fix（客户端已改为纯坐标秒回，不再叠加 12s 逆地理 HTTP）。
+    this.requestTimeoutMs = opts?.requestTimeoutMs ?? 12_000;
     this.trackingConfig = {
       mode: getLocationTrackingMode(),
       intervalSec: getLocationReportIntervalSec(),
@@ -160,6 +163,11 @@ export class LocationCoordinator {
       const timer = setTimeout(() => {
         if (!this.pending.has(jobId)) return;
         this.pending.delete(jobId);
+        // 超时侧日志：请求已下发但手机没回包（权限被拒/GPS 冷启动超预算/旧版 App 未重装）
+        console.log(
+          `[location-coordinator] 按需定位超时(${this.requestTimeoutMs}ms) actor=${actorId} reason=${reason ?? "-"}` +
+            ` → 工具将拿不到实时坐标，可能回退旧缓存或反问用户`,
+        );
         resolve(null);
       }, this.requestTimeoutMs);
       this.pending.set(jobId, { socket, timer, resolve });
@@ -192,6 +200,14 @@ export class LocationCoordinator {
     const loc = parseClientLocation(payload);
     if (loc) {
       this.cache.set(actorId, { payload: loc, at: Date.now() });
+      // 真机定位链路可观测（2026-10-08）：这是「手机上报了什么坐标」的唯一一手证据，
+      // 定位答错的排查从这里开始——坐标对而答错=LLM/逆地理问题；坐标错=手机 GPS 问题。
+      const pendingHit = String(payload.jobId ?? "").trim() ? "按需回包" : "主动上报";
+      console.log(
+        `[location-coordinator] ${pendingHit} actor=${actorId} ` +
+          `lat=${loc.latitude?.toFixed(5) ?? "?"} lon=${loc.longitude?.toFixed(5) ?? "?"} ` +
+          `label=${loc.label ?? "-"} tz=${loc.timezone ?? "-"}`,
+      );
     }
     const jobId = String(payload.jobId ?? "").trim();
     if (!jobId) return true; // 纯上报：已写缓存

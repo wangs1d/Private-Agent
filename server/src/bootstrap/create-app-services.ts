@@ -16,7 +16,8 @@ import {
   WorldService,
   type WorldRevisionEvent,
 } from "@private-ai-agent/agent-world";
-import { createExternalChatProviderFromEnv } from "../external-model/index.js";
+import { createExternalChatProviderFromEnv, MutableExternalChatProvider } from "../external-model/index.js";
+import { applyPersistedServiceConfig } from "../config/service-config-store.js";
 import { createPictureKit } from "@private-ai-agent/picture";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { createRecommendationCatalog, fetchLiveProducts, liveProductToRecord } from "../recommendation/index.js";
@@ -1707,7 +1708,13 @@ export async function createAppServices(): Promise<AppServices> {
     },
   });
 
-  const externalChat = createExternalChatProviderFromEnv();
+  // 服务接入（内测 byok）：先重放用户自配密钥（data/service-config.json → env），
+  // 再解析 provider 装入可热替换代理——用户在客户端「服务接入」页保存密钥后，
+  // PUT /api/service-config 经 externalChatSwapper 热生效，无需重启
+  // （见 routes/http/service-config.ts 与 config/service-config-store.ts）。
+  await applyPersistedServiceConfig();
+  const externalChatHost = new MutableExternalChatProvider(createExternalChatProviderFromEnv());
+  const externalChat = externalChatHost;
   // 主动话术生成器（内容型场景：行程变化/消息来临 → LLM 主动回复；模板兜底）。
   // 用量纪律：每日熔断 PROACTIVITY_MAX_PHRASE_PER_DAY（默认 30），PROACTIVITY_PHRASE_LLM=0 关闭。
   const speechPolisher = new SpeechPolisher({
@@ -6105,6 +6112,8 @@ export async function createAppServices(): Promise<AppServices> {
     webhookService,
     notesService,
     externalChat,
+    // 服务接入热替换：PUT /api/service-config 保存后装入新 provider（见 service-config.ts）
+    externalChatSwapper: (next) => externalChatHost.swap(next),
     moodInferenceService,
     devicePairingService,
     deviceRegistry,

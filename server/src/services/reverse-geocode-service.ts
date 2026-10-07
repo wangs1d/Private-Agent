@@ -79,7 +79,11 @@ async function fetchTimezone(latitude: number, longitude: number): Promise<strin
 }
 
 function buildLabel(parts: { district?: string; city?: string; region?: string; country?: string }): string {
-  return [parts.district, parts.city, parts.region, parts.country].filter(Boolean).join(" · ");
+  // 相邻去重：逆地理源经常返回 district=city=region（如「北京市 · 北京市」）
+  return [parts.district, parts.city, parts.region, parts.country]
+    .map((p) => (p ?? "").trim())
+    .filter((p, i, arr) => p && p !== arr[i - 1])
+    .join(" · ");
 }
 
 async function reverseFromBigDataCloud(
