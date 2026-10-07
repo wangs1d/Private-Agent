@@ -480,6 +480,10 @@ void DynamicIslandWindow::StartAttention(const std::string& title,
     now_s_ = static_cast<double>(GetTickCount64() - anim_epoch_ms_) / 1000.0;
   }
   attention_start_s_ = now_s_;
+  // 宽度自适应（2026-10-07）：按本次提醒文本实测取档，attention 激活
+  // 期间 CompactWidth 以此为准（含覆盖在常规条目上的情况）。
+  attention_capsule_w_ = MeasureAttentionCapsuleW(attention_title_,
+                                                  attention_trailing_);
   // 待机态来提醒：注入临时条目让胶囊有内容可显（结束由 Dart 侧收口）。
   if (!has_entry_ && !attention_title_.empty()) {
     Entry e;
@@ -494,6 +498,51 @@ void DynamicIslandWindow::StartAttention(const std::string& title,
     if (!IsVisible()) Show();
     StartAnimTimer();
   }
+}
+
+// attention 胶囊宽度自适应（2026-10-07 定调：预告标题+说明全展示，
+// 宽度随文本伸缩；上限防撑爆）。与渲染端头部行排版同构：
+// pad*2 + 图标块 + 标题 + 8s 间隔 (+ 尾注)，钳位 [最小档, 上限]。
+// 返回逻辑 px；测量失败回落 kAttentionCapsuleW（行为同旧固定档）。
+int DynamicIslandWindow::MeasureAttentionCapsuleW(
+    const std::wstring& title, const std::wstring& trailing) const {
+  EnsureGdiplusIsland();
+  HDC hdc = GetDC(window_handle_ != nullptr ? window_handle_ : nullptr);
+  if (hdc == nullptr) return kAttentionCapsuleW;
+  int result = kAttentionCapsuleW;
+  do {
+    const float s = static_cast<float>(dpi_scale_);
+    Gdiplus::Graphics g(hdc);
+    Gdiplus::Font icon_font(hdc, MakeIslandGlyphFont(S(15)));
+    Gdiplus::Font title_font(hdc, MakeIslandFont(S(18), 650));
+    Gdiplus::Font trail_font(hdc, MakeIslandFont(S(15), 650));
+    Gdiplus::RectF m_icon, m_title, m_trail;
+    if (g.MeasureString(KindGlyph(Kind::kSchedule), -1, &icon_font,
+                        Gdiplus::PointF(0, 0), &m_icon) != Gdiplus::Ok) {
+      break;
+    }
+    if (g.MeasureString(title.c_str(), -1, &title_font,
+                        Gdiplus::PointF(0, 0), &m_title) != Gdiplus::Ok) {
+      break;
+    }
+    float trail_w = 0.0f;
+    if (!trailing.empty() &&
+        g.MeasureString(trailing.c_str(), -1, &trail_font,
+                        Gdiplus::PointF(0, 0), &m_trail) == Gdiplus::Ok) {
+      trail_w = m_trail.Width;
+    }
+    const float pad_x = 14.0f * s;
+    const float gap = 7.0f * s;
+    const float title_gap = 8.0f * s;
+    const float icon_block = m_icon.Width + gap;
+    const float needed =
+        pad_x * 2.0f + icon_block + m_title.Width + title_gap + trail_w;
+    const int logical =
+        static_cast<int>(needed / dpi_scale_ + 0.5f);
+    result = std::clamp(logical, kAttentionCapsuleW, kAttentionMaxCapsuleW);
+  } while (false);
+  ReleaseDC(window_handle_ != nullptr ? window_handle_ : nullptr, hdc);
+  return result;
 }
 
 // attention 时间线：放大入(easeOutBack) -> 保持高亮脉冲 -> 缩回。
@@ -607,8 +656,9 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATI
 }
 
 // ── 声明尺寸档（islandTransition 思路）：每种状态一个设计好的尺寸 ──
-// 胶囊宽不再按文案实时测量，杜绝文案长短引起的大小抖动；
-// 超档文案渲染时截断加省略号。
+// 胶囊宽不按文案实时测量，杜绝文案长短引起的大小抖动；超档文案渲染时
+// 截断加省略号。例外：attention 提醒档按文本实测自适应（2026-10-07 定调，
+// 预告内容全展示），见 MeasureAttentionCapsuleW / CompactWidth。
 
 int DynamicIslandWindow::CompactWidthFor(Kind kind) const {
   switch (kind) {
@@ -623,6 +673,12 @@ int DynamicIslandWindow::CompactWidthFor(Kind kind) const {
 
 int DynamicIslandWindow::CompactWidth() const {
   if (!has_entry_) return kRestCapsuleW;
+  // attention 宽度自适应（2026-10-07 定调：预告内容全展示）：attention
+  // 激活期间（含覆盖在常规条目上）以实测提醒文本宽为准，播完回落声明档。
+  if (attention_capsule_w_ > 0 &&
+      (attention_start_s_ >= 0 || entry_.id == "attention")) {
+    return attention_capsule_w_;
+  }
   // attention 提醒走独立小胶囊档（用户拍板：提醒=小形态，不用 kSchedule 的 230 档）
   if (entry_.id == "attention") return kAttentionCapsuleW;
   return CompactWidthFor(entry_.kind);
@@ -961,13 +1017,15 @@ void DynamicIslandWindow::Render() {
                       r * 0.42f);
       } else {
         // 内容头部：图标 + 标题 + 尾注/活点，整体在头部行居中。
-        // attention 提醒期间标题/尾注切换为提醒文案（若下发）。
+        // attention 提醒期间胶囊内容整体让位给提醒文案：标题切换为提醒
+        // 标题，尾注同步取提醒尾注（空即不显示——条目旧尾注如「25 分钟后」
+        // 会与提醒标题里的时间信息重复/过期，2026-10-07 随宽度自适应一并收口）。
         std::wstring title =
             attention_start_s_ >= 0 && !attention_title_.empty()
                 ? attention_title_
                 : Utf8ToWide(entry_.title);
         std::wstring trailing =
-            attention_start_s_ >= 0 && !attention_trailing_.empty()
+            attention_start_s_ >= 0 && !attention_title_.empty()
                 ? attention_trailing_
                 : Utf8ToWide(entry_.trailing);
         Gdiplus::Font icon_font(mem_dc, MakeIslandGlyphFont(S(15)));

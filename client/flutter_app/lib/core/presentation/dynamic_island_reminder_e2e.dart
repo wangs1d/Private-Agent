@@ -52,8 +52,11 @@ Future<void> runIslandReminderE2EBootstrap() async {
 
   // 到点提醒语义（holdSeconds>0 = 长驻留档）：C++ StartAttention 直推
   // 抑制豁免唤回，播完（0.45 入 + 8 持 + 0.35 出 ≈ 8.8s）自动复位回抑制。
+  // message 随标题全展示（2026-10-07 宽度自适应定调）：r2 截图应见完整
+  // 「标题 · 说明」且胶囊宽随文本伸缩。
   IslandReminderScheduler.instance.fireNow(
     title: "设计评审 · 14:00",
+    message: "10 分钟后开始，请提前准备",
     holdSeconds: 8,
   );
   File("${stageDir.path}${Platform.pathSeparator}reminder_fired.flag")

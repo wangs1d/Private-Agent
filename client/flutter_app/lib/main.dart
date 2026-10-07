@@ -21,6 +21,7 @@ import "core/presentation/client_update_dialog.dart";
 import "core/presentation/dynamic_island.dart";
 import "core/presentation/dynamic_island_stage_e2e.dart";
 import "core/presentation/dynamic_island_reminder_e2e.dart";
+import "core/presentation/reminder_popup_e2e.dart";
 import "core/presentation/glass_notify.dart";
 import "core/presentation/update_result_card.dart";
 import "core/presentation/voice_call_ui_labels.dart";
@@ -1042,6 +1043,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 真机截图回归的数据注入引导，见 dynamic_island_reminder_e2e.dart。
     if (const bool.fromEnvironment('PAI_ISLAND_REMINDER_E2E')) {
       unawaited(runIslandReminderE2EBootstrap());
+    }
+    // E2E 专用（--dart-define=PAI_REMINDER_POPUP_E2E=true）：日程提醒
+    // 预告档/到点档桌面分流（预告只上岛，到点岛+原生弹窗）的数据注入引导，
+    // 见 reminder_popup_e2e.dart。
+    if (const bool.fromEnvironment('PAI_REMINDER_POPUP_E2E')) {
+      unawaited(runReminderPopupE2EBootstrap());
     }
     // 日程倒计时每 30s 刷新一次（「25 分钟后」随时间推进），并立即初同步。
     unawaited(_syncIslandSchedule());

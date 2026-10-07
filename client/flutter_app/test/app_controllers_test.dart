@@ -1,11 +1,11 @@
-import "dart:async";
-
 import "package:private_ai_agent/app/ambient_feeds_controller.dart";
 import "package:private_ai_agent/app/chat_turn_controller.dart";
 import "package:private_ai_agent/app/notification_flow_controller.dart";
 import "package:private_ai_agent/app/phone_call_controller.dart";
 import "package:private_ai_agent/core/models/agent_relay_models.dart";
 import "package:private_ai_agent/core/services/account_profile_api.dart";
+import "package:private_ai_agent/core/presentation/dynamic_island.dart";
+import "package:flutter/services.dart";
 import "package:flutter_test/flutter_test.dart";
 
 void main() {
@@ -80,6 +80,67 @@ void main() {
         "message": "10 分钟后开始",
       });
       expect(syncCalls, 2);
+    });
+
+    test("reminder_fired: 桌面到点档补发原生弹窗，预告档不上弹窗", () async {
+      const MethodChannel channel = MethodChannel("pai/desktop_notification");
+      final List<Map<String, dynamic>> shows = <Map<String, dynamic>>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+        if (call.method == "show") {
+          shows.add(Map<String, dynamic>.from(call.arguments as Map));
+          return true;
+        }
+        return null;
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding
+          .instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null));
+
+      // 到点档：岛 + 原生弹窗双通道（弹窗带确认钮）
+      await c.onScheduleReminderFired(<String, dynamic>{
+        "title": "评审会",
+        "message": "现在开始",
+      });
+      expect(shows, hasLength(1));
+      expect(shows.single["title"], "评审会");
+      expect(shows.single["message"], "现在开始");
+      expect(shows.single["showConfirmButton"], true);
+
+      // 预告档：只走灵动岛，不上弹窗（弹窗留给到点时刻）
+      await c.onScheduleReminderFired(<String, dynamic>{
+        "title": "该出门了",
+        "preReminder": true,
+      });
+      expect(shows, hasLength(1));
+    });
+
+    test("reminder_fired: 岛 attention 标题+说明全展示（2026-10-07 定调）", () async {
+      // 展示文本组装为纯函数直测（岛通道单测态 nativeReady=false 不出口）
+      expect(
+        IslandReminderScheduler.displayText(
+            "该出门了 · 14:00 出发", "距离出发约 15 分钟"),
+        "该出门了 · 14:00 出发 · 距离出发约 15 分钟",
+      );
+      expect(IslandReminderScheduler.displayText("吃药", null), "吃药");
+      expect(IslandReminderScheduler.displayText("吃药", "  "), "吃药");
+
+      // 说明文案回退链（空 message → 到点了）经桌面弹窗通道可断言
+      const MethodChannel channel = MethodChannel("pai/desktop_notification");
+      final List<Map<String, dynamic>> shows = <Map<String, dynamic>>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+        if (call.method == "show") {
+          shows.add(Map<String, dynamic>.from(call.arguments as Map));
+          return true;
+        }
+        return null;
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding
+          .instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null));
+      await c.onScheduleReminderFired(<String, dynamic>{"title": "吃药"});
+      expect(shows.single["message"], "到点了");
     });
 
     test("inbox.message: 桌面前台走应用内呈现并 bump 角标", () async {

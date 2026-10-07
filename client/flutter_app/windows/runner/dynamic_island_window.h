@@ -108,6 +108,10 @@ class DynamicIslandWindow {
   /// 到点提醒传长驻留（如 26s），点击胶囊可提前收口（并回 kAction「打开日程」）。
   void StartAttention(const std::string& title, const std::string& trailing,
                       double hold_s = 0.0);
+  /// attention 胶囊宽度自适应（2026-10-07）：按提醒文本实测宽度取档，
+  /// 钳位 [kAttentionCapsuleW, kAttentionMaxCapsuleW]（逻辑 px）。
+  int MeasureAttentionCapsuleW(const std::wstring& title,
+                               const std::wstring& trailing) const;
   void SetDpiScale(double scale);
   /// Dart 看门狗兜底：直推一次全屏抑制检查（原生 WM_TIMER 心跳失效时，
   /// 退出全屏后岛卡在隐藏态的恢复全靠这条）。
@@ -121,7 +125,10 @@ class DynamicIslandWindow {
   static constexpr int kWindowH = 460;
   static constexpr int kCapsuleH = 38;       // compact 胶囊高
   static constexpr int kRestCapsuleW = 108;  // 待机胶囊宽（用户拍板：长度 2 倍、高度不变）
-  static constexpr int kAttentionCapsuleW = 180;  // 提醒小胶囊宽（用户拍板：提醒改小形态，不带 1.6 放大）
+  static constexpr int kAttentionCapsuleW = 180;  // 提醒小胶囊最小宽（用户拍板：提醒改小形态，不带 1.6 放大）
+  // 提醒胶囊宽度上限（2026-10-07 定调：预告内容标题+说明全展示、宽度自适应，
+  // 上限防撑爆；窗口 760 留呼吸光余量）。超限文本由渲染端 FitText 截断兜底。
+  static constexpr int kAttentionMaxCapsuleW = 660;
   static constexpr int kExpandedW = 380;     // 展开卡宽
   static constexpr int kHoverW = 360;        // hover 态宽（声明档，环境信息 + 导航点）
   static constexpr int kHoverH = 58;         // hover 态高（胶囊 → 展开的中间层）
@@ -215,6 +222,7 @@ class DynamicIslandWindow {
   double attention_hold_s_ = kAttnHoldS;  // 本次保持段时长（秒），可变档
   std::wstring attention_title_;    // 高亮时显示的标题（可选，空=沿用当前 entry）
   std::wstring attention_trailing_;
+  int attention_capsule_w_ = 0;  // 本次 attention 实测宽（逻辑 px；0=未测量）
 
   // 鼠标交互
   bool hovering_ = false;

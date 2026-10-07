@@ -7,6 +7,7 @@ import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
 import "../core/models/agent_relay_models.dart";
+import "../core/services/desktop_notification_launcher.dart";
 import "../core/services/local_notification_service.dart";
 import "../core/presentation/dynamic_island.dart";
 
@@ -79,12 +80,13 @@ class AmbientFeedsController {
     }
   }
 
-  /// 日程提醒触达分流（2026-10-05 定调：提醒统一归灵动岛，桌面弹窗退役
-  /// 为纯决策出口——岛 = 告知，弹窗 = 等用户拍板）：
+  /// 日程提醒触达分流（2026-10-05 定调：提醒统一归灵动岛；2026-10-07 修订：
+  /// 到点档补回桌面原生弹窗——岛驻留短、切屏/全屏时易错过，弹窗保证必达）：
   ///   - 提前量预告（preReminder == true，睡前备忘/起床闹钟/该出门了…）：
   ///     走灵动岛 attention 默认档（约 6s 收回）——「灵动岛 = 预告」；
-  ///   - 到点提醒（preReminder != true）：走灵动岛长驻留档（约 30s，
-  ///     点击胶囊提前收口并打开日程页），提示音由 attention 档自带；
+  ///   - 到点提醒（preReminder != true）：灵动岛长驻留档（约 30s，点击胶囊
+  ///     提前收口并打开日程页）+ 桌面原生弹窗双通道（带「我知道了」确认钮，
+  ///     30s 自动关），提示音由 attention 档自带；
   ///   - 移动端后台一律走系统通知（前台仍回落灵动岛）。
   Future<void> onScheduleReminderFired(Map<String, dynamic> payload) async {
     try {
@@ -98,13 +100,27 @@ class AmbientFeedsController {
       if (isMobile && _backgrounded) {
         unawaited(LocalNotificationService.show(title: title, body: message));
       } else {
-        // 岛上只显示事情本身（title），不重复展示说明文案（2026-10-05 定调）。
+        // 岛上标题+说明全展示（2026-10-07 修订，覆盖 2026-10-05「只显示
+        // 事情本身」）：预告/到点文案完整上岛，胶囊宽度原生端自适应伸缩。
         IslandReminderScheduler.instance.fireNow(
           title: title,
+          message: message,
           // 到点档加长驻留（原生保持段 26s + 入出场 ≈ 30s）；
           // 提前量预告用默认短档。
           holdSeconds: isPreReminder ? 0 : 26,
         );
+        // 到点档桌面弹窗兜底必达（2026-10-07 修订）；预告档仍只走岛，
+        // 弹窗留给真正到点的时刻，避免每次预告都打断。
+        if (!isMobile && !isPreReminder) {
+          unawaited(DesktopNotificationLauncher.show(
+            title: title,
+            message: message,
+            priority: "high",
+            showConfirmButton: true,
+            confirmText: "我知道了",
+            autoCloseMs: 30000,
+          ));
+        }
       }
 
       await syncSchedule?.call();

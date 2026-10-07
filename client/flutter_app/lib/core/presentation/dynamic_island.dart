@@ -355,7 +355,7 @@ class DynamicIslandLauncher {
     });
   }
 
-  /// 提醒时刻的 attention 动画：放大 2 倍 + 高亮脉冲。
+  /// 提醒时刻的 attention 动画：高亮脉冲 + 胶囊宽度按文本自适应伸缩。
   /// [holdSeconds] = 保持段时长（秒），0 用原生默认档（预告）；
   /// 到点提醒传长驻留（如 26），点击胶囊可提前收口并回「打开日程」action。
   Future<void> attention({
@@ -506,21 +506,30 @@ class IslandReminderScheduler {
   static final IslandReminderScheduler instance = IslandReminderScheduler._();
 
   /// 立即触发一次提醒动画。
-  /// 内容只显示事情本身（[title]，2026-10-05 定调：不加尾注/说明文案）。
+  /// 展示内容 = [title] + 可选 [message]（2026-10-07 定调：标题与说明文案
+  /// 全展示，以「 · 」连接；胶囊宽度原生端按文本自适应伸缩）。
   /// [holdSeconds] 保持段时长（秒）：预告档不传（默认 6s 收回）；
   /// 到点档传长驻留（如 26 → 约 30s），点击胶囊提前收口并跳日程页。
   void fireNow({
     required String title,
+    String? message,
     double holdSeconds = 0,
   }) {
     final DynamicIslandLauncher launcher = DynamicIslandLauncher.instance;
-    launcher.attention(title: title, holdSeconds: holdSeconds);
+    launcher.attention(
+        title: displayText(title, message), holdSeconds: holdSeconds);
     // 提醒动画结束后胶囊回落：默认 6 秒；长驻留档 = 保持段 + 入出场余量。
     final int dismissMs =
         holdSeconds > 0 ? ((holdSeconds + 1.0) * 1000).round() : 6000;
     Timer(Duration(milliseconds: dismissMs), () {
       DynamicIslandController.instance.dismiss('attention');
     });
+  }
+
+  /// 提醒展示文本组装（纯函数可测）：说明为空时只出标题，否则「 · 」连接。
+  static String displayText(String title, String? message) {
+    final String extra = message?.trim() ?? '';
+    return extra.isEmpty ? title : '$title · $extra';
   }
 }
 
