@@ -173,6 +173,325 @@ export function extractDsmlToolCalls(content: string): NormalToolCall[] {
   return calls;
 }
 
+/* ------------------------------------------------------------------ *
+ * 文本形态工具调用：声明式格式注册表 + 通用解析引擎 + 结构启发式兜底    *
+ * （根因方案：换模型不再需要为每种泄漏格式人工写适配）                  *
+ * ------------------------------------------------------------------ */
+
+/**
+ * 泄漏机理（2026-10-07 双向实测）：带 tools 的请求各厂商都返回结构化
+ * tool_calls；泄漏只发生在**无工具/工具被裁轮次**——模型按各自训练格式把调用
+ * 写进 content 正文（充要条件 = 模型自认能办事 × 无结构化通道）。MiniMax-M3
+ * 形如 `<tool_call><invoke name="reminder_plan"><parameter name="title">…`；
+ * Qwen/Hermes 系为 `<tool_call>{"name":"x","arguments":{…}}</tool_call>`。
+ *
+ * 根因方案分两层：
+ *   1. 声明式注册表（TEXTUAL_TOOL_CALL_FORMATS）：已知厂商格式注册一条声明
+ *      （标签名集合 + 可选 namespace 前缀 + JSON 载荷容器），提取（XML/JSON
+ *      双形态）、流式净化、半截标签滞留、正文剥离全部由注册表派生自动生效——
+ *      新模型适配 = 注册一行，零解析代码。
+ *   2. 结构启发式兜底（extractHeuristicToolCalls）：完全未注册的格式按
+ *      「标签名含工具词根（tool/invoke/call/param/function/arg）+ name 属性
+ *      定性 + 键值参数/JSON 载荷」识别——保证任何新厂商的泄漏都能被提取升级
+ *      到任务面、正文流末被剥离；仅流式半截拦截弱于注册格式（可随后补注册）。
+ */
+
+/** 一个「文本形态 XML 工具调用格式」的声明。 */
+type XmlToolCallFormat = {
+  /** 格式 id（日志/排错定位用） */
+  id: string;
+  /** 该格式的全部协议标签名（不带 namespace 前缀的裸名） */
+  tagNames: readonly string[];
+  /** 可选 namespace 前缀：匹配 `<prefix:tag>`；无前缀变体始终兼容 */
+  namespacePrefixes?: readonly string[];
+  /** JSON 载荷容器标签：`<tag>{"name":…,"arguments":{…}}</tag>` */
+  jsonPayloadTags?: readonly string[];
+};
+
+/**
+ * 已知厂商格式注册表。新模型泄漏新格式时：先在此注册一行（流式净化即全量
+ * 生效）；来不及注册时结构启发式也能兜住提取与流末剥离。
+ */
+const TEXTUAL_TOOL_CALL_FORMATS: readonly XmlToolCallFormat[] = [
+  {
+    id: "minimax-m3",
+    // MiniMax-M3 无工具轮训练格式；<minimax:tool_call> 为带前缀变体。
+    // Qwen/Hermes 系复用 tool_call 标签但载荷为 JSON（jsonPayloadTags）。
+    tagNames: ["tool_call", "invoke", "parameter"],
+    namespacePrefixes: ["minimax"],
+    jsonPayloadTags: ["tool_call"],
+  },
+];
+
+/** 单格式的 namespace 前缀模式（整组可选）：`(?:(?:minimax)\s*:\s*)?` */
+function formatNamespacePattern(fmt: XmlToolCallFormat): string {
+  const prefixes = fmt.namespacePrefixes?.filter(Boolean) ?? [];
+  return prefixes.length > 0 ? `(?:(?:${prefixes.join("|")})\\s*:\\s*)?` : "";
+}
+
+/** 启发式词根：标签名含这些词根即视为工具协议标签候选（定性靠 name 属性/JSON 载荷）。 */
+const TOOLISH_NAME_ROOTS = ["tool", "invoke", "call", "param", "function", "arg"] as const;
+/** 启发式标签名模式：词根可出现在任意命名段中（my_tool / function_call / parameter 等）。 */
+const TOOLISH_NAME_PATTERN = "[a-z0-9_]*?(?:tool|invoke|call|param|function|arg)[a-z0-9_]*";
+/** 启发式标签的通用 namespace 前缀（未知厂商的任意 `<ns:` 形态）。 */
+const GENERIC_NS_PATTERN = "(?:[A-Za-z][\\w.-]*\\s*:\\s*)?";
+
+function escapeRegExp(raw: string): string {
+  return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/* -- 由注册表派生的共享常量（提取/净化/滞留三处共用，注册即全量生效） -- */
+
+/** 已知标签名全集（半截滞留判定用）。 */
+const KNOWN_TEXTUAL_TAG_NAMES: readonly string[] =
+  TEXTUAL_TOOL_CALL_FORMATS.flatMap((f) => f.tagNames);
+/** 已知 namespace 前缀全集。 */
+const KNOWN_TEXTUAL_NS_PREFIXES: readonly string[] =
+  TEXTUAL_TOOL_CALL_FORMATS.flatMap((f) => f.namespacePrefixes ?? []);
+
+/**
+ * 完整协议标签联合模式（开/闭/自闭合）：
+ *   - 注册格式：精确标签名（`[^>]*` 容纳属性）；
+ *   - 启发式：带 name 属性的工具词根开标签 + 工具词根闭标签。
+ * 流式净化 drain() 用它取「最早出现的协议标签」；name 属性定性把误伤收敛到
+ * 「正文恰好出现 `<词根标签 name="…">`」的极端场景（与 think 净化器同款取舍：
+ * 内部信号防透出的优先级更高）。
+ */
+const TEXTUAL_TOOL_ANY_TAG_RE = new RegExp(
+  [
+    ...TEXTUAL_TOOL_CALL_FORMATS.map((fmt) => {
+      const ns = formatNamespacePattern(fmt);
+      return `<\\s*\\/?\\s*${ns}(?:${fmt.tagNames.join("|")})\\b[^>]*>`;
+    }),
+    // 启发式闭标签（无属性要求——游离闭标签同样剥除）
+    `<\\s*\\/\\s*${GENERIC_NS_PATTERN}${TOOLISH_NAME_PATTERN}\\s*>`,
+    // 启发式开标签：词根名 + 必须携带 name="…" 属性
+    `<\\s*${GENERIC_NS_PATTERN}${TOOLISH_NAME_PATTERN}\\s+[^>]*?\\bname\\s*=\\s*(?:"[^"]*"|'[^']*')[^>]*>`,
+  ].join("|"),
+  "i",
+);
+/** 快速判定：content 是否含已注册格式的协议标签（启发式另判）。 */
+const TEXTUAL_TOOL_TAG_PROBE_RE = new RegExp(
+  `<\\s*\\/?\\s*(?:${TEXTUAL_TOOL_CALL_FORMATS.flatMap((f) => {
+    const ns = formatNamespacePattern(f);
+    return f.tagNames.map((t) => `${ns}${t}`);
+  }).join("|")})\\b`,
+  "i",
+);
+
+/** 文本形态参数值解码：HTML 实体 + 去包裹引号 + 数字/布尔字面量推断。 */
+function coerceTextualParamValue(raw: string): unknown {
+  const decoded = raw
+    .replace(/<\s*br\s*\/?\s*>/gi, "\n")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim();
+  // 模型常给字符串参数画上引号（实测：title → "王哥，吃饭啦"），去掉包裹引号
+  const unquoted =
+    decoded.length >= 2 &&
+    ((decoded.startsWith('"') && decoded.endsWith('"')) ||
+      (decoded.startsWith("「") && decoded.endsWith("」")))
+      ? decoded.slice(1, -1).trim()
+      : decoded;
+  if (/^-?\d+(?:\.\d+)?$/.test(unquoted)) {
+    const n = Number(unquoted);
+    if (Number.isFinite(n)) return n;
+  }
+  if (/^(true|false)$/i.test(unquoted)) return /^true$/i.test(unquoted);
+  return unquoted;
+}
+
+/** 单注册格式的提取：JSON 载荷形态 + XML invoke/parameter 形态。 */
+function extractCallsForFormat(content: string, fmt: XmlToolCallFormat): NormalToolCall[] {
+  const calls: NormalToolCall[] = [];
+  let index = 0;
+  const ns = formatNamespacePattern(fmt);
+  const push = (name: string, args: Record<string, unknown>) => {
+    calls.push({
+      index,
+      id: `xml_call_${fmt.id}_${Date.now().toString(36)}_${index}`,
+      name,
+      argumentsChunk: JSON.stringify(args),
+    });
+    index += 1;
+  };
+
+  // JSON 载荷形态：<tool_call>{"name":"x","arguments":{…}}</tool_call>
+  for (const tag of fmt.jsonPayloadTags ?? []) {
+    const jsonBlockRe = new RegExp(
+      `<\\s*${ns}${tag}\\s*>\\s*([{\\[][\\s\\S]*[}\\]])\\s*<\\s*\\/\\s*${ns}${tag}\\s*>`,
+      "gi",
+    );
+    for (const m of content.matchAll(jsonBlockRe)) {
+      try {
+        const parsed = JSON.parse(m[1]) as { name?: unknown; arguments?: unknown };
+        if (typeof parsed.name === "string" && parsed.name.trim()) {
+          push(parsed.name.trim(), (parsed.arguments ?? {}) as Record<string, unknown>);
+        }
+      } catch {
+        // 半截 JSON：按无效调用忽略（正文剥离仍会进行）
+      }
+    }
+  }
+
+  // XML invoke 形态：<invoke name="x"><parameter name="k">v</parameter></invoke>
+  const invokeRe = new RegExp(
+    `<\\s*${ns}invoke\\b([^>]*)>([\\s\\S]*?)<\\s*\\/\\s*${ns}invoke\\s*>`,
+    "gi",
+  );
+  const parameterRe = new RegExp(
+    `<\\s*${ns}parameter\\b([^>]*)>([\\s\\S]*?)<\\s*\\/\\s*${ns}parameter\\s*>`,
+    "gi",
+  );
+  for (const invokeMatch of content.matchAll(invokeRe)) {
+    const invokeAttrs = parseDsmlAttributes(invokeMatch[1] ?? "");
+    const name = invokeAttrs.name?.trim();
+    if (!name) continue;
+    const args: Record<string, unknown> = {};
+    for (const paramMatch of (invokeMatch[2] ?? "").matchAll(parameterRe)) {
+      const paramAttrs = parseDsmlAttributes(paramMatch[1] ?? "");
+      const paramName = paramAttrs.name?.trim();
+      if (!paramName) continue;
+      args[paramName] = coerceTextualParamValue(paramMatch[2] ?? "");
+    }
+    push(name, args);
+  }
+  return calls;
+}
+
+/**
+ * 从 content 提取「已注册格式」的文本形态工具调用（与 extractDsmlToolCalls 互斥：
+ * DSML 标签带竖线前缀，不会被这里的正则命中）。
+ *
+ * 覆盖格式（随注册表扩展）：
+ *   A. `<tool_call>…<invoke name="x">…</invoke>…</tool_call>`（含 minimax: 变体、
+ *      无外层包裹的裸 invoke）；
+ *   B. `<tool_call>{"name":"x","arguments":{…}}</tool_call>`（Qwen/Hermes JSON）。
+ */
+export function extractTextualToolCalls(content: string): NormalToolCall[] {
+  if (!content || !TEXTUAL_TOOL_TAG_PROBE_RE.test(content)) return [];
+  const calls: NormalToolCall[] = [];
+  for (const fmt of TEXTUAL_TOOL_CALL_FORMATS) {
+    calls.push(...extractCallsForFormat(content, fmt));
+  }
+  return calls;
+}
+
+/* -- 结构启发式兜底（未注册格式的最后一道网） -- */
+
+/** 启发式快速判定：content 含工具词根标签候选才进结构扫描。 */
+const HEURISTIC_TOOL_TAG_PROBE_RE = new RegExp(
+  `<\\s*\\/?\\s*${GENERIC_NS_PATTERN}[A-Za-z][\\w.-]*(?:tool|invoke|call|param|function|arg)`,
+  "i",
+);
+
+/**
+ * 未注册格式的结构启发式提取：不认识标签名没关系，只要结构像工具调用——
+ * 容器标签名含工具词根，且（带 name 属性 → 工具名）或（载荷为含 name 字段的
+ * JSON）；参数来自「带 name 属性的子标签」或容器附加属性。
+ */
+export function extractHeuristicToolCalls(content: string): NormalToolCall[] {
+  if (!content || content.indexOf("<") < 0 || !HEURISTIC_TOOL_TAG_PROBE_RE.test(content)) {
+    return [];
+  }
+  const calls: NormalToolCall[] = [];
+  const openRe = /<\s*([A-Za-z][\w.-]*)(\s[^<>]*?)?\s*(\/?)>/g;
+  // 已消费区间水印：外层容器提取为调用后，其内部标签（invoke 里的 parameter、
+  // function_call 里的 arg）不再作为独立调用扫描——参数标签也带 name 属性，
+  // 不做区间排除会把参数键名误判成工具名。
+  let consumedUntil = 0;
+  for (const open of content.matchAll(openRe)) {
+    if ((open.index ?? 0) < consumedUntil) continue;
+    const tagName = (open[1] ?? "").toLowerCase();
+    if (!TOOLISH_NAME_ROOTS.some((root) => tagName.includes(root))) continue;
+    const selfClosing = open[3] === "/";
+    const attrs = parseDsmlAttributes((open[2] ?? "").replace(/\/\s*$/, ""));
+    const after = content.slice((open.index ?? 0) + open[0].length);
+    const closeMatch = new RegExp(
+      `<\\s*\\/\\s*(?:${GENERIC_NS_PATTERN})?${escapeRegExp(tagName)}\\s*>`,
+      "i",
+    ).exec(after);
+    if (!selfClosing && !closeMatch) continue;
+    const body = selfClosing ? "" : after.slice(0, closeMatch!.index);
+
+    let name = attrs.name?.trim() ?? "";
+    let args: Record<string, unknown> = {};
+    const trimmedBody = body.trim();
+    // JSON 载荷（无 name 属性容器，如 <function_call>{"name":…}</function_call>）
+    if (!name && trimmedBody.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(trimmedBody) as { name?: unknown; arguments?: unknown };
+        if (typeof parsed.name === "string" && parsed.name.trim()) {
+          name = parsed.name.trim();
+          args = (parsed.arguments ?? {}) as Record<string, unknown>;
+        }
+      } catch {
+        // 半截 JSON：忽略（正文剥离仍会进行）
+      }
+    }
+    if (!name) continue;
+    // 子标签参数：<arg name="city">北京</arg> / <parameter name="title">…</parameter>
+    if (trimmedBody.startsWith("<")) {
+      const childRe = /<\s*([A-Za-z][\w:.-]*)((?:\s[^<>]*?)?)\s*(\/?)>/g;
+      for (const child of body.matchAll(childRe)) {
+        if (child[3] === "/") continue;
+        const childAttrs = parseDsmlAttributes(child[2] ?? "");
+        const paramName = childAttrs.name?.trim();
+        if (!paramName) continue;
+        const rest = body.slice((child.index ?? 0) + child[0].length);
+        const childClose = new RegExp(
+          `<\\s*\\/\\s*${escapeRegExp(child[1] ?? "")}\\s*>`,
+          "i",
+        ).exec(rest);
+        args[paramName] = coerceTextualParamValue(
+          childClose ? rest.slice(0, childClose.index) : "",
+        );
+      }
+    }
+    // 容器附加属性视为参数（<invoke name="x" city="北京"/> 形态）
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k !== "name" && args[k] === undefined) args[k] = coerceTextualParamValue(v);
+    }
+    calls.push({
+      index: calls.length,
+      id: `htool_call_${Date.now().toString(36)}_${calls.length}`,
+      name,
+      argumentsChunk: JSON.stringify(args),
+    });
+    // 标记本调用区间已消费（含闭合标签），内部子标签不再重复扫描
+    consumedUntil = selfClosing
+      ? (open.index ?? 0) + open[0].length
+      : (open.index ?? 0) + open[0].length + closeMatch!.index + closeMatch![0].length;
+  }
+  return calls;
+}
+
+/**
+ * 统一提取入口：DSML（Kimi）+ 已注册格式 + 结构启发式，按「工具名+参数」去重
+ * （启发式与注册引擎命中的同一调用只保留首个）。consumeNormalizedStream 一律
+ * 走这里——新厂商格式未注册时也能被提取升级到任务面。
+ */
+export function extractAllTextualToolCalls(content: string): NormalToolCall[] {
+  const merged = [
+    ...extractDsmlToolCalls(content),
+    ...extractTextualToolCalls(content),
+    ...extractHeuristicToolCalls(content),
+  ];
+  if (merged.length <= 1) return merged;
+  const seen = new Set<string>();
+  const out: NormalToolCall[] = [];
+  for (const call of merged) {
+    const key = `${call.name ?? ""}\u0000${call.argumentsChunk ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...call, index: out.length });
+  }
+  return out;
+}
+
 function resolveIdleTimeoutMs(explicit?: number): number {
   if (typeof explicit === "number") return explicit;
   const env = process.env.STREAM_IDLE_TIMEOUT_MS;
@@ -360,16 +679,19 @@ export async function consumeNormalizedStream(
   let toolCalls: NormalToolCall[] = [...toolAccByIndex.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, v]) => v);
-  // 提取必须用 rawContent（DSML 标记完好），发射给 consumer 的 content 已被
+  // 提取必须用 rawContent（协议标记完好），发射给 consumer 的 content 已被
   // 守卫剥掉协议原文——否则提取不到任何调用（2026-09-11 根修）。
-  const dsmlToolCalls = extractDsmlToolCalls(rawContent);
-  if (dsmlToolCalls.length > 0) {
+  // 2026-10-08 根因化：统一入口 = DSML（Kimi）+ 注册格式（声明式注册表派生）
+  // + 结构启发式（未注册格式兜底）。任何厂商在无工具轮把调用写进 content，
+  // 都能被提取升级到任务面执行 / 正文流末剥离——换模型不再需要人工适配。
+  const extractedCalls = extractAllTextualToolCalls(rawContent);
+  if (extractedCalls.length > 0) {
     const offset = toolCalls.length;
     toolCalls = toolCalls.concat(
-      dsmlToolCalls.map((call, i) => ({ ...call, index: offset + i })),
+      extractedCalls.map((call, i) => ({ ...call, index: offset + i })),
     );
     // content 已被守卫剥掉协议原文，strip 通常在此为 no-op（防守卫旁路的兜底）。
-    // 但 no-op 不带 trim——历史行为里「有 DSML 的正文」会经 strip 收尾 trim，
+    // 但 no-op 不带 trim——历史行为里「有协议块的正文」会经 strip 收尾 trim，
     // 这里补 .trim() 保持契约（协议块被剥后正文不应残留尾随空行）。
     content = stripDsmlToolCallMarkup(content).trim();
     finishReason = "tool_calls";
@@ -580,7 +902,39 @@ export function createStreamThinkSanitizer() {
 
 /** 完整 DSML 标签（开或闭）：`<` 可选 `/`，两组竖线（间可夹空白），`DSML`，任意标签头到 `>`。 */
 const DSML_ANY_TAG_RE = /<\s*\/?\s*[|｜]+\s*[|｜]+\s*DSML[^>]*>/i;
-/** 末尾滞留判定：是否为「可能是半截 DSML 标签的前缀」。返回应滞留的字符数。 */
+
+/**
+ * 末尾滞留判定：是否为「可能是半截协议标签的前缀」。返回应滞留的字符数。
+ * 策略：裸 `<`（`a<b`、`5<3`）不滞留；`<字母…` 名字段按「已知标签前缀 / 已知
+ * ns 前缀 / 工具词根」定性后整段滞留（≤120，属性可含任意字符直到 `>`）；
+ * 未知名且未长全也滞留到 `>`（未注册厂商标签不打字机漏出，正文 `<word`
+ * 最多延迟一个 chunk，`>` 一到立即放行）。
+ */
+function textualToolPartialTagTailLen(text: string): number {
+  const lt = text.lastIndexOf("<");
+  if (lt < 0) return 0;
+  const tail = text.slice(lt);
+  if (tail.length > 120) return 0;
+  // `<` + 可选 `/` + 字母开头的名字段：先定性名字，未定性则滞留到标签长全。
+  const m = /^<\s*\/?\s*(?:([A-Za-z][\w]*)\s*:\s*)?([a-zA-Z_][\w-]*)/.exec(tail);
+  if (!m) return 0; // 裸 `<`（`a<b`、`5<3`）或非字母：正文太常见，不滞留
+  const name = (m[2] ?? "").toLowerCase();
+  // 已知注册标签 / 已知 ns 前缀（含 `<minimax` 未打出冒号）/ 工具词根候选：
+  // 定性为协议候选，整段滞留（含属性与任意字符，≤120）等 `>`
+  if (KNOWN_TEXTUAL_TAG_NAMES.some((k) => k.startsWith(name))) return tail.length;
+  if (KNOWN_TEXTUAL_NS_PREFIXES.some((p) => p.toLowerCase().startsWith(name))) {
+    return tail.length;
+  }
+  if (TOOLISH_NAME_ROOTS.some((r) => name.includes(r) || r.startsWith(name))) {
+    return tail.length;
+  }
+  // 未知名字（如未注册厂商的 `<wrap_call`）：标签没长全前无法判——滞留到 `>`
+  // 出现。`>` 一到即走完整标签分支（注册/启发式/裸标签留观）或立即放行，
+  // 正文 `<word` 形态最多延迟一个 chunk（有界）。
+  if (!tail.includes(">")) return tail.length;
+  return 0;
+}
+
 function dsmlPartialTagTailLen(text: string): number {
   const lt = text.lastIndexOf("<");
   if (lt < 0) return 0;
@@ -593,19 +947,136 @@ function dsmlPartialTagTailLen(text: string): number {
   return 0;
 }
 
+/**
+ * 裸工具词根开标签（无 name 属性）：注册表与「name 属性定性」都不认的容器，
+ * 但它可能是未知厂商的 JSON 载荷容器（如 <function_call>{"name":…}）或
+ * 外层包裹（如 <wrap_call><invoke name=…>）。流式遇到时进入「留观」。
+ */
+function findBareToolishOpen(text: string): { index: number; tagName: string } | null {
+  const openRe = new RegExp(
+    `<\\s*${GENERIC_NS_PATTERN}(${TOOLISH_NAME_PATTERN})((?:\\s[^<>]*)?)>`,
+    "gi",
+  );
+  for (const m of text.matchAll(openRe)) {
+    const attrs = (m[2] ?? "").trimEnd();
+    if (/\bname\s*=/i.test(attrs)) continue; // 带 name 属性的走完整启发式分支
+    if (/\/\s*$/.test(attrs)) continue; // 自闭合无内容，无需留观
+    return { index: m.index ?? -1, tagName: (m[1] ?? "").toLowerCase() };
+  }
+  return null;
+}
+
+/** 留观判决。 */
+type ProbationVerdict = "confirm" | "release" | "hold";
+
+/**
+ * 留观证据判定（对「开标签之后的候选证据」）：
+ *   - 首个非空白是 `{` 且出现 `"name":` 键 → JSON 载荷容器，确认；
+ *   - 首个非空白是同名闭标签（成对）→ 确认；
+ *   - 首个非空白是带 name 属性的工具词根开标签 → 外层包裹，确认；
+ *   - 其余（正文文本 / 无关标签）→ 证伪，原样放行；
+ *   - 证据未齐（纯空白 / JSON 还没出 "name" 键）→ 继续扣，超上限放行。
+ * 确认成本有界：留观段 ≤ PROBATION_CAP；正文误扣在首个非空白字符即解除。
+ */
+function evaluateProbation(seg: string, tagName: string): ProbationVerdict {
+  const PROBATION_CAP = 240;
+  const tagEnd = seg.indexOf(">");
+  if (tagEnd < 0) return seg.length > PROBATION_CAP ? "release" : "hold";
+  const rest = seg.slice(tagEnd + 1);
+  const trimmed = rest.replace(/^\s+/, "");
+  if (trimmed.length === 0) return seg.length > PROBATION_CAP ? "release" : "hold";
+  if (trimmed.startsWith("{")) {
+    if (/^[\s\S]*?"name"\s*:/.test(trimmed)) return "confirm";
+    return seg.length > PROBATION_CAP ? "release" : "hold";
+  }
+  if (trimmed.startsWith("<")) {
+    const isClosing = /^<\s*\//.test(trimmed);
+    const m = /^<\s*\/?\s*(?:[A-Za-z][\w.-]*\s*:\s*)?([a-zA-Z_][\w-]*)?/.exec(trimmed);
+    const nm = (m?.[1] ?? "").toLowerCase();
+    // 名字段还是半截（<、</、<inv…）或工具词根候选 → 可能长成 named child /
+    // 同名闭标签，继续扣；确认不了的（<b>、</div> 等）放行
+    const couldBeRelevant =
+      nm === ""
+        ? true
+        : TOOLISH_NAME_ROOTS.some((r) => nm.includes(r) || r.startsWith(nm)) ||
+          (isClosing && tagName.startsWith(nm));
+    if (couldBeRelevant) {
+      const closeSelfRe = new RegExp(
+        `^<\\s*\\/\\s*(?:${GENERIC_NS_PATTERN})${escapeRegExp(tagName)}\\s*>`,
+        "i",
+      );
+      if (closeSelfRe.test(trimmed)) return "confirm";
+      const namedChildRe = new RegExp(
+        `^<\\s*${GENERIC_NS_PATTERN}${TOOLISH_NAME_PATTERN}\\s+[^>]*?\\bname\\s*=`,
+        "i",
+      );
+      if (namedChildRe.test(trimmed)) return "confirm";
+      return seg.length > PROBATION_CAP ? "release" : "hold";
+    }
+    return "release";
+  }
+  return "release";
+}
+
 export function createStreamDsmlSanitizer() {
   let pending = "";
   let depth = 0;
+  /**
+   * 留观段：裸工具词根开标签（无 name 属性、注册表也不认）扣住待判。
+   * 确认 → 转协议态吞掉整块；证伪 → 原样放行（宁可透出也不吞正文）。
+   * 解决未注册格式的流式透出：JSON 载荷容器 / 外层包裹的协议文本不再
+   * 打进打字机，只等流末剥离。
+   */
+  let probation: { seg: string; tagName: string } | null = null;
 
   function drain(): string {
     let out = "";
     while (true) {
-      const tagMatch = DSML_ANY_TAG_RE.exec(pending);
+      if (probation) {
+        // 留观中：新 chunk 全部并入留观段，直到判决
+        probation.seg += pending;
+        pending = "";
+        const verdict = evaluateProbation(probation.seg, probation.tagName);
+        if (verdict === "confirm") {
+          // 转协议态：去掉开标签，其余内容（含已到达的闭标签）交回主循环按协议处理
+          const tagEnd = probation.seg.indexOf(">");
+          pending = tagEnd >= 0 ? probation.seg.slice(tagEnd + 1) : "";
+          depth = 1;
+          probation = null;
+          continue;
+        }
+        if (verdict === "release") {
+          out += probation.seg;
+          probation = null;
+          continue;
+        }
+        return out; // hold：证据未齐，等下一 chunk
+      }
+      // 两类协议标签取更早出现者：DSML（Kimi 竖线格式）/ 通用 XML（MiniMax M3、Qwen 系）
+      const dsmlMatch = DSML_ANY_TAG_RE.exec(pending);
+      const textualMatch = TEXTUAL_TOOL_ANY_TAG_RE.exec(pending);
+      const tagMatch =
+        dsmlMatch && (!textualMatch || dsmlMatch.index <= textualMatch.index)
+          ? dsmlMatch
+          : textualMatch;
+      // 正常态：先看是否有更早的「裸工具词根开标签」要留观
+      if (depth === 0) {
+        const bare = findBareToolishOpen(pending);
+        if (bare && (bare.index < (tagMatch?.index ?? pending.length))) {
+          out += pending.slice(0, bare.index);
+          probation = { seg: pending.slice(bare.index), tagName: bare.tagName };
+          pending = "";
+          return out;
+        }
+      }
       if (tagMatch) {
+        const isClosing = /^<\s*\//.test(tagMatch[0]);
+        const isSelfClosing = /\/\s*>$/.test(tagMatch[0]);
         if (depth > 0) {
           // 协议态：标签前的内容（参数值/工具名等协议正文）连同标签一并丢弃
           pending = pending.slice(tagMatch.index + tagMatch[0].length);
-          if (/^<\s*\//.test(tagMatch[0])) {
+          if (isSelfClosing) continue; // 自闭合不改变深度
+          if (isClosing) {
             depth -= 1;
           } else {
             depth += 1;
@@ -615,15 +1086,18 @@ export function createStreamDsmlSanitizer() {
         // 正常态：标签前是正常正文，放行；再处理标签本身
         out += pending.slice(0, tagMatch.index);
         pending = pending.slice(tagMatch.index + tagMatch[0].length);
-        if (/^<\s*\//.test(tagMatch[0])) {
-          // 游离闭标签：只剥标签，不出协议、不进协议态
+        if (isClosing || isSelfClosing) {
+          // 游离闭/自闭合标签：只剥标签，不出协议、不进协议态
           continue;
         }
         depth = 1;
         continue;
       }
       // 无完整标签：按状态滞留半截前缀，其余全部处理
-      const hold = dsmlPartialTagTailLen(pending);
+      const hold = Math.max(
+        dsmlPartialTagTailLen(pending),
+        textualToolPartialTagTailLen(pending),
+      );
       if (hold > 0) {
         if (depth > 0) {
           // 协议态：滞留尾部可能是半截闭标签，其余协议内容丢弃
@@ -652,8 +1126,18 @@ export function createStreamDsmlSanitizer() {
       pending = "";
       // 协议块未闭合（流被截断）：剩余内容全部视为协议丢弃
       if (depth > 0) return "";
-      // 正常态残留的半截协议前缀（如结尾悬着 `< |`）：协议残渣，丢弃
+      // 留观中流就结束了（未确认）：JSON 形态大概率是截断的协议残渣，丢弃；
+      // 其余（含孤立裸标签的正文用法）原样放行——宁可透出不吞正文。
+      if (probation) {
+        const held = probation.seg;
+        probation = null;
+        const tagEnd = held.indexOf(">");
+        const restAfterTag = tagEnd >= 0 ? held.slice(tagEnd + 1).trim() : "";
+        return restAfterTag.startsWith("{") ? "" : held;
+      }
+      // 正常态残留的半截协议前缀（如结尾悬着 `< |`、`<tool_call`）：协议残渣，丢弃
       if (dsmlPartialTagTailLen(rest) > 0) return "";
+      if (textualToolPartialTagTailLen(rest) > 0) return "";
       return rest;
     },
   };
@@ -677,9 +1161,29 @@ export function createStreamDsmlSanitizer() {
  * 策略：只剥 `tool_calls` 块（连同其内容），其他 `DSML` 标签（如 `</DSML>` 之类的
  * 残留闭合）一并清掉；参数值（url 等）已经在结构化 tool_calls 里被使用，正文不需要再保留。
  */
+/**
+ * 启发式剥离探测：词根闭标签 / 带 name 属性的词根开标签 / 含 "name" 键 JSON
+ * 载荷的词根容器——命中才进启发式剥离段（未注册格式的正文净化）。
+ */
+const HEURISTIC_STRIP_PROBE_RE = new RegExp(
+  [
+    String.raw`<\s*\/\s*${GENERIC_NS_PATTERN}${TOOLISH_NAME_PATTERN}\s*>`,
+    String.raw`<\s*${GENERIC_NS_PATTERN}${TOOLISH_NAME_PATTERN}\s+[^>]*?\bname\s*=`,
+    String.raw`<\s*${GENERIC_NS_PATTERN}${TOOLISH_NAME_PATTERN}\s*>\s*\{[\s\S]*?"name"\s*:`,
+  ].join("|"),
+  "i",
+);
+
 export function stripDsmlToolCallMarkup(content: string): string {
   if (!content) return content;
-  if (!/dsml/i.test(content)) return content;
+  // 2026-10-07 扩面：除 DSML 外，同时剥离通用 XML 文本形态工具调用
+  // （MiniMax M3 线上泄漏的 <tool_call><invoke name=…>、Qwen JSON 变体）
+  const hasDsml = /dsml/i.test(content);
+  const hasTextualMarkup =
+    /<\s*\/?\s*(?:minimax\s*:\s*)?(?:tool_call|invoke|parameter)\b/i.test(content);
+  // 未注册格式：结构启发式探测（词根标签 + name 属性/JSON 载荷定性）
+  const hasHeuristicMarkup = HEURISTIC_STRIP_PROBE_RE.test(content);
+  if (!hasDsml && !hasTextualMarkup && !hasHeuristicMarkup) return content;
   let cleaned = content;
 
   const dsmlToolCallsBlock = new RegExp(
@@ -757,6 +1261,64 @@ export function stripDsmlToolCallMarkup(content: string): string {
     new RegExp(`<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}\\s*${pipe}\\s*[^<>]*?\\/?>`, "gi"),
     "",
   );
+
+  // ── 通用 XML 文本形态（MiniMax M3 / Qwen 系，2026-10-07 扩面）──
+  if (hasTextualMarkup) {
+    const anyToolTag = String.raw`<\s*\/?\s*(?:minimax\s*:\s*)?(?:tool_call|invoke|parameter)\b[^>]*>`;
+    // 成对 tool_call 块（含内部 invoke/parameter 与 JSON 变体）
+    cleaned = cleaned.replace(
+      /<\s*(?:minimax\s*:\s*)?tool_call\b[^>]*>[\s\S]*?<\s*\/\s*(?:minimax\s*:\s*)?tool_call\s*>/gi,
+      "",
+    );
+    // 未闭合 tool_call 开块（流被截断）：剥到串尾
+    cleaned = cleaned.replace(
+      /<\s*(?:minimax\s*:\s*)?tool_call\b[^>]*>[\s\S]*$/gi,
+      "",
+    );
+    // 孤立 invoke 块（无外层 tool_call 包裹）
+    cleaned = cleaned.replace(
+      /<\s*(?:minimax\s*:\s*)?invoke\b[^>]*>[\s\S]*?<\s*\/\s*(?:minimax\s*:\s*)?invoke\s*>/gi,
+      "",
+    );
+    // 游离标签残渣（开/闭/自闭合 parameter 等）
+    cleaned = cleaned.replace(new RegExp(anyToolTag, "gi"), "");
+  }
+
+  // ── 结构启发式（未注册格式：词根标签 + name 属性 / JSON 载荷定性）──
+  if (hasHeuristicMarkup) {
+    const ns = GENERIC_NS_PATTERN;
+    const nm = `(${TOOLISH_NAME_PATTERN})`;
+    // 成对 name-attr 容器（连同内部 invoke/参数与载荷，闭标签须同名）
+    cleaned = cleaned.replace(
+      new RegExp(
+        String.raw`<\s*${ns}${nm}\s+[^>]*?\bname\s*=\s*(?:"[^"]*"|'[^']*')[^>]*>[\s\S]*?<\s*\/\s*${ns}\1\s*>`,
+        "gi",
+      ),
+      "",
+    );
+    // 成对 JSON 载荷容器（无属性定性，载荷含 "name": 键才剥）
+    cleaned = cleaned.replace(
+      new RegExp(
+        String.raw`<\s*${ns}${nm}\s*>\s*\{[\s\S]*?"name"\s*:[\s\S]*?\}\s*<\s*\/\s*${ns}\1\s*>`,
+        "gi",
+      ),
+      "",
+    );
+    // 未闭合 name-attr 开容器（流被截断）：剥到串尾
+    cleaned = cleaned.replace(
+      new RegExp(
+        String.raw`<\s*${ns}${nm}\s+[^>]*?\bname\s*=\s*(?:"[^"]*"|'[^']*')[^>]*>[\s\S]*$`,
+        "gi",
+      ),
+      "",
+    );
+    // 游离闭标签残渣
+    cleaned = cleaned.replace(
+      new RegExp(String.raw`<\s*\/\s*${ns}${nm}\s*>`, "gi"),
+      "",
+    );
+  }
+
   // 合并多余空行/收尾空白
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+\n/g, "\n").trim();
   return cleaned;
@@ -984,7 +1546,7 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512) {
 export class ToolIntentWithoutToolsError extends Error {
   readonly providerId?: string;
   readonly model?: string;
-  /** 从 DSML 标记提取出的工具调用（含桥接形态：name="tool_call" + name/arguments 参数） */
+  /** 从协议标记（DSML / 通用 XML 文本形态）提取出的工具调用 */
   readonly toolCalls: NormalToolCall[];
 
   constructor(params: {
@@ -995,7 +1557,7 @@ export class ToolIntentWithoutToolsError extends Error {
     const names = params.toolCalls.map((c) => c.name ?? "?").join(", ");
     super(
       `Tool intent on tool-less turn (provider=${params.providerId ?? "?"} ` +
-        `model=${params.model ?? "?"}): ${params.toolCalls.length} DSML-extracted ` +
+        `model=${params.model ?? "?"}): ${params.toolCalls.length} text-protocol-extracted ` +
         `call(s) [${names}] cannot execute without a tool executor`,
     );
     this.name = "ToolIntentWithoutToolsError";

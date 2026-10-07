@@ -4,7 +4,10 @@ import test from "node:test";
 import {
   consumeNormalizedStream,
   createStreamDsmlSanitizer,
+  extractAllTextualToolCalls,
   extractDsmlToolCalls,
+  extractHeuristicToolCalls,
+  extractTextualToolCalls,
   pickVisibleText,
   stripDsmlToolCallMarkup,
   ToolIntentWithoutToolsError,
@@ -221,4 +224,328 @@ test("pickVisibleText reasoning fallback strips DSML markup (reasoner draft leak
 test("pickVisibleText still prefers non-empty content untouched", () => {
   const visible = pickVisibleText("正式回答", dsmlFullwidthLeak);
   assert.equal(visible, "正式回答");
+});
+
+/* ------------------------------------------------------------------ *
+ * 通用 XML 文本形态（MiniMax M3 / Qwen 系，2026-10-07 线上泄漏扩面）    *
+ * ------------------------------------------------------------------ */
+
+// MiniMax-M3 2026-10-07 线上泄漏（「1分钟后提醒我吃饭」对话面轮次）：
+// 模型幻觉出 reminder_plan/whenOffsetSeconds（注意与真实工具 reminder.plan 不同），
+// 按 <tool_call><invoke><parameter> 训练格式写进 content，工具从未执行。
+const minimaxXmlLeak =
+  "王哥，1分钟后我叫你。我现在再帮你重新设一条。\n" +
+  "<tool_call>\n" +
+  '<invoke name="reminder_plan">\n' +
+  '<parameter name="title">"王哥，吃饭啦"</parameter>\n' +
+  '<parameter name="whenOffsetSeconds">60</parameter>\n' +
+  "</invoke>\n" +
+  "</tool_call>";
+
+const minimaxWrappedVariant =
+  "好的，马上设。\n" +
+  "<minimax:tool_call>\n" +
+  '<invoke name="reminder.plan">\n' +
+  '<parameter name="text">1分钟后提醒我吃饭</parameter>\n' +
+  "</invoke>\n" +
+  "</minimax:tool_call>";
+
+const qwenJsonVariant =
+  "稍等。\n" +
+  '<tool_call>\n{"name": "search_web", "arguments": {"query": "明天天气"}}\n</tool_call>';
+
+test("extractTextualToolCalls parses MiniMax XML tool call (2026-10-07 leak)", () => {
+  const calls = extractTextualToolCalls(minimaxXmlLeak);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "reminder_plan");
+  assert.deepEqual(JSON.parse(calls[0]?.argumentsChunk ?? "{}"), {
+    title: "王哥，吃饭啦",
+    whenOffsetSeconds: 60,
+  });
+});
+
+test("extractTextualToolCalls parses minimax:tool_call wrapped variant", () => {
+  const calls = extractTextualToolCalls(minimaxWrappedVariant);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "reminder.plan");
+  assert.deepEqual(JSON.parse(calls[0]?.argumentsChunk ?? "{}"), {
+    text: "1分钟后提醒我吃饭",
+  });
+});
+
+test("extractTextualToolCalls parses Qwen/Hermes JSON variant", () => {
+  const calls = extractTextualToolCalls(qwenJsonVariant);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "search_web");
+  assert.deepEqual(JSON.parse(calls[0]?.argumentsChunk ?? "{}"), {
+    query: "明天天气",
+  });
+});
+
+test("extractTextualToolCalls ignores prose with stray angle brackets", () => {
+  const calls = extractTextualToolCalls("如果 a<b 且 x>y，就没问题。");
+  assert.equal(calls.length, 0);
+});
+
+test("stripDsmlToolCallMarkup removes MiniMax XML block and keeps prose", () => {
+  const cleaned = stripDsmlToolCallMarkup(minimaxXmlLeak);
+
+  assert.equal(cleaned.includes("tool_call"), false);
+  assert.equal(cleaned.includes("reminder_plan"), false);
+  assert.equal(cleaned.includes("王哥，吃饭啦"), false);
+  assert.equal(
+    cleaned,
+    "王哥，1分钟后我叫你。我现在再帮你重新设一条。",
+  );
+});
+
+test("stripDsmlToolCallMarkup removes unclosed MiniMax block (truncated stream)", () => {
+  const cleaned = stripDsmlToolCallMarkup(
+    "马上设。<tool_call><invoke name=\"reminder_plan\"><parameter name=\"title\">王哥，吃饭啦",
+  );
+
+  assert.equal(cleaned, "马上设。");
+});
+
+test("consumeNormalizedStream turns MiniMax XML content into real tool calls", async () => {
+  async function* source(): AsyncIterable<NormalChatChunk> {
+    yield { content: minimaxXmlLeak, finishReason: "stop" };
+  }
+
+  const result = await consumeNormalizedStream(source());
+
+  assert.equal(result.finishReason, "tool_calls");
+  assert.equal(result.content, "王哥，1分钟后我叫你。我现在再帮你重新设一条。");
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0]?.name, "reminder_plan");
+});
+
+test("consumeNormalizedStream never streams MiniMax XML markup through onContentDelta", async () => {
+  // 端到端不变量：正文含通用 XML 协议块时，流式 delta 不得出现协议标记/参数，
+  // 流末提取仍能拿到完整工具调用（与 DSML 同款锁）。
+  async function* source(): AsyncIterable<NormalChatChunk> {
+    for (const piece of minimaxXmlLeak.match(/[\s\S]{1,5}/g) ?? []) {
+      yield { content: piece, finishReason: null };
+    }
+    yield { content: "", finishReason: "stop" };
+  }
+
+  const deltas: string[] = [];
+  const result = await consumeNormalizedStream(source(), {
+    onContentDelta: (d) => deltas.push(d),
+  });
+
+  const streamed = deltas.join("");
+  assert.equal(streamed.includes("tool_call"), false, `delta 泄漏协议标记: ${streamed}`);
+  assert.equal(streamed.includes("reminder_plan"), false, `delta 泄漏工具名: ${streamed}`);
+  assert.equal(streamed.includes("吃饭啦"), false, `delta 泄漏参数值: ${streamed}`);
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.finishReason, "tool_calls");
+  assert.equal(result.content.includes("tool_call"), false);
+});
+
+test("createStreamDsmlSanitizer swallows MiniMax XML block between prose", () => {
+  const guard = createStreamDsmlSanitizer();
+  const before = "王哥，1分钟后我叫你。";
+  const after = "\n设好了叫你。";
+
+  const out =
+    guard.feed(before) +
+    guard.feed(minimaxXmlLeak.slice(before.length)) +
+    guard.feed(after) +
+    guard.flush();
+
+  assert.equal(out.includes(before), true, `丢失块前正文: ${out}`);
+  assert.equal(out.includes("设好了叫你"), true, `丢失块后正文: ${out}`);
+  assert.equal(out.includes("tool_call"), false);
+  assert.equal(out.includes("reminder_plan"), false);
+});
+
+/* ------------------------------------------------------------------ *
+ * 根因方案（2026-10-08）：声明式注册表 + 结构启发式兜底                 *
+ * —— 换模型不再人工适配：未注册格式同样能提取升级 / 净化剥离            *
+ * ------------------------------------------------------------------ */
+
+// 虚构厂商格式（未注册）：词根标签 + name 属性 + 自定义子标签参数
+const unknownXmlVariant =
+  "先查天气。<function_call name=\"weather.lookup\">\n" +
+  '<arg name="city">北京</arg>\n' +
+  "</function_call>";
+
+// 虚构厂商 JSON 容器（无 name 属性，载荷含 name 键）
+const unknownJsonVariant =
+  "稍等。\n" +
+  '<function_call>\n{"name": "hot_rankings", "arguments": {"scope": "weibo"}}\n</function_call>';
+
+test("extractHeuristicToolCalls parses unregistered vendor XML format", () => {
+  const calls = extractHeuristicToolCalls(unknownXmlVariant);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "weather.lookup");
+  assert.deepEqual(JSON.parse(calls[0]?.argumentsChunk ?? "{}"), { city: "北京" });
+});
+
+test("extractHeuristicToolCalls parses unregistered vendor JSON payload", () => {
+  const calls = extractHeuristicToolCalls(unknownJsonVariant);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "hot_rankings");
+  assert.deepEqual(JSON.parse(calls[0]?.argumentsChunk ?? "{}"), { scope: "weibo" });
+});
+
+test("extractAllTextualToolCalls dedupes registered engine and heuristic hits", () => {
+  const calls = extractAllTextualToolCalls(minimaxXmlLeak);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "reminder_plan");
+  assert.deepEqual(JSON.parse(calls[0]?.argumentsChunk ?? "{}"), {
+    title: "王哥，吃饭啦",
+    whenOffsetSeconds: 60,
+  });
+});
+
+test("extractAllTextualToolCalls recovers unregistered format end to end", () => {
+  const calls = extractAllTextualToolCalls(unknownXmlVariant);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "weather.lookup");
+});
+
+test("consumeNormalizedStream never streams unregistered format markup through onContentDelta", async () => {
+  // 端到端不变量（未注册格式）：流式 delta 不得出现协议标记/参数，流末提取
+  // 仍能拿到完整工具调用——启发式流式识别（词根标签 + name 属性）生效。
+  async function* source(): AsyncIterable<NormalChatChunk> {
+    for (const piece of unknownXmlVariant.match(/[\s\S]{1,5}/g) ?? []) {
+      yield { content: piece, finishReason: null };
+    }
+    yield { content: "", finishReason: "stop" };
+  }
+
+  const deltas: string[] = [];
+  const result = await consumeNormalizedStream(source(), {
+    onContentDelta: (d) => deltas.push(d),
+  });
+
+  const streamed = deltas.join("");
+  assert.equal(streamed.includes("function_call"), false, `delta 泄漏协议标记: ${streamed}`);
+  assert.equal(streamed.includes("weather.lookup"), false, `delta 泄漏工具名: ${streamed}`);
+  assert.equal(streamed.includes("北京"), false, `delta 泄漏参数值: ${streamed}`);
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0]?.name, "weather.lookup");
+  assert.equal(result.finishReason, "tool_calls");
+  assert.equal(result.content, "先查天气。");
+});
+
+test("stripDsmlToolCallMarkup removes unregistered format block and keeps prose", () => {
+  const cleaned = stripDsmlToolCallMarkup(unknownXmlVariant);
+
+  assert.equal(cleaned.includes("weather.lookup"), false);
+  assert.equal(cleaned.includes("北京"), false);
+  assert.equal(cleaned, "先查天气。");
+});
+
+test("stripDsmlToolCallMarkup removes unregistered JSON container", () => {
+  const cleaned = stripDsmlToolCallMarkup(unknownJsonVariant);
+
+  assert.equal(cleaned.includes("hot_rankings"), false);
+  assert.equal(cleaned, "稍等。");
+});
+
+test("stripDsmlToolCallMarkup removes unclosed unregistered container (truncated stream)", () => {
+  const cleaned = stripDsmlToolCallMarkup(
+    '马上查。<function_call name="weather.lookup"><arg name="city">北京',
+  );
+
+  assert.equal(cleaned, "马上查。");
+});
+
+test("prose with HTML-like tags is not treated as tool calls", () => {
+  // 防误伤：无词根命中的普通 HTML 标签（input 等）不进协议通道——提取零命中、
+  // 流式原样透传、剥离原样返回。
+  const prose = '参考：<input name="user">填这里</input>，谢谢。';
+
+  assert.equal(extractHeuristicToolCalls(prose).length, 0);
+  assert.equal(extractAllTextualToolCalls(prose).length, 0);
+  const guard = createStreamDsmlSanitizer();
+  assert.equal(guard.feed(prose) + guard.flush(), prose);
+  assert.equal(stripDsmlToolCallMarkup(prose), prose);
+});
+
+/* ------------------------------------------------------------------ *
+ * 留观机制（2026-10-08）：未注册「裸词根容器」的流式全防                 *
+ * —— 无 name 属性的未知容器扣住待判：JSON 载荷/同名成对/带 name 子标签   *
+ *    确认即转协议态吞掉；正文证据立即放行（宁可透出不吞正文）。           *
+ * ------------------------------------------------------------------ */
+
+test("createStreamDsmlSanitizer swallows unregistered no-attr JSON container (probation confirm)", async () => {
+  // 端到端不变量：Qwen 式 JSON 载荷容器换任何标签名（未注册）都不透出 delta
+  const leak =
+    '<function_call>\n{"name": "hot_rankings", "arguments": {"scope": "weibo"}}\n</function_call>';
+  async function* source(): AsyncIterable<NormalChatChunk> {
+    for (const piece of leak.match(/[\s\S]{1,5}/g) ?? []) {
+      yield { content: piece, finishReason: null };
+    }
+    yield { content: "", finishReason: "stop" };
+  }
+
+  const deltas: string[] = [];
+  const result = await consumeNormalizedStream(source(), {
+    onContentDelta: (d) => deltas.push(d),
+  });
+
+  const streamed = deltas.join("");
+  assert.equal(streamed.includes("function_call"), false, `delta 泄漏协议标记: ${streamed}`);
+  assert.equal(streamed.includes("hot_rankings"), false, `delta 泄漏工具名: ${streamed}`);
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0]?.name, "hot_rankings");
+  assert.equal(result.content, "");
+});
+
+test("createStreamDsmlSanitizer confirms probation via named child wrapper", () => {
+  // 未注册外层包裹 + 已知形态子标签：整块吞掉
+  const leak =
+    '<wrap_call><invoke name="weather.lookup"><parameter name="city">北京</parameter></invoke></wrap_call>';
+  const guard = createStreamDsmlSanitizer();
+  const out =
+    leak
+      .match(/[\s\S]{1,7}/g)!
+      .map((p) => guard.feed(p))
+      .join("") + guard.flush();
+
+  assert.equal(out, "");
+  assert.equal(extractAllTextualToolCalls(leak).length, 1);
+});
+
+test("createStreamDsmlSanitizer releases prose following a bare toolish tag", () => {
+  // 防误伤：正文里教学式提及裸词根标签，后续是正文文本 → 立即放行，原样透传
+  const prose = "用 <function> 标签定义函数，然后 <call> 发起请求。";
+  const guard = createStreamDsmlSanitizer();
+  const out =
+    prose
+      .match(/[\s\S]{1,5}/g)!
+      .map((p) => guard.feed(p))
+      .join("") + guard.flush();
+
+  assert.equal(out, prose);
+});
+
+test("createStreamDsmlSanitizer flush drops truncated JSON probation residue", () => {
+  // 流在留观确认前被截断：已现 JSON 形态 → 按协议残渣丢弃
+  const guard = createStreamDsmlSanitizer();
+  let out = "";
+  for (const piece of '<function_call>\n{"name": "hot_ra'.match(/[\s\S]{1,5}/g) ?? []) {
+    out += guard.feed(piece);
+  }
+  out += guard.flush();
+  assert.equal(out, "");
+});
+
+test("createStreamDsmlSanitizer flush releases lone bare tag prose", () => {
+  // 流在裸标签后结束、无证据：按正文放行
+  const guard = createStreamDsmlSanitizer();
+  const out = guard.feed("正文提到 <function>") + guard.flush();
+  assert.equal(out, "正文提到 <function>");
 });
