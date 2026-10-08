@@ -28,6 +28,11 @@ import {
   sanitizeToolCallMessageChain,
 } from "./chat-thread-sanitize.js";
 import { stripLeadingTimestampFrames } from "../utils/timestamp-frame.js";
+import {
+  isInternalFrameText,
+  stripInternalFrameMarkup,
+  stripSystemReminderBlocks,
+} from "./internal-frames.js";
 
 /**
  * clientMessageId 的绑定/落盘字段实现已抽到 {@link ./chat-thread-client-id.js}
@@ -47,10 +52,15 @@ const THREAD_NEXT_UP_BLOCK_RE = /\[NEXT_UP_START\][\s\S]*?(?:\[NEXT_UP_END\]|$)/
 const THREAD_NEXT_UP_ORPHAN_RE = /\[NEXT_UP_(?:START|END)\]/g;
 const THREAD_RENDER_DECL_RE = /^\s*\[(?:RENDER_HINT|RENDER_AS):[A-Za-z_]+\]\s*$/gm;
 const THREAD_RENDER_DECL_INLINE_RE = /\[(?:RENDER_HINT|RENDER_AS):[A-Za-z_]+\]/g;
-const THREAD_PROTOCOL_ANY_RE = /\[NEXT_UP_(?:START|END)\]|\[(?:RENDER_HINT|RENDER_AS):/;
+const THREAD_PROTOCOL_ANY_RE =
+  /\[NEXT_UP_(?:START|END)\]|\[(?:RENDER_HINT|RENDER_AS):|<\s*\/?\s*system-reminder/i;
 
 function stripProtocolMarkersForThread(text: string): string {
-  let out = text.replace(THREAD_NEXT_UP_BLOCK_RE, "");
+  // <system-reminder>（2026-10-08 事故根源）：上游 harness 注入块被模型复读后
+  // 落库即成永久上下文污染——下一轮模型看到「自己说过」，再复读，自我维持。
+  // 线程是 LLM 上下文的唯一事实源，必须在写入前剥干净。
+  let out = stripSystemReminderBlocks(text);
+  out = out.replace(THREAD_NEXT_UP_BLOCK_RE, "");
   out = out.replace(THREAD_NEXT_UP_ORPHAN_RE, "");
   out = out.replace(THREAD_RENDER_DECL_RE, "");
   out = out.replace(THREAD_RENDER_DECL_INLINE_RE, "");
@@ -697,6 +707,9 @@ function minimalRecapLinesFromDropped(
     const ts = extractMessageTimestamp(msg) ?? new Date();
     const text = stripTimestampText(msg.content);
     if (!text || text.startsWith(SESSION_RECAP_PREFIX)) continue;
+    // 2026-10-08：内部帧（[上一轮回复中断…] / [后台任务记录] / 围栏等）不进待归纳区
+    // ——它们不是对话事实，落进 recap 后会被 LLM 摘要成「用户/助手说过…」，反向污染上下文。
+    if (isInternalFrameText(text)) continue;
     const label = formatRecapTimeLabel(ts);
     const norm = normalizeRecapLine(`[${label}] ${text}`);
     if (!norm || norm.length > SESSION_PENDING_MAX_CHARS) continue;
@@ -905,8 +918,16 @@ function buildInterruptedToolChainNotice(
     } else if (m.role === "tool") {
       const raw = typeof m.content === "string" ? m.content.trim() : "";
       if (raw) {
-        const firstLine = raw.split("\n")[0]?.replace(/\s+/g, " ").trim() ?? "";
-        if (firstLine) resultSnippets.push(firstLine.slice(0, 80));
+        // 2026-10-08 根源修复：tool 消息首行恒为 `[不可信内容围栏 source=tool:x]`
+        // （untrusted-content.ts），此前直接摘录，把围栏头抄进了占位文本——
+        // 这就是「[上一轮回复中断…[不可信内容围栏…]」黏在同一条气泡里的成因。
+        // 摘录前先剥掉围栏标签外壳（保留块内真实数据——那是「已办了什么」的事实），
+        // 只留真正的工具数据。
+        const cleaned = stripInternalFrameMarkup(raw).replace(/\s+/g, " ").trim();
+        const firstLine = cleaned.split("\n")[0]?.trim() ?? "";
+        if (firstLine && !isInternalFrameText(firstLine)) {
+          resultSnippets.push(firstLine.slice(0, 80));
+        }
       }
     }
   }
@@ -922,7 +943,14 @@ function buildInterruptedToolChainNotice(
   } else {
     parts.push("未产生任何工具动作。");
   }
-  parts.push("不要把它当作用户重复请求或未处理的悬空事项重新提起。]");
+  // 2026-10-08：显式禁复述。占位帧以 assistant 角色待在线程里，模型会把它当成
+  // 「自己上一轮说过的话」原样复读给用户（手机端气泡事故的直接成因）。出口净化
+  // （stream-chat-helpers / ToolResultProcessor）只能挡逐字复读，挡不住改写转述，
+  // 因此这里在帧文本内部再钉一条硬约束。
+  parts.push(
+    "不要把它当作用户重复请求或未处理的悬空事项重新提起。",
+    "这是系统内部记录：禁止原样或改写后复述给用户，也不要提及它的存在。]",
+  );
   return parts.join("");
 }
 
@@ -1200,6 +1228,26 @@ export class ChatThreadStore {
     // 防串台已根源解决：afterTurnCompleted 在轮次完成时调用 foldCompletedToolChains
     // 移除 raw tool 结果。这里无需再做事后隔断。
     return t;
+  }
+
+  /**
+   * 只读窥线程（GET /api/chat-data/history 用）：内存 → 收养 → 持久层恢复，
+   * 全部未命中返回 null，**不创建空线程**（GET 必须无副作用，避免凭空建上下文）。
+   * 恢复路径与 thread() 同源（restoreThreadFromPersistence 内部会缓存进内存，
+   * 与下一次真实对话的恢复行为一致）。
+   */
+  peekThread(sessionId: string): ChatCompletionMessageParam[] | null {
+    let t = this.history.get(sessionId);
+    if (!t) {
+      t = adoptLegacyMasterDelegateThread(this.history, sessionId);
+    }
+    if (!t) {
+      t = adoptPrimaryThreadFromMasterThread(this.history, sessionId);
+    }
+    if (!t && this.persistence) {
+      t = this.restoreThreadFromPersistence(sessionId, this.sessionSystemProvider?.() ?? "") ?? undefined;
+    }
+    return t ?? null;
   }
 
   /**

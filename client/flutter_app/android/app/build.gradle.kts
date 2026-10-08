@@ -48,6 +48,16 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    // Gradle 层产物命名 NEXTBOT.apk（不带版本号/变体后缀）。注意 flutter 工具链
+    // 构建后仍会把产物拷到 flutter-apk/app-release.apk（工具侧行为拦不住），
+    // 对外分发统一走 build_apk.ps1 → 桌面 NEXTBOT.apk。
+    applicationVariants.all {
+        outputs.all {
+            (this as com.android.build.gradle.internal.api.BaseVariantOutputImpl)
+                .outputFileName = "NEXTBOT.apk"
+        }
+    }
 }
 
 dependencies {

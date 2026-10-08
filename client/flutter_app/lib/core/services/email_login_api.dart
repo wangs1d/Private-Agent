@@ -37,9 +37,15 @@ class EmailLoginResult {
 ///
 /// 登录主体恒为邮箱本身（userId=email）：与桌面端「登录邮箱=运行时身份
 /// 覆盖」同源，聊天/记忆/画像等全部数据按该 userId 落库，两端自动共享。
+///
+/// 基址默认取 [ApiConfig.controlPlaneBase]（账号/OTP/登录页所在的控制面，
+/// 与反馈、站内信、桌面端 /accounts/web 同源）；单机/开发形态下它回落
+/// [ApiConfig.httpBase]，行为不变。**手机端打包必须烤 CONTROL_PLANE_URL**
+/// （见 build_apk.ps1），否则回落 127.0.0.1:3000 —— 真机上那是手机自己，
+/// 发验证码必然落进「网络错误」兜底。
 class EmailLoginApi {
   EmailLoginApi({String? baseUrl, http.Client? client})
-      : _baseUrl = baseUrl ?? ApiConfig.httpBase,
+      : _baseUrl = baseUrl ?? ApiConfig.controlPlaneBase,
         _client = client ?? http.Client();
 
   final String _baseUrl;

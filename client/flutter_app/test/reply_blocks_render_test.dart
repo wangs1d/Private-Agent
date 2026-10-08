@@ -285,4 +285,50 @@ void main() {
     expect(find.text("泳池别墅怎么选"), findsOneWidget);
     expect(find.byType(MediaInlineRow), findsOneWidget);
   });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 结构化 markdown 文本段（2026-10-08）：blocks 文本段走结构化渲染器，
+  // 标题/表格/引用块级渲染有区分度，不再以 ### / |---| / > 源码符号裸露。
+  // ───────────────────────────────────────────────────────────────────────────
+
+  testWidgets("reply blocks: 结构化 markdown 文本段按块级渲染（表格/标题不裸露）", (tester) async {
+    await pumpBody(
+      tester,
+      messageWithBlocks([
+        {
+          "type": "text",
+          "text": "### 方案 A · 自然光线（推荐）\n\n"
+              "| 时间 | 安排 |\n"
+              "|---|---|\n"
+              "| 08:30 | 兴义市区出发 |\n"
+              "| 09:00 | 万峰林景区 |\n\n"
+              "> 门票以景区当天公告为准",
+        },
+      ]),
+    );
+
+    // markdown 源码符号不裸露（此前 ### / |---| / > 全部直排为纯文本）
+    expect(find.textContaining("###"), findsNothing);
+    expect(find.textContaining("|---|"), findsNothing);
+    expect(find.textContaining("| 时间 |"), findsNothing);
+    // 内容仍在：标题、表格单元格、引用文字
+    expect(find.textContaining("方案 A", findRichText: true), findsWidgets);
+    expect(find.textContaining("08:30", findRichText: true), findsWidgets);
+    expect(find.textContaining("万峰林景区", findRichText: true), findsWidgets);
+    expect(find.textContaining("门票以景区当天公告为准", findRichText: true), findsWidgets);
+  });
+
+  testWidgets("reply blocks: 纯叙述文本段自动回退内联排版（无结构化包装）", (tester) async {
+    await pumpBody(
+      tester,
+      messageWithBlocks([
+        {"type": "text", "text": "好的，耳机已下单，预计周六送达。"},
+      ]),
+    );
+
+    expect(find.textContaining("耳机已下单", findRichText: true), findsWidgets);
+    // 纯叙述无块级元素：不出现标题/表格渲染痕迹
+    expect(find.textContaining("###"), findsNothing);
+    expect(find.textContaining("|"), findsNothing);
+  });
 }

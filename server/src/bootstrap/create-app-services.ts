@@ -541,6 +541,8 @@ import { CostCalibrator } from "../proactivity/cost-calibrator.js";
 import { MessageWatchTrigger } from "../proactivity/triggers/message-watch-trigger.js";
 import { SpeechPolisher } from "../proactivity/speech-polisher.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
+import { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
+import { registerAlarmRoutes } from "../routes/http/alarms.js";
 import { ProactivePipeline } from "../proactivity/proactive-pipeline.js";
 import { SilenceLog } from "../proactivity/silence-log.js";
 import { PendingConfirmationStore } from "../proactivity/pending-confirmation-store.js";
@@ -5930,6 +5932,27 @@ export async function createAppServices(): Promise<AppServices> {
 
   // 设备自绑定鉴权周界（仅 ACCESS_AUTH_REQUIRED=1 时挂载 hook；未开启零行为变更）
   registerAccessAuthHook(app, accessAuthService);
+
+  // ─── 闹钟/即时提醒（docs/mobile-agent-reminder-alarm-design.md）───
+  // 触发主路在客户端本地（Android 精确闹钟 / iOS 本地通知）；服务端负责落库、
+  // 跨设备同步（alarm.sync）、到点兜底触发（alarm.trigger）与推送兜底。
+  const alarmClockService = new AlarmClockService({
+    wsRegistry: wsConnectionRegistry,
+    mobilePush: proactivePushService,
+    dataDir: join(process.cwd(), "data", "alarm-clock"),
+    // 二阶段语音叫醒：TTS 合成开场白随 alarm.trigger 下发；不可用时客户端文本兜底
+    synthesizeSpeech: async (text) => {
+      const result = await ttsService.synthesizeMp3Base64(text);
+      return result.ok ? { format: "mp3", base64: result.base64 } : null;
+    },
+    log: {
+      info: (msg) => app.log.info(`[alarm-clock] ${msg}`),
+      warn: (msg) => app.log.warn(`[alarm-clock] ${msg}`),
+    },
+  });
+  alarmClockService.start();
+  registerAlarmRoutes(app, { alarmClockService });
+  app.addHook("onClose", async () => alarmClockService.stop());
 
   registerHttpRoutes(app, {
     pictureKit,

@@ -101,6 +101,19 @@ export class Bm25Index {
     this.avgDl = docs.length > 0 ? totalLen / docs.length : 0;
   }
 
+  /**
+   * token 的 BM25 IDF（意图先验直取的区分度加权用，2026-10-09）。
+   * 与 rankByBm25 同公式。索引中无此 token 时返回 0——对重叠证据打分而言，
+   * 「语料里没见过」≠「极稀有」：无 df 证据的 token（如 query 特有词）不构成
+   * 意图证据，按最高区分度计会把先验通道击穿（实测「十一」零 df 满分泄漏）。
+   */
+  idfOf(token: string): number {
+    const docFreq = this.df.get(token) ?? 0;
+    const n = this.docs.length;
+    if (n === 0 || docFreq === 0) return 0;
+    return Math.log(1 + (n - docFreq + 0.5) / (docFreq + 0.5));
+  }
+
   search(query: string, limit: number, aliasEntries?: SearchAliasEntry[]): Bm25Hit[] {
     const queries = expandSearchQueries(query, aliasEntries);
     if (queries.length === 0 || this.docs.length === 0) return [];

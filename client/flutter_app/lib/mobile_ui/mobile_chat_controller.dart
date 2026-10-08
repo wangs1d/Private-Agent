@@ -5,8 +5,13 @@ import "package:flutter/foundation.dart";
 import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
+import "../core/db/isar_local_history_store.dart";
+import "../core/db/local_history_store.dart";
 import "../core/models/chat_models.dart";
+import "../core/services/access_auth_api.dart";
+import "../core/services/client_location_service.dart";
 import "../core/services/ws_chat_service.dart";
+import "../core/utils/assistant_text_sanitizer.dart";
 import "../core/vision/vision_wire_frame.dart";
 
 // ===== 真·分绿泡（2026-09-28）：气泡拆分消息 id 工具（与桌面端 main.dart 同构）=====
@@ -28,15 +33,23 @@ String? _bubbleTraceOf(String messageId) =>
 ///   `chat.media_ready`(边说边出图临时照片)、`chat.assistant_done`(收尾最终文本,
 ///   含结构化 mediaCards/renderBlocks 字段,与桌面端一致)
 class MobileChatController extends ChangeNotifier {
-  MobileChatController({String? wsBaseUrl}) {
+  MobileChatController({String? wsBaseUrl, LocalHistoryStore? historyStore}) {
     _service = WsChatService(url: wsBaseUrl ?? ApiConfig.wsUrl);
     _service.onConnected = _sendSessionInit;
     _subscription = _service.events.listen(_onWsEvent);
     _service.connect();
+    _store = historyStore ?? IsarLocalHistoryStore(userPin: ApiConfig.localPin);
+    unawaited(_bootstrapHistory());
   }
 
   late final WsChatService _service;
   StreamSubscription? _subscription;
+
+  /// 本地历史存储（聊天气泡落盘，重启后恢复；测试可注入内存实现）。
+  late final LocalHistoryStore _store;
+
+  /// 服务端线程历史拉取去重闸（每次控制器生命周期只拉一次）。
+  bool _serverHistoryPulled = false;
 
   /// 对话历史(含正在流式生成的助手消息)。
   final List<ChatMessage> messages = <ChatMessage>[];
@@ -91,6 +104,12 @@ class MobileChatController extends ChangeNotifier {
     } catch (_) {
       ok = false;
     }
+    // 本地落盘的历史一并清掉（与服务端「聊天线程+记忆」清空语义对齐）
+    try {
+      await _store.deleteMessagesForSession(ApiConfig.effectiveActorId);
+    } catch (_) {
+      // 本地清理失败不阻塞服务端清理结果
+    }
     // 通知服务端同步清除 ChatThreadStore 内存上下文
     _service.sendEvent("chat.clear_history", <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
@@ -102,6 +121,189 @@ class MobileChatController extends ChangeNotifier {
     errorMessage = ok ? null : "服务端清理失败,已清空本地";
     notifyListeners();
     return ok;
+  }
+
+  // ===== 聊天历史持久化（2026-10-08）：本地落盘 + 服务端线程漫游回填 =====
+
+  /// 启动加载：本地 store 恢复历史 → 再拉服务端线程回填跨端消息。
+  /// 全程静默容错（存储不可写/网络不可达都只降级为内存态，不阻塞聊天）。
+  Future<void> _bootstrapHistory() async {
+    try {
+      await _store.init();
+      try {
+        await _store.saveSession(ChatSession(
+          sessionId: ApiConfig.effectiveActorId,
+          title: "默认会话",
+          createdAt: DateTime.now(),
+        ));
+      } catch (_) {
+        // 会话头写失败不影响消息恢复
+      }
+      final List<ChatMessage> loaded =
+          await _store.listMessages(ApiConfig.effectiveActorId);
+      if (loaded.isNotEmpty) {
+        _mergeLoadedMessages(loaded);
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint("[MobileChatController] 本地历史加载失败(降级内存态): $e");
+    }
+    unawaited(_pullServerHistory());
+  }
+
+  /// 把本地加载的历史并入内存：无内存消息直接铺入；已有消息（加载期间
+  /// 用户已发消息的竞态窗口）按 messageId 去重后前置旧消息，保序不覆盖。
+  void _mergeLoadedMessages(List<ChatMessage> loaded) {
+    if (messages.isEmpty) {
+      messages.addAll(loaded);
+      return;
+    }
+    final Set<String> memoryIds = messages.map((m) => m.messageId).toSet();
+    final List<ChatMessage> older =
+        loaded.where((m) => !memoryIds.contains(m.messageId)).toList();
+    if (older.isEmpty) return;
+    messages.insertAll(0, older);
+  }
+
+  /// 消息落盘（fire-and-forget；失败静默，聊天主链路绝不因存储阻塞）。
+  void _persist(ChatMessage message) {
+    unawaited(
+      _store.saveMessage(message).catchError((Object e) {
+        debugPrint("[MobileChatController] 消息落盘失败: $e");
+      }),
+    );
+  }
+
+  /// 服务端线程历史拉取（GET /api/chat-data/history）：读最近一段共享线程，
+  /// 把本机缺失的对话轮回填进本地（桌面端聊过、手机重启后也能看到）。
+  Future<void> _pullServerHistory() async {
+    if (_serverHistoryPulled) return;
+    _serverHistoryPulled = true;
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/history")
+          .replace(queryParameters: <String, String>{
+        "userId": ApiConfig.effectiveActorId,
+        "limit": "80",
+      });
+      final http.Response res = await http
+          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) return;
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      final List<dynamic> raw = body["messages"] as List<dynamic>? ?? const [];
+      final List<ChatMessage> incoming = <ChatMessage>[];
+      int fallbackSeq = 0;
+      for (final dynamic item in raw) {
+        if (item is! Map<String, dynamic>) continue;
+        final String role = item["role"]?.toString() ?? "";
+        final String text = stripAssistantProtocolFrames(
+          item["text"]?.toString() ?? "",
+        ).trim();
+        if ((role != "user" && role != "assistant") || text.isEmpty) continue;
+        final int? tsMs = item["ts"] is int ? item["ts"] as int : null;
+        final DateTime ts =
+            tsMs != null ? DateTime.fromMillisecondsSinceEpoch(tsMs) : DateTime.now();
+        final String? clientMessageId = item["clientMessageId"]?.toString();
+        final String messageId = role == "user" && (clientMessageId?.isNotEmpty ?? false)
+            ? clientMessageId!
+            : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
+        incoming.add(ChatMessage(
+          messageId: messageId,
+          sessionId: ApiConfig.effectiveActorId,
+          role: role,
+          text: text,
+          timestamp: ts,
+        ));
+      }
+      if (incoming.isEmpty) return;
+      _mergeServerTurns(incoming);
+    } catch (e) {
+      debugPrint("[MobileChatController] 服务端历史拉取失败(跳过回填): $e");
+    }
+  }
+
+  /// 跨端回填合并（turn 级锚定去重）：
+  /// - 锚 = 用户消息。服务端轮与本机重复的判定：clientMessageId 命中本地 id、
+  ///   用户原文精确命中、纯图占位（服务端「（用户发送了…」↔ 本地「（见图）」）。
+  /// - 助手消息随锚走：锚轮已存在 → 整轮跳过（分泡/塌缩形态差异不再制造双份）；
+  ///   无锚的孤儿助手消息按正文包含关系去重后插入。
+  /// - 插入位置按时间戳落位，回填后逐条写进本地 store（下次启动直接命中）。
+  void _mergeServerTurns(List<ChatMessage> incoming) {
+    // 按 user 锚切轮（开头没有锚的孤儿助手消息自成一轮）
+    final List<List<ChatMessage>> turns = <List<ChatMessage>>[];
+    for (final ChatMessage m in incoming) {
+      if (m.role == "user" || turns.isEmpty) {
+        turns.add(<ChatMessage>[m]);
+      } else {
+        turns.last.add(m);
+      }
+    }
+
+    final Set<String> localUserIds = <String>{};
+    final Set<String> localUserTexts = <String>{};
+    final List<ChatMessage> localAssistants = <ChatMessage>[];
+    for (final ChatMessage m in messages) {
+      if (m.role == "user") {
+        localUserIds.add(m.messageId);
+        localUserTexts.add(m.text.trim());
+      } else if (m.role == "assistant" && m.text.trim().isNotEmpty) {
+        localAssistants.add(m);
+      }
+    }
+    final Set<String> backfilledAssistantTexts = <String>{};
+
+    bool turnExistsLocally(List<ChatMessage> turn) {
+      final ChatMessage anchor = turn.first;
+      if (anchor.role != "user") return false;
+      final String anchorText = anchor.text.trim();
+      if (localUserIds.contains(anchor.messageId)) return true;
+      if (localUserTexts.contains(anchorText)) return true;
+      // 纯图轮：本地气泡文案与服务端视觉占位文案不同，视为同一轮
+      if (anchorText == "（见图）" &&
+          localUserTexts.any((t) => t == "（见图）")) {
+        return true;
+      }
+      return false;
+    }
+
+    bool assistantKnown(ChatMessage m) {
+      final String text = m.text.trim();
+      if (backfilledAssistantTexts.contains(text)) return true;
+      if (localUserTexts.contains(text)) return true;
+      for (final ChatMessage local in localAssistants) {
+        final String lt = local.text.trim();
+        // 包含关系去重：服务端合并正文 ↔ 本地分泡互为片段时视为同一条回复
+        if (lt.length >= 8 && text.contains(lt)) return true;
+        if (text.length >= 8 && lt.contains(text)) return true;
+      }
+      return false;
+    }
+
+    void insertByTimestamp(ChatMessage m) {
+      int idx = messages.indexWhere((local) => local.timestamp.isAfter(m.timestamp));
+      if (idx < 0) idx = messages.length;
+      messages.insert(idx, m);
+      _persist(m);
+    }
+
+    bool mutated = false;
+    for (final List<ChatMessage> turn in turns) {
+      if (turnExistsLocally(turn)) continue;
+      for (final ChatMessage m in turn) {
+        if (m.role == "assistant" && assistantKnown(m)) continue;
+        if (m.role == "assistant") backfilledAssistantTexts.add(m.text.trim());
+        insertByTimestamp(m);
+        mutated = true;
+        if (m.role == "user") {
+          localUserIds.add(m.messageId);
+          localUserTexts.add(m.text.trim());
+        } else {
+          localAssistants.add(m);
+        }
+      }
+    }
+    if (mutated) notifyListeners();
   }
 
   void _sendSessionInit() {
@@ -138,6 +340,7 @@ class MobileChatController extends ChangeNotifier {
       attachmentImageCount: hasFrames ? visionFrames.length : 0,
     );
     messages.add(userMsg);
+    _persist(userMsg);
     isProcessing = true;
     errorMessage = null;
     notifyListeners();
@@ -164,6 +367,76 @@ class MobileChatController extends ChangeNotifier {
   @visibleForTesting
   void debugHandleWsEvent(Map<String, dynamic> event) => _onWsEvent(event);
 
+  /// 测试注入点：定位解析器（生产为 null → 走 ClientLocationService 实时定位）。
+  @visibleForTesting
+  static Future<ClientLocationPayload?> Function()? debugLocationResolver;
+
+  /// 测试开关：置 true 时 [_send] 把发出的事件记录进 [debugSentEvents]。
+  @visibleForTesting
+  bool debugCaptureSentEvents = false;
+
+  /// 测试观测点：经 [_send] 发出的事件（type, payload）按序记录。
+  @visibleForTesting
+  final List<MapEntry<String, Map<String, dynamic>>> debugSentEvents =
+      <MapEntry<String, Map<String, dynamic>>>[];
+
+  /// 出站统一入口：生产直发；测试开启 [debugCaptureSentEvents] 时留观测记录。
+  bool _send(String type, Map<String, dynamic> payload) {
+    if (debugCaptureSentEvents) {
+      debugSentEvents.add(MapEntry<String, Map<String, dynamic>>(type, payload));
+    }
+    return _service.sendEvent(type, payload);
+  }
+
+  /// 服务端按需定位应答（与桌面端 main.dart 同协议）：Agent 需要位置时
+  /// （天气/时钟等工具）下发 `agent.location_request`，本端拉纯坐标秒回
+  /// `client.location_report`（服务端拿到坐标后自行逆地理）。
+  ///
+  /// 手机端此前没有这条应答链——服务端 locationCoordinator 绑定的是该 actor
+  /// 最后一条完成 session.init 的连接，手机聊天 WS 与桌面根 WS 同 actor 竞绑
+  /// （聊天 WS 后建常胜出），请求落在无人应答的聊天 WS 上就恒超时，agent
+  /// 便「不知道用户的地址」。本端补齐后无论绑定落在哪条连接都能闭环。
+  Future<void> _handleLocationRequest(Map<String, dynamic> payload) async {
+    final String jobId = payload["jobId"]?.toString() ?? "";
+    ClientLocationPayload? loc;
+    try {
+      loc = await _resolveLocation();
+    } catch (_) {
+      loc = null;
+    }
+    debugPrint(
+      "[MobileChatController] 按需定位回包 jobId=$jobId lat=${loc?.latitude ?? "无"}",
+    );
+    // 拿不到坐标也回 jobId 空包：让服务端立即结算（resolve null），不白等超时。
+    _send("client.location_report", <String, dynamic>{
+      if (jobId.isNotEmpty) "jobId": jobId,
+      ...?loc?.toJson(),
+    });
+  }
+
+  /// 连接就绪即静默上报一次定位（无 jobId 纯上报，与桌面端启动上报同语义）：
+  /// 填充服务端 actor 位置缓存，首条消息的 prompt 注入才有位置背景可用。
+  /// 登录后 actor 身份才落定，桌面根 WS 的启动上报可能落在匿名 actor 上，
+  /// 本连接（登录后创建）的上报正好补上登录身份的缓存。
+  Future<void> _reportStartupLocation() async {
+    try {
+      final ClientLocationPayload? loc = await _resolveLocation();
+      if (loc == null) return;
+      debugPrint(
+        "[MobileChatController] 启动定位上报 lat=${loc.latitude} city=${loc.city ?? "-"}",
+      );
+      _send("client.location_report", loc.toJson());
+    } catch (_) {
+      // 定位失败静默：Agent 运行中需要位置时会走 agent.location_request 按需再拉
+    }
+  }
+
+  Future<ClientLocationPayload?> _resolveLocation() {
+    final resolver = debugLocationResolver;
+    if (resolver != null) return resolver();
+    return ClientLocationService.getCurrentLocationForAgentReply();
+  }
+
   void _onWsEvent(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
     final Map<String, dynamic> payload =
@@ -173,6 +446,11 @@ class MobileChatController extends ChangeNotifier {
         isConnected = true;
         connection.value = true;
         notifyListeners();
+        // 连接就绪即静默上报一次定位（无 jobId）：填充服务端位置缓存，
+        // 首条消息的 prompt 注入才有位置背景。与桌面端启动上报同语义。
+        unawaited(_reportStartupLocation());
+      case "agent.location_request":
+        unawaited(_handleLocationRequest(payload));
       case "ws_disconnected":
       case "connection_error":
         isConnected = false;
@@ -185,6 +463,8 @@ class MobileChatController extends ChangeNotifier {
         notifyListeners();
       case "chat.assistant_chunk":
         _appendChunk(payload);
+      case "chat.stream_reset":
+        _handleStreamReset(payload);
       case "chat.media_ready":
         _handleMediaReady(payload);
       case "tool.call":
@@ -223,7 +503,11 @@ class MobileChatController extends ChangeNotifier {
   }
 
   void _appendChunk(Map<String, dynamic> payload) {
-    final String chunk = payload["chunk"]?.toString() ?? "";
+    // 2026-10-08：手机端此前是「服务端给什么就画什么」，连桌面端已有的
+    // [ts:] / DSML 清洗都没接（[上一轮回复中断…[不可信内容围栏…] 事故气泡
+    // 因此直透）。这里统一过一次协议帧清洗；服务端出口已净化，此层为兜底。
+    final String chunk =
+        stripAssistantProtocolFrames(payload["chunk"]?.toString() ?? "");
     final String? traceId = payload["traceId"]?.toString();
     final String id = payload["messageId"]?.toString() ??
         (traceId != null && traceId.isNotEmpty
@@ -257,7 +541,8 @@ class MobileChatController extends ChangeNotifier {
 
   /// 真·分绿泡：分泡 chunk 追加。新泡开=旧泡完；turn_started 建的空占位
   /// （assistant-$traceId，非泡 id 且无正文）让位给第一个真泡。
-  void _appendBubbleChunk(String id, String? traceId, String chunk) {
+  void _appendBubbleChunk(String id, String? traceId, String rawChunk) {
+    final String chunk = stripAssistantProtocolFrames(rawChunk);
     if (_streamingMessageId != null &&
         _streamingMessageId != id &&
         !_isBubbleId(_streamingMessageId!)) {
@@ -313,6 +598,41 @@ class MobileChatController extends ChangeNotifier {
     }
     isProcessing = true;
     notifyListeners();
+  }
+
+  /// 会出卡片的轮次不流式（2026-10-08）：服务端确认本轮将携带结构化卡片
+  /// （工具附卡/识图照片/模型自产标记）后，先撤回该 trace 已流出的正文并转
+  /// 静默，最终内容由 `chat.assistant_done` 一次性结构化下发。这里清空本轮
+  /// 所有流式泡的正文（保留占位泡与已挂照片），回到「生成中」观感，杜绝
+  /// 「文字打一半 → done 整条重排成卡片」的跳变。
+  void _handleStreamReset(Map<String, dynamic> payload) {
+    final String? traceId = payload["traceId"]?.toString();
+    final String mainId = (traceId != null && traceId.isNotEmpty)
+        ? "assistant-$traceId"
+        : (_streamingMessageId ?? "");
+    if (mainId.isEmpty) return;
+    bool changed = false;
+    for (int i = 0; i < messages.length; i++) {
+      final ChatMessage m = messages[i];
+      if (!m.streaming || m.text.isEmpty) continue;
+      final bool sameTrace = (m.messageId == mainId) ||
+          (traceId != null && traceId.isNotEmpty && _bubbleTraceOf(m.messageId) == traceId);
+      if (!sameTrace) continue;
+      messages[i] = ChatMessage(
+        messageId: m.messageId,
+        sessionId: m.sessionId,
+        role: m.role,
+        text: "",
+        timestamp: m.timestamp,
+        streaming: true,
+        mediaCards: m.mediaCards,
+        renderBlocks: m.renderBlocks,
+        replyBlocks: m.replyBlocks,
+        pendingMediaCards: m.pendingMediaCards,
+      );
+      changed = true;
+    }
+    if (changed) notifyListeners();
   }
 
   /// 边说边出图：`chat.media_ready` 到达时把已搜到的照片先挂到当前流式消息上，
@@ -398,7 +718,8 @@ class MobileChatController extends ChangeNotifier {
         (m) => m.messageId == traceKey || (messageId != null && m.messageId == messageId),
       );
     }
-    final String finalText = payload["finalText"]?.toString() ?? "";
+    final String finalText =
+        stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
     // 结构化媒体卡片 / 交错渲染块 / 回复信封块：与桌面端一致，前端据此渲染
     // 卡片与图文交错，不再把 `[AGENT_RESULT_CARD_START]` 等标记当纯文本展示。
     final List<Map<String, dynamic>>? mediaCards =
@@ -408,7 +729,17 @@ class MobileChatController extends ChangeNotifier {
     final List<Map<String, dynamic>>? replyBlocks =
         _parseStructuredList(payload, "blocks");
     if (idx < 0) {
-      // 没有流式占位:直接落一条最终消息
+      // 没有流式占位:直接落一条最终消息（整轮只剩内部帧 → 不落空白泡）
+      if (finalText.trim().isEmpty &&
+          mediaCards == null &&
+          renderBlocks == null &&
+          replyBlocks == null) {
+        _streamingMessageId = null;
+        currentToolName = null;
+        isProcessing = false;
+        notifyListeners();
+        return;
+      }
       messages.add(ChatMessage(
         messageId: messageId ?? "assistant-final",
         sessionId: ApiConfig.effectiveActorId,
@@ -419,8 +750,24 @@ class MobileChatController extends ChangeNotifier {
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
       ));
+      _persist(messages.last);
     } else {
       final ChatMessage prev = messages[idx];
+      // 整轮只剩系统内部帧（服务端已判为不可见 / 本地清洗后为空）且无任何
+      // 结构化产出 → 撤掉空占位泡，不留一条空白助手气泡（2026-10-08）。
+      final bool nothingToShow = finalText.trim().isEmpty &&
+          prev.text.trim().isEmpty &&
+          mediaCards == null &&
+          renderBlocks == null &&
+          replyBlocks == null;
+      if (nothingToShow) {
+        messages.removeAt(idx);
+        _streamingMessageId = null;
+        currentToolName = null;
+        isProcessing = false;
+        notifyListeners();
+        return;
+      }
       messages[idx] = ChatMessage(
         messageId: messageId ?? prev.messageId,
         sessionId: prev.sessionId,
@@ -432,6 +779,7 @@ class MobileChatController extends ChangeNotifier {
         renderBlocks: renderBlocks ?? prev.renderBlocks,
         replyBlocks: replyBlocks ?? prev.replyBlocks,
       );
+      _persist(messages[idx]);
     }
     _streamingMessageId = null;
     currentToolName = null;
@@ -446,7 +794,11 @@ class MobileChatController extends ChangeNotifier {
     List<Map<String, dynamic>> bubbles,
   ) {
     final String? traceId = payload["traceId"]?.toString();
-    final String finalText = payload["finalText"]?.toString() ?? "";
+    final String finalText =
+        stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
+    final String traceKey = traceId != null && traceId.isNotEmpty
+        ? "assistant-$traceId"
+        : "assistant-final";
     final List<Map<String, dynamic>>? mediaCards =
         _parseStructuredList(payload, "mediaCards");
     final List<Map<String, dynamic>>? renderBlocks =
@@ -462,10 +814,19 @@ class MobileChatController extends ChangeNotifier {
                 _bubbleTraceOf(m.messageId) == traceId);
         return hit;
       });
+      if (finalText.trim().isEmpty &&
+          mediaCards == null &&
+          renderBlocks == null &&
+          replyBlocks == null) {
+        // 整轮只剩系统内部帧 → 塌缩后也不留空白泡
+        _streamingMessageId = null;
+        currentToolName = null;
+        isProcessing = false;
+        notifyListeners();
+        return;
+      }
       messages.add(ChatMessage(
-        messageId: traceId != null && traceId.isNotEmpty
-            ? "assistant-$traceId"
-            : "assistant-final",
+        messageId: traceKey,
         sessionId: ApiConfig.effectiveActorId,
         role: "assistant",
         text: finalText,
@@ -474,6 +835,7 @@ class MobileChatController extends ChangeNotifier {
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
       ));
+      _persist(messages.last);
       _streamingMessageId = null;
       currentToolName = null;
       isProcessing = false;
@@ -505,10 +867,12 @@ class MobileChatController extends ChangeNotifier {
       final String id = b["id"]?.toString() ?? "";
       if (id.isEmpty) continue;
       final bool isLast = i == bubbles.length - 1;
-      final String text = b["text"]?.toString() ?? "";
+      final String text =
+          stripAssistantProtocolFrames(b["text"]?.toString() ?? "");
       final int idx = messages.indexWhere((m) => m.messageId == id);
       if (idx < 0) {
-        // 客户端漏收该泡 chunk：按对账补建
+        // 客户端漏收该泡 chunk：按对账补建（整泡只剩内部帧时不补建空泡）
+        if (text.trim().isEmpty) continue;
         messages.add(ChatMessage(
           messageId: id,
           sessionId: ApiConfig.effectiveActorId,
@@ -519,8 +883,14 @@ class MobileChatController extends ChangeNotifier {
           renderBlocks: isLast ? renderBlocksForLast : null,
           replyBlocks: isLast ? replyBlocksForLast : null,
         ));
+        _persist(messages.last);
       } else {
         final ChatMessage prev = messages[idx];
+        // 该泡只剩内部帧（清洗后为空）且此前也没流到正文 → 撤泡，不留空白
+        if (text.trim().isEmpty && prev.text.trim().isEmpty) {
+          messages.removeAt(idx);
+          continue;
+        }
         messages[idx] = ChatMessage(
           messageId: prev.messageId,
           sessionId: prev.sessionId,
@@ -535,6 +905,7 @@ class MobileChatController extends ChangeNotifier {
           pendingMediaCards: isLast ? null : prev.pendingMediaCards,
           // streaming 不带 → false：定稿
         );
+        _persist(messages[idx]);
       }
     }
     _streamingMessageId = null;

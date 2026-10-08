@@ -437,6 +437,12 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        // 设备活跃度刷新（提醒智能路由）：业务消息（非 keepalive）代表"人在这台设备上"，
+        // 刷新该连接 lastActiveAt；后台挂机仅有心跳的连接不会被误判为用户所在端。
+        if (boundActorId) {
+          wsConnectionRegistry.touchActivity(boundActorId, ws);
+        }
+
         // ========== 终端互连平台 device.* 事件路由 ==========
         // device.register 不需要 boundActorId（设备身份在 payload 内）；
         // 其余 device.* 事件依赖 socket 上已绑定的 deviceId（由 register 写入）。

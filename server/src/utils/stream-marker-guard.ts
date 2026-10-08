@@ -26,6 +26,12 @@ const MARKER_TOKEN_RE =
 /** 独占一行的全大写方括号标记（防御未来新增的服务端标记类型） */
 const MARKER_LINE_RE = /^[ \t]*\[[A-Z_]+(?::[A-Za-z_]+)?\][ \t]*$/;
 
+/** 结构化产出标记 token：命中即意味着本轮 done 会携带卡片/媒体/渲染块。
+ *  注意不含 NEXT_UP（只产 followups 字段，不改变正文渲染形态）与
+ *  RENDER_HINT/RENDER_AS（文本形态声明，done 渲染与流式正文近似）。 */
+const STRUCTURAL_MARKER_TOKEN_RE =
+  /\[(?:AGENT_RESULT_CARD_(?:START|END)|DATA_BRIEF_(?:START|END)|VIDEO_MEDIA_(?:START|END)|CONTENT_SUMMARY_V2_(?:START|END)|CHAT_MEDIA_(?:START|END)|IMAGE_RESULT_(?:START|END))\]/;
+
 const CARD_START_LINE = "[AGENT_RESULT_CARD_START]";
 const CARD_END_LINE = "[AGENT_RESULT_CARD_END]";
 const NEXT_UP_START_LINE = "[NEXT_UP_START]";
@@ -60,12 +66,17 @@ export interface StreamMarkerGuard {
   feed(chunk: string): string;
   /** 流结束：放行被误扣的普通残段；标记/卡片块内容一律丢弃 */
   flush(): string;
+  /** 流式期间是否见过结构化产出标记（卡片/媒体/数据简报等）。
+   *  命中即意味着本轮 done 会携带结构化渲染——「会出卡片的轮次不流式」
+   *  用此信号在 chunk 出口撤回已流正文并转静默。 */
+  readonly sawStructuredBlock: boolean;
 }
 
 export function createStreamMarkerGuard(): StreamMarkerGuard {
   let pending = ""; // 尚未裁决的尾部残段（未断行，或疑似半截标记）
   let inCardBlock = false; // 已见 CARD_START，丢弃直到 CARD_END
   let inNextUpBlock = false; // 已见 NEXT_UP_START，丢弃直到 NEXT_UP_END（接续建议由 done 载荷承载）
+  let sawStructured = false; // 流式期间见过结构化产出标记（done 将携带卡片/渲染块）
 
   /** 裁决一行完整文本；返回 null 表示整行丢弃，否则返回可发文本（无换行符） */
   const judgeLine = (line: string): string | null => {
@@ -75,6 +86,7 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
     }
     if (line.trim() === CARD_START_LINE) {
       inCardBlock = true;
+      sawStructured = true;
       return null;
     }
     // NEXT_UP 标记不再要求独占一行：模型实测会把 [NEXT_UP_START] 直接跟在正文
@@ -108,6 +120,7 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
     }
     const stripped = line.replace(MARKER_TOKEN_RE, "");
     if (stripped !== line) {
+      if (STRUCTURAL_MARKER_TOKEN_RE.test(line)) sawStructured = true;
       // 行内嵌标记被剥离：剩余纯空白则整行丢弃，否则发剩余文本
       return stripped.trim() ? stripped : null;
     }
@@ -160,6 +173,9 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
       if (tailCouldBecomeMarker(rest)) return ""; // 疑似半截标记，宁可不发
       const judged = judgeLine(rest);
       return judged ?? "";
+    },
+    get sawStructuredBlock(): boolean {
+      return sawStructured;
     },
   };
 }

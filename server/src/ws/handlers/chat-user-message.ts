@@ -54,11 +54,14 @@ import {
 } from "../../agent/turn-events.js";
 import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, stripMediaCardMarker, type MediaCardItem } from "../../services/tool-result-processor.js";
 import {
+  buildToolCard,
   lookupToolCardBuilder,
 } from "../../services/tool-card-registry.js";
 import {
   attachDeterministicCards,
+  looksLikeHandwrittenItinerary,
   resolveTravelReceipt,
+  sniffItineraryDays,
   type ExecutedToolReceipt,
 } from "../../services/deterministic-card-chain.js";
 import { buildVisionPhotoCards, attachImageResultPhotos } from "../../services/vision-photo-cards.js";
@@ -74,6 +77,7 @@ import {
   stripAllTimestampFrameLines,
   stripLeadingTimestampFrames,
 } from "../../utils/timestamp-frame.js";
+import { stripInternalFrames } from "../../external-model/internal-frames.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
 
@@ -595,6 +599,59 @@ async function processBatchedMessage(
   // 分配/记账逻辑见 BubbleTracker（bubble-tracker.ts，含独立单测）。
   const bubbleTracker = new BubbleTracker(false, assistantMessageId);
 
+  // 会出卡片的轮次不流式（2026-10-08 用户定调）：手机端「先流式打纯文本 →
+  // done 整条替换成卡片渲染」的跳变根治。本轮一旦确认会携带结构化卡片
+  // （工具确定性附卡源 / 识图照片卡 / LLM 自产结构化标记），正文一律扣发；
+  // 已流出的文本以 chat.stream_reset 撤回，最终内容统一由 assistant_done
+  // 结构化一次性下发（卡片 + renderBlocks + 正文同帧呈现，无二次重排）。
+  let turnWillCarryCards = batched.visionFrames?.length
+    ? // 识图轮：done 阶段确定性附照片卡（buildVisionPhotoCards），天然是卡片轮
+      true
+    : false;
+  let suppressStreamForCards = false;
+  let anyStreamChunkSent = false;
+  let streamResetSent = false;
+  const retractAndSuppressStream = (): void => {
+    if (suppressStreamForCards) return;
+    suppressStreamForCards = true;
+    if (anyStreamChunkSent && !isStale()) {
+      streamResetSent = true;
+      ctx.socket.send(
+        JSON.stringify({
+          type: ServerEventType.ChatStreamReset,
+          payload: {
+            sessionId: msgActor,
+            traceId: batched.originalMessageId,
+          },
+        }),
+      );
+    }
+  };
+
+  /** 直跑路径工具回执是否产得出结构化卡片（runToolIfNeeded 补判用）。
+   *  与 done 阶段 attachDeterministicCards 的建卡条件同口径：媒体类看真实
+   *  items，搜索/天气/行程/视频有成功回执即出卡，注册工具看 buildToolCard。 */
+  const directPathToolProducesCard = (
+    toolName: string,
+    result: Record<string, unknown>,
+  ): boolean => {
+    if (SEARCH_MEDIA_TOOL_NAMES.has(toolName) || toolName === "image.generate") {
+      return extractMediaCards(toolName, result).length > 0;
+    }
+    if (
+      toolName === "weather.get_local" ||
+      toolName === "search_web" ||
+      toolName === "info.search" ||
+      toolName === "travel.plan-itinerary" ||
+      toolName === "video.grab" ||
+      toolName === "video.find"
+    ) {
+      return true;
+    }
+    const payload = buildToolCard(toolName, result);
+    return !!payload && payload.items.length > 0;
+  };
+
   // [ts:...] 是系统注入的元数据标记，仅供 LLM 上下文使用，绝不能透出到用户可见消息。
   // 2026-09-03 收紧：此前只剥首块，后续块里模型复述的时间戳帧（含残缺帧）会直透前端。
   // 现在每个 chunk 出口都剥"帧"：
@@ -614,10 +671,25 @@ async function processBatchedMessage(
     let cleanedChunk = stripLeadingTimestampFrames(chunk);
     if (chunkSeq === 1) cleanedChunk = stripAllTimestampFrameLines(cleanedChunk);
     if (isOnlyTimestampFrames(cleanedChunk)) cleanedChunk = "";
+    // 线程内部帧（2026-10-08）：[上一轮回复中断…] / [不可信内容围栏 …] / [session-recap]
+    // 这类写给模型的上下文帧一旦被复读，必须在这里（所有 chunk 的唯一出口）拦死，
+    // 否则已推给客户端的气泡无法撤回——手机端事故气泡就是这么漏出去的。
+    cleanedChunk = stripInternalFrames(cleanedChunk);
     // 展示形式标记防泄漏（L2 配套）：模型声明的 [RENDER_HINT]/卡片 JSON 块等
     // 只允许随 assistant_done 的 finalText 一次性解析渲染，流式阶段一律扣下，
     // 避免打字机气泡闪现原始标记/JSON。
     cleanedChunk = streamMarkerGuard.feed(cleanedChunk);
+    // 会出卡片的轮次不流式：工具附卡源就绪（cardSourceSeen）或模型自产结构化
+    // 标记（guard.sawStructuredBlock，含当前块）→ 撤回已流正文并转静默。
+    // 注意在 feed 之后判定：当前块内嵌标记时，同块前缀一并扣下（finalText
+    // 权威存在，done 统一下发，不丢内容）。
+    if (
+      !suppressStreamForCards &&
+      (turnWillCarryCards || streamMarkerGuard.sawStructuredBlock)
+    ) {
+      retractAndSuppressStream();
+    }
+    if (suppressStreamForCards) return;
     if (!cleanedChunk) return;
     // 气泡拆分：new 开新泡（独立 messageId），无 meta 的直推段（确定性收口
     // supplement / 零正文兜底）追加到当前末泡；尚无泡时兜底开第一泡。
@@ -638,6 +710,7 @@ async function processBatchedMessage(
         },
       }),
     );
+    anyStreamChunkSent = true;
   };
 
   const turnEmitter: TurnEventEmitter = createTurnEventEmitter({
@@ -959,6 +1032,10 @@ async function processBatchedMessage(
   // 结果、行程卡永远附不上（右侧面板不自动展开）。这里从 onExternalToolExecuted
   // 捕获真实结果作为附卡数据源。
   let executedTravelPlanResult: Record<string, unknown> | undefined;
+  // 本轮是否尝试过规划工具（成功与否都算）：失败时 executedTravelPlanResult 保持
+  // undefined，但没有这个标记，done 阶段的手写行程兜底会对失败轮再补跑一次，
+  // 用户承受双重 10~30s 等待。
+  let executedTravelPlanAttempted = false;
   // 「边说边出图」已推送过的媒体地址集合：跨工具批去重，避免同一张图被推两次
   const sentEarlyMediaKeys = new Set<string>();
   // 方案1：不再把流式 delta 逐段喂入分段器（多段流/工具边界会打断 heldFirst 导致
@@ -1061,6 +1138,9 @@ async function processBatchedMessage(
             toolName: info.toolName,
             result: info.result as Record<string, unknown>,
           });
+          // 搜索回执 → done 阶段确定性附 search_result 卡（或让位给照片卡）：
+          // 结构化产出轮，按「会出卡片的轮次不流式」扣流
+          turnWillCarryCards = true;
         }
         // 捕获天气工具的真实结果，供 done 阶段确定性附 weather 卡（L1，与搜索同理）
         if (info.ok && info.result && info.toolName === "weather.get_local") {
@@ -1068,6 +1148,7 @@ async function processBatchedMessage(
             toolName: info.toolName,
             result: info.result as Record<string, unknown>,
           });
+          turnWillCarryCards = true;
         }
         // 捕获其余注册工具（wallet/calendar/shopping…）的真实结果（L1，同上）
         if (
@@ -1082,6 +1163,10 @@ async function processBatchedMessage(
             toolName: info.toolName,
             result: info.result as Record<string, unknown>,
           });
+          // 精确判定：注册工具卡实际建得出（items 非空）才算卡片轮，
+          // 避免注册工具执行成功但无卡时白白牺牲流式打字机
+          const cardPayload = buildToolCard(info.toolName, info.result as Record<string, unknown>);
+          if (cardPayload && cardPayload.items.length > 0) turnWillCarryCards = true;
         }
         // 捕获视频工具的真实结果，供 done 阶段附加 [RENDER_AS:video] 媒体标记
         // （video.grab=贴链接解析 / video.find=按内容找视频直接出可播流）
@@ -1094,10 +1179,18 @@ async function processBatchedMessage(
             toolName: info.toolName,
             result: info.result as Record<string, unknown>,
           });
+          // 视频回执 → done 阶段附 [RENDER_AS:video] 可播媒体标记：卡片轮
+          turnWillCarryCards = true;
         }
         // 捕获媒体搜索工具的真实结果，供 done 阶段构建 mediaCards（见上方说明）
-        if (info.ok && info.result && info.toolName === "travel.plan-itinerary") {
-          executedTravelPlanResult = info.result as Record<string, unknown>;
+        if (info.toolName === "travel.plan-itinerary") {
+          // 尝试标记（成功与否都算）：手写行程兜底对已尝试轮不再补跑
+          executedTravelPlanAttempted = true;
+          if (info.ok && info.result) {
+            executedTravelPlanResult = info.result as Record<string, unknown>;
+            // 行程回执 → done 阶段确定性附行程卡：卡片轮
+            turnWillCarryCards = true;
+          }
         }
         // 捕获媒体搜索/图像生成工具的真实结果，供 done 阶段构建 mediaCards。
         // image.generate 与搜索同链路：执行完即早推卡片（边说边出图），
@@ -1114,6 +1207,10 @@ async function processBatchedMessage(
             toolName: info.toolName,
             result: info.result as Record<string, unknown>,
           });
+          // 媒体回执 → done 阶段聚合 mediaCards/renderBlocks：卡片轮
+          if (extractMediaCards(info.toolName, info.result as Record<string, unknown>).length > 0) {
+            turnWillCarryCards = true;
+          }
           // 边说边出图：媒体工具一执行完，先把该批照片结构化推给前端，
           // 前端插到当前流式正文下方实时展示；done 时再按 renderBlocks 校正顺序。
           try {
@@ -1375,6 +1472,17 @@ async function processBatchedMessage(
           },
         }),
       );
+      // 直跑路径卡片源补判：runToolIfNeeded 不走 onExternalToolExecuted，
+      // 上面的工具捕获点看不到这类回执。直跑工具在主回复流之后执行——
+      // 产出可建卡即扣流（已流文本由 retract 内部撤回），done 统一结构化下发。
+      if (
+        !suppressStreamForCards &&
+        toolResult.ok &&
+        toolResult.result &&
+        directPathToolProducesCard(reply.toolName, toolResult.result as Record<string, unknown>)
+      ) {
+        retractAndSuppressStream();
+      }
     }
 
     const scheduleOutcome =
@@ -1425,7 +1533,7 @@ async function processBatchedMessage(
     // 冷层近窗回捞三路归一——此前 reply.toolName 是其他工具（如
     // travel.destination-info）会短路掉冷层回捞，行程卡整轮漏发；
     // planId 补全量数据由 attachTravelItineraryCard 内部完成。
-    const travelReceiptResolution = resolveTravelReceipt({
+    let travelReceiptResolution = resolveTravelReceipt({
       replyToolName: reply.toolName,
       replyToolResult:
         toolResult?.ok && toolResult.result
@@ -1435,6 +1543,69 @@ async function processBatchedMessage(
       goal: batched.text,
       finalText,
     });
+    // 手写行程确定性兜底（2026-10-08）：模型把完整行程手写成 markdown 却没调
+    // travel.plan-itinerary → 行程卡整轮缺席（travel-plans 落盘自 9/28 零新增的
+    // 实证，手机/桌面行程卡点击界面形同虚设）。双闸检测（领域词 × 行程表结构）
+    // 命中且本轮没尝试过规划工具时，代码强制补跑一次规划，回执走下方
+    // attachDeterministicCards 原链路附卡；规划阶段进度经 travel-progress-bus
+    // 照常下发，用户端可见「正在规划行程」。
+    if (
+      !executedTravelPlanAttempted &&
+      !travelReceiptResolution.toolName &&
+      looksLikeHandwrittenItinerary(finalText)
+    ) {
+      const forcedInput = batched.text.trim() || "规划行程";
+      const forcedDays = sniffItineraryDays([batched.text, finalText]);
+      const forcedToolInput = {
+        input: forcedInput,
+        ...(forcedDays ? { days: forcedDays } : {}),
+      };
+      if (isStale()) return;
+      const forcedStartedAt = Date.now();
+      ctx.socket.send(
+        JSON.stringify({
+          type: ServerEventType.ToolCall,
+          payload: {
+            toolName: "travel.plan-itinerary",
+            input: forcedToolInput,
+            traceId: batched.originalMessageId,
+          },
+        }),
+      );
+      const forcedPlan = await deps.runtime.runToolIfNeeded(
+        msgActor,
+        { text: "", toolName: "travel.plan-itinerary", toolInput: forcedToolInput },
+        {
+          chatUserMessageId: batched.originalMessageId,
+          userId: batched.userId,
+          agentAccessMode: parseAgentAccessMode(batched.agentAccessMode),
+          clientIp: batched.clientIp,
+          clientLocation: batched.clientLocation,
+        },
+      );
+      if (isStale()) return;
+      ctx.socket.send(
+        JSON.stringify({
+          type: ServerEventType.ToolResult,
+          payload: {
+            toolName: "travel.plan-itinerary",
+            ok: forcedPlan.ok,
+            result: forcedPlan.result ?? {},
+            traceId: batched.originalMessageId,
+            durationMs: Date.now() - forcedStartedAt,
+          },
+        }),
+      );
+      if (forcedPlan.ok && forcedPlan.result) {
+        travelReceiptResolution = {
+          toolName: "travel.plan-itinerary",
+          result: forcedPlan.result as Record<string, unknown>,
+        };
+        // 正文已在流式阶段以纯文本送达（没有卡片形态），补卡后 finalText ≠ 已流
+        // 文本，必须整段替换让两端重渲染出卡片（桌面端 done 默认保留已流正文）。
+        finalTextReplacesStream = true;
+      }
+    }
     // 「接下来你可以」接续建议（NEXT_UP 协议）：从正文提取成独立 followups
     // 字段并从文本剥离——done 载荷与落库文本都不再含标记块（时机性内容不落
     // 历史；流式阶段已由 stream-marker-guard 扣下，用户全程看不到原始标记）。
@@ -1589,7 +1760,11 @@ async function processBatchedMessage(
         : `\n\n${scheduleOutcome}`;
       // 去重兜底：剔除 supplement 与已流式正文句级重复的内容，
       // 避免"整段一模一样出现两次"（工具结果拼接与 LLM 已说内容重叠）。
-      const deduped = stripSentencesAlreadySaid(reply.text, supplement);
+      // 2026-10-08：对账基准从 reply.text 扩到「已流式文本 ∪ reply.text」——
+      // 流式出口净化（时间戳帧/内部帧剥离）会让 reply.text 与用户实际看到的
+      // 文本分叉，只对 reply.text 去重会漏掉"用户已经看到过"的句子。
+      const seenSource = `${streamedText}\n${reply.text}`;
+      const deduped = stripSentencesAlreadySaid(seenSource, supplement);
       if (!isStale() && deduped.trim()) sendAssistantChunk(deduped, "stream");
     } else if (!reply.text.trim() && chunkSeq === 0) {
       if (!isStale() && finalText) sendAssistantChunk(finalText, "stream");
@@ -1655,7 +1830,11 @@ async function processBatchedMessage(
           ...(bubbleTracker.hasBubbles ? { bubbles: bubbleTracker.snapshot } : {}),
           // 放流配套（2026-09-28）：最终文本与已流文本分叉（重写/重跑/确定性
           // 收口）时置 true，客户端收到后用 finalText 整段替换流式气泡。
-          ...(finalTextReplacesStream ? { finalTextReplacesStream: true } : {}),
+          // 卡片轮撤回（2026-10-08）：stream_reset 已撤回正文，done 必须
+          // 整段替换（桌面端 done 默认保留已流正文，不强制会保留空泡）。
+          ...(finalTextReplacesStream || streamResetSent
+            ? { finalTextReplacesStream: true }
+            : {}),
           toolCalls: reply.toolName ? [reply.toolName] : [],
           // 任务面异步收尾：本轮已把任务派发到后台（无正文），客户端按
           // source=task_plane + traceId 结清前台处理状态、不落正文气泡——

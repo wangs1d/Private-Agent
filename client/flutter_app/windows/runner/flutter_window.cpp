@@ -967,40 +967,12 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
   }
 
   if (method == "setAmbient") {
-    // hover 态环境信息数据源：未读数 + agent 运行状态行 + 消息聚合挂件数。
+    // hover 态环境信息数据源：未读数 + agent 运行状态行。
     const int unread = GetEncodableInt(args, "unread", 0);
     const bool agent_active = GetEncodableBool(args, "agentActive", false);
     const std::string status = GetEncodableString(args, "agentStatus", "");
-    const int messages_unread = GetEncodableInt(args, "messageHub", 0);
     if (dynamic_island_window_) {
-      dynamic_island_window_->SetAmbient(unread, agent_active, status,
-                                         messages_unread);
-    }
-    result->Success(flutter::EncodableValue(true));
-    return;
-  }
-
-  if (method == "setMessagesPreview") {
-    // 岛旁独立消息卡数据：最近会话预览行（标题/预览/未读数）。
-    std::vector<DynamicIslandWindow::MessageRow> rows;
-    if (args != nullptr) {
-      auto it = args->find(flutter::EncodableValue("items"));
-      if (it != args->end()) {
-        if (const auto* list = std::get_if<flutter::EncodableList>(&it->second)) {
-          for (const auto& elem : *list) {
-            if (const auto* m = std::get_if<flutter::EncodableMap>(&elem)) {
-              DynamicIslandWindow::MessageRow row;
-              row.title = GetEncodableString(m, "title", "");
-              row.preview = GetEncodableString(m, "preview", "");
-              row.unread = GetEncodableInt(m, "unread", 0);
-              rows.push_back(std::move(row));
-            }
-          }
-        }
-      }
-    }
-    if (dynamic_island_window_) {
-      dynamic_island_window_->SetMessagesPreview(std::move(rows));
+      dynamic_island_window_->SetAmbient(unread, agent_active, status);
     }
     result->Success(flutter::EncodableValue(true));
     return;

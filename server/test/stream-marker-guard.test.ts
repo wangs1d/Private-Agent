@@ -118,3 +118,26 @@ test("NEXT_UP 行内 END 后的正文照发（与 extraction 的 replace 语义�
   assert.ok(!all.includes("条目一"), `块内泄漏：${all}`);
   assert.ok(all.includes("收尾一句。"));
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// sawStructuredBlock：「会出卡片的轮次不流式」的扣流信号（2026-10-08）
+// ───────────────────────────────────────────────────────────────────────────
+
+test("sawStructuredBlock：卡片块出现即置位（含未闭合块）", () => {
+  const g = createStreamMarkerGuard();
+  assert.equal(g.sawStructuredBlock, false);
+  g.feed("结论在卡里：\n[AGENT_RESULT_CARD_START]\n{\"title\":\"x\"}");
+  assert.equal(g.sawStructuredBlock, true);
+});
+
+test("sawStructuredBlock：行内嵌结构化标记也置位", () => {
+  const g = createStreamMarkerGuard();
+  g.feed("前文 [DATA_BRIEF_START] {...} [DATA_BRIEF_END] 后文");
+  assert.equal(g.sawStructuredBlock, true);
+});
+
+test("sawStructuredBlock：RENDER_HINT/NEXT_UP 不算结构化产出（不触发扣流）", () => {
+  const g = createStreamMarkerGuard();
+  g.feed("[RENDER_HINT:structured]\n建议如下[NEXT_UP_START]查天气[NEXT_UP_END]完。");
+  assert.equal(g.sawStructuredBlock, false);
+});

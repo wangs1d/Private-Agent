@@ -23,7 +23,7 @@ process.env.TRAVEL_PLAN_STORE_DIR = tmpDir;
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
 );
-const { resolveTravelReceipt, attachDeterministicCards } = await import(
+const { resolveTravelReceipt, attachDeterministicCards, looksLikeHandwrittenItinerary, sniffItineraryDays } = await import(
   "../src/services/deterministic-card-chain.js"
 );
 const { normalizeReplyCardLayout, buildReplyBlocks } = await import(
@@ -180,4 +180,62 @@ test("全链产物：attach → 版式归一 → blocks，行程卡必须是最�
   assert.ok(
     ((last.card as Record<string, unknown>).title as string).includes("厦门"),
   );
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// 手写行程检测（2026-10-08 确定性兜底）：模型手写行程不调工具 → 代码补跑附卡
+// ───────────────────────────────────────────────────────────────────────────
+
+test("手写行程检测：时间表格行程（真实事故形态）命中", () => {
+  const reply = [
+    "## 🗓️ 兴义周末一日游 · 推荐方案",
+    "### 方案 A · 自然风光线（推荐 ✅）",
+    "| 时间 | 安排 | 关键信息 |",
+    "|---|---|---|",
+    "| 08:30 | 兴义市区出发 → 万峰林 | 打车约30分钟 |",
+    "| 09:00–13:00 | **万峰林景区** | 开放 8:00–18:00 |",
+    "| 14:30–17:30 | **马岭河峡谷** | 旺季门票 70元 |",
+    "| 18:00 | 回市区，夜市觅食 | 推荐烧烤、羊肉粉 |",
+    "门票和开放时间以景区当天公告为准。",
+  ].join("\n");
+  assert.equal(looksLikeHandwrittenItinerary(reply), true);
+});
+
+test("手写行程检测：多方案标题（无时间格）命中", () => {
+  const reply = [
+    "### 方案 A · 轻松市区线",
+    "- 上午：地质公园博物馆",
+    "- 下午：万峰湖码头散步",
+    "### 方案 B · 户外挑战线",
+    "- 马岭河漂流 + 万峰林骑行",
+  ].join("\n");
+  assert.equal(looksLikeHandwrittenItinerary(reply), true);
+});
+
+test("手写行程检测：多天标题命中", () => {
+  const reply =
+    "行程这样安排：\n第一天抵达大理古城逛逛，第二天环洱海骑行，景点门票都帮你留了弹性。";
+  assert.equal(looksLikeHandwrittenItinerary(reply), true);
+});
+
+test("手写行程检测：日常日程表（会议/提醒带时间）不命中", () => {
+  const reply =
+    "明天的安排：09:00 站会，11:00 设计评审，14:00 与产品对齐，16:30 周报，18:00 下班。";
+  assert.equal(looksLikeHandwrittenItinerary(reply), false);
+});
+
+test("手写行程检测：泛泛聊旅游（无行程结构）不命中", () => {
+  assert.equal(
+    looksLikeHandwrittenItinerary("兴义秋天挺适合旅游的，万峰林和马岭河都值得去，门票也不贵。"),
+    false,
+  );
+  assert.equal(looksLikeHandwrittenItinerary("晴天 13–26°C，适合出门。"), false);
+  assert.equal(looksLikeHandwrittenItinerary(""), false);
+});
+
+test("天数嗅探：两日/三天/一日 → 对应天数，说不清 → 缺省", () => {
+  assert.equal(sniffItineraryDays(["帮我规划周末两日游", "兴义两日游安排如下"]), 2);
+  assert.equal(sniffItineraryDays(["成都三日游怎么玩"]), 3);
+  assert.equal(sniffItineraryDays(["周末一日游"]), 1);
+  assert.equal(sniffItineraryDays(["出去玩"]), undefined);
 });

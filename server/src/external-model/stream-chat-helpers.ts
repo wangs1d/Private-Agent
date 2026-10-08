@@ -1373,6 +1373,15 @@ const INTERNAL_CONTROL_TAG_FULL_RE =
 const INTERNAL_CONTROL_TAG_PREFIX_RE =
   /^\s*\[(?:话题已?切换|Topic|STOP)/i;
 
+/**
+ * 线程内部帧（[上一轮回复中断…] / [不可信内容围栏…] / [session-recap] …）前缀探测。
+ *
+ * 2026-10-08 事故：这些帧以 assistant 角色存在于线程里，模型会把它们当成「自己
+ * 上一轮说过的话」原样复读，顺着流式通道直穿气泡。词干从内部帧契约统一取，
+ * 保证与 stripInternalFrames 的名单永不分叉（此前各写一份正则，新增帧就漏一种）。
+ */
+const INTERNAL_FRAME_STEM_PREFIX_RE = INTERNAL_FRAME_PREFIX_RE;
+
 /* ------------------------------------------------------------------ *
  * 元术语整句净化（2026-08-29）                                        *
  * ------------------------------------------------------------------ *
@@ -1460,7 +1469,9 @@ export function createStreamMetaSentenceFilter(maxPendingChars = 1024) {
 /** 整串剥离内部控制标签前缀（可匹配多个连续标签）。 */
 export function stripInternalControlTags(text: string): string {
   if (!text) return text;
-  let out = text;
+  // 先按内部帧契约做整串净化（围栏整块 / 帧整行 / 开头连续帧），
+  // 再走原有的控制标签循环剥离。
+  let out = stripInternalFrames(text);
   // 循环剥离，涵盖出现多次/中间含空白的情况
   for (let i = 0; i < 8; i++) {
     const next = out.replace(INTERNAL_CONTROL_TAG_FULL_RE, "");
@@ -1506,12 +1517,26 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512) {
       // 剥后还有内容：检查剩余内容是否仍可能是某个标签的前缀。
       // 若是（例如剥掉一个 tag 后又出现另一个 tag 的开头），继续吞；
       // 否则说明已经是正常正文，切直通并吐出去。
-      if (INTERNAL_CONTROL_TAG_PREFIX_RE.test(stripped)) {
+      if (
+        INTERNAL_CONTROL_TAG_PREFIX_RE.test(stripped) ||
+        INTERNAL_FRAME_STEM_PREFIX_RE.test(stripped)
+      ) {
+        pending = stripped;
+        return "";
+      }
+      // XML 形态 <system-reminder>（2026-10-08 事故根源）：末尾是它的半截
+      // 前缀（如 `<system-`）时扣住待判——整标签到齐后下一轮 feed 的整串
+      // 剥离会连块删掉，半截先吐就撤不回了。
+      if (systemReminderPartialTailLen(stripped) > 0) {
         pending = stripped;
         return "";
       }
       const rest = stripped.replace(INTERNAL_CONTROL_TAG_FULL_RE, "");
-      if (rest !== stripped && INTERNAL_CONTROL_TAG_PREFIX_RE.test(rest)) {
+      if (
+        rest !== stripped &&
+        (INTERNAL_CONTROL_TAG_PREFIX_RE.test(rest) ||
+          INTERNAL_FRAME_STEM_PREFIX_RE.test(rest))
+      ) {
         pending = rest;
         return "";
       }
@@ -1802,6 +1827,11 @@ import type {
   ChatCompletionChunk,
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions";
+import {
+  INTERNAL_FRAME_PREFIX_RE,
+  stripInternalFrames,
+  systemReminderPartialTailLen,
+} from "./internal-frames.js";
 
 /**
  * 把 OpenAI-compatible 的 usage 对象解析为 NormalUsage。

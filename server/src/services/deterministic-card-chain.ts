@@ -100,6 +100,47 @@ export function resolveTravelReceipt(input: {
   };
 }
 
+/* ────────────────────────────────────────────────────────────
+ * 手写行程检测（2026-10-08 确定性兜底）
+ *
+ * 失败模式（travel-plans 落盘自 9/28 零新增实证）：模型把完整行程手写成
+ * markdown 表格/多方案清单，全程不调 travel.plan-itinerary → 行程卡整轮缺席，
+ * 手机/桌面的行程卡点击界面形同虚设。检测走「领域词 × 结构特征」双闸：
+ *   - 领域词（景点/门票/景区/攻略…）先行：排除日常日程表（会议/提醒带时间）
+ *     的误触发——「明天的行程 09:00 开会」这类回复不该补跑旅游规划；
+ *   - 结构特征（时间格 ≥4 / 多方案标题 / 多天标题）：只有真的写了行程表
+ *     才命中，泛泛聊旅游不触发。
+ * 误触发代价 = 多跑一次 10~30s 规划 + 多挂一张行程卡；漏触发代价 = 卡片缺席。
+ * 结构特征保证误触发率极低，宁挂勿漏。
+ * ──────────────────────────────────────────────────────────── */
+
+const ITINERARY_TIME_CELL_RE = /\b\d{1,2}[:：]\d{2}\b/g;
+const STRONG_TRAVEL_TOPIC_RE =
+  /景点|景区|门票|游玩|旅游|攻略|自由行|民宿|青旅|骑行|漂流|徒步|登高|古城|古镇|温泉|滑雪|出海|夜景|小吃|美食街/;
+const PLAN_OPTION_HEADING_RE = /方案\s*[A-Za-z0-9一二三四五六]/g;
+const DAY_HEADING_RE = /Day\s*\d|第[一二三四五六七\d]+天/gi;
+
+/** 回复是否为「模型手写的完整行程」（应附行程卡但没调规划工具）。 */
+export function looksLikeHandwrittenItinerary(text: string): boolean {
+  const t = text ?? "";
+  if (!STRONG_TRAVEL_TOPIC_RE.test(t)) return false;
+  const timeCells = t.match(ITINERARY_TIME_CELL_RE)?.length ?? 0;
+  if (timeCells >= 4) return true;
+  const planHeadings = t.match(PLAN_OPTION_HEADING_RE)?.length ?? 0;
+  if (planHeadings >= 2) return true;
+  const dayHeadings = t.match(DAY_HEADING_RE)?.length ?? 0;
+  return dayHeadings >= 2;
+}
+
+/** 从用户原话 + 手写行程文本里嗅探天数（补跑入参用，best-effort：说不清就缺省）。 */
+export function sniffItineraryDays(texts: ReadonlyArray<string>): number | undefined {
+  const joined = texts.join("\n");
+  if (/两日|两天|2天/.test(joined)) return 2;
+  if (/三日|三天|3天/.test(joined)) return 3;
+  if (/一日|一天|1天/.test(joined)) return 1;
+  return undefined;
+}
+
 export interface DeterministicCardChainInput {
   /** processAssistantText 之后的正文（LLM 口语回复，可能已含 L2 卡块）。 */
   text: string;

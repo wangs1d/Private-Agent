@@ -12,6 +12,7 @@ class MainActivity : FlutterActivity() {
         flutterEngine.plugins.add(PhoneBridgePlugin())
         flutterEngine.plugins.add(MobilePushPlugin())
         flutterEngine.plugins.add(MessageCapturePlugin())
+        flutterEngine.plugins.add(AlarmClockPlugin())
     }
 
     override fun onNewIntent(intent: Intent) {

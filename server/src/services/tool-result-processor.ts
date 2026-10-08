@@ -15,6 +15,11 @@ import { tryAttachToolResultCard } from "./tool-card-registry.js";
 import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
+import {
+  hasInternalFrameTag,
+  isInternalFrameText,
+  stripInternalFrames,
+} from "../external-model/internal-frames.js";
 
 /** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：400） */
 const CONTENT_LENGTH_THRESHOLD = 400;
@@ -825,13 +830,26 @@ export class ToolResultProcessor {
     // 人性化助手：下方所有分支统一走它，避免重复写 `{ userText }` 参数
     const humanize = (t: string) => humanizeAssistantText(t, { userText: opts?.userText });
 
-    // === -1. 系统内部帧守卫：线程存档里的非用户可见文本不参与任何卡片/形态判定 ===
+    // === -1. 系统内部帧守卫：线程存档里的非用户可见文本既不做形态判定，也不下发 ===
     // 真实数据回放发现：[session-recap] 记忆回顾、[后台任务记录]、[上一轮回复中断]
     // 这类系统帧若流入本管线，会被列表/时间戳特征误判上卡（回放案例：recap 带
-    // 日期列表被判成 progress 卡）。这些文本即使流转也不该有展示形态。
-    if (/^\s*\[(?:session-recap|后台任务记录|上一轮回复中断)/.test(text)) {
-      console.log("[ToolResultProcessor] system_frame: skip render routing");
-      return humanize(text);
+    // 日期列表被判成 progress 卡）。
+    //
+    // 2026-10-08 升级：此前这里 return humanize(text) —— 语义只是「跳过渲染路由」，
+    // 文本原样交回，照样进 finalText → chat.assistant_done → 气泡（手机端事故气泡
+    // 就是这么来的：模型把线程里的占位帧当「自己上一轮说过的话」复读，本守卫放行了）。
+    // 现在按内部帧契约判定：整条是内部帧 → 直接不下发；混有内部帧 → 剥帧留正文。
+    if (isInternalFrameText(text)) {
+      console.log("[ToolResultProcessor] system_frame: hidden from user");
+      return "";
+    }
+    if (hasInternalFrameTag(text)) {
+      const cleaned = stripInternalFrames(text);
+      if (!cleaned.trim()) {
+        console.log("[ToolResultProcessor] system_frame: stripped to empty");
+        return "";
+      }
+      text = cleaned;
     }
 
     // === 0. 检查 LLM 声明的 [RENDER_HINT:xxx]（优先级最高）===

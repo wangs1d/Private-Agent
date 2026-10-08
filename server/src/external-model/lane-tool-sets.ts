@@ -16,8 +16,9 @@
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import { domainVotesForQuery, priorDirectMatchesForQuery, PRIOR_DIRECT_LIMIT, topToolMatchesForQuery } from "../tools/tool-search/index.js";
 import { firstSentence } from "../tools/tool-search/schema-slim.js";
-import { toolInCapabilityDomains } from "../tools/tool-search/tool-category.js";
+import { toolInCapabilityDomains, toolsInDomain } from "../tools/tool-search/tool-category.js";
 
 export type LaneId = "chat" | "task";
 
@@ -236,6 +237,116 @@ export function buildLaneCoreTools(
     resolved.push(fullSchema ? tool : slimToolSchema(tool));
   }
   return dedupeToolsByName(resolved);
+}
+
+/** 域信号预载的族规模上限（与任务面域拉取 DOMAIN_PULL_LIMIT 对齐）。 */
+export const DOMAIN_PRELOAD_CAP = 12;
+
+/** 弱信号兜底的 top-K 工具数（无强域时 BM25 直取，宁少勿滥）。 */
+export const DOMAIN_PRELOAD_TOPK = 4;
+
+/**
+ * 工具召回链总开关（2026-10-09 五层根修）：AGENT_TOOL_RECALL=off 一键关闭
+ * L1（域预载/top-K 兜底）与 L4（晋升常驻）——A/B 基线与故障回退共用。
+ * L3（调用即发现）在 tool-loop 侧独立读本开关；L2 域卡是 2026-10-01 存量设施，
+ * 不在本开关语义内（它只影响 discover 路径的指引，不影响可见集组装）。
+ */
+export function isToolRecallEnabled(): boolean {
+  const raw = process.env.AGENT_TOOL_RECALL?.trim().toLowerCase();
+  return raw !== "off";
+}
+
+/**
+ * 域信号预召回（2026-10-09 工具链根修，chat / task 车道共用原语；L1 增强）。
+ *
+ * 根因：车道 Core 是静态白名单，长尾工具（travel.* / media.* / smart_home 等）
+ * 全在延迟目录，须 tool_discover 两波召回才能到手——而模型不知道自己看不见，
+ * 「自认能办事」就手写答案静默失败（三次真机实证：profile.update 9/29「嘴硬说
+ * 记了」、weather.get_local 10/7「嘴硬没接口」、travel.plan-itinerary 10/8 手写
+ * 行程导致旅游卡缺席）。逐领域提 Core 是打地鼠（已否定路线）；正解是组装可见集
+ * 时对用户文本做确定性 BM25 域多数票，命中域全族瘦身 schema 直接进本轮可见集——
+ * 把「要不要找工具」从模型自觉拿回代码裁决。
+ *
+ * L1 增强（2026-10-09）四通道递进：
+ *   1. 强域命中（票 ≥3/5）→ 域全族注入；次强域（票 ≥2）同注入（多域意图，
+ *      如「去北京旅游顺便查天气」→ travel + weather 两族）。
+ *   2. 先验直取（点信号）：意图别名/例句命中（token 重叠加分 ≥0.4）的工具
+ *      直取 ≤2 个，排在域族之前——确切意图证据优先于族广度（否则 12 工具的
+ *      desktop 族会把 cap 挤满、点信号被 slice 丢弃，实测教训）。
+ *   3. 无强域 → BM25 top-K 工具直取兜底（双闸过滤噪声，见 topToolMatchesForQuery）。
+ *   4. AGENT_TOOL_RECALL=off → 空集（基线/回退）。
+ *
+ * excludeNames：车道 Core 已含的工具不重复注入（先排除后截断，填满 cap 的都是
+ * 增量工具）；任务面 router-first 可见集 = 纯预载，传空集即退化为原语义。
+ * 确定性：同语料同文本恒同输出（BM25 跨轮缓存），前缀缓存友好。
+ */
+export function buildDomainPreloadTools(
+  text: string,
+  corpus: ChatCompletionTool[],
+  excludeNames: ReadonlySet<string> = new Set(),
+  cap: number = DOMAIN_PRELOAD_CAP,
+): ChatCompletionTool[] {
+  if (!isToolRecallEnabled()) return [];
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  const picked: ChatCompletionTool[] = [];
+  const seen = new Set<string>();
+  const push = (tool: ChatCompletionTool): void => {
+    const name = tool.type === "function" ? tool.function?.name ?? "" : "";
+    if (!name || seen.has(name) || excludeNames.has(name)) return;
+    seen.add(name);
+    picked.push(slimToolSchema(tool));
+  };
+  const byName = new Map<string, ChatCompletionTool>();
+  for (const t of corpus) {
+    const name = t.type === "function" ? t.function?.name ?? "" : "";
+    if (name) byName.set(name, t);
+  }
+
+  // 2. 先验直取（点信号，最先生成）：别名/例句意图命中（≥0.4）直取 ≤2 个。
+  //    与 BM25 词面通道互补——描述与 query 零词面重叠的意图（买耳机/盯话题/
+  //    到家提醒）靠别名召回；raw/先验双 top-1 不再被假强域整族顶掉。
+  for (const m of priorDirectMatchesForQuery(trimmed, corpus, PRIOR_DIRECT_LIMIT, excludeNames)) {
+    const tool = byName.get(m.name);
+    if (tool) push(tool);
+  }
+
+  // 1. 域多数票：top-1 强信号（≥3/5）才注入；强域 + 次强域（≥2 票）全族
+  //    （多域意图如「去北京旅游顺便查天气」→ travel + weather）。top-1 只有 2 票
+  //    = 无强信号（噪声校准：噪声票恰在 2/5），整组不注入、走 top-K 兜底。
+  // 子句切分（2026-10-09 L1）：连词/标点切开后按子句投票再取强域并集——
+  // 长多意图 query 整句投 BM25 top-5 会被两族工具摊薄成每域 1 票（实测），
+  // 按子句投才能恢复「每子句一个强域」。确定性：切分规则静态，输出恒同。
+  const segments = trimmed
+    .split(/顺便|然后|另外|还有|同时|接着|[，,；;。！!？?]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 4);
+  const strongDomains: string[] = [];
+  for (const seg of segments) {
+    const votes = domainVotesForQuery(seg, corpus);
+    if (votes.length === 0 || votes[0].votes < 3) continue;
+    for (const v of votes) {
+      if (v.votes < 2) break;
+      if (!strongDomains.includes(v.domain)) strongDomains.push(v.domain);
+      if (strongDomains.length >= 2) break;
+    }
+    if (strongDomains.length >= 2) break;
+  }
+  for (const domain of strongDomains) {
+    for (const tool of toolsInDomain(corpus, domain)) push(tool);
+  }
+
+  // 3. 弱信号兜底：无强域时 BM25 top-K 工具直取（先验直取不算强信号，不影响此闸）
+  if (strongDomains.length === 0) {
+    for (const match of topToolMatchesForQuery(trimmed, corpus, DOMAIN_PRELOAD_TOPK, excludeNames)) {
+      const tool = byName.get(match.name);
+      if (tool) push(tool);
+    }
+  }
+
+  return picked.slice(0, cap);
 }
 
 /**

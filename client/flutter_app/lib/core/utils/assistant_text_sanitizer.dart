@@ -73,11 +73,145 @@ String stripDsmlToolCallMarkup(String text) {
       .trim();
 }
 
+/// 线程内部帧标签清单（2026-10-08）。
+///
+/// 与服务端 `server/src/external-model/internal-frames.ts` 的 `INTERNAL_FRAME_TAGS`
+/// **逐项对齐**——两边各写一份名单正是此前 [不可信内容围栏] 漏网的根源。
+/// 这些帧是写给 LLM 看的线程上下文（回复中断占位 / 摘要区 / 后台任务记录 /
+/// 工具结果围栏 / 临时系统指令），被模型原样复读出来时不该出现在气泡里。
+const List<String> kInternalFrameTags = <String>[
+  "上一轮回复中断",
+  "上一轮工具调用已完成但未生成可见回复",
+  "session-recap",
+  "unsummarized",
+  "关键钉",
+  "后台任务记录",
+  "不可信内容围栏",
+  "系统提示",
+  "世界状态转移",
+  "主动话术",
+  "对话时间线",
+  "节律提醒",
+  "日志固化",
+  "多模态消息",
+  "已压缩·",
+  "本轮用户明确要求不联网",
+  "话题切换",
+  "话题已切换",
+];
+
+final String _internalFrameAlt =
+    kInternalFrameTags.map((String t) => RegExp.escape(t)).join("|");
+
+/// XML 形态的上游 harness 注入提醒（2026-10-08 事故根源，与服务端
+/// `internal-frames.ts` 的 stripSystemReminderBlocks 同构——两边名单对齐的
+/// 教训同 [不可信内容围栏]：只改一边就会漏）。模型把上游 provider 包给它的
+/// `<system-reminder>` 原样复读时在此剥掉：闭合块整块删；未闭合块吞无 CJK
+/// 的英文提醒行、保留首个含 CJK 的正文行起的内容。
+final RegExp _systemReminderBlockRe = RegExp(
+  r"<system-reminder>[\s\S]*?</system-reminder>",
+  caseSensitive: false,
+);
+final RegExp _systemReminderOpenRe = RegExp(
+  r"<system-reminder>",
+  caseSensitive: false,
+);
+final RegExp _systemReminderOrphanCloseLineRe = RegExp(
+  r"^[ \t]*</system-reminder>[ \t]*(?:\n|$)",
+  multiLine: true,
+  caseSensitive: false,
+);
+final RegExp _systemReminderAnyTagRe = RegExp(
+  r"</?system-reminder>",
+  caseSensitive: false,
+);
+final RegExp _cjkCharRe = RegExp(r"[\u3400-\u4dbf\u4e00-\u9fff]");
+
+String _stripOneUnclosedSystemReminder(String text) {
+  final Match? m = _systemReminderOpenRe.firstMatch(text);
+  if (m == null) return text;
+  final List<String> lines = text.substring(m.end).split("\n");
+  int consumed = 0;
+  for (; consumed < lines.length; consumed++) {
+    if (_cjkCharRe.hasMatch(lines[consumed])) break;
+  }
+  // 全部行都无 CJK → opener 到 EOF 是纯英文泄漏，全删。
+  if (consumed >= lines.length) return text.substring(0, m.start);
+  return text.substring(0, m.start) + lines.sublist(consumed).join("\n");
+}
+
+String stripSystemReminderBlocks(String text) {
+  if (text.isEmpty ||
+      !text.toLowerCase().contains("system-reminder")) {
+    return text;
+  }
+  String out = text.replaceAll(_systemReminderBlockRe, "");
+  for (var i = 0; i < 8; i++) {
+    final String next = _stripOneUnclosedSystemReminder(out);
+    if (next == out) break;
+    out = next;
+  }
+  return out
+      .replaceAll(_systemReminderOrphanCloseLineRe, "")
+      .replaceAll(_systemReminderAnyTagRe, "");
+}
+
+/// 闭口的 `[不可信内容围栏]…[/不可信内容围栏]` 整块（块内是工具原始数据）。
+final RegExp _fenceBlockRe =
+    RegExp(r"\[不可信内容围栏[^\]]*\][\s\S]*?\[\/不可信内容围栏\]");
+
+/// 孤立的围栏开/闭标签行（模型只复读了一半时兜底）。
+final RegExp _fenceTagLineRe = RegExp(
+  r"^[ \t]*\[\/?不可信内容围栏[^\]]*\][ \t]*(?:\n|$)",
+  multiLine: true,
+);
+
+/// 整行就是一个内部帧（帧后即使跟同行内容也整行删）。
+final RegExp _internalFrameLineRe = RegExp(
+  "^[ \\t]*\\[(?:${_internalFrameAlt})[^\\]]*\\][^\\n]*(?:\\n|\$)",
+  multiLine: true,
+  caseSensitive: false,
+);
+
+/// 文本开头的连续内部帧（可能连着多个），剥帧留正文。
+final RegExp _internalFrameLeadingRe = RegExp(
+  "^[ \\t]*(?:\\[(?:${_internalFrameAlt})[^\\]]*\\][ \\t:：—–-]*)+",
+  caseSensitive: false,
+);
+
+/// 剥离文本中的线程内部帧，返回可以展示的正文；剥完为空返回空串
+/// （调用方据此判断本条不该落气泡）。与服务端 `stripInternalFrames` 同构。
+String stripInternalFrames(String text) {
+  if (text.isEmpty) return text;
+  String out = stripSystemReminderBlocks(text)
+      .replaceAll(_fenceBlockRe, "")
+      .replaceAll(_fenceTagLineRe, "")
+      .replaceAll(_internalFrameLineRe, "");
+  // 开头连续帧：循环剥，只动开头不碰正文。
+  for (var i = 0; i < 8; i++) {
+    final String next = out.replaceFirst(_internalFrameLeadingRe, "");
+    if (next == out) break;
+    out = next;
+  }
+  out = out.replaceAll(RegExp(r"\n{3,}"), "\n\n");
+  if (out.trim().isEmpty) return "";
+  return out;
+}
+
+/// 文本（去空白后）是否以内部帧标签开头——整条就是内部帧。
+bool isInternalFrameText(String text) {
+  final String trimmed = text.trim();
+  if (!trimmed.startsWith("[")) return false;
+  return _internalFrameLeadingRe.hasMatch(trimmed);
+}
+
 String stripAssistantProtocolFrames(String text) {
-  // 先剥行首帧（兼容帧与正文同行的旧格式），再删整行帧（清夹在中间的复述帧），
-  // 最后剥 DSML 工具调用标记。
+  // 先剥线程内部帧（整块围栏 / 帧整行 / 开头连续帧），再剥行首时间戳帧、
+  // 删整行时间戳帧，最后剥 DSML 工具调用标记。
   return stripDsmlToolCallMarkup(
-    stripAllTimestampFrameLines(stripAssistantTimestampFrames(text)),
+    stripAllTimestampFrameLines(
+      stripAssistantTimestampFrames(stripInternalFrames(text)),
+    ),
   );
 }
 

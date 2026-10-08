@@ -57,9 +57,14 @@ Map<String, dynamic> _task(
   };
 }
 
-Widget _wrap(List<Map<String, dynamic>> tasks, {VoidCallback? onGoToChat}) {
+Widget _wrap(
+  List<Map<String, dynamic>> tasks, {
+  VoidCallback? onGoToChat,
+  GlobalKey<MobileSchedulePageState>? key,
+}) {
   return MaterialApp(
     home: MobileSchedulePage(
+      key: key,
       scheduleApi: ScheduleApiClient(
         baseUrl: "http://localhost:3000",
         client: _MockScheduleHttp(tasks),
@@ -199,5 +204,27 @@ void main() {
     expect(find.text("被取消的事"), findsNothing);
     expect(find.text("08:00"), findsOneWidget);
     expect(find.text("1 件安排"), findsOneWidget);
+  });
+
+  testWidgets("refresh() 重拉:保活页在数据源变化后经外部触发拿到新条目", (WidgetTester tester) async {
+    final DateTime now = DateTime.now();
+    final DateTime todayAt = DateTime(now.year, now.month, now.day, 10, 0);
+    // 可变列表：mock 每次请求都读同一引用——refresh 后服务端"多了一条"即可模拟
+    final List<Map<String, dynamic>> tasks = <Map<String, dynamic>>[
+      _task("t1", "项目评审会", todayAt),
+    ];
+    final GlobalKey<MobileSchedulePageState> key = GlobalKey<MobileSchedulePageState>();
+    await tester.pumpWidget(_wrap(tasks, key: key));
+    await tester.pumpAndSettle();
+    expect(find.text("项目评审会"), findsOneWidget);
+    expect(find.text("牙医复诊"), findsNothing);
+
+    // 模拟对话里新建了提醒 → 服务端数据变了
+    tasks.add(_task("t2", "牙医复诊", todayAt.add(const Duration(hours: 3))));
+    // 主壳切 tab 时走的就是这条路径：保活页不重建，直接重拉
+    key.currentState!.refresh();
+    await tester.pumpAndSettle();
+    expect(find.text("牙医复诊"), findsOneWidget);
+    expect(find.text("2 件安排"), findsOneWidget);
   });
 }

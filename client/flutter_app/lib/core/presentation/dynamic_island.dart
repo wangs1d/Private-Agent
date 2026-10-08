@@ -66,16 +66,12 @@ class DynamicIslandController extends ChangeNotifier {
   int _taskPlaneCount = 0;
   bool _foregroundAgentActive = false;
   int _ambientUnread = 0;
-
-  /// 消息聚合未读（微信/QQ/飞书等多来源平台消息）：与站内信分账，
-  /// hover 环境行合并为同一个「N 未读」。
-  int _messageHubUnread = 0;
   String _agentStatusLine = '';
 
   IslandEntry? get entry => _entry;
   bool get expanded => _expanded;
-  /// hover 环境行未读总数（站内信 + 消息聚合）。
-  int get ambientUnread => _ambientUnread + _messageHubUnread;
+  /// hover 环境行未读数（站内信）。
+  int get ambientUnread => _ambientUnread;
   String get agentStatusLine => _agentStatusLine;
 
   /// agent 是否在忙：后台任务面有活任务，或前台轮次处理中。
@@ -109,16 +105,6 @@ class DynamicIslandController extends ChangeNotifier {
     _ambientUnread = count;
     notifyListeners();
   }
-
-  /// 消息聚合未读数（hover 环境行与站内信合并展示）。
-  void setMessageHubUnread(int count) {
-    if (_messageHubUnread == count) return;
-    _messageHubUnread = count;
-    notifyListeners();
-  }
-
-  /// 消息聚合未读原始值（岛旁挂件数据源；hover 行用合并后的 [ambientUnread]）。
-  int get messageHubUnread => _messageHubUnread;
 
   /// 展示/刷新一条信息。同 id 原地刷新；不同 id 按优先级抢占或排队。
   /// 语音模式独占期间，非语音条目改道停泊区（不抢屏）。
@@ -232,8 +218,6 @@ class DynamicIslandLauncher {
   DynamicIslandController? _controller;
   bool _nativeReady = false;
   bool _syncingFromNative = false;
-  // 岛旁独立消息卡的最近数据缓存：原生窗口重建后随状态同步补推。
-  List<Map<String, Object?>> _lastMessageRows = const <Map<String, Object?>>[];
   // create 失败退避重试（2026-09-28 根治）：此前一次失败 = 整进程无岛且零日志。
   Timer? _createRetryTimer;
   int _createAttempts = 0;
@@ -383,16 +367,6 @@ class DynamicIslandLauncher {
     } on PlatformException catch (_) {}
   }
 
-  /// 岛旁独立消息卡数据（最近会话预览行）；缓存待原生重建后补推。
-  Future<void> setMessagesPreview(List<Map<String, Object?>> items) async {
-    _lastMessageRows = items;
-    if (!_nativeReady) return;
-    try {
-      await _channel.invokeMethod<bool>('setMessagesPreview',
-          <String, Object?>{'items': items});
-    } on PlatformException catch (_) {}
-  }
-
   Future<void> _syncToNative() async {
     if (!_nativeReady || _controller == null || _syncingFromNative) return;
     final IslandEntry? e = _controller!.entry;
@@ -411,17 +385,12 @@ class DynamicIslandLauncher {
       }
       await _channel.invokeMethod<bool>('setExpanded',
           <String, Object?>{'expanded': _controller!.expanded});
-      // hover 态环境行 + 岛旁消息挂件：轻量数据随状态同步直推。
+      // hover 态环境行：轻量数据随状态同步直推。
       await _channel.invokeMethod<bool>('setAmbient', <String, Object?>{
         'unread': _controller!.ambientUnread,
         'agentActive': _controller!.agentActive,
         'agentStatus': _controller!.agentStatusLine,
-        'messageHub': _controller!.messageHubUnread,
       });
-      if (_lastMessageRows.isNotEmpty) {
-        await _channel.invokeMethod<bool>('setMessagesPreview',
-            <String, Object?>{'items': _lastMessageRows});
-      }
     } on PlatformException catch (_) {}
   }
 }
@@ -633,19 +602,6 @@ class IslandRealFeeds {
     } else {
       _c.dismiss('inbox');
     }
-  }
-
-  /// 消息聚合未读（多来源平台消息轮询驱动）。不做胶囊条目：
-  /// 原生在胶囊右缘画小挂件（信封 + 未读数，点击展开独立消息卡），
-  /// 数值随 setAmbient 全量同步，原生窗口重建后自动恢复。
-  static void setMessageHubUnread(int count) {
-    debugPrint('[island-feed] setMessagesUnread=$count');
-    _c.setMessageHubUnread(count);
-  }
-
-  /// 独立消息卡预览行（最近会话，挂件点开即看，与应用内隔离）。
-  static void setMessagesPreview(List<Map<String, Object?>> items) {
-    _l.setMessagesPreview(items);
   }
 
   // ───────────────────── 纯语音模式（岛=唯一视觉） ─────────────────────

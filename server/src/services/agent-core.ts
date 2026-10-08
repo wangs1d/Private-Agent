@@ -160,14 +160,15 @@ import {
 } from "../external-model/fallback-texts.js";
 import { resolveRouteChatProvider } from "../external-model/route-chat-provider.js";
 import {
+  buildDomainPreloadTools,
   buildLaneCoreTools,
   isStaticToolArchEnabled,
   isTaskLaneRouterFirst,
+  isToolRecallEnabled,
   slimToolSchema,
   toolsMatchingCapabilityBeam,
 } from "../external-model/lane-tool-sets.js";
-import { dominantDomainForQuery } from "../tools/tool-search/index.js";
-import { toolsInDomain } from "../tools/tool-search/tool-category.js";
+import { getPromotedToolNames } from "../tools/tool-search/tool-promotion.js";
 import {
   getBuiltinAgentChatTools,
   selectForegroundCapabilityToolAdditions,
@@ -224,9 +225,6 @@ import { captionMediaCards, isImageCaptionEnabled } from "./image-caption-servic
 import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
 import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
-
-/** 域信号预载的族规模上限（与域拉取 DOMAIN_PULL_LIMIT 对齐）。 */
-const DOMAIN_PRELOAD_CAP = 12;
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
 import { claimsWebSearch, composeRealtimeSearchQuery } from "../agent/realtime-search-query.js";
 import {
@@ -2212,6 +2210,58 @@ if (route.plane === "task") {
     const foregroundTagMode =
       this.isChatLane(mode) && isForegroundDispatchMode() && isForegroundTagProtocolEnabled();
     const dispatchFilter = foregroundTagMode ? new DispatchTagStreamFilter() : null;
+    // chat 车道 explicit 轮可见集（2026-10-09 工具链根修）：Core 常驻 ∪ 域信号
+    // 预召回。此前可见集是纯静态白名单，长尾工具（travel.* / media.* /
+    // smart_home 等）藏在延迟目录，模型不知道自己看不见、不主动 discover 就
+    // 手写答案（travel 手写行程 → 旅游卡缺席；profile.update / weather.get_local
+    // 同款教训）。预召回与任务面 router-first 共用同一原语，把「用户这句话涉及
+    // 的域」的工具确定性拉进本轮可见集；纯闲聊零工具隔离分支在其上游，不受影响。
+    // 晋升常驻解析（2026-10-09 L4）：per-actor 高频成功工具（≥3 次/48h）转常驻。
+    // 语料缺失（生产/测试注册表差异）自动跳过；与 Core/预载重名由下游 uniqueTools 收敛。
+    const buildPromotedChatTools = (
+      corpus: ChatCompletionTool[],
+      excludeNames: ReadonlySet<string>,
+    ): ChatCompletionTool[] => {
+      if (!isToolRecallEnabled()) return [];
+      const byName = new Map<string, ChatCompletionTool>();
+      for (const t of corpus) {
+        const name = t.type === "function" ? t.function?.name ?? "" : "";
+        if (name) byName.set(name, t);
+      }
+      return getPromotedToolNames(actorId)
+        .filter((name) => !excludeNames.has(name) && byName.has(name))
+        .map((name) => byName.get(name) as ChatCompletionTool);
+    };
+    const buildChatLaneExplicitOpts = () => {
+      const webForbidden = ctx.webSearchForbidden === true;
+      const coreTools = buildLaneCoreTools("chat", getBuiltinAgentChatTools(), [
+        TASK_DISPATCH_TOOL_DEFINITION,
+        TASK_STATUS_TOOL_DEFINITION,
+        TASK_CANCEL_TOOL_DEFINITION,
+        PERCEPTION_OVERVIEW_TOOL_DEFINITION,
+      ]);
+      const coreFiltered = webForbidden ? filterWebSearchTools(coreTools) : coreTools;
+      const corpusSafe = webForbidden
+        ? filterWebSearchTools(getBuiltinAgentChatTools())
+        : getBuiltinAgentChatTools();
+      const coreNames = new Set(
+        coreFiltered
+          .map((d) => (d.type === "function" ? d.function?.name : ""))
+          .filter(Boolean),
+      );
+      return {
+        toolExposureProfile: "explicit" as const,
+        chatToolsBuiltin: [
+          ...coreFiltered,
+          ...buildDomainPreloadTools(text, corpusSafe, coreNames),
+          // 晋升常驻（2026-10-09 L4）：该 actor 近窗真实成功调用 ≥3 次的延迟工具
+          // 直接常驻可见集——预载/top-K/两波 discover 都不需要，晋升工具已是主力。
+          ...buildPromotedChatTools(corpusSafe, coreNames),
+        ],
+        chatToolsExtra: corpusSafe,
+        toolLoop: { maxRounds: chatLaneMaxRounds() },
+      };
+    };
     const baseStreamOpts = this.isChatLane(mode)
       ? ({
           ...(this.promptContextBuilder.build({
@@ -2257,30 +2307,7 @@ if (route.plane === "task") {
             : isStaticToolArchEnabled() && ctx.routeIntent === "chat" && !turnNeedsToolFloor(text)
               ? { toolExposureProfile: "none" as const }
               : isStaticToolArchEnabled()
-              ? {
-                  toolExposureProfile: "explicit" as const,
-                  // 显式禁网轮（2026-09-23）：联网检索族从 chat Core 剥离——
-                  // "模型自决"的前提是环境不提供与用户指令冲突的选项。
-                  chatToolsBuiltin: ctx.webSearchForbidden
-                    ? filterWebSearchTools(
-                        buildLaneCoreTools("chat", getBuiltinAgentChatTools(), [
-                          TASK_DISPATCH_TOOL_DEFINITION,
-                          TASK_STATUS_TOOL_DEFINITION,
-                          TASK_CANCEL_TOOL_DEFINITION,
-                          PERCEPTION_OVERVIEW_TOOL_DEFINITION,
-                        ]),
-                      )
-                    : buildLaneCoreTools("chat", getBuiltinAgentChatTools(), [
-                        TASK_DISPATCH_TOOL_DEFINITION,
-                        TASK_STATUS_TOOL_DEFINITION,
-                        TASK_CANCEL_TOOL_DEFINITION,
-                        PERCEPTION_OVERVIEW_TOOL_DEFINITION,
-                      ]),
-                  chatToolsExtra: ctx.webSearchForbidden
-                    ? filterWebSearchTools(getBuiltinAgentChatTools())
-                    : getBuiltinAgentChatTools(),
-                  toolLoop: { maxRounds: chatLaneMaxRounds() },
-                }
+              ? buildChatLaneExplicitOpts()
               : {
                   toolExposureProfile: "explicit" as const,
                   chatToolsBuiltin: getForegroundChatToolWhitelist(text),
@@ -2580,20 +2607,20 @@ if (route.plane === "task") {
           };
         } else {
           // router-first（2026-09-23 token 优化）：可见集 = 桥工具 + 域信号预载
-          // （2026-10-01 S2：词面 top-5 域多数票 ≥2 → 预载该域全族瘦身 schema，
-          // travel 硬编码的泛化——所有"模型自觉会写"的域统一覆盖），其余全量语料
-          // 进 BM25 目录按需召回（能力面经域卡+域拉取可达）。回滚：
-          // AGENT_TASK_LANE=core（下方静态 Core 路径）。
-          const preloadDomain = dominantDomainForQuery(text, corpusSafe);
-          const domainPreload = preloadDomain
-            ? toolsInDomain(corpusSafe, preloadDomain)
-                .slice(0, DOMAIN_PRELOAD_CAP)
-                .map(slimToolSchema)
-            : [];
+          // （2026-10-01 S2：词面 top-5 域多数票 ≥3 → 预载该域全族瘦身 schema，
+          // travel 硬编码的泛化——所有"模型自觉会写"的域统一覆盖；2026-10-09 起
+          // 与 chat 车道共用 buildDomainPreloadTools 原语），其余全量语料进 BM25
+          // 目录按需召回（能力面经域卡+域拉取可达）。回滚：AGENT_TASK_LANE=core
+          // （下方静态 Core 路径）。
+          const domainPreload = buildDomainPreloadTools(text, corpusSafe);
+          // 晋升常驻（2026-10-09 L4，双车道共用）：高频成功工具进 router-first 可见集
           execStreamOpts = {
             ...streamOpts,
             toolExposureProfile: "explicit",
-            chatToolsBuiltin: domainPreload,
+            chatToolsBuiltin: [
+              ...domainPreload,
+              ...buildPromotedChatTools(corpusSafe, new Set(domainPreload.map((d) => (d.type === "function" ? d.function?.name : "")).filter(Boolean) as string[])),
+            ],
             chatToolsExtra: corpusSafe,
           };
         }

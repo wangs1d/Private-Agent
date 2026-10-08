@@ -28,6 +28,8 @@ export function normalizeDeviceClass(raw: unknown): DeviceClass {
 interface SocketEntry {
   socket: WsLike;
   deviceClass: DeviceClass;
+  /** 终端最近一次"真人活动"时间（非 keepalive 的业务消息刷新；设备智能路由用） */
+  lastActiveAt: number;
 }
 
 export class WsConnectionRegistry {
@@ -42,7 +44,7 @@ export class WsConnectionRegistry {
       set = new Set();
       this.connections.set(sessionId, set);
     }
-    set.add({ socket, deviceClass: meta?.deviceClass ?? "desktop" });
+    set.add({ socket, deviceClass: meta?.deviceClass ?? "desktop", lastActiveAt: Date.now() });
     if (set.size === 1) {
       try {
         this.onConnectionChange?.(sessionId, true);
@@ -114,6 +116,64 @@ export class WsConnectionRegistry {
       if (open) classes.add(entry.deviceClass);
     }
     return [...classes];
+  }
+
+  /**
+   * 终端活动刷新（2026-10-08 提醒智能路由）：终端每条业务 WS 消息（chat / ack / sync 回执等，
+   * 不含 ws.keepalive——后台挂着的连接不代表"人在看"）调用一次，维护该连接的 lastActiveAt。
+   * 连接未登记（未 session.init）时静默忽略。
+   */
+  touchActivity(sessionId: string, socket: WsLike): void {
+    const set = this.connections.get(sessionId);
+    if (!set) return;
+    const entry = [...set].find((e) => e.socket === socket);
+    if (entry) entry.lastActiveAt = Date.now();
+  }
+
+  /**
+   * 最近活跃设备的类别（withinMs 窗口内有真人活动的连接里取最新一条）。
+   * 找不到 → undefined（调用方按"位置未知"处理）。提醒单端投递的判定核心。
+   */
+  mostRecentActiveDeviceClass(sessionId: string, withinMs: number): DeviceClass | undefined {
+    const set = this.connections.get(sessionId);
+    if (!set) return undefined;
+    const cutoff = Date.now() - withinMs;
+    let best: SocketEntry | undefined;
+    for (const entry of set) {
+      const open = entry.socket.readyState === undefined || entry.socket.readyState === 1;
+      if (!open || entry.lastActiveAt < cutoff) continue;
+      if (!best || entry.lastActiveAt > best.lastActiveAt) best = entry;
+    }
+    return best?.deviceClass;
+  }
+
+  /**
+   * 仅向"最近活跃"的那一个连接投递（同窗口多端活跃时取最新），任一端有真人活动即不算全端打扰。
+   * 返回是否成功送达（无活跃端 / 发送失败 → false，调用方自行降级 fan-out）。
+   */
+  trySendToActiveDevice(sessionId: string, data: string, withinMs: number): boolean {
+    const set = this.connections.get(sessionId);
+    if (!set) return false;
+    const cutoff = Date.now() - withinMs;
+    let best: SocketEntry | undefined;
+    for (const entry of [...set]) {
+      const open = entry.socket.readyState === undefined || entry.socket.readyState === 1;
+      if (!open || entry.lastActiveAt < cutoff) continue;
+      if (!best || entry.lastActiveAt > best.lastActiveAt) best = entry;
+    }
+    if (!best) return false;
+    return this.trySendEntry(sessionId, best, data);
+  }
+
+  /**
+   * 按设备类别优先级投递：第一个有在线设备的类别独占接收（手机优先的闹钟触达用，
+   * 闹铃只在"跟人睡"的那台设备上响，不两端齐响）。
+   */
+  trySendToDeviceClassOrder(sessionId: string, data: string, orderedClasses: DeviceClass[]): boolean {
+    for (const dc of orderedClasses) {
+      if (this.trySendToDeviceClasses(sessionId, data, [dc])) return true;
+    }
+    return false;
   }
 
   /** 向该 actor 的全部在线设备投递（电脑端 + 手机端都收到），任一成功即算送达 */

@@ -64,6 +64,9 @@ import "core/services/ws_chat_service.dart";
 import "core/services/inbox_api.dart";
 import "core/services/control_plane_account.dart";
 import "core/services/account_session_store.dart";
+import "mobile_ui/mobile_login_page.dart";
+import "mobile_ui/mobile_home.dart";
+import "mobile_ui/mobile_theme.dart";
 import "core/utils/play_url_utils.dart";
 import "features/catalog/catalog_page.dart";
 import "features/help/feedback_dialog.dart";
@@ -114,6 +117,10 @@ import "core/services/attention_api.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
 import "features/schedule/schedule_page.dart";
+// 闹钟/即时提醒引擎（docs/mobile-agent-reminder-alarm-design.md）：
+// 触发主路 = 客户端本地精确闹钟；alarm.sync/trigger/deliver 服务端事件在此收口
+import "features/alarm/alarm_engine.dart";
+import "features/alarm/alarm_platform.dart";
 import "features/chat/image_preview_panel.dart";
 import "features/chat/video_preview_panel.dart";
 import "features/auth/register_page.dart";
@@ -293,6 +300,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       GlobalKey<NavigatorState>();
   // 注册门禁专用：见 _buildRegisterGate 内注释（禁止与主应用共享）
   final GlobalKey<NavigatorState> _gateNavigatorKey =
+      GlobalKey<NavigatorState>();
+  // 手机主壳专用：登录门禁 → 主壳互斥切换同属跨 MaterialApp 换挂，
+  // 共享 GlobalKey 会触发 Navigator 收养重挂（见 _buildRegisterGate 注释）
+  final GlobalKey<NavigatorState> _mobileMainNavigatorKey =
       GlobalKey<NavigatorState>();
   final IsarLocalHistoryStore _store =
       IsarLocalHistoryStore(userPin: ApiConfig.localPin);
@@ -488,6 +499,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // 向导专用（与注册门禁同款隔离理由：禁止与主应用共享 GlobalKey）
   final GlobalKey<NavigatorState> _onboardingNavigatorKey =
       GlobalKey<NavigatorState>();
+
+  /// 手机端主壳主题模式（亮/暗/跟随系统）。与桌面端 AppThemeVariant 体系
+  /// 解耦——手机主壳（MobileHomePage）用 MobileTheme，主题档互不串扰。
+  final ValueNotifier<ThemeMode> _mobileThemeMode =
+      ValueNotifier<ThemeMode>(ThemeMode.system);
 
   /// Agent是否正在处理中（用于显示响应状态指示器)
   bool _isAgentProcessing = false;
@@ -1017,12 +1033,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
     // 桌面顶部灵动岛：原生窗口 + 控制器绑定（数据全部来自真实事件源）。
     setDynamicIslandActionHandler((String label) {
-      if (label == '打开消息') {
-        // 岛旁挂件点开的独立消息卡：就地全部标为已读（挂件隐藏，
-        // 新消息再露出）。与应用内隔离——不唤起主窗口。
-        unawaited(_markAllMessageHubRead());
-        return;
-      }
       if (label == '打开日程') {
         // 到点提醒点击胶囊提前收口的确认出口：唤起主窗口 + 打开日程双栏面板。
         unawaited(windowManager.show());
@@ -1078,6 +1088,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 立即返回）。WS 自带退避重连，runtime 稍慢也无碍。
     if (!kIsWeb && Platform.isWindows) {
       await LocalRuntimeManager.ensureRunning();
+    }
+    // 闹钟引擎引导：装载本地闹钟库并全量重排本地精确闹钟（杀进程/重启恢复主路）
+    if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+      unawaited(() async {
+        await AlarmPlatform.configure(httpBase: ApiConfig.httpBase);
+        await AlarmEngine.instance.init(
+          actorId: () => ApiConfig.effectiveActorId,
+          httpBase: ApiConfig.httpBase,
+        );
+      }());
     }
     _ws.connect();
     _startMessagePolling();
@@ -1462,6 +1482,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           await AmbientFeedsController.instance
               .onScheduleReminderFired(payload);
         }
+        // ====== 闹钟/即时提醒（手机端本地调度主路的服务端事件） ======
+        if (type == "alarm.sync" || type == "alarm.trigger" || type == "reminder.deliver") {
+          unawaited(
+            AlarmEngine.instance.handleServerEvent(type, payload),
+          );
+        }
         if (type == "hub.message_arrived") {
           await AmbientFeedsController.instance
               .onHubMessageArrived(payload);
@@ -1523,6 +1549,54 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           _handleTaskPlaneUpdate(payload);
         }
         // ===== /v2 =====
+        // 会出卡片的轮次不流式：服务端确认本轮将携带结构化卡片（工具附卡/
+        // 识图照片/模型自产标记）后，先撤回该 trace 已流出的正文并转静默，
+        // 最终内容由 chat.assistant_done 一次性结构化下发（done 载荷强制
+        // finalTextReplacesStream=true，整段替换不保留空文本）。
+        if (type == "chat.stream_reset") {
+          final String? resetTraceId = payload["traceId"]?.toString();
+          final String? activeTraceId = ChatTurnController.instance.activeTraceId;
+          if (resetTraceId == null ||
+              resetTraceId.isEmpty ||
+              (activeTraceId != null && resetTraceId != activeTraceId)) {
+            return;
+          }
+          final List<int> resetIdx = <int>[];
+          for (int i = 0; i < _messages.length; i++) {
+            final ChatMessage m = _messages[i];
+            if (!m.streaming || m.text.isEmpty) continue;
+            if (m.messageId != "assistant-$resetTraceId" &&
+                _bubbleTraceOf(m.messageId) != resetTraceId) {
+              continue;
+            }
+            resetIdx.add(i);
+          }
+          if (resetIdx.isEmpty) return;
+          setState(() {
+            for (final int i in resetIdx) {
+              final ChatMessage previous = _messages[i];
+              _messages[i] = ChatMessage(
+                messageId: previous.messageId,
+                sessionId: previous.sessionId,
+                role: previous.role,
+                text: "",
+                timestamp: previous.timestamp,
+                attachmentImageCount: previous.attachmentImageCount,
+                playUrl: previous.playUrl,
+                attachments: previous.attachments,
+                contentType: previous.contentType,
+                durationMs: previous.durationMs,
+                waveform: previous.waveform,
+                streaming: true,
+                mediaCards: previous.mediaCards,
+                renderBlocks: previous.renderBlocks,
+                replyBlocks: previous.replyBlocks,
+                pendingMediaCards: previous.pendingMediaCards,
+              );
+            }
+          });
+          return;
+        }
         if (type == "chat.assistant_chunk") {
           _resetAgentReplyWatchdog();
           // 丢弃「已结束轮次」的迟到 chunk：避免在 chat.assistant_done 之后
@@ -3719,35 +3793,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 消息卡行标题：与会话列表同源（title → 参与者 → 渠道）。
-  String _messageRowTitle(Map<String, dynamic> conv) {
-    final String title = (conv["title"] as String?)?.trim() ?? "";
-    if (title.isNotEmpty) return title;
-    final String name = (conv["participantName"] as String?)?.trim() ?? "";
-    if (name.isNotEmpty) return name;
-    final String pid = (conv["participantId"] as String?)?.trim() ?? "";
-    if (pid.isNotEmpty) return pid;
-    return (conv["channelId"] as String? ?? "未命名会话");
-  }
-
-  /// 岛旁挂件点开消息卡 = 已在岛上查看：全部标为已读，
-  /// 挂件随之隐藏，新消息到来再露出。
-  Future<void> _markAllMessageHubRead() async {
-    try {
-      final result = await _worldApi.getMessageConversations(limit: 200);
-      if (result["ok"] != true) return;
-      for (final dynamic c in result["conversations"] ?? <dynamic>[]) {
-        final Map<String, dynamic> conv = c as Map<String, dynamic>;
-        final int unread = (conv["unreadCount"] as num?)?.toInt() ?? 0;
-        final String id = conv["conversationId"] as String? ?? "";
-        if (unread > 0 && id.isNotEmpty) {
-          await _worldApi.markConversationRead(id);
-        }
-      }
-      await _pollUnreadMessages();
-    } catch (_) {}
-  }
-
   Future<void> _pollUnreadMessages() async {
     try {
       final result = await _worldApi.getMessageConversations(limit: 200);
@@ -3764,23 +3809,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }
         if (mounted) {
           setState(() => _unreadByPlatform = byPlatform);
-          // 聊天 AppBar 徽标已退役：聚合未读改由灵动岛旁挂件承载。
-          IslandRealFeeds.setMessageHubUnread(
-              byPlatform.values.fold(0, (int a, int b) => a + b));
-          // 独立消息卡数据：最近 5 个会话预览行（挂件点开即看）。
-          // 预览压成单行——服务端预览常含换行（邮件正文），原生 GDI+
-          // 会照原样画出多行炸开行距。
-          IslandRealFeeds.setMessagesPreview(<Map<String, Object?>>[
-            for (final dynamic c in (result["conversations"] ?? <dynamic>[]).take(5))
-              <String, Object?>{
-                'title': _messageRowTitle(c as Map<String, dynamic>)
-                    .replaceAll(RegExp(r"\s+"), " "),
-                'preview': (c["lastMessagePreview"] as String? ?? "")
-                    .replaceAll(RegExp(r"\s+"), " ")
-                    .trim(),
-                'unread': (c["unreadCount"] as num?)?.toInt() ?? 0,
-              }
-          ]);
           debugPrint('[msg-poll] actor=${ApiConfig.effectiveActorId} '
               'convs=${conversations.length} '
               'platforms=${byPlatform.keys.toList()} '
@@ -5132,6 +5160,48 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
+  /// 手机端登录门禁：黑白极简落地页 + 弹出小卡片两步邮箱验证
+  /// （新邮箱即注册、已注册即登录，与 /accounts/web 同协议）。
+  /// 登录成功复用 [_completeWebAuth]：落盘会话 → 运行时身份覆盖 →
+  /// 按需进首启向导 → 主界面。门禁用独立 navigatorKey（理由同注册门禁）。
+  Widget _buildMobileLoginGate() {
+    return MaterialApp(
+      navigatorKey: _gateNavigatorKey,
+      title: "",
+      theme: AppTheme.of(AppThemeVariant.dark).copyWith(
+        scaffoldBackgroundColor: Colors.black,
+      ),
+      home: MobileLoginPage(
+        onLoggedIn: (String email) => unawaited(_completeWebAuth(email)),
+      ),
+    );
+  }
+
+  /// 手机端主壳：对话/日程/我的（与独立调试入口 main_mobile.dart 同构，
+  /// 用 MobileTheme，主题档与桌面端 AppThemeVariant 互不串扰）。
+  /// 登录后直接切入，不等桌面端的向导与 N 光扫；退出登录复用
+  /// [_performLogout]（清会话 + 清身份覆盖 → 回手机登录门禁）。
+  Widget _buildMobileMainGate() {
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: _mobileThemeMode,
+      builder: (BuildContext context, ThemeMode mode, _) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          navigatorKey: _mobileMainNavigatorKey,
+          title: "NEXTBOT",
+          theme: MobileTheme.light,
+          darkTheme: MobileTheme.dark,
+          themeMode: mode,
+          home: MobileHomePage(
+            themeMode: mode,
+            onThemeModeChanged: (ThemeMode m) => _mobileThemeMode.value = m,
+            onLogout: _performLogout,
+          ),
+        );
+      },
+    );
+  }
+
   /// 注册门禁页：与独立预览窗口同款深色整页（页面自带自绘标题栏与
   /// 窗口按钮，深色独占不随应用主题切换）。
   Widget _buildRegisterGate() {
@@ -5214,6 +5284,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Widget _buildApp() {
     if (!_sessionLoaded) {
       return _buildLoadingApp();
+    }
+    // 手机端全链走手机 UI：登录门禁 → 手机主壳（对话/日程/我的）。
+    // 桌面端的注册门禁/首启向导/N 光扫/主界面均不参与；根组件的重量级
+    // 初始化照常后台跑——主动通知、简报、通话等根能力与主壳解耦。
+    if (_isMobile) {
+      if (_accountEmail == null) {
+        return _buildMobileLoginGate();
+      }
+      return _buildMobileMainGate();
     }
     if (_accountEmail == null) {
       return _buildRegisterGate();

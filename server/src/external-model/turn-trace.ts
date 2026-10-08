@@ -18,12 +18,14 @@ export type ToolCallTraceEntry = {
   /** 是否经请求卡（tool_request）转正后才可达 */
   viaRequestCard?: boolean;
   /**
-   * 工具到达通道（2026-10-01 S2 通道收敛观测）：
-   *   visible    = 首波可见（Core/束投影/域信号预载）
+   * 工具到达通道（2026-10-01 S2 通道收敛观测；2026-10-09 L3 增幻觉转正）：
+   *   visible    = 首波可见（Core/束投影/域信号预载/晋升常驻）
    *   bridge     = 桥自身（tool_discover/tool_call 解析层）
-   *   deferred   = 经桥按名/检索调回的延迟工具
+   *   deferred   = 经桥按名/检索/请求卡调回的延迟工具
+   *   hallucination_promoted = 模型未检索就直呼的不可见名，registry 放行执行
+   *                            （调用即发现转正，等价 discover+call 合一波）
    */
-  acquisition?: "visible" | "bridge" | "deferred";
+  acquisition?: "visible" | "bridge" | "deferred" | "hallucination_promoted";
 };
 
 export type TurnTraceRecord = {
@@ -44,6 +46,9 @@ export type TurnTraceRecord = {
   deferredCount: number;
   /** 预召回注入的工具名（无则空） */
   prerecall?: string;
+  /** 召回链注入可见集的工具名（可见集 − 静态 Core − 桥；2026-10-09 L5 观测）。
+   *  离线对账：预载转化率 = |注入 ∩ 实际执行| / |注入|；晋升转化率同口径。 */
+  recallInjectedNames?: string[];
   /** 实际使用的波次数 */
   waves: number;
   toolCalls: ToolCallTraceEntry[];
@@ -76,12 +81,28 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
   avgWaves: number;
   requestCardFired: number;
   exitGateFired: number;
+  /** 幻觉转正调用数（未检索直呼不可见名且被执行） */
+  hallucinationPromotedCalls: number;
+  /** 幻觉转正中成功执行的占比（转正通道可用性） */
+  hallucinationPromotedOkRate: number;
+  /** 召回链注入转化率：注入名中真实被执行的占比（L5 对账） */
+  recallInjectedConversion: number;
 } {
   const totalCalls = records.reduce((n, r) => n + r.toolCalls.length, 0);
   const okCalls = records.reduce((n, r) => n + r.toolCalls.filter((c) => c.ok).length, 0);
   const avgWaves = records.length > 0
     ? records.reduce((n, r) => n + r.waves, 0) / records.length
     : 0;
+  const promotedCalls = records.flatMap((r) =>
+    r.toolCalls.filter((c) => c.acquisition === "hallucination_promoted"),
+  );
+  // 召回链注入转化率：分轮对账（注入名 ∩ 该轮实际执行名）/ 注入名
+  const injectedTurns = records.filter((r) => (r.recallInjectedNames?.length ?? 0) > 0);
+  const injectedTotal = injectedTurns.reduce((n, r) => n + r.recallInjectedNames!.length, 0);
+  const injectedExecuted = injectedTurns.reduce((n, r) => {
+    const executed = new Set(r.toolCalls.map((c) => c.name));
+    return n + r.recallInjectedNames!.filter((name) => executed.has(name)).length;
+  }, 0);
   return {
     turns: records.length,
     totalCalls,
@@ -90,5 +111,11 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
     avgWaves,
     requestCardFired: records.filter((r) => r.requestCard?.fired).length,
     exitGateFired: records.filter((r) => r.exitGate?.fired).length,
+    hallucinationPromotedCalls: promotedCalls.length,
+    hallucinationPromotedOkRate:
+      promotedCalls.length > 0
+        ? promotedCalls.filter((c) => c.ok).length / promotedCalls.length
+        : 0,
+    recallInjectedConversion: injectedTotal > 0 ? injectedExecuted / injectedTotal : 0,
   };
 }

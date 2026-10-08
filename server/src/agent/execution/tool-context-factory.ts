@@ -8,6 +8,7 @@ import type { BrainCenter } from "../../brain/index.js";
 import type { ClientLocationWire } from "../../types/client-location.js";
 import type { ToolContext, ToolMediaCard, ToolRegistry } from "../../tools/tool-registry.js";
 import type { ToolCallGuard } from "../../services/tool-call-guard.js";
+import { recordToolUsageForPromotion } from "../../tools/tool-search/tool-promotion.js";
 
 export type ToolExecutionAccess = {
   agentAccessMode?: AgentAccessMode;
@@ -116,6 +117,8 @@ export class ToolContextFactory {
 
     const out = await this.deps.toolRegistry.execute(name, args, this.toToolContext(base, signal));
     guard?.record(base.actorId, name, args, out.ok, out.result);
+    // 晋升计数（2026-10-09 L4）：真实执行成功 → 近窗计数，凑满阈值常驻可见集
+    recordToolUsageForPromotion(base.actorId, name, out.ok);
     return out;
   }
 

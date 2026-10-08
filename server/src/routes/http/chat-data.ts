@@ -2,7 +2,12 @@ import type { FastifyInstance } from "fastify";
 
 import { resolveActorId } from "../../agent/actor-id.js";
 import { resolvePrimaryChatSessionId } from "../../agent/master-chat-session.js";
-import { getChatThreadStore } from "../../external-model/chat-thread-store.js";
+import {
+  getChatThreadStore,
+  parseMessageTimestamp,
+  readMessageTimestampPrefix,
+} from "../../external-model/chat-thread-store.js";
+import { readUserMessageClientId } from "../../external-model/chat-thread-client-id.js";
 import type { ExternalChatProvider } from "../../external-model/types.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import type { AgentMemorySyncService } from "../../services/agent-memory-sync-service.js";
@@ -78,6 +83,85 @@ export function registerChatDataRoutes(
         ok: result.ok,
         reason: result.reason,
         removed: result.removed ?? 0,
+      };
+    },
+  );
+
+  /**
+   * 最近对话线程历史（跨端漫游用，2026-10-08）：手机端等第二设备连接后拉取
+   * 共享线程的最近一段（模型上下文同源），把本机缺失的对话轮回填本地。
+   *
+   * - 只读：peekThread 不创建空线程；线程消息剥掉 [ts:] 帧还原纯正文 + 真实时间戳。
+   * - user 消息附带 clientMessageId（客户端 messageId），供客户端按 id 精确去重。
+   * - [session-recap] 摘要块与 tool/system 消息不下发（均为模型内部素材，不是气泡）。
+   */
+  app.get<{ Querystring: { userId?: string; sessionId?: string; limit?: string } }>(
+    "/api/chat-data/history",
+    async (request, reply) => {
+      const query = request.query ?? {};
+      const actorId = resolveActorId({
+        userId: query.userId,
+        sessionId: query.sessionId ?? "",
+      });
+      if (!actorId) {
+        return reply.code(400).send({ ok: false, message: "missing userId or sessionId" });
+      }
+      const limitRaw = Number.parseInt(query.limit ?? "", 10);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+
+      const masterOn = getAgentRuntimeConfig().masterDelegation.enabled;
+      const threadKey = resolvePrimaryChatSessionId(actorId, masterOn);
+      const msgs = getChatThreadStore().peekThread(threadKey) ?? [];
+
+      const messages: Array<{
+        role: "user" | "assistant";
+        text: string;
+        ts: number | null;
+        clientMessageId?: string;
+      }> = [];
+      for (const msg of msgs) {
+        if (!msg || (msg.role !== "user" && msg.role !== "assistant")) continue;
+        const content =
+          typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content
+                  .filter(
+                    (p): p is { type: "text"; text: string } =>
+                      !!p &&
+                      typeof p === "object" &&
+                      (p as { type?: string }).type === "text" &&
+                      typeof (p as { text?: unknown }).text === "string",
+                  )
+                  .map((p) => p.text)
+                  .join("\n")
+              : "";
+        const parsed = readMessageTimestampPrefix(content);
+        const text = (parsed?.rest ?? content).trim();
+        if (!text || text.startsWith("[session-recap]")) continue;
+        const ts = parseMessageTimestamp(content);
+        const item: {
+          role: "user" | "assistant";
+          text: string;
+          ts: number | null;
+          clientMessageId?: string;
+        } = {
+          role: msg.role,
+          text: text.slice(0, 8000),
+          ts: ts ? ts.getTime() : null,
+        };
+        if (msg.role === "user") {
+          const clientId = readUserMessageClientId(msg);
+          if (clientId) item.clientMessageId = clientId;
+        }
+        messages.push(item);
+      }
+
+      return {
+        ok: true,
+        actorId,
+        sessionId: threadKey,
+        messages: messages.slice(-limit),
       };
     },
   );

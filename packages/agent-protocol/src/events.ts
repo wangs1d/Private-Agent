@@ -131,6 +131,14 @@ export const ServerEventType = {
   ChatAssistantChunk: "chat.assistant_chunk",
   ChatAssistantDone: "chat.assistant_done",
   /**
+   * 会出卡片的轮次不流式（2026-10-08）：服务端在确认本轮将携带结构化卡片
+   * （工具确定性附卡源 / 识图照片卡 / LLM 自产结构化标记）后推送此事件，
+   * 客户端撤回该 trace 已流出的正文（清空流式气泡回到生成中状态），服务端
+   * 随即转静默——最终内容由 chat.assistant_done 一次性结构化下发，根治
+   * 「先流式打纯文本 → done 整条替换成卡片渲染」的跳变。
+   */
+  ChatStreamReset: "chat.stream_reset",
+  /**
    * 「边说边出图」：媒体搜索工具（search_images / search_images_batch /
    * search_videos）执行成功的瞬间推送该批结构化媒体卡片，前端立即把它们
    * 插到当前流式回复正文下方（pendingMediaCards），无需等 LLM 打完字。
@@ -254,6 +262,24 @@ export const ServerEventType = {
    * 比 phone.call_user 轻：无来电界面，但有视觉提示。
    */
   AgentVoiceAlarm: "agent.voice.alarm",
+  /**
+   * 闹钟跨设备同步 —— 闹钟在某端创建/修改/取消后 fan-out 到该用户全部在线设备，
+   * 各端写入本地闹钟库并重排本地调度（本地调度为主路，见 docs/mobile-agent-reminder-alarm-design.md）。
+   * payload: { alarm, op: "upsert" | "delete" }
+   */
+  AlarmSync: "alarm.sync",
+  /**
+   * 闹钟到点兜底触发 —— 服务端调度器扫描到 nextFireAt 到点后推送。
+   * 客户端本地调度是主路：若本地已触发（firedAtMs 相同分钟内），收到本事件应幂等忽略并回报回执。
+   * payload: { alarmId, label, kind, firedAtMs, via, wakeMode?, tts? }
+   */
+  AlarmTrigger: "alarm.trigger",
+  /**
+   * 即时提醒投递 —— 服务端到点下发，客户端按 channelPlan 升级链展示
+   * （notification → popup → …，escalateAfterSec 未确认则升级）。
+   * payload: { reminderId, text, channelPlan, escalateAfterSec, requireAck }
+   */
+  ReminderDeliver: "reminder.deliver",
   /**
    * 用户语音消息的 ASR 转写结果回执：
    * 服务端在 `chat.user_message` 收到 `contentType=audio` 后跑 ASR，

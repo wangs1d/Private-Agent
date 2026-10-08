@@ -8,6 +8,7 @@ import { MASTER_CHAT_SESSION_PREFIX, NOTES_CHAT_SESSION_PREFIX } from "../agent/
 import { attachPersistedClientIds } from "./chat-thread-client-id.js";
 import { mergeActorThreadIntoMasterThread } from "./chat-thread-merge.js";
 import { compactValidChatMessages, repairKimiAssistantToolCallReasoning, sanitizeToolCallMessageChain } from "./chat-thread-sanitize.js";
+import { stripSystemReminderBlocks, SYSTEM_REMINDER_ANY_RE } from "./internal-frames.js";
 
 const PE_SESSION_MARKER = "\u007fpe\u007f";
 
@@ -229,6 +230,35 @@ export class ChatThreadPersistence {
           `${row.messages.length} → ${sanitized.length} messages`,
         );
         row.messages = sanitized;
+        row.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+      // <system-reminder> 存量污染治愈（2026-10-08 事故根源）：已被复读落库的
+      // 注入块会随上下文发给模型，形成「看到→复读→再落库」的自我维持循环。
+      // 启动加载时统一剥一次并写回，循环即断。
+      let healed = false;
+      for (let i = 0; i < row.messages.length; i++) {
+        const m = row.messages[i];
+        if (
+          m &&
+          m.role === "assistant" &&
+          typeof m.content === "string" &&
+          SYSTEM_REMINDER_ANY_RE.test(m.content)
+        ) {
+          const cleaned = stripSystemReminderBlocks(m.content)
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+          if (cleaned !== m.content) {
+            row.messages[i] = { ...m, content: cleaned };
+            healed = true;
+          }
+        }
+      }
+      if (healed) {
+        console.warn(
+          `[chat-thread-persist] Stripped <system-reminder> pollution from session ${sessionId} on load`,
+        );
         row.updatedAt = new Date().toISOString();
         changed = true;
       }

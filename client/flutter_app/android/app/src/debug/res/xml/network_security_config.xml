@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 调试变体（flutter run）：放行全部明文 HTTP。
+     真机调试常换 WiFi / 换电脑 IP，逐个改白名单太易漏；debug 包不分发，
+     放开明文只影响本机联调。release 变体仍走 main 下的严格白名单版本。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

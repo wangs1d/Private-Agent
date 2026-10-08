@@ -33,10 +33,10 @@ class MobileSchedulePage extends StatefulWidget {
   final VoidCallback? onGoToChat;
 
   @override
-  State<MobileSchedulePage> createState() => _MobileSchedulePageState();
+  State<MobileSchedulePage> createState() => MobileSchedulePageState();
 }
 
-class _MobileSchedulePageState extends State<MobileSchedulePage> {
+class MobileSchedulePageState extends State<MobileSchedulePage> {
   /// 展示范围：从今天零点起往后 30 天。
   static const int _lookaheadDays = 30;
 
@@ -81,6 +81,10 @@ class _MobileSchedulePageState extends State<MobileSchedulePage> {
     _pageController.dispose();
     super.dispose();
   }
+
+  /// 外部触发的重新拉取（2026-10-08）：页面在 IndexedStack 里保活，initState
+  /// 只拉一次——对话里刚建的提醒不切不刷新。主壳在每次切到本 tab 时调用。
+  void refresh() => _load();
 
   Future<void> _load() async {
     setState(() {

@@ -116,7 +116,14 @@ import {
   isPhotoDeliveryRound,
 } from "../agent/synthesis-strategy.js";
 import { isDirectFactQuery } from "../agent/direct-fact-query.js";
-import { isStaticToolArchEnabled, ROUTER_FIRST_LANE_MAX_VISIBLE } from "./lane-tool-sets.js";
+import {
+  CHAT_LANE_CORE_NAMES,
+  TASK_LANE_CORE_NAMES,
+  isStaticToolArchEnabled,
+  isToolRecallEnabled,
+  ROUTER_FIRST_LANE_MAX_VISIBLE,
+} from "./lane-tool-sets.js";
+import { topToolMatchesForQuery } from "../tools/tool-search/index.js";
 import { buildDomainCards } from "../tools/tool-search/domain-cards.js";
 import { recordTurnTrace, type ToolCallTraceEntry } from "./turn-trace.js";
 import {
@@ -1735,6 +1742,23 @@ export async function streamCompletionWithTools(
       .map((t) => (t.type === "function" ? resolveRegistryToolName(t.function?.name ?? "") : ""))
       .filter(Boolean),
   );
+  // ── 调用即发现观测（2026-10-09 L3）──
+  // 本轮经桥检索结果面出现过的延迟工具名：模型先 discover 再 call 的名字归
+  // "deferred"（常规召回通道）；未检索就直呼的不可见名 = 幻觉转正
+  // （hallucination_promoted，registry 层本就放行执行，这里补观测语义）。
+  const bridgeSurfacedNames = new Set<string>();
+  // L3 错误即检索的语料：用稳定 searchable 源（跨轮签名稳定 → BM25 catalog 缓存友好）
+  const recallCorpus = options?.toolSearchSourceTools ?? mergedRegistryTools;
+  // L5 观测（2026-10-09 五层根修）：本轮召回链注入可见集的工具名（可见集 −
+  // 静态 Core − 桥）——离线对账「预载转化率 / 晋升转化率」的基准集合。
+  const laneCoreSet = new Set(
+    (options?.audit?.stage ?? "").startsWith("task_plane")
+      ? TASK_LANE_CORE_NAMES
+      : CHAT_LANE_CORE_NAMES,
+  );
+  const recallInjectedNames = [...visibleAtStart]
+    .filter((n) => !laneCoreSet.has(n) && !isToolSearchBridgeName(n))
+    .sort();
   const staticToolArch = isStaticToolArchEnabled();
   // ── 轮级 trace 收集（[turn-trace] 一行 JSON，见 turn-trace.ts）──
   const traceStartTs = Date.now();
@@ -2584,6 +2608,21 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
               return p;
             })());
           if (bridge.kind === "search" || bridge.kind === "describe" || bridge.kind === "discover") {
+            if (bridge.ok) {
+              // L3 观测：把本轮检索结果面出现过的工具名记入 surfaced 集，
+              // 供 acquisition 区分「先检索再调用」与「未检索直呼」（幻觉转正）。
+              for (const key of ["matches", "tools", "results"]) {
+                const arr = (bridge.result as Record<string, unknown>)[key];
+                if (!Array.isArray(arr)) continue;
+                for (const item of arr) {
+                  const raw = (item as { name?: unknown } | null)?.name;
+                  if (typeof raw === "string" && raw) {
+                    bridgeSurfacedNames.add(raw);
+                    bridgeSurfacedNames.add(raw.replace(/\./g, "_"));
+                  }
+                }
+              }
+            }
             const compacted = await compactToolOutputForLlm({
               toolName: item.registryToolName,
               ok: bridge.ok,
@@ -2751,7 +2790,12 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           // 显著高于立即重打；超时已烧完整个时间预算，不重试。
           const isTimeoutFailure =
             (exec.result as Record<string, unknown> | undefined)?.timeout === true;
-          if (!exec.ok && !isTimeoutFailure) {
+          // 工具名未知是确定性失败（重试 N 次还是未知）：不进重试循环，走下方
+          // 「错误即检索」回填候选。防模型幻觉一个名字就白烧 500ms 退避。
+          const isUnknownToolFailure =
+            (exec.result as Record<string, unknown> | undefined)?.errorCode ===
+            UnifiedErrorCode.ToolUnknown;
+          if (!exec.ok && !isTimeoutFailure && !isUnknownToolFailure) {
             const retryDelaysMs = [0, 500];
             for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
               const delay = retryDelaysMs[attempt];
@@ -2778,6 +2822,35 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
               } catch {
                 /* 保留上次失败结果 */
               }
+            }
+          }
+          // 错误即检索（2026-10-09 L3）：模型直呼了不存在的工具名——不让它停在
+          // 「未知工具」死胡同里盲试或手写答案，错误回执直接携带 BM25 top-3
+          // 候选名 + 指引。弱模型只需会读错误消息即可自愈（错误消息即检索结果）。
+          if (isUnknownToolFailure && isToolRecallEnabled()) {
+            const candidates = topToolMatchesForQuery(
+              targetToolName.replace(/[_.]/g, " "),
+              recallCorpus,
+              3,
+              visibleAtStart,
+              // 幻觉名候选跳过绝对闸：名字 token 命中即证据（描述先验对英文名无重叠）
+              { minScore: 0 },
+            ).map((m) => m.name);
+            if (candidates.length > 0) {
+              exec = {
+                ok: false,
+                result: {
+                  ...exec.result,
+                  suggestions: candidates,
+                  hint:
+                    `工具「${targetToolName}」不存在。最接近的可用工具：${candidates.join("、")}。` +
+                    `若其中之一匹配需求：先用 tool_discover 查看它的参数 schema，再正确调用；` +
+                    `若都不匹配，请如实告知用户不要编造。`,
+                },
+              };
+              console.info(
+                `[openai-tool-loop] 未知名工具 ${targetToolName} → 错误即检索候选 [${candidates.join(", ")}]`,
+              );
             }
           }
           return exec;
@@ -2920,7 +2993,11 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           ? "bridge"
           : visibleAtStart.has(wireToolName)
             ? "visible"
-            : "deferred",
+            : bridgeSurfacedNames.has(wireToolName) || requestCardLoadedNames.has(wireToolName)
+              ? "deferred"
+              : // 未检索/未转正就直呼的不可见名：registry 放行执行（L3 转正语义），
+                // 单独标注供「幻觉转正率」观测与晋升闭环对账。
+                "hallucination_promoted",
       });
       if (isInteractiveToolName(wireToolName)) {
         waveUsedInteractiveTool = true;
@@ -3084,6 +3161,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
     visibleTools: registryTools.length,
     deferredActive: toolSearchPrepared.toolSearchActive,
     deferredCount: toolSearchPrepared.deferredToolCount,
+    ...(recallInjectedNames.length > 0 ? { recallInjectedNames } : {}),
     waves: traceWavesUsed,
     toolCalls: traceToolCalls,
     ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),

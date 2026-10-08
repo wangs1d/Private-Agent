@@ -50,6 +50,11 @@ class MobileHomePageState extends State<MobileHomePage> {
 
   int _tabIndex = 0;
 
+  /// 日程页句柄（2026-10-08）：IndexedStack 保活下日程页 initState 只拉一次，
+  /// 对话里刚建的提醒不切不刷新——每次切到日程 tab 时经此触发重拉。
+  final GlobalKey<MobileSchedulePageState> _scheduleKey =
+      GlobalKey<MobileSchedulePageState>();
+
   /// 惰性构建缓存:首次切到某 tab 才构建其页面,之后保活。
   final List<Widget?> _tabCache = <Widget?>[null, null, null];
 
@@ -71,7 +76,16 @@ class MobileHomePageState extends State<MobileHomePage> {
   /// 切到指定 tab(0=对话 1=日程 2=我的;供行程表空态跳回对话页等跨页联动)。
   void goToTab(int index) {
     if (index < 0 || index > 2) return;
+    _switchTab(index);
+  }
+
+  void _switchTab(int index) {
+    // 首次进入走页面 initState 的 _load（避免双拉）；已构建过的页面才补一次重拉。
+    final bool scheduleAlreadyBuilt = _tabCache[1] != null;
     setState(() => _tabIndex = index);
+    if (index == 1 && scheduleAlreadyBuilt) {
+      _scheduleKey.currentState?.refresh();
+    }
   }
 
   @override
@@ -97,6 +111,7 @@ class MobileHomePageState extends State<MobileHomePage> {
         return MobileChatPage(controller: _chatController);
       case 1:
         return MobileSchedulePage(
+          key: _scheduleKey,
           scheduleApi: _scheduleApi,
           sessionId: ApiConfig.effectiveActorId,
           onGoToChat: () => goToTab(0),
@@ -118,7 +133,7 @@ class MobileHomePageState extends State<MobileHomePage> {
     final bool dark = Theme.of(context).brightness == Brightness.dark;
     return NavigationBar(
       selectedIndex: _tabIndex,
-      onDestinationSelected: (int i) => setState(() => _tabIndex = i),
+      onDestinationSelected: _switchTab,
       backgroundColor: cs.surface,
       indicatorColor: Colors.transparent,
       height: 64,

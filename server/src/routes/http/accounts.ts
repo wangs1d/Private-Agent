@@ -114,8 +114,14 @@ export function registerAccountRoutes(app: FastifyInstance, deps: HttpRouteDeps)
           if (!sent.ok) throw new Error(sent.error);
         },
       });
-    } catch {
+    } catch (e) {
       // 发码失败（SMTP 凭据/网络）：不锁冷却，用户改后可立即重试
+      // 静默吞掉 SMTP 错误会导致「发送失败」无法归因（2026-10-08 手机端
+      // 发码失败排查时发现日志完全缺失），此处必须打出底层错误。
+      console.error(
+        `[accounts] OTP 发码失败 email=${email} ip=${request.ip}:`,
+        e instanceof Error ? e.message : e,
+      );
       return reply.code(502).send({ ok: false, message: "验证码邮件发送失败，请稍后重试" });
     }
     if (!result.ok) {

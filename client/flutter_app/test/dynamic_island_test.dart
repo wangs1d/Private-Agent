@@ -109,17 +109,6 @@ void main() {
       c.setAmbientUnread(3); // 幂等
       expect(c.ambientUnread, 3);
     });
-
-    test('消息聚合未读与站内信分账，hover 行合并计数', () {
-      final DynamicIslandController c = DynamicIslandController();
-      c.setAmbientUnread(2);
-      c.setMessageHubUnread(5);
-      expect(c.ambientUnread, 7);
-      c.setMessageHubUnread(5); // 幂等
-      expect(c.ambientUnread, 7);
-      c.setMessageHubUnread(0); // 聚合清零只撤自己的账
-      expect(c.ambientUnread, 2);
-    });
   });
 
   group('DynamicIslandController 语音模式独占', () {

@@ -282,10 +282,12 @@ Widget _buildAssistantBodyInner(
         if (displayText.trim().isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: AppTypography.space2),
-            child: buildInlineMarkdownText(
-              displayText,
-              AppTypography.assistantBody(Theme.of(context).textTheme, cs),
+            // mediaCards 直挂轮的正文同样可能是结构化 markdown，走结构化渲染器
+            // （纯叙述自动回退内联排版）。
+            child: StructuredAssistantMessageBody(
+              text: displayText,
               cs: cs,
+              textTheme: Theme.of(context).textTheme,
             ),
           ),
       ],
@@ -438,10 +440,6 @@ Widget? _buildReplyBlocksBody(
   bool excludeTravelCard = false,
 }) {
   final List<Widget> blockWidgets = <Widget>[];
-  final TextStyle bodyStyle = AppTypography.assistantBody(
-    Theme.of(context).textTheme,
-    cs,
-  );
   for (final Map<String, dynamic> block in replyBlocks) {
     final String type = block["type"]?.toString() ?? "text";
     if (type == "card") {
@@ -456,7 +454,17 @@ Widget? _buildReplyBlocksBody(
     } else {
       final String text = block["text"]?.toString() ?? "";
       if (text.trim().isEmpty) continue;
-      blockWidgets.add(buildInlineMarkdownText(text, bodyStyle, cs: cs));
+      // 信封文本段可能是完整结构化 markdown（模型按 structured 范式写的
+      // 标题/表格/引用/列表），走结构化正文渲染器：块级元素有区分度地渲染，
+      // 纯叙述时其内部自动回退内联排版（此前直排内联导致 ### / |---| / >
+      // 以源码符号裸露）。
+      blockWidgets.add(
+        StructuredAssistantMessageBody(
+          text: text,
+          cs: cs,
+          textTheme: Theme.of(context).textTheme,
+        ),
+      );
     }
   }
   if (blockWidgets.isEmpty) return null;
@@ -490,10 +498,6 @@ Widget? _buildUnifiedMediaCardBody(
         ];
 
   final List<Widget> blockWidgets = <Widget>[];
-  final TextStyle bodyStyle = AppTypography.assistantBody(
-    Theme.of(context).textTheme,
-    cs,
-  );
 
   for (final Map<String, dynamic> block in base) {
     final String type = block["type"]?.toString() ?? "text";
@@ -532,7 +536,15 @@ Widget? _buildUnifiedMediaCardBody(
       }
     } else {
       if (text.trim().isEmpty) continue;
-      blockWidgets.add(buildInlineMarkdownText(text, bodyStyle, cs: cs));
+      // 无卡片标记的文本段同样可能是结构化 markdown（交错媒体块的正文段），
+      // 与信封路径同口径走结构化渲染器，纯叙述自动回退内联。
+      blockWidgets.add(
+        StructuredAssistantMessageBody(
+          text: text,
+          cs: cs,
+          textTheme: Theme.of(context).textTheme,
+        ),
+      );
     }
   }
 

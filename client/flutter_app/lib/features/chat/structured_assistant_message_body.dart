@@ -203,7 +203,15 @@ _StructuredMessageParts _splitStructuredMessage(String text) {
 
   final String lead = lines.take(firstBlank).join("\n").trim();
   final String body = lines.skip(firstBlank + 1).join("\n").trim();
+  // lead 首行是 markdown 标题（### / 一、）时不算口语开场白：标题该留在正文
+  // 走块级渲染（### 前缀剥除、层级样式），进了 lead 面板就会以内联排版把
+  // 「### 方案 A」的井号原样漏出来（2026-10-08 手机端 markdown 裸露回归）。
+  final String leadFirstLine = lead.split("\n").first.trim();
+  final bool leadIsHeading =
+      RegExp(r"^(#{1,6})\s+").hasMatch(leadFirstLine) ||
+      RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]").hasMatch(leadFirstLine);
   final bool keepLead = lead.isNotEmpty &&
+      !leadIsHeading &&
       lead.length <= 120 &&
       body.length >= 60 &&
       (sectionCount >= 2 ||

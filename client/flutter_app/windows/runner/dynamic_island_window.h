@@ -59,16 +59,9 @@ class DynamicIslandWindow {
     bool completed = false;
   };
 
-  /// 岛旁挂件点开的独立消息卡里的一行（与应用内隔离，不开主窗）。
-  struct MessageRow {
-    std::string title;    // utf8
-    std::string preview;  // utf8
-    int unread = 0;
-  };
-
   enum class EventType {
     kExpandedChanged,  // payload: "true"/"false"（进入展开 / 回到胶囊）
-    kAction,           // 岛上动作出口，payload = 动作文案（如「打开消息」）
+    kAction,           // 岛上动作出口，payload = 动作文案（如「打开日程」）
     kTapped,           // 胶囊本体被点击（展开/收起之外的未来扩展）
   };
   using EventCallback = std::function<void(EventType type, const std::string& payload)>;
@@ -96,11 +89,7 @@ class DynamicIslandWindow {
   /// 三级目标态（用户点击逐级下行：胶囊→hover→展开；收起逐级回退）。
   void SetStage(Stage stage);
   void SetAmbient(int unread_count, bool agent_active,
-                  const std::string& agent_status, int messages_unread = 0);
-  /// 岛旁挂件的独立消息卡数据（最近会话预览行）。
-  void SetMessagesPreview(std::vector<MessageRow> rows);
-  /// 展开/收起独立消息卡；展开时发 kAction("打开消息") 让 Dart 标已读。
-  void ToggleMessages();
+                  const std::string& agent_status);
   /// 纯语音模式标志（对话全语音免点击）：开启后胶囊态悬停自动 glance
   /// 环境行，无需点击进 hover。
   void SetVoiceTalkMode(bool enabled);
@@ -197,13 +186,8 @@ class DynamicIslandWindow {
   int ambient_unread_ = 0;
   bool agent_active_ = false;
   std::string agent_status_;  // utf8，hover「任务」页状态行
-  int messages_unread_ = 0;   // 消息聚合未读：岛旁挂件数据源
   bool voice_talk_mode_ = false;  // 纯语音模式：对话全语音（悬停自动 glance）
   std::vector<RECT> hover_dot_rects_;  // hover 导航点命中区（物理像素）
-  RECT messages_badge_rect_ = {};  // 岛旁消息挂件命中区（物理像素；空=未展示）
-  std::vector<MessageRow> message_rows_;  // 独立消息卡预览行
-  bool messages_open_ = false;  // 独立消息卡展开中
-  RECT messages_card_rect_ = {};  // 独立消息卡命中区（物理像素；空=未展示）
 
   // 动画相位（秒）
   double now_s_ = 0.0;          // 累计时间（呼吸/活点用）

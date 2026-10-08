@@ -9,7 +9,12 @@
         </trust-anchors>
     </base-config>
 
-    <!-- 放行明文流量的白名单 -->
+    <!-- 放行明文流量的白名单（release 变体生效；debug/profile 由各自 source
+         set 覆盖为全放行）。换电脑/WiFi 导致后端 IP 变化时，请在此追加
+         <domain includeSubdomains="false">新IP</domain>，并与 build_apk.ps1
+         烤入的 HTTP_BASE 保持一致 —— 否则 http 请求被系统掐掉，登录页只会
+         显示笼统的「网络错误」。生产请直接用 https 域名（如
+         https://login.nextbot.top），无需维护此表。 -->
     <domain-config cleartextTrafficPermitted="true">
         <!-- 真实后端：当前电脑的局域网 IP（构建时 dart-define 传 HTTP_BASE=http://192.168.10.2:3000） -->
         <domain includeSubdomains="false">192.168.10.2</domain>

@@ -150,9 +150,6 @@ void DrawMailIcon(Gdiplus::Graphics& g, float cx, float cy, float w,
   g.DrawLine(&pen, cx + w / 2, cy - h / 2, cx, cy + h * 0.08f);
 }
 
-// 岛旁独立消息卡最多预览行数（超出部分不展示，数据源按最近排序）。
-constexpr int kMaxMessageRows = 5;
-
 double EaseOutCubic(double t) { return 1.0 - std::pow(1.0 - t, 3.0); }
 
 double Clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
@@ -373,34 +370,11 @@ void DynamicIslandWindow::SetAgenda(std::vector<AgendaItem> items) {
 }
 
 void DynamicIslandWindow::SetAmbient(int unread_count, bool agent_active,
-                                     const std::string& agent_status,
-                                     int messages_unread) {
+                                     const std::string& agent_status) {
   ambient_unread_ = unread_count;
   agent_active_ = agent_active;
   agent_status_ = agent_status;
-  messages_unread_ = messages_unread;
   if (window_handle_ != nullptr) Render();
-}
-
-void DynamicIslandWindow::SetMessagesPreview(std::vector<MessageRow> rows) {
-  if (rows.size() > static_cast<size_t>(kMaxMessageRows)) {
-    rows.erase(rows.begin() + kMaxMessageRows, rows.end());
-  }
-  message_rows_ = std::move(rows);
-  if (window_handle_ != nullptr) Render();
-}
-
-void DynamicIslandWindow::ToggleMessages() {
-  messages_open_ = !messages_open_;
-  if (window_handle_ != nullptr) Render();
-  if (messages_open_) {
-    // 通知 Dart「已在岛上查看」：标全部已读 → 挂件隐藏，新消息再露出。
-    const wchar_t* label = L"打开消息";
-    char utf8[64] = {};
-    WideCharToMultiByte(CP_UTF8, 0, label, -1, utf8, sizeof(utf8), nullptr,
-                        nullptr);
-    FireEvent(EventType::kAction, utf8);
-  }
 }
 
 void DynamicIslandWindow::SetVoiceTalkMode(bool enabled) {
@@ -1246,125 +1220,6 @@ void DynamicIslandWindow::Render() {
     }
 
     g.ResetClip();
-
-    // ── 岛旁消息挂件：贴胶囊右缘的小药丸（信封 + 未读数）。
-    // 不参与条目仲裁：待机/内容态都挂；随 morph 进展开卡淡出（信息已在卡上）。
-    // 命中区存物理像素，WM_LBUTTONDOWN 直接开消息面板（走 kAction 事件）。
-    messages_badge_rect_ = {0, 0, 0, 0};
-    if (messages_unread_ > 0) {
-      const BYTE ba =
-          static_cast<BYTE>(255.0f * Clamp01(1.0f - (mf - 1.0f)));
-      if (ba > 5) {
-        wchar_t cnt[16];
-        _snwprintf_s(cnt, _countof(cnt), _TRUNCATE, L"%d",
-                     messages_unread_ > 99 ? 99 : messages_unread_);
-        if (messages_unread_ > 99) wcscat_s(cnt, L"+");
-        Gdiplus::Font cnt_font(mem_dc, MakeIslandFont(S(14), 650));
-        Gdiplus::RectF m_cnt;
-        g.MeasureString(cnt, -1, &cnt_font, Gdiplus::PointF(0, 0), &m_cnt);
-        const float bh = 24.0f * s;
-        const float bgap = 8.0f * s;
-        const float bpad = 9.0f * s;
-        const float icon_w = 13.0f * s;
-        const float text_gap = 5.0f * s;
-        const float bw = bpad + icon_w + text_gap + m_cnt.Width + bpad;
-        const float bx0 = cap_x + cur_w + bgap;
-        const float by0 = cap_y + (cur_h - bh) / 2.0f;
-        Gdiplus::GraphicsPath bp;
-        RoundedPath(&bp, Gdiplus::RectF(bx0, by0, bw, bh), bh / 2.0f);
-        Gdiplus::SolidBrush bg_brush(Gdiplus::Color(ba, 16, 16, 18));
-        Gdiplus::Pen b_rim(Gdiplus::Color(
-            static_cast<BYTE>(ba * 22 / 100), 255, 255, 255), 1.0f * s);
-        g.FillPath(&bg_brush, &bp);
-        g.DrawPath(&b_rim, &bp);
-        DrawMailIcon(g, bx0 + bpad + icon_w / 2.0f, by0 + bh / 2.0f,
-                     icon_w, icon_w * 0.72f);
-        Gdiplus::SolidBrush cnt_brush(Gdiplus::Color(
-            static_cast<BYTE>(ba * 100 / 100), 255, 130, 120));
-        g.DrawString(cnt, -1, &cnt_font,
-                     Gdiplus::PointF(bx0 + bpad + icon_w + text_gap,
-                                     by0 + (bh - m_cnt.Height) / 2.0f),
-                     &cnt_brush);
-        messages_badge_rect_ = {static_cast<LONG>(bx0),
-                                static_cast<LONG>(by0),
-                                static_cast<LONG>(bx0 + bw),
-                                static_cast<LONG>(by0 + bh)};
-      }
-    }
-
-    // ── 岛旁独立消息卡：点挂件展开的查看层（与应用内隔离，不开主窗）。
-    // 展开时 Dart 收到「打开消息」把未读全部标已读 → 挂件隐藏，新消息再露出。
-    messages_card_rect_ = {0, 0, 0, 0};
-    if (messages_open_) {
-      const float row_h = 40.0f * s;
-      const float head_h = 34.0f * s;
-      const float pad_c = 12.0f * s;
-      const float cw = 340.0f * s;
-      const float chh = head_h +
-                        (message_rows_.empty() ? row_h
-                                               : message_rows_.size() * row_h) +
-                        pad_c;
-      const float cx0 = (phys_w - cw) / 2.0f;
-      const float cy0 = cap_y + cur_h + 8.0f * s;
-      Gdiplus::GraphicsPath cp;
-      RoundedPath(&cp, Gdiplus::RectF(cx0, cy0, cw, chh), 16.0f * s);
-      Gdiplus::SolidBrush c_brush(Gdiplus::Color(242, 10, 10, 12));
-      Gdiplus::Pen c_rim(Gdiplus::Color(46, 255, 255, 255), 1.0f * s);
-      g.FillPath(&c_brush, &cp);
-      g.DrawPath(&c_rim, &cp);
-
-      float ty = cy0 + 8.0f * s;
-      {
-        Gdiplus::Font head_font(mem_dc, MakeIslandFont(S(14), 700));
-        Gdiplus::SolidBrush head_brush(Gdiplus::Color(230, 255, 255, 255));
-        g.DrawString(L"消息", -1, &head_font, Gdiplus::PointF(cx0 + pad_c, ty),
-                     &head_brush);
-      }
-      ty += head_h;
-      if (message_rows_.empty()) {
-        Gdiplus::Font empty_font(mem_dc, MakeIslandFont(S(13), 500));
-        Gdiplus::SolidBrush empty_brush(Gdiplus::Color(170, 255, 255, 255));
-        g.DrawString(L"暂无消息", -1, &empty_font,
-                     Gdiplus::PointF(cx0 + pad_c, ty + 3.0f * s),
-                     &empty_brush);
-      }
-      for (const MessageRow& row : message_rows_) {
-        const float iy = ty + 3.0f * s;
-        Gdiplus::Font t_font(mem_dc, MakeIslandFont(S(14), 650));
-        Gdiplus::SolidBrush t_brush(Gdiplus::Color(255, 255, 255, 255));
-        const std::wstring title = Utf8ToWide(row.title);
-        const float t_max = cw - pad_c * 2 - 34.0f * s;
-        const std::wstring fitted_t = FitText(g, title, t_font, t_max);
-        g.DrawString(fitted_t.c_str(), -1, &t_font,
-                     Gdiplus::PointF(cx0 + pad_c, iy), &t_brush);
-        Gdiplus::Font p_font(mem_dc, MakeIslandFont(S(13), 600));
-        Gdiplus::SolidBrush p_brush(Gdiplus::Color(215, 255, 255, 255));
-        const std::wstring preview = Utf8ToWide(row.preview);
-        const float p_max =
-            cw - pad_c * 2 - (row.unread > 0 ? 44.0f : 22.0f) * s;
-        const std::wstring fitted_p = FitText(g, preview, p_font, p_max);
-        g.DrawString(fitted_p.c_str(), -1, &p_font,
-                     Gdiplus::PointF(cx0 + pad_c, iy + 17.0f * s), &p_brush);
-        if (row.unread > 0) {
-          wchar_t uc[16];
-          _snwprintf_s(uc, _countof(uc), _TRUNCATE, L"%d",
-                       row.unread > 99 ? 99 : row.unread);
-          if (row.unread > 99) wcscat_s(uc, L"+");
-          Gdiplus::Font u_font(mem_dc, MakeIslandFont(S(12), 650));
-          Gdiplus::RectF m_u;
-          g.MeasureString(uc, -1, &u_font, Gdiplus::PointF(0, 0), &m_u);
-          Gdiplus::SolidBrush u_brush(Gdiplus::Color(255, 255, 130, 120));
-          g.DrawString(uc, -1, &u_font,
-                       Gdiplus::PointF(cx0 + cw - pad_c - m_u.Width - 2.0f * s,
-                                       iy + 3.0f * s),
-                       &u_brush);
-        }
-        ty += row_h;
-      }
-      messages_card_rect_ = {static_cast<LONG>(cx0), static_cast<LONG>(cy0),
-                             static_cast<LONG>(cx0 + cw),
-                             static_cast<LONG>(cy0 + chh)};
-    }
   }
 
   // GDI+ 写入的是 straight alpha；UpdateLayeredWindow 需要 premultiplied。
@@ -1473,22 +1328,6 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         FireEvent(EventType::kAction, "打开日程");
         // 提前收口后立即让位：全屏环境仍在时回抑制态，不等下一跳。
         UpdateFullscreenSuppression();
-        return 0;
-      }
-      // 岛旁消息挂件：点击展开独立消息卡（不唤起主窗口，与应用内隔离）。
-      if (messages_unread_ > 0 &&
-          messages_badge_rect_.right > messages_badge_rect_.left &&
-          cx >= messages_badge_rect_.left &&
-          cx <= messages_badge_rect_.right &&
-          cy >= messages_badge_rect_.top &&
-          cy <= messages_badge_rect_.bottom) {
-        ToggleMessages();
-        return 0;
-      }
-      // 消息卡展开中：点卡外任意处收起（吞掉本次，避免误触分级展开）。
-      if (messages_open_) {
-        messages_open_ = false;
-        if (window_handle_ != nullptr) Render();
         return 0;
       }
       // hover 导航点：今日/任务切页，「展开」点进展开卡。

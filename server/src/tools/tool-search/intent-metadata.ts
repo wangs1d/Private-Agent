@@ -33,8 +33,8 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
   {
     exact: "shopping.suggest",
     metadata: {
-      aliases: ["buy product", "shopping advice", "买东西", "商品推荐"],
-      examples: ["help me pick a laptop under budget"],
+      aliases: ["buy product", "shopping advice", "买东西", "商品推荐", "买什么", "买什么好", "性价比", "求推荐", "种草", "双十一买什么"],
+      examples: ["help me pick a laptop under budget", "双十一买什么耳机性价比高", "预算五千买什么笔记本"],
       negativeExamples: ["what time is it now"],
     },
   },
@@ -390,7 +390,39 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     metadata: {
       aliases: ["改期", "换个时间", "推迟", "提前到", "改到", "暂停提醒", "恢复提醒"],
       examples: ["把会议改期到下午三点", "那个提醒推迟半小时", "暂停每天喝水的提醒"],
-      negativeExamples: ["我有哪些日程", "取消明天那个提醒", "明天早上九点提醒我开会"],
+      negativeAliases: ["暂停音乐", "音乐暂停", "暂停视频", "暂停播放", "暂停导航"],
+      negativeExamples: ["我有哪些日程", "取消明天那个提醒", "明天早上九点提醒我开会", "音乐暂停一下"],
+    },
+  },
+  {
+    exact: "smart_home.scene",
+    metadata: {
+      aliases: ["回家模式", "离家模式", "观影模式", "睡眠场景", "场景模式", "一键场景", "灯光场景"],
+      examples: ["帮我打开回家模式", "切到观影模式", "启动睡眠场景"],
+      negativeAliases: ["打开软件", "打开应用", "启动应用", "运行软件"],
+    },
+  },
+  {
+    exact: "interest.manage",
+    metadata: {
+      aliases: ["关注话题", "追踪动态", "盯着", "追更", "话题更新", "有新消息告诉我", "有更新提醒我"],
+      examples: ["帮我一直盯着这个话题有新消息就告诉我", "关注这个话题有更新告诉我", "追一下这部剧的动态"],
+      negativeAliases: ["发消息给", "回复消息", "语音消息"],
+    },
+  },
+  {
+    exact: "travel.plan-itinerary",
+    metadata: {
+      aliases: ["旅游攻略", "行程规划", "旅行计划", "自由行", "怎么安排", "帮我规划"],
+      examples: ["帮我规划去成都玩5天的行程", "周末去周边游玩怎么安排", "十一去北京玩有什么攻略"],
+    },
+  },
+  {
+    exact: "travel.search-poi",
+    metadata: {
+      aliases: ["景点推荐", "好玩", "景点门票", "好吃的推荐", "酒店推荐"],
+      examples: ["北京有什么好玩的景点", "成都有哪些必吃美食"],
+      negativeAliases: ["打开软件", "启动应用"],
     },
   },
 ];
