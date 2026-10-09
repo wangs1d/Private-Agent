@@ -119,9 +119,10 @@ import { isDirectFactQuery } from "../agent/direct-fact-query.js";
 import {
   CHAT_LANE_CORE_NAMES,
   TASK_LANE_CORE_NAMES,
+  TASK_LANE_ROUTER_FIRST_LIGHT_NAMES,
   isStaticToolArchEnabled,
   isToolRecallEnabled,
-  ROUTER_FIRST_LANE_MAX_VISIBLE,
+  isRouterFirstLaneTurn,
 } from "./lane-tool-sets.js";
 import { topToolMatchesForQuery } from "../tools/tool-search/index.js";
 import { buildDomainCards } from "../tools/tool-search/domain-cards.js";
@@ -1751,9 +1752,12 @@ export async function streamCompletionWithTools(
   const recallCorpus = options?.toolSearchSourceTools ?? mergedRegistryTools;
   // L5 观测（2026-10-09 五层根修）：本轮召回链注入可见集的工具名（可见集 −
   // 静态 Core − 桥）——离线对账「预载转化率 / 晋升转化率」的基准集合。
+  // 2026-10-10 ③：task 车道口径补上 router-first 轻量常驻（TASK_LANE_ROUTER_
+  // FIRST_LIGHT_NAMES）——它们是确定性常驻设施，不是召回链注入，混进基准集合
+  // 会稀释预载/晋升转化率（reminder.plan 等常驻工具恒"注入恒不调"，假阴性）。
   const laneCoreSet = new Set(
     (options?.audit?.stage ?? "").startsWith("task_plane")
-      ? TASK_LANE_CORE_NAMES
+      ? [...TASK_LANE_CORE_NAMES, ...TASK_LANE_ROUTER_FIRST_LIGHT_NAMES]
       : CHAT_LANE_CORE_NAMES,
   );
   const recallInjectedNames = [...visibleAtStart]
@@ -1839,13 +1843,10 @@ export async function streamCompletionWithTools(
   // 规划引导：Plan-and-Execute 要求模型在单次回复里一次性规划全部工具调用，
   // 减少串行波次（每多一波 = 多一次带 schema 的全量历史重发）。
   // 只在有工具可调时注入，纯对话场景不注入。
-  // router-first 车道（可见集=桥+定向保底族，业务主力在延迟目录）追加两步走
-  // 引导：先 discover 后 call。口径与 agent-gateway 意图预召回共享
-  // ROUTER_FIRST_LANE_MAX_VISIBLE，两处判定永不漂移。
-  const routerFirstLane =
-    toolSearchPrepared.toolSearchActive &&
-    toolSearchPrepared.coreToolCount <= ROUTER_FIRST_LANE_MAX_VISIBLE &&
-    toolSearchPrepared.deferredToolCount > 0;
+  // router-first 车道（可见集=桥+轻量常驻+定向保底族，业务主力在延迟目录）追加
+  // 两步走引导：先 discover 后 call。口径收口在 lane-tool-sets.isRouterFirstLaneTurn
+  // （轻量常驻子集/桥不计入），单点定义防漂移。
+  const routerFirstLane = isRouterFirstLaneTurn(toolSearchPrepared);
 
 /** 域卡语料去重（名字优先者胜，保序）。 */
 function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
@@ -2475,6 +2476,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         visibleTools: registryTools.length,
         deferredActive: toolSearchPrepared.toolSearchActive,
         deferredCount: toolSearchPrepared.deferredToolCount,
+        ...(userText ? { query: userText.slice(0, 160) } : {}),
         waves: traceWavesUsed,
         toolCalls: traceToolCalls,
         ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),
@@ -2984,11 +2986,22 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
 
       toolResults.push({ name: wireToolName, ok: exec.ok });
       const callStart = traceCallStartByCallId.get(item.tc.id);
+      // 参数级失败观测（2026-10-10 L3 盲区）：args 非法 JSON / schema 校验不过
+      // 单独标注——名字纠错（错误即检索）管不到参数错，重灾区工具靠此定位。
+      const paramError =
+        !exec.ok &&
+        (() => {
+          const code = classifyToolFailure(exec.result);
+          return (
+            code === UnifiedErrorCode.ToolArgsMalformed || code === UnifiedErrorCode.ValidationError
+          );
+        })();
       traceToolCalls.push({
         name: wireToolName,
         ok: exec.ok,
         ms: callStart ? Date.now() - callStart : 0,
         viaRequestCard: requestCardLoadedNames.has(wireToolName),
+        ...(paramError ? { paramError: true } : {}),
         acquisition: isToolSearchBridgeName(wireToolName)
           ? "bridge"
           : visibleAtStart.has(wireToolName)
@@ -3159,9 +3172,10 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       ? { routeConfidence: options.turnRouteConfidence }
       : {}),
     visibleTools: registryTools.length,
-    deferredActive: toolSearchPrepared.toolSearchActive,
-    deferredCount: toolSearchPrepared.deferredToolCount,
-    ...(recallInjectedNames.length > 0 ? { recallInjectedNames } : {}),
+        deferredActive: toolSearchPrepared.toolSearchActive,
+        deferredCount: toolSearchPrepared.deferredToolCount,
+        ...(recallInjectedNames.length > 0 ? { recallInjectedNames } : {}),
+        ...(userText ? { query: userText.slice(0, 160) } : {}),
     waves: traceWavesUsed,
     toolCalls: traceToolCalls,
     ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),

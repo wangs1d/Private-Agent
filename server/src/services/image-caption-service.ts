@@ -105,8 +105,10 @@ export async function captionMediaCards(
   }
   if (pending.length === 0) return;
 
-  const cfg = resolvePrimaryLlmClientConfig();
-  if (!cfg || !cfg.model || !modelSupportsVision(cfg.model)) {
+  // 主模型视觉能力闸仅约束默认的内置 VLM 通道；注入 describeFn（测试/自定义
+  // 生成器）本就不依赖主模型配置，提前 return 会让注入点完全失效（实测教训）
+  const cfg = opts.describeFn ? null : resolvePrimaryLlmClientConfig();
+  if (!opts.describeFn && (!cfg || !cfg.model || !modelSupportsVision(cfg.model))) {
     console.info(
       "[image-caption] 主模型不支持视觉或未配置，跳过图片描述生成（回退旧渲染）",
     );
@@ -114,7 +116,8 @@ export async function captionMediaCards(
   }
 
   const timeoutMs = opts.timeoutMs ?? CAPTION_TIMEOUT_MS;
-  const describe = opts.describeFn ?? ((cards, ms) => describeImagesWithVlm(cards, cfg, ms, opts.locationHint));
+  // cfg 仅在默认通道（describeFn 缺省）使用，上方守卫已保证非空
+  const describe = opts.describeFn ?? ((cards, ms) => describeImagesWithVlm(cards, cfg!, ms, opts.locationHint));
   try {
     const captions = await describe(pending, timeoutMs);
     for (let i = 0; i < pending.length; i++) {

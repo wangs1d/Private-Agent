@@ -11,6 +11,8 @@
  * - `AGENT_PE_VERBOSE_STREAM=1`：将计划阶段标题写入用户可见流（默认仅推 phase 状态）。
  */
 import { requiresTaskDecomposition } from "./simple-task.js";
+import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import { dedupeToolsByName, slimToolSchema } from "../external-model/lane-tool-sets.js";
 import type {
   AgentStreamOptions,
   ChatToolExecutionContext,
@@ -151,6 +153,47 @@ export function parseExecutionPlan(raw: string): TaskExecutionPlan | null {
   }
   if (steps.length === 0) return null;
   return { goal: goal.trim(), steps };
+}
+
+/** 计划直供预载的工具数上限（防幻觉名/超多步计划灌爆可见集）。 */
+const SUGGESTED_TOOLS_MAX = 8;
+
+function toolNameOf(tool: ChatCompletionTool): string {
+  return tool.type === "function" ? tool.function?.name ?? "" : "";
+}
+
+/**
+ * 计划直供预载（2026-10-10 编排器协同，五层根修的执行层补刀）：
+ * 计划步里的 suggestedTools 是模型在计划阶段自声明的意图——它读过全量任务
+ * 语境，比 BM25 对原话的词面猜测更准。解析成语料内真实工具定义后并入执行轮
+ * 可见集（chatToolsBuiltin），执行步免 discover 直达。
+ * 口径：仅收本轮语料（chatToolsExtra/延迟目录）内存在的名字，幻觉名跳过；
+ * 已在 builtin 可见集的不重复注入；瘦身 schema（与域预载同款）。
+ * baseStreamOpts 未装配工具集（chatToolsExtra 空）时返回空集——此时执行轮本
+ * 就全量可见，无需直供。
+ * （导出供单元测试；运行时唯一消费方是 runPlanExecuteLoop）
+ */
+export function resolveSuggestedToolDefinitions(
+  plan: TaskExecutionPlan,
+  baseStreamOpts: AgentStreamOptions | undefined,
+): ChatCompletionTool[] {
+  const names = [
+    ...new Set(plan.steps.flatMap((s) => s.suggestedTools ?? []).filter(Boolean)),
+  ].slice(0, SUGGESTED_TOOLS_MAX);
+  if (names.length === 0) return [];
+  const builtinNames = new Set(
+    (baseStreamOpts?.chatToolsBuiltin ?? []).map(toolNameOf).filter(Boolean),
+  );
+  const corpus = baseStreamOpts?.chatToolsExtra ?? [];
+  if (corpus.length === 0) return [];
+  const byName = new Map(corpus.map((t) => [toolNameOf(t), t] as const));
+  const out: ChatCompletionTool[] = [];
+  for (const name of names) {
+    if (builtinNames.has(name)) continue;
+    const tool = byName.get(name);
+    if (tool) out.push(slimToolSchema(tool));
+  }
+  return out;
 }
 
 async function emitPhase(
@@ -305,8 +348,20 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     "请调用可用工具收集事实并完成任务；最后用自然语言向用户汇总结果（含关键数据依据）。若某工具失败应换策略或说明阻塞点。",
   ].filter(Boolean).join("\n");
 
+  // 计划直供预载（2026-10-10 编排器协同）：模型自声明的 suggestedTools 转正
+  // 进执行轮可见集——比任何词面检索通道都可靠的意图来源。幻觉名/已可见名在
+  // resolveSuggestedToolDefinitions 内部过滤，空集时保持 baseStreamOpts 原样。
+  const suggestedDefinitions = resolveSuggestedToolDefinitions(plan, baseStreamOpts);
   const executeOpts: AgentStreamOptions = {
     ...baseStreamOpts,
+    ...(suggestedDefinitions.length > 0
+      ? {
+          chatToolsBuiltin: dedupeToolsByName([
+            ...(baseStreamOpts?.chatToolsBuiltin ?? []),
+            ...suggestedDefinitions,
+          ]),
+        }
+      : {}),
     ...(onToolBatchForExecute ? { toolLoop: { onAfterToolBatch: onToolBatchForExecute } } : {}),
   };
 

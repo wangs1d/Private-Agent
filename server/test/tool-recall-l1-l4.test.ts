@@ -9,6 +9,9 @@
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
 process.env.DESKTOP_VISUAL_ENABLED = "1";
+// 晋升持久化对单测关闭：防进程退出 flush 把假 actor 计数写进生产状态文件
+// （server/data/tool-promotion-state.json）。持久化语义单独用 tmp 路径测。
+process.env.AGENT_TOOL_PROMOTION_STATE_PATH = "off";
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -21,6 +24,9 @@ const promotion = await import("../src/tools/tool-search/tool-promotion.js");
 const turnTrace = await import("../src/external-model/turn-trace.js");
 const { MEDIA_MUSIC_CHAT_TOOLS } = await import(
   "../src/tools/capability-modules/media-music/chat-tools.js"
+);
+const { MEMORY_GOVERNANCE_CHAT_TOOLS } = await import(
+  "../src/tools/capability-modules/memory-governance/chat-tools.js"
 );
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
@@ -38,6 +44,7 @@ function fn(name: string, description = name): ChatCompletionTool {
 const corpus: ChatCompletionTool[] = [
   ...getBuiltinAgentChatTools(),
   ...MEDIA_MUSIC_CHAT_TOOLS,
+  ...MEMORY_GOVERNANCE_CHAT_TOOLS,
 ];
 // travel 族用生产真实描述（与 tool-recall-benchmark.ts 同源）：合成薄描述会让
 // BM25 排名失真（travel 域凑不满 3 票强信号 → 误触发 top-K 兜底），测试口径必须同源
@@ -307,4 +314,106 @@ test("L5 指标：幻觉转正率 + 注入转化率计算口径", () => {
   assert.ok(Math.abs(s.recallInjectedConversion - 2 / 3) < 1e-9, `注入转化率=${s.recallInjectedConversion}`);
   assert.equal(s.hallucinationPromotedCalls, 1);
   assert.equal(s.hallucinationPromotedOkRate, 1);
+});
+
+// ── ②：task 车道 router-first 轻量常驻（2026-10-10） ──
+test("② 轻量常驻：清单工具从真实语料全量解析，顺序=清单，schema 瘦身", () => {
+  const light = laneSets.buildTaskLaneRouterFirstLightTools(corpus);
+  const names = light.map(toolName);
+  assert.deepEqual(names, [...laneSets.TASK_LANE_ROUTER_FIRST_LIGHT_NAMES]);
+  // 与预载同款瘦身：description 压首句 ≤120 字符（profile.update 原描述远超）
+  for (const t of light) {
+    const desc = t.type === "function" ? (t.function?.description ?? "") : "";
+    assert.ok(desc.length <= 120, `${toolName(t)} 描述未瘦身: ${desc.length}`);
+  }
+});
+
+test("② 三条实证 miss 补齐：提醒/回复/记一下 在 router-first 可见集（轻量 ∪ 预载）", () => {
+  // 短口语动作的 BM25 词面召回天然弱（「提醒/回复/记」跨域通词被 IDF 闸杀），
+  // 三条 query 的期望工具均由轻量常驻兜底，不再赌词面
+  const light = new Set(laneSets.buildTaskLaneRouterFirstLightTools(corpus).map(toolName));
+  const CASES: Array<[string, string]> = [
+    ["明早八点提醒我交周报", "reminder.plan"],
+    ["回复妈妈微信说我马上到家", "messages.reply"],
+    ["帮我记一下，我女儿叫小雨今年三岁", "profile.update"],
+  ];
+  for (const [query, expected] of CASES) {
+    const preload = laneSets.buildDomainPreloadTools(query, corpus, light).map(toolName);
+    const visible = new Set([...light, ...preload]);
+    assert.ok(visible.has(expected), `"${query}" → ${expected} 应可见，实际: ${[...visible].join(",")}`);
+  }
+});
+
+test("② router-first 判定收口：轻量常驻/桥不稀释「主力在目录」语义", () => {
+  const bridge = ["tool_discover", "tool_call"];
+  const mk = (names: string[]) => ({
+    toolSearchActive: true,
+    deferredToolCount: 100,
+    visibleTools: [...bridge, ...names].map((n) => fn(n)),
+  });
+  const light = laneSets.buildTaskLaneRouterFirstLightTools(corpus).map(toolName);
+  // 轻量 7 + 桥 2 + travel 保底族 4 = 13 可见 → 业务 4 ≤ 6，仍判 router-first
+  assert.equal(
+    laneSets.isRouterFirstLaneTurn(
+      mk([...light, "travel.plan-itinerary", "travel.search-poi", "travel.destination-info", "travel.compute-route"]),
+    ),
+    true,
+    "轻量常驻+保底族轮应仍判 router-first（两步走引导不失活）",
+  );
+  // chat 车道规模（Core 20+ 常驻）→ 非 router-first
+  const chatScale = [...light, ...Array.from({ length: 20 }, (_, i) => `x.tool_${i}`)];
+  assert.equal(laneSets.isRouterFirstLaneTurn(mk(chatScale)), false);
+  // 目录未激活 → false
+  assert.equal(
+    laneSets.isRouterFirstLaneTurn({ toolSearchActive: false, deferredToolCount: 0, visibleTools: [] }),
+    false,
+  );
+});
+
+// ── ③：晋升计数持久化（dev server 高频重启不清零） ──
+
+test("③ 持久化：落盘 → 内存清零 → 模拟重启重载，晋升状态存活", async () => {
+  const { join } = await import("node:path");
+  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "tool-promotion-test-"));
+  const statePath = join(dir, "state.json");
+  process.env.AGENT_TOOL_PROMOTION_STATE_PATH = statePath;
+  try {
+    promotion.resetToolPromotionState();
+    const actor = "actor-persist-1";
+    for (let i = 0; i < 3; i++) promotion.recordToolUsageForPromotion(actor, "travel.plan-itinerary", true);
+    promotion.flushToolPromotionState();
+    // 落盘内容：{ actorId: { toolName: [ts...] } }
+    const raw = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, Record<string, number[]>>;
+    assert.equal(raw[actor]?.["travel.plan-itinerary"]?.length, 3, `落盘内容异常: ${JSON.stringify(raw).slice(0, 200)}`);
+    // 模拟进程重启：内存清零 + 重新从磁盘恢复
+    promotion.resetToolPromotionState();
+    promotion.reloadToolPromotionStateFromDiskForTests();
+    assert.deepEqual(promotion.getPromotedToolNames(actor), ["travel.plan-itinerary"]);
+  } finally {
+    promotion.resetToolPromotionState();
+    delete process.env.AGENT_TOOL_PROMOTION_STATE_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("③ 持久化 off 档：不读不写（单测/基准进程零污染）", async () => {
+  const { join } = await import("node:path");
+  const { existsSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "tool-promotion-off-"));
+  const statePath = join(dir, "state.json");
+  process.env.AGENT_TOOL_PROMOTION_STATE_PATH = "off";
+  try {
+    promotion.reloadToolPromotionStateFromDiskForTests();
+    promotion.recordToolUsageForPromotion("actor-off-1", "travel.plan-itinerary", true);
+    promotion.flushToolPromotionState();
+    assert.equal(existsSync(statePath), false, "off 档不应产生状态文件");
+    assert.equal(existsSync(join(process.cwd(), "off")), false, "off 不应被当作路径解析");
+  } finally {
+    promotion.resetToolPromotionState();
+    delete process.env.AGENT_TOOL_PROMOTION_STATE_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

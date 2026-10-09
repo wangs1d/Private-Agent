@@ -77,6 +77,25 @@ export function dominantDomainForQuery(
 }
 
 /**
+ * BM25 词面命中全表（2026-10-10 族序修正）：与域投票（domainVotesForQuery）同
+ * 索引同链路的命中工具与分数，按分降序。消费方（buildDomainPreloadTools 的族内
+ * 排序）用「投票的证据本身」给命中域的族内工具排序，未上榜工具保持注册表序垫底。
+ * 确定性：同语料同 query 恒同输出，复用跨轮 catalog 缓存。
+ */
+export function bm25HitsForQuery(
+  query: string,
+  searchableTools: ChatCompletionTool[],
+  limit: number,
+): Array<{ name: string; score: number }> {
+  const trimmed = query.trim();
+  if (!trimmed || limit <= 0) return [];
+  const catalog = getOrCreateFullCatalog(searchableTools);
+  return catalog.index
+    .search(trimmed, limit, catalog.entries)
+    .map((hit) => ({ name: hit.id, score: hit.score }));
+}
+
+/**
  * 域票全表（2026-10-09 L1 感知增强）：BM25 词面 top-5 按域归并的票数（降序）。
  * dominantDomainForQuery 只吐 top-1 强信号；多域意图（「去北京旅游顺便查天气」）
  * 与弱信号兜底需要完整票表——消费方（buildDomainPreloadTools）自行决定阈值。

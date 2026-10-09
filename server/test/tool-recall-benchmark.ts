@@ -9,12 +9,15 @@
  *   after  = Core ∪ 域预载(L1) ∪ top-K 兜底(L1) ∪ 晋升常驻(L4)
  *
  * 语料口径：getBuiltinAgentChatTools()（测试环境全量 builtin）+ media-music
- * 能力模块（测试环境 _capabilityModuleDeps 为 null 需手动并入）+ travel 技能族
- * （bootstrap 注册链同源构造，同 chat-lane-domain-preload.test.ts 口径）。
+ * 能力模块 + memory-governance 能力模块（测试环境 _capabilityModuleDeps 为 null
+ * 需手动并入）+ travel 技能族（bootstrap 注册链同源构造，同
+ * chat-lane-domain-preload.test.ts 口径）。
  * 生产语料还会多出少量技能注册工具，此处取的是保守下界。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
 process.env.DESKTOP_VISUAL_ENABLED = "1";
+// 基准进程退出 flush 会把模拟 actor 计数写进生产状态文件，持久化置 off
+process.env.AGENT_TOOL_PROMOTION_STATE_PATH = "off";
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
@@ -34,6 +37,9 @@ const {
 const { MEDIA_MUSIC_CHAT_TOOLS } = await import(
   "../src/tools/capability-modules/media-music/chat-tools.js"
 );
+const { MEMORY_GOVERNANCE_CHAT_TOOLS } = await import(
+  "../src/tools/capability-modules/memory-governance/chat-tools.js"
+);
 const { topToolMatchesForQuery } = await import("../src/tools/tool-search/index.js");
 
 function fn(name: string, description: string): ChatCompletionTool {
@@ -43,10 +49,11 @@ function fn(name: string, description: string): ChatCompletionTool {
   };
 }
 
-/** 生产语料 + media-music + travel 技能族（bootstrap 注册链同源构造，描述取生产原文） */
+/** 生产语料 + media-music + memory-governance + travel 技能族（bootstrap 注册链同源构造，描述取生产原文） */
 const corpus: ChatCompletionTool[] = [
   ...getBuiltinAgentChatTools(),
   ...MEDIA_MUSIC_CHAT_TOOLS,
+  ...MEMORY_GOVERNANCE_CHAT_TOOLS,
 ];
 const TRAVEL_DESCRIPTIONS: Record<string, string> = {
   "travel.plan-itinerary":
@@ -173,7 +180,7 @@ const noiseFalsePositive = noise.filter((r) => !r.after).length;
 const pct = (n: number, d: number) => (d === 0 ? "n/a" : `${(n / d * 100).toFixed(1)}%`);
 
 console.log("=== 工具召回五层根修 · 离线可达性基准 ===");
-console.log(`语料: ${corpus.length} 工具（builtin + media-music + travel 族；生产语料为保守下界）`);
+console.log(`语料: ${corpus.length} 工具（builtin + media-music + memory-governance + travel 族；生产语料为保守下界）`);
 console.log(`A/B: before = AGENT_TOOL_RECALL=off（静态 Core 白名单）; after = Core ∪ 域预载 ∪ top-K 兜底 ∪ 晋升常驻`);
 console.log(`chat Core 解析: ${beforeCoreNames.size}/${CHAT_LANE_CORE_NAMES.length}（brain.recall 由 bootstrap 注入，测试环境缺省属正常）`);
 console.log("");
@@ -232,16 +239,29 @@ console.log("## L3 调用即发现（未知名 → 结构化错误 + BM25 top-3 
 }
 console.log("");
 
-// ── task 车道（router-first：可见集 = 纯预载，before = 纯桥） ──
+// ── task 车道（router-first：可见集 = 轻量常驻 ∪ 预载，before = 纯桥） ──
 console.log("## task 车道（router-first）· 意图工具直达率");
 {
-  // before（recall off）：router-first 可见集只剩桥工具，业务工具 0 直达
+  const {
+    buildTaskLaneRouterFirstLightTools,
+  } = await import("../src/external-model/lane-tool-sets.js");
+  const light = buildTaskLaneRouterFirstLightTools(corpus);
+  const lightNames = new Set(light.map(toolName).filter(Boolean));
+  // before（recall off）：router-first 可见集只剩桥+轻量常驻，业务工具 0 直达
   //（存量「意图预召回/请求卡」投机通道不在本离线口径内，此处为保守下界）
   const taskBefore = 0;
   let taskAfter = 0;
+  const taskMiss: string[] = [];
   for (const r of intent) {
-    const preload = buildDomainPreloadTools(r.c.query, corpus, new Set());
-    if (r.c.expected.some((n) => preload.map(toolName).includes(n))) taskAfter++;
+    const preload = buildDomainPreloadTools(r.c.query, corpus, lightNames).map(toolName);
+    const visible = new Set([...lightNames, ...preload]);
+    if (r.c.expected.some((n) => visible.has(n))) taskAfter++;
+    else taskMiss.push(`- [${r.c.domain}] "${r.c.query}" → 期望 ${r.c.expected.join("/")}，预载: ${preload.join(",") || "∅"}`);
   }
+  console.log(`轻量常驻: ${[...lightNames].join(", ")}`);
   console.log(`**总计: before ${taskBefore}/${intent.length}（${pct(taskBefore, intent.length)}，仅桥工具须两波 discover） → after ${taskAfter}/${intent.length}（${pct(taskAfter, intent.length)}，意图预载直转正）**`);
+  if (taskMiss.length > 0) {
+    console.log("未命中明细：");
+    for (const m of taskMiss) console.log(m);
+  }
 }

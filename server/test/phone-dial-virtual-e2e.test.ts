@@ -167,6 +167,8 @@ const stubs = {
     register: () => {},
     unregister: () => {},
     trySend: () => true,
+    // 设备活跃度刷新（闹钟全链路提交新增）：业务消息到达即调，stub 仅需不抛错
+    touchActivity: () => {},
   },
   agentPairingService: {},
   aipService: {},

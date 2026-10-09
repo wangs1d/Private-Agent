@@ -162,6 +162,7 @@ import { resolveRouteChatProvider } from "../external-model/route-chat-provider.
 import {
   buildDomainPreloadTools,
   buildLaneCoreTools,
+  buildTaskLaneRouterFirstLightTools,
   isStaticToolArchEnabled,
   isTaskLaneRouterFirst,
   isToolRecallEnabled,
@@ -2580,7 +2581,12 @@ if (route.plane === "task") {
     //   保底，全量语料进 BM25 目录按需召回。
     // - AGENT_TASK_LANE=core 回滚：静态 task Core ∪ 能力束（原路径保留）。
     let execStreamOpts = streamOpts;
-    if (!useExplicitPlanner && this.isTaskLane(mode)) {
+    // 2026-10-10 编排器协同：去掉 !useExplicitPlanner 短路——plan-execute 路径
+    // 同样走任务面工具装配（runPlanExecuteLoop 拿 execStreamOpts 作
+    // baseStreamOpts，计划步 suggestedTools 经 resolveSuggestedToolDefinitions
+    // 转正进执行轮可见集）。此前编排器路径绕过整个可见集组装，可见集退化成
+    // 「全量 builtin 直塞」，router-first/预载/晋升在编排器轮全部失活。
+    if (this.isTaskLane(mode)) {
       const corpus = [
         ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
         ...(streamOpts.chatToolsExtra ?? []),
@@ -2613,13 +2619,24 @@ if (route.plane === "task") {
           // 目录按需召回（能力面经域卡+域拉取可达）。回滚：AGENT_TASK_LANE=core
           // （下方静态 Core 路径）。
           const domainPreload = buildDomainPreloadTools(text, corpusSafe);
+          // 轻量常驻（2026-10-10 ②）：router-first 不再是纯预载——「提醒/回复/
+          // 记一下」类短口语动作的 BM25 词面召回天然弱（通词被 IDF 闸杀、强票位
+          // 被长描述族占走，benchmark 三条实证 miss），轻动作/感知工具确定性
+          // 常驻；与预载/晋升重名由下方去重收敛。
+          const lightTools = buildTaskLaneRouterFirstLightTools(corpusSafe);
+          const preloadNames = new Set(
+            [...domainPreload, ...lightTools]
+              .map((d) => (d.type === "function" ? d.function?.name : "") ?? "")
+              .filter(Boolean),
+          );
           // 晋升常驻（2026-10-09 L4，双车道共用）：高频成功工具进 router-first 可见集
           execStreamOpts = {
             ...streamOpts,
             toolExposureProfile: "explicit",
             chatToolsBuiltin: [
               ...domainPreload,
-              ...buildPromotedChatTools(corpusSafe, new Set(domainPreload.map((d) => (d.type === "function" ? d.function?.name : "")).filter(Boolean) as string[])),
+              ...lightTools,
+              ...buildPromotedChatTools(corpusSafe, preloadNames),
             ],
             chatToolsExtra: corpusSafe,
           };
@@ -2712,7 +2729,10 @@ if (route.plane === "task") {
         onPhaseStatus: opts?.onAgentPhaseStatus,
         onPlanReady: opts?.onPlanReady,
         toolCtx,
-        baseStreamOpts: streamOpts,
+        // 2026-10-10 编排器协同：任务面工具装配（router-first/轻量常驻/预载/
+        // 晋升）对 plan-execute 路径同样生效，计划步 suggestedTools 才有语料
+        // 可转正（此前编排器拿的是未装配的 streamOpts，绕过了整个可见集组装）。
+        baseStreamOpts: execStreamOpts,
         onToolBatchForExecute: onBatchWithEvolution,
       });
       full = result.finalText;

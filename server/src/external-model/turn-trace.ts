@@ -26,6 +26,13 @@ export type ToolCallTraceEntry = {
    *                            （调用即发现转正，等价 discover+call 合一波）
    */
   acquisition?: "visible" | "bridge" | "deferred" | "hallucination_promoted";
+  /**
+   * 失败是否为参数级错误（2026-10-10 L3 盲区观测）：arguments 非法 JSON
+   * （TOOL_ARGS_MALFORMED）或 schema 校验不过（VALIDATION_ERROR）。L3 错误即
+   * 检索只管「名字错了」，参数错了（幻觉字段/类型不对/截断）没有观测——
+   * 该指标定位重灾区工具，针对性修 schema 描述。
+   */
+  paramError?: boolean;
 };
 
 export type TurnTraceRecord = {
@@ -39,6 +46,8 @@ export type TurnTraceRecord = {
   turnEvidenceInjected?: boolean;
   /** 路由置信度（与 turnIntent 同源，观测路由器质量） */
   routeConfidence?: number;
+  /** 用户原话（截断 160 字符；2026-10-10 未命中聚类分析的数据源，落日志仅排障用） */
+  query?: string;
   /** 暴露给模型的可见工具数（含桥工具，不含请求卡追加） */
   visibleTools: number;
   /** 延迟目录是否激活及目录规模 */
@@ -87,6 +96,10 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
   hallucinationPromotedOkRate: number;
   /** 召回链注入转化率：注入名中真实被执行的占比（L5 对账） */
   recallInjectedConversion: number;
+  /** 参数级失败调用数（args 非法/schema 校验不过；L3 名字纠错管不到的盲区） */
+  paramErrorCalls: number;
+  /** 参数级失败占全部调用的比例（重灾区定位看分析脚本的按工具聚合） */
+  paramErrorRate: number;
 } {
   const totalCalls = records.reduce((n, r) => n + r.toolCalls.length, 0);
   const okCalls = records.reduce((n, r) => n + r.toolCalls.filter((c) => c.ok).length, 0);
@@ -117,5 +130,14 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
         ? promotedCalls.filter((c) => c.ok).length / promotedCalls.length
         : 0,
     recallInjectedConversion: injectedTotal > 0 ? injectedExecuted / injectedTotal : 0,
+    paramErrorCalls: records.reduce(
+      (n, r) => n + r.toolCalls.filter((c) => c.paramError === true).length,
+      0,
+    ),
+    paramErrorRate:
+      totalCalls > 0
+        ? records.reduce((n, r) => n + r.toolCalls.filter((c) => c.paramError === true).length, 0) /
+          totalCalls
+        : 0,
   };
 }

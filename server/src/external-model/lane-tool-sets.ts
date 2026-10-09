@@ -16,9 +16,13 @@
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-import { domainVotesForQuery, priorDirectMatchesForQuery, PRIOR_DIRECT_LIMIT, topToolMatchesForQuery } from "../tools/tool-search/index.js";
+import { bm25HitsForQuery, domainVotesForQuery, priorDirectMatchesForQuery, PRIOR_DIRECT_LIMIT, topToolMatchesForQuery } from "../tools/tool-search/index.js";
 import { firstSentence } from "../tools/tool-search/schema-slim.js";
 import { toolInCapabilityDomains, toolsInDomain } from "../tools/tool-search/tool-category.js";
+import {
+  isPreloadDeweighted,
+  recordPreloadInjection,
+} from "../tools/tool-search/preload-feedback.js";
 
 export type LaneId = "chat" | "task";
 
@@ -294,7 +298,9 @@ export function buildDomainPreloadTools(
   const seen = new Set<string>();
   const push = (tool: ChatCompletionTool): void => {
     const name = tool.type === "function" ? tool.function?.name ?? "" : "";
-    if (!name || seen.has(name) || excludeNames.has(name)) return;
+    // 预载负反馈（2026-10-10 L5 数据回流）：冷却降权中的工具不进候选——
+    // 「预载了但没被调」的噪声槽让位给真有转化率的工具（见 preload-feedback.ts）。
+    if (!name || seen.has(name) || excludeNames.has(name) || isPreloadDeweighted(name)) return;
     seen.add(name);
     picked.push(slimToolSchema(tool));
   };
@@ -334,8 +340,28 @@ export function buildDomainPreloadTools(
     }
     if (strongDomains.length >= 2) break;
   }
+  // 族内按 BM25 相关性降序注入（2026-10-10 族序修正）：域命中只说明「意图在
+  // 域里」，全族按注册表序截断会让大族里的无关工具占满 cap——实证「音乐暂停
+  // 一下」命中 media 域后 11 个 vision.*（同域前缀混域）把 media.pause（族内
+  // #14）挤掉，task 车道直达率的 2 条 miss 全栽在这。排序依据用域投票同索引的
+  // 命中全表（bm25HitsForQuery，投票的证据本身排序族内工具——searchDeferredTools
+  // 通道对该类 CJK query 失真，top1 是 vision 噪声、media.* 反而落榜，不可用）；
+  // 同语料同 query 恒同输出，确定性成立，未上榜工具保持注册表序垫底。
+  const familyScore = new Map<string, number>();
+  if (strongDomains.length > 0) {
+    for (const hit of bm25HitsForQuery(trimmed, corpus, corpus.length)) {
+      familyScore.set(hit.name, hit.score);
+    }
+  }
+  const byFamilyRelevance = (a: ChatCompletionTool, b: ChatCompletionTool): number => {
+    const sa = familyScore.get(toolNameOfPreload(a)) ?? -1;
+    const sb = familyScore.get(toolNameOfPreload(b)) ?? -1;
+    return sb - sa; // 同分（含双 -1）返回 0，V8 稳定排序保持注册表序
+  };
   for (const domain of strongDomains) {
-    for (const tool of toolsInDomain(corpus, domain)) push(tool);
+    const family = toolsInDomain(corpus, domain);
+    if (familyScore.size > 0) family.sort(byFamilyRelevance);
+    for (const tool of family) push(tool);
   }
 
   // 3. 弱信号兜底：无强域时 BM25 top-K 工具直取（先验直取不算强信号，不影响此闸）
@@ -346,18 +372,88 @@ export function buildDomainPreloadTools(
     }
   }
 
-  return picked.slice(0, cap);
+  const finalPicked = picked.slice(0, cap);
+  // L5 回流：记录本轮实际预载名（负反馈判定的注入侧数据源；执行侧在
+  // ToolContextFactory.execute）。AGENT_TOOL_RECALL=off / 空集不记录。
+  recordPreloadInjection(finalPicked.map(toolNameOfPreload));
+  return finalPicked;
+}
+
+function toolNameOfPreload(tool: ChatCompletionTool): string {
+  return tool.type === "function" ? tool.function?.name ?? "" : "";
 }
 
 /**
- * router-first 车道判定口径（2026-10-01 统一）：可见工具数 ≤ 此值且延迟目录
- * 非空 = "业务工具主力在延迟目录、本轮依赖检索召回"的轮。两个消费方共享：
- *   - agent-gateway 意图预召回（只对这类轮投机，chat/束轮 Core 已覆盖主力）
- *   - tool-loop 规划指导语第 0 条（先 discover 后 call 的两步走引导）
- * 数值 = 桥工具(2) + travel 规划族保底(4) 的常驻规模（高频晋升轮按非
- * router-first 处理——晋升工具本身已是主力，预召回/两步引导价值消失）。
+ * task 车道 router-first 轻量常驻子集（2026-10-10 ②）。
+ *
+ * 根因：router-first 可见集 = 纯预载，chat 车道 Core 常驻的轻动作/感知工具
+ * 在任务面完全不可见，而短口语动作 query 的 BM25 词面召回天然弱——「提醒」
+ * 「回复」「记」是跨域通词被 IDF 闸杀掉，强票位被描述更长更具体的族占走
+ * （实测：「明早八点提醒我交周报」calendar:5 vs reminder:1；「回复妈妈微信」
+ * geofence:3「到家」撞车；「帮我记一下女儿叫小雨」无强域 top-4 全噪声）。
+ * 这类轻动作单步工具确定性常驻（瘦身 schema），任务面「记一下/提醒我/回复」
+ * 不再赌词面召回；长尾重活仍走预载/discover/晋升通道。
+ */
+export const TASK_LANE_ROUTER_FIRST_LIGHT_NAMES: readonly string[] = [
+  "clock.get_current_time",
+  "reminder.plan",
+  "calendar.create_from_text",
+  "calendar.list_tasks",
+  "messages.overview",
+  "messages.reply",
+  "profile.update",
+];
+
+/**
+ * 按轻量子集清单解析常驻工具（语料缺失自动跳过；瘦身 schema 控 token）。
+ * 输出顺序跟随清单（可读性），同输入恒同输出。
+ */
+export function buildTaskLaneRouterFirstLightTools(
+  corpus: ChatCompletionTool[],
+): ChatCompletionTool[] {
+  const byName = new Map<string, ChatCompletionTool>();
+  for (const t of corpus) {
+    const name = t.type === "function" ? t.function?.name ?? "" : "";
+    if (name) byName.set(name, t);
+  }
+  const out: ChatCompletionTool[] = [];
+  for (const name of TASK_LANE_ROUTER_FIRST_LIGHT_NAMES) {
+    const tool = byName.get(name);
+    if (tool) out.push(slimToolSchema(tool));
+  }
+  return out;
+}
+
+/**
+ * router-first 车道判定口径（2026-10-01 统一；2026-10-10 收口为共享函数）。
+ *
+ * 判定：延迟目录激活 且 「非常驻轻量子集、非桥工具」的可见工具数 ≤ 上限 =
+ * "业务工具主力在延迟目录、本轮依赖检索召回"的轮。轻量子集（上方 ②）与
+ * 桥工具不计入——它们是常驻基础设施，不稀释"主力在目录"的语义，否则轻量
+ * 常驻会把 router-first 判定整体顶破、两步走引导失活。两个消费方共享本函数
+ * 防口径漂移（gateway 意图预召回已退役，现存唯一消费方是 tool-loop 规划引导）。
+ *
+ * 数值 = travel 规划族保底规模 + 桥工具（历史口径兼容：桥/轻量扣除后，原
+ * 纯预载轮的判定结果不变）。
  */
 export const ROUTER_FIRST_LANE_MAX_VISIBLE = 6;
+
+export function isRouterFirstLaneTurn(prepared: {
+  toolSearchActive: boolean;
+  visibleTools: ChatCompletionTool[];
+  deferredToolCount: number;
+}): boolean {
+  if (!prepared.toolSearchActive || prepared.deferredToolCount <= 0) return false;
+  const exempt = new Set<string>([
+    ...TASK_LANE_ROUTER_FIRST_LIGHT_NAMES,
+    ...CAPABILITY_BRIDGE_TOOLS,
+  ]);
+  const businessVisible = prepared.visibleTools.filter((t) => {
+    const name = t.type === "function" ? t.function?.name ?? "" : "";
+    return Boolean(name) && !exempt.has(name);
+  }).length;
+  return businessVisible <= ROUTER_FIRST_LANE_MAX_VISIBLE;
+}
 
 /** 元工具/能力查询桥：任何集合都保留，保证延迟目录可达。 */
 export const CAPABILITY_BRIDGE_TOOLS: ReadonlySet<string> = new Set([
